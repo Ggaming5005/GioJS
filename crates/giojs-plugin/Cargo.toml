@@ -1,0 +1,9 @@
+[package]
+name    = "giojs-plugin"
+version = "0.1.0-beta.1"
+edition = "2021"
+
+[dependencies]
+giojs-cache = { path = "../giojs-cache" }
+axum.workspace       = true
+thiserror.workspace  = true

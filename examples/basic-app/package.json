@@ -1,0 +1,12 @@
+{
+  "name": "basic-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "giojs-core": "workspace:*",
+    "giojs-react": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

@@ -1,0 +1,28 @@
+[app]
+name   = "basic-app"
+router = "app"
+
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[websocket]
+enabled = true
+max_connections = 1000
+ping_interval_secs = 30
+
+[[rate_limits]]
+path           = "/api/*"
+per_ip         = 3
+window_seconds = 10
+burst          = 0
+
+[i18n]
+locales        = ["en", "fr"]
+default_locale = "en"
+detect_from    = ["path", "accept-language", "cookie"]
+
+[[fonts]]
+family = "Inter"
+url    = "https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfAZ9hiJ-Ek-_EeA.woff2"
+weight = 400

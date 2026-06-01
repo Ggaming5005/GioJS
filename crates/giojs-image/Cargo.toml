@@ -1,0 +1,16 @@
+[package]
+name    = "giojs-image"
+version = "0.1.0-beta.1"
+edition = "2021"
+
+[dependencies]
+tokio.workspace     = true
+bytes.workspace     = true
+anyhow.workspace    = true
+thiserror.workspace = true
+tracing.workspace   = true
+sha2.workspace      = true
+lru.workspace       = true
+serde.workspace     = true
+reqwest.workspace   = true
+image = { version = "0.25", features = ["avif", "webp"] }

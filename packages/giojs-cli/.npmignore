@@ -1,0 +1,10 @@
+src/
+*.ts
+!*.d.ts
+tsconfig*.json
+*.test.*
+node_modules/
+templates/**/*.ts
+!templates/**/*.json
+!templates/**/*.tsx
+!templates/**/*.md

@@ -1,0 +1,50 @@
+# Rust
+/target/
+crates/*/target/
+**/*.rs.bk
+Cargo.lock
+
+# Node
+node_modules/
+packages/*/node_modules/
+examples/*/node_modules/
+packages/*/dist/
+*.tsbuildinfo
+
+# GioJS build output
+.gio/
+!.gio/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+.idea/
+*.suo
+*.user
+
+# Temp / debug output
+*.log
+server-*.txt
+node-test*.txt
+
+# Local editor / tool settings (machine-specific)
+.claude/
+
+# Local scratch / test scaffolds
+/dist-test/
+/test-app/
+
+# Platform binaries — provided by CI at release, never committed
+platform/*/bin/*
+!platform/*/bin/.gitkeep
+
+# Internal docs / specs — NOT for public release
+/CLAUDE.md
+/SPEC.MD
+/SPEC2.MD
+/SPEC.md
+/SPEC2.md
+/OPEN_QUESTIONS.md

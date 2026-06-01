@@ -1,0 +1,40 @@
+[package]
+name    = "giojs-server"
+version = "0.1.0-beta.1"
+edition = "2021"
+
+[[bin]]
+name = "giojs-server"
+path = "src/main.rs"
+
+[dependencies]
+giojs-cache     = { path = "../giojs-cache" }
+giojs-prefetch  = { path = "../giojs-prefetch" }
+giojs-ratelimit = { path = "../giojs-ratelimit" }
+giojs-i18n      = { path = "../giojs-i18n" }
+giojs-font     = { path = "../giojs-font" }
+giojs-image    = { path = "../giojs-image" }
+giojs-css      = { path = "../giojs-css" }
+giojs-plugin   = { path = "../giojs-plugin" }
+tokio.workspace              = true
+axum.workspace               = true
+tower.workspace              = true
+tower-http.workspace         = true
+serde.workspace              = true
+serde_json.workspace         = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+uuid.workspace               = true
+tokio-util.workspace         = true
+bytes.workspace              = true
+toml.workspace               = true
+thiserror.workspace          = true
+dashmap.workspace            = true
+anyhow.workspace             = true
+sha2.workspace               = true
+hyper.workspace              = true
+hyper-util.workspace         = true
+tokio-stream.workspace       = true
+rustls          = "0.23"
+rustls-pemfile  = "2"
+tokio-rustls    = "0.26"

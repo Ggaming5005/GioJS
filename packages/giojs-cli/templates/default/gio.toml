@@ -1,0 +1,11 @@
+[app]
+name = "{{PROJECT_NAME}}"
+
+[server]
+host = "0.0.0.0"
+port = 3000
+http2 = true
+
+[images]
+allowed_widths = [640, 828, 1080, 1200, 1920]
+quality = 80

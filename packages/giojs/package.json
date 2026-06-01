@@ -1,0 +1,26 @@
+{
+  "name": "@gio.js/server",
+  "version": "0.1.0-beta.1",
+  "description": "GioJS — Rust-powered React framework",
+  "bin": {
+    "gio": "bin/gio.js",
+    "giojs-server": "bin/gio.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "dependencies": {
+    "@gio.js/core": "0.1.0-beta.1"
+  },
+  "optionalDependencies": {
+    "@gio.js/server-linux-x64": "0.1.0-beta.1",
+    "@gio.js/server-linux-arm64": "0.1.0-beta.1",
+    "@gio.js/server-win32-x64": "0.1.0-beta.1",
+    "@gio.js/server-darwin-x64": "0.1.0-beta.1",
+    "@gio.js/server-darwin-arm64": "0.1.0-beta.1"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

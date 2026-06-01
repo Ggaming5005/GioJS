@@ -1,0 +1,8 @@
+[package]
+name    = "giojs-assets"
+version = "0.1.0-beta.1"
+edition = "2021"
+
+[dependencies]
+tower-http.workspace = true
+tokio.workspace      = true

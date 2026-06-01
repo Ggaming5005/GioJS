@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-platform:
+    name: Build ${{ matrix.pkg }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  pkg: giojs-linux-x64,    cross: false }
+          # linux-arm64 (aarch64 cross-compile) deferred — fails to build under `cross`; re-add once fixed
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    pkg: giojs-win32-x64,    cross: false }
+          - { os: macos-13,       target: x86_64-apple-darwin,       pkg: giojs-darwin-x64,   cross: false }
+          - { os: macos-14,       target: aarch64-apple-darwin,      pkg: giojs-darwin-arm64, cross: false }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }} -p giojs-server
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }} -p giojs-server
+
+      - name: Stage binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/giojs-server platform/${{ matrix.pkg }}/bin/giojs-server
+          chmod +x platform/${{ matrix.pkg }}/bin/giojs-server
+
+      - name: Stage binary (Windows)
+        if: runner.os == 'Windows'
+        run: copy target\${{ matrix.target }}\release\giojs-server.exe platform\${{ matrix.pkg }}\bin\giojs-server.exe
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish platform package (skip if already published)
+        shell: bash
+        run: |
+          dir="./platform/${{ matrix.pkg }}"
+          name=$(node -p "require('$dir/package.json').name")
+          ver=$(node -p "require('$dir/package.json').version")
+          if npm view "$name@$ver" version >/dev/null 2>&1; then
+            echo "✓ $name@$ver already on npm — skipping"
+          else
+            npm publish "$dir" --access public --tag beta
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-main:
+    name: Publish @gio.js/* + create-giojs
+    needs: build-platform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Publish in dependency order, skipping any version already on npm
+      # (so re-runs and partial releases are idempotent).
+      - name: Publish @gio.js/* + create-giojs
+        shell: bash
+        run: |
+          set -e
+          for dir in packages/giojs-react packages/giojs-core packages/giojs packages/giojs-cli; do
+            name=$(node -p "require('./$dir/package.json').name")
+            ver=$(node -p "require('./$dir/package.json').version")
+            if npm view "$name@$ver" version >/dev/null 2>&1; then
+              echo "✓ $name@$ver already on npm — skipping"
+            else
+              echo "publishing $name@$ver"
+              npm publish "./$dir" --access public --tag beta
+            fi
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

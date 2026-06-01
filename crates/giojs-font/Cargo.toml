@@ -1,0 +1,10 @@
+[package]
+name    = "giojs-font"
+version = "0.1.0-beta.1"
+edition = "2021"
+
+[dependencies]
+tokio.workspace   = true
+anyhow.workspace  = true
+tracing.workspace = true
+reqwest.workspace = true

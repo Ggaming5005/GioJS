@@ -1,0 +1,42 @@
+[app]
+name   = "giojs-app"
+router = "app"
+
+[server]
+host  = "0.0.0.0"
+port  = 3000
+http2 = false
+
+[server.tls]
+enabled   = false
+cert_path = "./certs/cert.pem"
+key_path  = "./certs/key.pem"
+
+[cache]
+memory_mb = 50
+disk_path = ".gio/cache"
+
+[cache.redis]
+enabled = false
+url     = "redis://localhost:6379"
+prefix  = "gio:"
+
+[compression]
+enabled       = true
+min_size_bytes = 1024
+prefer_brotli = true
+
+[prefetch]
+strategy       = "hover"
+max_concurrent = 5
+max_per_second = 20
+
+[images]
+allowed_widths = [640, 750, 828, 1080, 1200, 1920]
+quality        = 75
+formats        = ["webp", "avif"]
+
+[css]
+engine              = "lightning"
+minify              = true
+critical_extraction = true

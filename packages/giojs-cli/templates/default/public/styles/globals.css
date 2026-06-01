@@ -1,0 +1,368 @@
+/* ============================================================
+   GioJS starter — "engineering editorial" theme
+   Warm ink + ember accent · Fraunces display × JetBrains Mono
+   ============================================================ */
+
+:root {
+  --bg:          #0b0a09;
+  --bg-2:        #100e0c;
+  --panel:       #141210;
+  --line:        rgba(245, 236, 222, 0.09);
+  --line-strong: rgba(245, 236, 222, 0.16);
+  --text:        #ece6da;
+  --muted:       #9b9387;
+  --faint:       #6a6358;
+  --ember:       #ff5a2c;
+  --ember-soft:  rgba(255, 90, 44, 0.14);
+  --ember-line:  rgba(255, 90, 44, 0.40);
+
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace;
+
+  --nav-h:    58px;
+  --footer-h: 60px;
+  --radius:   12px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 16px; -webkit-text-size-adjust: 100%; }
+
+body {
+  font-family: var(--font-mono);
+  color: var(--text);
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(120% 80% at 50% -10%, var(--ember-soft), transparent 55%),
+    radial-gradient(circle at 1px 1px, rgba(245, 236, 222, 0.05) 1px, transparent 0);
+  background-size: auto, 22px 22px;
+  background-attachment: fixed;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.01em;
+}
+
+/* Grain overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.038;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+#__gio, main, nav, footer { position: relative; z-index: 1; }
+
+main { min-height: calc(100vh - var(--nav-h) - var(--footer-h)); }
+
+a { color: inherit; text-decoration: none; }
+a:focus-visible, button:focus-visible {
+  outline: 1px solid var(--ember);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+h1, h2, h3 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-optical-sizing: auto;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  color: var(--text);
+}
+h1 { font-size: clamp(2.6rem, 6vw, 4.5rem); }
+h2 { font-size: clamp(1.6rem, 3vw, 2.2rem); }
+h3 { font-size: 1.15rem; }
+
+p { color: var(--muted); }
+
+code { font-family: var(--font-mono); font-size: 0.92em; }
+
+.gio-container {
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+/* ---- Nav ---- */
+.gio-nav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  height: var(--nav-h);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: saturate(140%) blur(10px);
+  border-bottom: 1px solid var(--line);
+}
+.gio-nav__inner { height: 100%; display: flex; align-items: center; justify-content: space-between; }
+.gio-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 600;
+  font-size: 0.92rem;
+  letter-spacing: 0.02em;
+}
+.gio-brand__mark {
+  display: block;
+  width: 26px; height: 26px;
+  border-radius: 7px;
+  box-shadow: 0 4px 16px var(--ember-soft);
+}
+.gio-nav__links { display: flex; align-items: center; gap: 0.1rem; list-style: none; }
+.gio-nav__link {
+  padding: 0.4rem 0.7rem;
+  font-size: 0.82rem;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+  border-radius: 7px;
+  transition: color 0.15s, background 0.15s;
+}
+.gio-nav__link:hover { color: var(--text); background: rgba(245, 236, 222, 0.04); }
+
+/* ---- Starter / hero ---- */
+.gio-starter {
+  min-height: calc(100vh - var(--nav-h) - var(--footer-h));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.gio-starter__inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 1.6rem;
+  padding: 4rem 0;
+  width: 100%;
+}
+/* Staggered page-load reveal */
+.gio-starter__inner > * {
+  opacity: 0;
+  transform: translateY(14px);
+  animation: gio-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.gio-starter__inner > *:nth-child(1) { animation-delay: 0.05s; }
+.gio-starter__inner > *:nth-child(2) { animation-delay: 0.14s; }
+.gio-starter__inner > *:nth-child(3) { animation-delay: 0.23s; }
+.gio-starter__inner > *:nth-child(4) { animation-delay: 0.34s; }
+.gio-starter__inner > *:nth-child(5) { animation-delay: 0.45s; }
+@keyframes gio-rise { to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .gio-starter__inner > * { animation: none; opacity: 1; transform: none; }
+}
+
+.gio-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.35rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(245, 236, 222, 0.02);
+  font-size: 0.74rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.gio-status-pill__dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--ember);
+  box-shadow: 0 0 0 0 var(--ember);
+  animation: gio-pulse 2.4s ease-out infinite;
+}
+@keyframes gio-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(255, 90, 44, 0.5); }
+  70%  { box-shadow: 0 0 0 7px rgba(255, 90, 44, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 90, 44, 0); }
+}
+
+.gio-headline {
+  font-size: clamp(2.8rem, 7vw, 5rem);
+  font-style: italic;
+  font-weight: 400;
+  line-height: 0.98;
+}
+.gio-headline em {
+  font-style: normal;
+  color: var(--ember);
+}
+.gio-starter__lead {
+  font-size: 0.95rem;
+  color: var(--muted);
+  max-width: 34rem;
+  letter-spacing: 0;
+}
+.gio-starter__lead code {
+  color: var(--text);
+  background: rgba(245, 236, 222, 0.06);
+  padding: 0.1rem 0.4rem;
+  border-radius: 5px;
+}
+
+/* ---- Faux editor card ---- */
+.gio-term {
+  width: 100%;
+  max-width: 560px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--panel), var(--bg-2));
+  box-shadow: 0 1px 0 rgba(245, 236, 222, 0.04) inset, 0 24px 60px -24px rgba(0, 0, 0, 0.8);
+  overflow: hidden;
+}
+.gio-term__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 0.95rem;
+  border-bottom: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.25);
+}
+.gio-term__dots { display: flex; gap: 0.4rem; }
+.gio-term__dot { width: 11px; height: 11px; border-radius: 50%; background: var(--line-strong); }
+.gio-term__dot:first-child { background: var(--ember); }
+.gio-term__name {
+  margin-left: 0.4rem;
+  font-size: 0.76rem;
+  color: var(--faint);
+  letter-spacing: 0.02em;
+}
+.gio-term__body {
+  padding: 1.1rem 1.25rem;
+  font-size: 0.82rem;
+  line-height: 1.95;
+  overflow-x: auto;
+}
+.gio-term__row { display: flex; gap: 1rem; white-space: pre; }
+.gio-term__ln { color: var(--faint); user-select: none; min-width: 1.2ch; text-align: right; }
+.tok-kw  { color: var(--ember); }
+.tok-fn  { color: #e7c590; }
+.tok-str { color: #9ec79a; }
+.tok-com { color: var(--faint); font-style: italic; }
+.tok-com--accent { color: var(--ember); font-style: italic; }
+
+/* ---- Buttons ---- */
+.gio-actions { display: flex; gap: 0.7rem; flex-wrap: wrap; justify-content: center; }
+.gio-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1.15rem;
+  border-radius: 9px;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: transform 0.12s ease, background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.gio-btn:active { transform: translateY(1px); }
+.gio-btn--primary {
+  background: var(--ember);
+  color: #1a0a04;
+  box-shadow: 0 8px 22px -10px var(--ember);
+}
+.gio-btn--primary:hover { box-shadow: 0 10px 28px -8px var(--ember); transform: translateY(-1px); }
+.gio-btn--secondary {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+.gio-btn--secondary:hover { border-color: var(--ember-line); color: var(--ember); }
+.gio-btn__arrow { transition: transform 0.18s ease; }
+.gio-btn:hover .gio-btn__arrow { transform: translateX(3px); }
+
+/* ---- Prose (about) ---- */
+.gio-prose {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 5rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.gio-kicker {
+  font-size: 0.74rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ember);
+}
+.gio-prose__lead { font-size: 1.05rem; color: var(--text); font-family: var(--font-display); font-style: italic; }
+.gio-deflist { display: flex; flex-direction: column; gap: 0; border-top: 1px solid var(--line); }
+.gio-deflist__row {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 1.5rem;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.gio-deflist__row code { color: var(--ember); }
+.gio-deflist__desc { color: var(--muted); font-size: 0.9rem; }
+.gio-prose p code {
+  color: var(--text);
+  background: rgba(245, 236, 222, 0.06);
+  padding: 0.1rem 0.4rem;
+  border-radius: 5px;
+}
+.gio-link {
+  color: var(--ember);
+  border-bottom: 1px solid var(--ember-line);
+  transition: border-color 0.15s;
+}
+.gio-link:hover { border-color: var(--ember); }
+
+/* ---- Article (posts) ---- */
+.gio-article {
+  max-width: 660px;
+  margin: 0 auto;
+  padding: 5rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+.gio-article__head { display: flex; flex-direction: column; gap: 0.6rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--line); }
+.gio-article__title { font-size: clamp(2rem, 5vw, 3rem); font-style: italic; }
+.gio-article__time { font-size: 0.78rem; color: var(--faint); letter-spacing: 0.04em; }
+.gio-article__body { display: flex; flex-direction: column; gap: 1.1rem; line-height: 1.85; }
+.gio-article__body code { color: var(--ember); background: rgba(245, 236, 222, 0.05); padding: 0.1rem 0.4rem; border-radius: 5px; }
+
+/* ---- Footer ---- */
+.gio-footer { border-top: 1px solid var(--line); min-height: var(--footer-h); display: flex; align-items: center; }
+.gio-footer__inner { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.gio-footer__copy { font-size: 0.76rem; color: var(--faint); letter-spacing: 0.02em; }
+.gio-footer__links { display: flex; gap: 1.1rem; }
+.gio-footer__link { font-size: 0.76rem; color: var(--muted); }
+.gio-footer__link:hover { color: var(--ember); }
+
+/* ---- Status pages ---- */
+.gio-status {
+  min-height: 62vh;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; gap: 1.1rem; padding: 4rem 1.5rem;
+}
+.gio-status__code { font-family: var(--font-display); font-style: italic; font-size: clamp(4rem, 13vw, 8rem); line-height: 1; color: var(--ember); }
+.gio-status__stack {
+  max-width: 640px; width: 100%; text-align: left;
+  padding: 1rem; border-radius: 9px;
+  background: var(--panel); border: 1px solid var(--line);
+  font-size: 0.8rem; color: var(--muted); overflow-x: auto;
+}
+.gio-skeleton-page { max-width: 660px; margin: 0 auto; padding: 5rem 0; display: flex; flex-direction: column; gap: 1rem; }
+.gio-skeleton { height: 1rem; border-radius: 6px; background: linear-gradient(90deg, var(--panel), var(--line-strong), var(--panel)); background-size: 200% 100%; animation: gio-shimmer 1.5s ease-in-out infinite; }
+.gio-skeleton-title { height: 2.4rem; width: 55%; }
+.gio-skeleton-text { width: 100%; }
+.gio-skeleton-short { width: 38%; }
+@keyframes gio-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+@media (max-width: 620px) {
+  .gio-deflist__row { grid-template-columns: 1fr; gap: 0.3rem; }
+  .gio-term__body { font-size: 0.76rem; }
+}

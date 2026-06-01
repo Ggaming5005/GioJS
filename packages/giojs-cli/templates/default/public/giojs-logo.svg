@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="GioJS">
+  <defs>
+    <linearGradient id="gio-g" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff8a3d"/>
+      <stop offset="1" stop-color="#f5421a"/>
+    </linearGradient>
+  </defs>
+  <rect width="48" height="48" rx="12" fill="url(#gio-g)"/>
+  <path d="M31.5 18.2c-1.3-2.2-3.7-3.6-6.6-3.6-4.6 0-8 3.7-8 8.9s3.4 8.9 8.1 8.9c4.3 0 7.4-2.9 7.6-7.1v-1.8h-7.4v3.2h3.7c-.4 2-1.9 3.2-3.9 3.2-2.6 0-4.3-2-4.3-4.6s1.7-4.6 4.2-4.6c1.5 0 2.7.6 3.4 1.8l3.2-2.3z" fill="#fff"/>
+</svg>

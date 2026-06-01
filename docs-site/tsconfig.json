@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "paths": {
+      "giojs/react": ["../packages/giojs-react/src/index.ts"]
+    }
+  },
+  "include": ["app", "components"]
+}

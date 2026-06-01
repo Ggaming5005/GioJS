@@ -1,0 +1,42 @@
+[workspace]
+members = [
+  "crates/giojs-server",
+  "crates/giojs-router",
+  "crates/giojs-assets",
+  "crates/giojs-cache",
+  "crates/giojs-prefetch",
+  "crates/giojs-ratelimit",
+  "crates/giojs-i18n",
+  "crates/giojs-font",
+  "crates/giojs-image",
+  "crates/giojs-css",
+  "crates/giojs-plugin",
+  # "crates/giojs-compress",
+  # "crates/giojs-middleware",
+  # "crates/giojs-og",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio              = { version = "1",    features = ["full"] }
+axum               = { version = "0.7", features = ["ws", "macros"] }
+tower              = "0.4"
+tower-http         = { version = "0.5", features = ["fs", "trace", "set-header", "compression-br", "compression-gzip"] }
+serde              = { version = "1",    features = ["derive"] }
+serde_json         = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid               = { version = "1",    features = ["v4"] }
+tokio-util         = { version = "0.7", features = ["codec"] }
+bytes              = "1"
+toml               = "0.8"
+thiserror          = "1"
+dashmap            = "5"
+anyhow             = "1"
+sha2               = "0.10"
+lru                = "0.12"
+tokio-stream       = { version = "0.1", features = ["sync"] }
+reqwest            = { version = "0.12", features = ["rustls-tls"] }
+hyper              = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util         = { version = "0.1", features = ["tokio", "server-auto"] }
+lightningcss       = { version = "1.0.0-alpha.71", features = ["bundler"] }
