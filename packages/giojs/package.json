@@ -1,6 +1,6 @@
 {
   "name": "@gio.js/server",
-  "version": "0.1.0-beta.3",
+  "version": "0.1.0-beta.4",
   "description": "GioJS — Rust-powered React framework",
   "bin": {
     "gio": "bin/gio.js",
@@ -10,7 +10,7 @@
     "bin"
   ],
   "dependencies": {
-    "@gio.js/core": "0.1.0-beta.3"
+    "@gio.js/core": "0.1.0-beta.4"
   },
   "optionalDependencies": {
     "@gio.js/server-linux-x64": "0.1.0-beta.1",
@@ -22,5 +22,25 @@
   "license": "MIT",
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "homepage": "https://giojs.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ggaming5005/GioJS.git",
+    "directory": "packages/giojs"
+  },
+  "bugs": {
+    "url": "https://github.com/Ggaming5005/GioJS/issues"
+  },
+  "keywords": [
+    "giojs",
+    "react",
+    "rust",
+    "react-framework",
+    "web-framework",
+    "ssr",
+    "http2",
+    "self-hosted",
+    "nextjs-alternative"
+  ]
 }

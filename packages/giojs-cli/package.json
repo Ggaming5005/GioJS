@@ -1,6 +1,6 @@
 {
   "name": "create-giojs",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.3",
   "license": "MIT",
   "description": "Create a new GioJS application",
   "type": "module",
@@ -19,5 +19,24 @@
   "devDependencies": {
     "@types/node": "^25.8.0",
     "typescript": "^5.4.0"
-  }
+  },
+  "homepage": "https://giojs.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ggaming5005/GioJS.git",
+    "directory": "packages/giojs-cli"
+  },
+  "bugs": {
+    "url": "https://github.com/Ggaming5005/GioJS/issues"
+  },
+  "keywords": [
+    "giojs",
+    "react",
+    "rust",
+    "create-giojs",
+    "scaffold",
+    "react-framework",
+    "nextjs-alternative",
+    "static-site-generator"
+  ]
 }

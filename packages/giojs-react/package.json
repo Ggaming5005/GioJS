@@ -1,6 +1,6 @@
 {
   "name": "@gio.js/react",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.2",
   "license": "MIT",
   "type": "module",
   "files": [
@@ -35,5 +35,21 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "homepage": "https://giojs.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ggaming5005/GioJS.git",
+    "directory": "packages/giojs-react"
+  },
+  "bugs": {
+    "url": "https://github.com/Ggaming5005/GioJS/issues"
+  },
+  "keywords": [
+    "giojs",
+    "react",
+    "components",
+    "image-optimization",
+    "ssr"
+  ]
 }
