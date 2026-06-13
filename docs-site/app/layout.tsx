@@ -19,7 +19,13 @@ export default function RootLayout({ children }: RootLayoutProps): React.JSX.Ele
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>GioJS Documentation</title>
         <meta name="description" content="GioJS — the Rust-powered React framework. Self-hosted React at Vercel speed: HTTP/2, image optimization, ISR caching, and compression in compiled Rust." />
-        <link rel="icon" href="/public/giojs-logo.svg" type="image/svg+xml" />
+        <link rel="icon" href="/favicon.ico" sizes="any" />
+        <link rel="icon" type="image/svg+xml" href="/public/giojs-logo.svg" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+        <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+        <link rel="manifest" href="/site.webmanifest" />
+        <meta name="theme-color" content="#0b0a09" />
         <meta property="og:type" content="website" />
         <meta property="og:site_name" content="GioJS" />
         <meta property="og:url" content="https://giojs.com" />
