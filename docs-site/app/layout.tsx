@@ -25,8 +25,14 @@ export default function RootLayout({ children }: RootLayoutProps): React.JSX.Ele
         <meta property="og:url" content="https://giojs.com" />
         <meta property="og:title" content="GioJS — the Rust-powered React framework" />
         <meta property="og:description" content="Self-hosted React at Vercel speed. HTTP/2, image optimization, ISR caching, and compression in compiled Rust — deploy anywhere." />
-        <meta property="og:image" content="https://giojs.com/public/giojs-logo.svg" />
-        <meta name="twitter:card" content="summary" />
+        <meta property="og:image" content="https://giojs.com/public/og.png" />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+        <meta property="og:image:alt" content="GioJS — self-hosted React at Vercel speed" />
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content="GioJS — the Rust-powered React framework" />
+        <meta name="twitter:description" content="Self-hosted React at Vercel speed. HTTP/2, image optimization, ISR caching, and compression in one binary." />
+        <meta name="twitter:image" content="https://giojs.com/public/og.png" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link
