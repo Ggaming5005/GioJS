@@ -37,6 +37,11 @@ prefix  = "gio:prod:"
 [compression]
 enabled = true          # brotli + gzip negotiation
 
+[metrics]
+enabled = false         # expose /_gio/metrics (Prometheus); off by default
+token = ""              # require "Authorization: Bearer <token>" when set
+ip_allowlist = []       # restrict by client IP, e.g. ["10.0.0.5"]
+
 [[images.remotePatterns]]
 hostname = "images.example.com"
 protocol = "https"
@@ -49,6 +54,48 @@ permanent   = true
 [[rewrites]]
 source      = "/api/:path*"
 destination = "http://internal-api/:path*"`} />
+
+      <h2>Health &amp; metrics</h2>
+      <p>
+        GioJS serves two built-in observability endpoints directly from the Rust
+        layer — no Node round-trip, so they stay responsive even under load:
+      </p>
+      <table>
+        <thead>
+          <tr><th>Endpoint</th><th>Default</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>/_gio/health</code></td>
+            <td>always on</td>
+            <td>Liveness probe — returns <code>200</code> once the server and the Node SSR worker are ready. Point your load balancer or container healthcheck here.</td>
+          </tr>
+          <tr>
+            <td><code>/_gio/metrics</code></td>
+            <td>off</td>
+            <td>Prometheus exposition (request counts, latency histograms, cache hit ratio, IPC timing). Returns <code>404</code> until enabled via <code>[metrics]</code>.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        Metrics are opt-in so you never expose them by accident. Turn them on,
+        and lock them down for anything beyond localhost:
+      </p>
+      <CodeBlock lang="toml" code={`[metrics]
+enabled = true          # serve /_gio/metrics
+
+# Secure it for production — use either or both:
+token        = "a-long-random-secret"     # require Authorization: Bearer <token>
+ip_allowlist = ["10.0.0.5", "10.0.0.6"]   # only allow these client IPs`} />
+      <CodeBlock lang="bash" code={`# Scrape with a token:
+curl -H "Authorization: Bearer a-long-random-secret" \\
+  http://localhost:3000/_gio/metrics`} />
+      <div className="callout">
+        With <code>enabled = true</code> but no <code>token</code> or
+        <code>ip_allowlist</code>, GioJS logs a warning at startup —
+        unauthenticated metrics are fine on localhost but should never face the
+        public internet.
+      </div>
 
       <h2>Environment variables</h2>
       <p>Environment variables override <code>gio.toml</code> at runtime:</p>

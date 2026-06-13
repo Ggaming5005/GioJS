@@ -224,8 +224,11 @@ export async function renderRoute(
       element = React.createElement(Layout, { children: element, path: req.path });
     }
 
+    // Static export has no client bundle to hydrate against, so skip the
+    // bootstrap script reference (it would 404 and trip strict MIME checks).
+    const bootstrap = process.env.GIO_EXPORT === '1' ? [] : ['/_next/static/chunks/main.js'];
     const stream = await renderToReadableStream(element, {
-      bootstrapScripts: ['/_next/static/chunks/main.js'],
+      bootstrapScripts: bootstrap,
       onError(err) {
         console.error('[SSR error]', err);
       },
@@ -238,7 +241,7 @@ export async function renderRoute(
     const hasRootLayout = layouts.has('/');
     const body = hasRootLayout
       ? html
-      : wrapWithDocument(html, ['/_next/static/chunks/main.js']);
+      : wrapWithDocument(html, bootstrap);
 
     const ssrResponse: IPCOutbound = {
       id: req.id,

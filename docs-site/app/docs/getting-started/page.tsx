@@ -3,59 +3,56 @@ import { CodeBlock } from '../../../components/CodeBlock.tsx';
 
 export const revalidate = false;
 
-export default function GettingStartedPage(): React.JSX.Element {
+export default function IntroductionPage(): React.JSX.Element {
   return (
     <>
-      <h1>Getting Started</h1>
+      <div className="docs-eyebrow">Getting Started</div>
+      <h1>Introduction</h1>
       <p className="page-subtitle">
-        GioJS is a Rust-powered React framework. The Rust binary handles HTTP, routing,
-        caching, and compression. Node handles React SSR.
+        GioJS is a Rust-powered React framework. You write familiar React with
+        file-based routing; the performance-critical hot path runs in compiled Rust,
+        and Node does what it is best at — rendering React.
       </p>
 
-      <h2>Prerequisites</h2>
+      <h2>Why GioJS</h2>
+      <p>
+        Most of the things that make a React app fast in production — HTTP/2, brotli
+        compression, image optimization, ISR caching, font self-hosting — are usually
+        provided by a proprietary cloud. Self-host that same stack and you typically lose
+        them. GioJS compiles all of it into a single binary so you get the same performance
+        profile on a $5 VPS, bare metal, Windows, or Kubernetes — no CDN tax.
+      </p>
+
+      <h2>The split</h2>
+      <p>The framework is two cooperating layers:</p>
       <ul>
-        <li>Node.js 20 or later</li>
+        <li><strong>Rust</strong> owns the hot path — HTTP/2 &amp; TLS, routing, brotli/gzip compression, image optimization, the ISR page cache, static files, and middleware.</li>
+        <li><strong>Node</strong> renders React via <code>renderToReadableStream</code>, runs <code>getServerSideProps</code>, and gives you the full npm ecosystem.</li>
       </ul>
-
-      <h2>Create a new app</h2>
-      <CodeBlock lang="bash" code={`npm create giojs@latest my-app\ncd my-app\nnpm install`} />
       <p>
-        GioJS ships a platform-specific binary via optional npm dependencies
-        (the same model as esbuild). The right binary is selected automatically at install time.
+        A request only crosses into Node when it is a dynamic render that missed the cache.
+        Everything else is served entirely from Rust.
       </p>
 
-      <h2>Start the dev server</h2>
-      <CodeBlock lang="bash" code={`npm run dev`} />
-
-      <h2>Build for production</h2>
-      <CodeBlock lang="bash" code={`npm run build\nNODE_ENV=production PORT=3000 npm start`} />
-
-      <h2>gio.toml — project configuration</h2>
+      <h2>Start in seconds</h2>
+      <CodeBlock lang="bash" code={`npm create giojs@latest`} />
       <p>
-        Create <code>gio.toml</code> in your project root. All fields are optional — GioJS
-        has sensible defaults for everything.
+        Pick TypeScript or JavaScript at the prompt, then <code>npm run dev</code>. Next,
+        head to <a href="/docs/installation">Installation</a> and <a href="/docs/project-structure">Project Structure</a>.
       </p>
-      <CodeBlock lang="toml" code={`[app]
-name = "my-app"
-router = "app"         # "app" (default) or "pages"
-
-[server]
-host = "0.0.0.0"
-port = 3000
-
-[cache]
-memory_mb = 128        # in-process LRU cache size`} />
-
-      <h2>Health check</h2>
-      <p>
-        The <code>/_gio/health</code> endpoint is always available and returns JSON.
-        Use it for readiness probes and uptime monitors.
-      </p>
-      <CodeBlock lang="bash" code={`curl http://localhost:3000/_gio/health\n# {"status":"ok","http2":false,"tls":false}`} />
 
       <div className="callout">
-        <strong>Migrating from Next.js?</strong> Run <code>npx gio-migrate</code> to
-        automatically convert imports. See the <a href="/docs/migration">Migration Guide</a>.
+        Coming from Next.js? The conventions (<code>app/</code>, <code>page</code>,
+        <code>layout</code>, <code>getServerSideProps</code>) will feel familiar. See
+        <a href="/docs/migration"> Migrating from Next.js</a>.
+      </div>
+
+      <div className="docs-pager">
+        <span />
+        <a className="next" href="/docs/installation">
+          <span className="dir">Next</span>
+          <span className="label">Installation →</span>
+        </a>
       </div>
     </>
   );

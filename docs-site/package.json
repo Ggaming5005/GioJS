@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx ../packages/giojs-core/src/index.ts",
+    "export": "node build.mjs",
+    "deploy": "node build.mjs && npx wrangler pages deploy out --project-name=giojs --branch=main --commit-dirty=true",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

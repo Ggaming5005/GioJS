@@ -30,6 +30,10 @@ Thumbs.db
 server-*.txt
 node-test*.txt
 
+# docs-site static build output + local preview scratch
+docs-site/out/
+docs-site/_*.mjs
+
 # Local editor / tool settings (machine-specific)
 .claude/
 

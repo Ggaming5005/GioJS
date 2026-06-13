@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { copyTemplate } from './copy-template.js';
-import { gatherConfig, type CliArgs, type Language } from './prompts.js';
+import { gatherConfig, type CliArgs, type Language, type Mode } from './prompts.js';
 
 export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = { yes: false };
@@ -23,6 +23,12 @@ export function parseArgs(argv: string[]): CliArgs {
         break;
       case '--install':
         args.installDeps = true;
+        break;
+      case '--static':
+        args.mode = 'static';
+        break;
+      case '--server':
+        args.mode = 'server';
         break;
       case '-y':
       case '--yes':
@@ -43,7 +49,7 @@ function monorepoRoot(): string | null {
   return existsSync(join(root, 'gio.toml')) ? root : null;
 }
 
-async function patchPackageJson(destDir: string): Promise<void> {
+async function patchPackageJson(destDir: string, mode: Mode): Promise<void> {
   const pkgPath = join(destDir, 'package.json');
   const raw = await readFile(pkgPath, 'utf8');
   const pkg = JSON.parse(raw) as Record<string, unknown>;
@@ -61,6 +67,12 @@ async function patchPackageJson(destDir: string): Promise<void> {
   }
   // Published mode keeps the template's pinned @gio.js/* version ranges as-is.
 
+  if (mode === 'static') {
+    // Static sites pre-render to out/ via `gio export` and ship no production server.
+    scripts['build'] = 'gio export';
+    delete scripts['start'];
+  }
+
   await writeFile(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
 }
 
@@ -69,9 +81,10 @@ export async function create(argv: string[]): Promise<void> {
   const destDir = join(process.cwd(), config.projectName);
 
   const langLabel = config.language === 'js' ? 'JavaScript (.jsx)' : 'TypeScript (.tsx)';
-  console.log(`\nCreating ${config.projectName} with ${langLabel}...`);
+  const modeLabel = config.mode === 'static' ? 'static site' : 'server app';
+  console.log(`\nCreating ${config.projectName} — ${langLabel}, ${modeLabel}...`);
   await copyTemplate(config.template, destDir, config.projectName);
-  await patchPackageJson(destDir);
+  await patchPackageJson(destDir, config.mode);
   console.log('Template copied.');
 
   if (config.installDeps) {
@@ -79,8 +92,11 @@ export async function create(argv: string[]): Promise<void> {
     execSync('npm install', { cwd: destDir, stdio: 'inherit' });
   }
 
-  const steps = config.installDeps
+  const base = config.installDeps
     ? `  cd ${config.projectName}\n  npm run dev`
     : `  cd ${config.projectName}\n  npm install\n  npm run dev`;
+  const steps = config.mode === 'static'
+    ? `${base}\n\nWhen you're ready to deploy:\n  npm run build      # → out/ (deploy to any static host)`
+    : base;
   console.log(`\nDone! To get started:\n\n${steps}\n`);
 }

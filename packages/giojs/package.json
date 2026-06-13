@@ -1,6 +1,6 @@
 {
   "name": "@gio.js/server",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.3",
   "description": "GioJS — Rust-powered React framework",
   "bin": {
     "gio": "bin/gio.js",
@@ -10,7 +10,7 @@
     "bin"
   ],
   "dependencies": {
-    "@gio.js/core": "0.1.0-beta.1"
+    "@gio.js/core": "0.1.0-beta.3"
   },
   "optionalDependencies": {
     "@gio.js/server-linux-x64": "0.1.0-beta.1",

@@ -2,10 +2,12 @@ import { createInterface } from 'readline/promises';
 import { select } from './select.js';
 
 export type Language = 'ts' | 'js';
+export type Mode = 'server' | 'static';
 
 export interface ProjectConfig {
   projectName: string;
   language: Language;
+  mode: Mode;
   template: 'default' | 'default-js';
   installDeps: boolean;
 }
@@ -13,6 +15,7 @@ export interface ProjectConfig {
 export interface CliArgs {
   projectName?: string;
   language?: Language;
+  mode?: Mode;
   installDeps?: boolean;
   /** Skip interactive prompts and accept defaults for anything not provided. */
   yes: boolean;
@@ -30,6 +33,7 @@ export async function gatherConfig(args: CliArgs): Promise<ProjectConfig> {
     return {
       projectName: args.projectName?.trim() || 'my-giojs-app',
       language,
+      mode: args.mode ?? 'server',
       template: templateFor(language),
       installDeps: args.installDeps ?? true,
     };
@@ -58,6 +62,15 @@ export async function gatherConfig(args: CliArgs): Promise<ProjectConfig> {
     0,
   ));
 
+  const mode = args.mode ?? (await select<Mode>(
+    'What are you building?',
+    [
+      { label: 'Server app', value: 'server', hint: 'SSR, ISR, image optimization, route handlers — runs the GioJS server' },
+      { label: 'Static site', value: 'static', hint: 'exports to HTML — deploy free to any static host' },
+    ],
+    0,
+  ));
+
   if (args.installDeps !== undefined) {
     installDeps = args.installDeps;
   } else {
@@ -70,5 +83,5 @@ export async function gatherConfig(args: CliArgs): Promise<ProjectConfig> {
     }
   }
 
-  return { projectName, language, template: templateFor(language), installDeps };
+  return { projectName, language, mode, template: templateFor(language), installDeps };
 }

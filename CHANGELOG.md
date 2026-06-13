@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.1.0-beta.3 (2026-06-02)
+
+- **Static export** now auto-generates `robots.txt` and a full `sitemap.xml`
+  (absolute URLs from `GIO_SITE_URL`) — every static build is SEO-ready.
+- **Fix:** exported pages no longer reference a `/_next/static/chunks/main.js`
+  bootstrap script (it 404'd on static hosts and tripped strict MIME checks).
+  `@gio.js/core` and `@gio.js/server` only.
+
+## 0.1.0-beta.2 (2026-06-02)
+
+- **Static export** — `gio export` pre-renders the app to `out/` as plain HTML,
+  deployable free to any static host. `getServerSideProps` runs at build time;
+  dynamic routes export via a new `getStaticPaths()`; server-only routes (route
+  handlers, SSE, WebSockets, ISR) are skipped with a warning.
+- **`create-giojs`** adds a **Server app / Static site** picker (`--static` /
+  `--server`); static projects build with `gio export` and ship no server.
+
 ## 0.1.0-beta.1 (2026-05-31)
 
 First public beta on npm. Published under the **`@gio.js/*`** scope —
