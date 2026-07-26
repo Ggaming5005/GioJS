@@ -1,4 +1,25 @@
+//! giojs-server/src/config.rs
+//!
+//! gio.toml parsing into typed config structs with serde defaults.
+//! A missing file falls back to defaults; a file that exists but cannot be
+//! read or parsed is a startup-time failure: print the error and exit(1).
+
 use serde::Deserialize;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("cannot read {path}: {source}")]
+    Read {
+        path: String,
+        source: std::io::Error,
+    },
+    #[error("cannot parse {path}: {source}")]
+    Parse {
+        path: String,
+        source: toml::de::Error,
+    },
+}
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct MetricsConfig {
@@ -158,6 +179,10 @@ pub struct ImageConfig {
     pub quality: u8,
     #[serde(default)]
     pub remote_patterns: Vec<RemotePattern>,
+    #[serde(default = "default_image_disk_max_bytes")]
+    pub disk_max_bytes: u64,
+    #[serde(default = "default_image_max_remote_bytes")]
+    pub max_remote_bytes: u64,
 }
 
 fn default_allowed_widths() -> Vec<u32> {
@@ -170,12 +195,22 @@ fn default_image_quality() -> u8 {
     75
 }
 
+fn default_image_disk_max_bytes() -> u64 {
+    512 * 1024 * 1024
+}
+
+fn default_image_max_remote_bytes() -> u64 {
+    20 * 1024 * 1024
+}
+
 impl Default for ImageConfig {
     fn default() -> Self {
         Self {
             allowed_widths: default_allowed_widths(),
             quality: default_image_quality(),
             remote_patterns: Vec::new(),
+            disk_max_bytes: default_image_disk_max_bytes(),
+            max_remote_bytes: default_image_max_remote_bytes(),
         }
     }
 }
@@ -211,12 +246,18 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default = "default_http2")]
     pub http2: bool,
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: usize,
     #[serde(default)]
     pub tls: TlsConfig,
 }
 
 fn default_http2() -> bool {
     true
+}
+
+fn default_max_body_bytes() -> usize {
+    2 * 1024 * 1024
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -233,6 +274,7 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 3000,
             http2: true,
+            max_body_bytes: default_max_body_bytes(),
             tls: TlsConfig::default(),
         }
     }
@@ -250,8 +292,27 @@ impl GioConfig {
             })
             .unwrap_or_else(|| std::path::PathBuf::from("gio.toml"));
 
-        let raw = std::fs::read_to_string(&path).unwrap_or_default();
-        toml::from_str(&raw).unwrap_or_default()
+        match Self::load_from_path(&path) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("giojs-server: configuration error: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    fn load_from_path(path: &std::path::Path) -> Result<Self, ConfigError> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+            path: path.display().to_string(),
+            source,
+        })?;
+        toml::from_str(&raw).map_err(|source| ConfigError::Parse {
+            path: path.display().to_string(),
+            source,
+        })
     }
 
     /// Absolute path to the project root directory (parent of GIO_APP_DIR or CWD).
@@ -268,5 +329,45 @@ impl GioConfig {
 
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.server.host, self.server.port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("gio_config_test_{}_{name}", std::process::id()))
+    }
+
+    #[test]
+    fn missing_file_yields_defaults() {
+        let path = unique_temp_path("missing.toml");
+        let config = GioConfig::load_from_path(&path).unwrap();
+        assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(config.server.port, 3000);
+        assert_eq!(config.images.quality, 75);
+        assert_eq!(config.images.disk_max_bytes, 512 * 1024 * 1024);
+        assert_eq!(config.images.max_remote_bytes, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn valid_file_is_parsed() {
+        let path = unique_temp_path("valid.toml");
+        std::fs::write(&path, "[server]\nhost = \"127.0.0.1\"\nport = 4321\n").unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let config = result.unwrap();
+        assert_eq!(config.server.host, "127.0.0.1");
+        assert_eq!(config.server.port, 4321);
+    }
+
+    #[test]
+    fn invalid_file_returns_parse_error() {
+        let path = unique_temp_path("invalid.toml");
+        std::fs::write(&path, "[server\nport = ???").unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 }

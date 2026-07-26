@@ -38,3 +38,10 @@ tokio-stream.workspace       = true
 rustls          = "0.23"
 rustls-pemfile  = "2"
 tokio-rustls    = "0.26"
+# Dev-watch file watching (per CLAUDE.md approved list: dev mode only).
+notify          = "6"
+
+# Job Object with KILL_ON_JOB_CLOSE so a hard-killed server cannot orphan the
+# Node worker (kill_on_drop alone misses TerminateProcess on the parent).
+[target.'cfg(windows)'.dependencies]
+win32job = "2"

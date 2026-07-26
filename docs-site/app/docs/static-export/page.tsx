@@ -37,6 +37,12 @@ export default function Page(): React.JSX.Element {
         in dev is what you get in <code>out/</code>. <code>getServerSideProps</code>
         runs at build time and its data is baked into the HTML.
       </p>
+      <p>
+        Every export also writes <code>out/404.html</code> — your{` `}
+        <code>app/not-found.tsx</code> if you have one, otherwise the built-in 404
+        page — so static hosts return a real 404 for unknown URLs instead of
+        falling back to the home page.
+      </p>
 
       <h2>Dynamic routes</h2>
       <p>

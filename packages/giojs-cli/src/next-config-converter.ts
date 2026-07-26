@@ -85,10 +85,12 @@ function extractConfig(source: string): ExtractedConfig {
   for (const block of extractObjectBlocks(source, 'remotePatterns')) {
     const hostname = extractStringProp(block, 'hostname');
     if (hostname) {
+      const protocol = extractStringProp(block, 'protocol');
+      const pathname = extractStringProp(block, 'pathname');
       remotePatterns.push({
-        protocol: extractStringProp(block, 'protocol'),
         hostname,
-        pathname: extractStringProp(block, 'pathname'),
+        ...(protocol !== undefined ? { protocol } : {}),
+        ...(pathname !== undefined ? { pathname } : {}),
       });
     }
   }
@@ -98,10 +100,11 @@ function extractConfig(source: string): ExtractedConfig {
     const source_ = extractStringProp(block, 'source');
     const destination = extractStringProp(block, 'destination');
     if (source_ && destination) {
+      const permanent = extractBoolProp(block, 'permanent');
       redirects.push({
         source: source_,
         destination,
-        permanent: extractBoolProp(block, 'permanent'),
+        ...(permanent !== undefined ? { permanent } : {}),
       });
     }
   }

@@ -1,0 +1,7 @@
+[app]
+name = "integration-fixture"
+
+[server]
+host  = "127.0.0.1"
+port  = 39517
+http2 = false

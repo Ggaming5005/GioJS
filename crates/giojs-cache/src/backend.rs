@@ -26,6 +26,8 @@ pub trait CacheBackend: Send + Sync {
     /// (entry_count, total_html_bytes) for observability.
     fn stats(&self) -> (usize, usize);
     fn evict_disk(&self) -> impl Future<Output = ()> + Send;
+    /// Drop every entry, memory and disk (dev-mode invalidation).
+    fn clear(&self) -> impl Future<Output = ()> + Send;
 }
 
 /// Node-local backend: in-memory LRU promoted over disk. This is the only
@@ -73,5 +75,10 @@ impl CacheBackend for LocalBackend {
         if self.disk_max_bytes > 0 {
             self.disk.enforce_limit(self.disk_max_bytes).await;
         }
+    }
+
+    async fn clear(&self) {
+        self.memory.clear();
+        self.disk.clear_all().await;
     }
 }

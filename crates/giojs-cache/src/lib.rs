@@ -34,6 +34,15 @@ pub struct CacheEntry {
     pub created_at: SystemTime,
     pub max_age_secs: u64,
     pub deployment_id: String,
+    /// True when `html` is the final composed document (critical CSS, font
+    /// preloads, and deployment script already injected at put time), so it
+    /// can be served byte-for-byte on a hit. False for entries written by
+    /// older versions or in dev mode — those are injected per request.
+    pub composed: bool,
+    /// Cache tags declared by the render (IPC `cacheTags`). Stored now so a
+    /// tag-based revalidation endpoint can invalidate by tag later without a
+    /// disk-format migration.
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +109,12 @@ impl PageCache {
     /// `disk_max_bytes`. A no-op when the bound is disabled (0).
     pub async fn evict_disk(&self) {
         self.backend.evict_disk().await;
+    }
+
+    /// Drop every entry, memory and disk. Dev-mode invalidation: after a
+    /// code change, everything previously rendered is stale.
+    pub async fn clear(&self) {
+        self.backend.clear().await;
     }
 
     /// Build a SHA256 cache key. Delegates to `key::build_cache_key`.
@@ -180,6 +195,8 @@ mod tests {
             created_at,
             max_age_secs,
             deployment_id: "deploy-1".to_string(),
+            composed: false,
+            tags: Vec::new(),
         }
     }
 
@@ -230,12 +247,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_drops_memory_and_disk_entries() {
+        let dir = std::env::temp_dir().join(format!("giojs-cache-clear-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let cache = PageCache::new(CacheConfig {
+            memory_max_entries: NonZeroUsize::new(100).unwrap(),
+            disk_dir: dir.clone(),
+            swr_multiplier: 10,
+            disk_max_bytes: 0,
+        });
+        cache.put("key-clear", make_entry(3600, 0)).await.unwrap();
+        assert!(cache.get("key-clear", "deploy-1").await.is_some());
+        // Give the background disk write a moment to land, then clear.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cache.clear().await;
+        assert!(
+            cache.get("key-clear", "deploy-1").await.is_none(),
+            "cleared entry must not survive via memory or disk promotion"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
     async fn deployment_id_mismatch_is_a_miss() {
         let cache = cache_with_swr(10);
         let entry = make_entry(3600, 0);
         cache.put("key4", entry).await.unwrap();
         // Lookup with a different deployment ID
         assert!(cache.get("key4", "deploy-2").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn composed_flag_round_trips_through_cache() {
+        let cache = cache_with_swr(10);
+        let mut entry = make_entry(3600, 0);
+        entry.composed = true;
+        cache.put("key-composed", entry).await.unwrap();
+        let (got, status) = cache.get("key-composed", "deploy-1").await.unwrap();
+        assert_eq!(status, CacheStatus::Hit);
+        assert!(got.composed);
     }
 
     #[tokio::test]

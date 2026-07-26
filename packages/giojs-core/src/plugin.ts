@@ -6,6 +6,7 @@
  * an IPCResponse directly. Plugin errors yield a 500 and never crash the process.
  */
 import type { IPCRequest, IPCResponse } from './context.ts';
+import { logger } from './logger.ts';
 
 export interface GioNodePlugin {
   name: string;
@@ -62,7 +63,11 @@ export class NodePluginRegistry {
         try {
           current = await plugin.onRequest(current as IPCRequest);
         } catch (err) {
-          console.error(`[plugin:${plugin.name}] onRequest error`, err);
+          logger.error('plugin onRequest error', {
+            plugin: plugin.name,
+            id: req.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
           return internalError(req.id, plugin.name);
         }
       }
@@ -77,7 +82,11 @@ export class NodePluginRegistry {
         try {
           current = await plugin.onResponse(req, current);
         } catch (err) {
-          console.error(`[plugin:${plugin.name}] onResponse error`, err);
+          logger.error('plugin onResponse error', {
+            plugin: plugin.name,
+            id: req.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       }
     }

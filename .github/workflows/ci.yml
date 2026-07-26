@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  version-lockstep:
+    name: Version lockstep check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: node scripts/sync-versions.mjs --check
+
+  rust:
+    name: Rust tests + clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace -- -D warnings
+
+  node:
+    name: Node tests + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: giojs-core tests + typecheck
+        working-directory: packages/giojs-core
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+      - name: giojs-react tests + typecheck
+        working-directory: packages/giojs-react
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+
+  # The real Rust↔Node pair: render, body forwarding, render isolation,
+  # cache hits, kill-the-worker recovery, orphan-free shutdown.
+  integration:
+    name: Integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: cargo build -p giojs-server
+      - run: node tests/integration/run.mjs

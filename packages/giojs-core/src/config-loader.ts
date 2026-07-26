@@ -7,6 +7,7 @@
  */
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { tsImport } from 'tsx/esm/api';
 import type { GioNodePlugin } from './plugin.ts';
 
@@ -25,7 +26,7 @@ export async function loadGioConfig(appDir: string): Promise<GioConfig> {
     } catch {
       continue; // not this extension — try the next
     }
-    const mod = await tsImport(configPath, import.meta.url) as { default?: GioConfig };
+    const mod = await tsImport(pathToFileURL(configPath).href, import.meta.url) as { default?: GioConfig };
     return mod.default ?? {};
   }
   return {};

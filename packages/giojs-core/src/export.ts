@@ -9,7 +9,7 @@
  */
 import { mkdir, writeFile, cp, access } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
-import { discoverRoutes, discoverLayouts } from './router.ts';
+import { discoverRoutes, discoverLayouts, discoverSpecialPages } from './router.ts';
 import { renderRoute } from './ssr.ts';
 import type { IPCRequest, IPCResponse } from './context.ts';
 
@@ -46,7 +46,7 @@ function pathToFile(outDir: string, urlPath: string): string {
 function makeRequest(path: string, params: Record<string, string>): IPCRequest {
   return {
     id: 'export', method: 'GET', path, params,
-    query: {}, headers: {}, body: null,
+    query: {}, headers: {}, body: null, bodyBase64: false,
     deploymentId: 'static', locale: 'en',
   };
 }
@@ -103,6 +103,24 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
         skipped.push({ route: target.path, reason: `status ${res.status}` });
       }
     }
+  }
+
+  // 404.html: static hosts (Cloudflare Pages, GitHub Pages, Netlify) serve it
+  // with a real 404 status for unmatched paths. Without it, Cloudflare Pages
+  // falls back to index.html — every unknown URL would 200 with the home page.
+  // Renders app/not-found.* through the layout pipeline, or the built-in 404.
+  const specialPages = await discoverSpecialPages(appDir);
+  const notFoundOut = await renderRoute(
+    makeRequest('/__gio_not_found__', {}),
+    routes,
+    layouts,
+    undefined,
+    undefined,
+    undefined,
+    { specialPages },
+  );
+  if ('body' in notFoundOut && typeof notFoundOut.body === 'string' && notFoundOut.body !== '') {
+    await writeFile(join(outDir, '404.html'), notFoundOut.body, 'utf8');
   }
 
   // Copy public/ (sibling of app/) into the output, served at /public/*.

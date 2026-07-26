@@ -35,5 +35,12 @@ pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
     var r = e.reason;
     show(r && r.message ? r.message : String(r), r && r.stack || '');
   });
+
+  // Dev watch: the server broadcasts `reload` on the devtools stream after
+  // restarting the worker for a source change.
+  try {
+    var es = new EventSource('/_gio/devtools/stream');
+    es.addEventListener('reload', function() { location.reload(); });
+  } catch (_) {}
 })();
 </script>"#;

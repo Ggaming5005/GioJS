@@ -73,8 +73,9 @@ async fn run_connection(
                         ws_ipc.send_ws_message(&conn_id, &text, false);
                     }
                     Some(Ok(Message::Binary(data))) => {
-                        let s = String::from_utf8_lossy(&data);
-                        ws_ipc.send_ws_message(&conn_id, &s, true);
+                        // Base64 keeps arbitrary bytes intact inside the JSON envelope
+                        let encoded = crate::ws_ipc::b64::encode(&data);
+                        ws_ipc.send_ws_message(&conn_id, &encoded, true);
                     }
                     Some(Ok(Message::Close(cf))) => {
                         let (code, reason) = cf

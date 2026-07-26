@@ -1,3 +1,10 @@
+/**
+ * packages/giojs-react/src/Image.tsx
+ *
+ * Drop-in replacement for next/image. Snaps the requested width to the
+ * server's allowed list and points src/srcSet at the /_gio/image
+ * optimisation endpoint served by giojs-image (Rust).
+ */
 import React from 'react';
 
 const ALLOWED_WIDTHS = [16, 32, 48, 64, 96, 128, 256, 384, 640, 750, 828, 1080, 1200, 1920, 2048, 3840];
@@ -63,7 +70,7 @@ export function GioImage({
       height={fill ? undefined : height}
       alt={alt}
       sizes={sizes}
-      fetchPriority={priority ? 'high' : undefined}
+      {...(priority ? { fetchPriority: 'high' as const } : {})}
       className={className}
       style={style}
       loading={priority ? 'eager' : 'lazy'}

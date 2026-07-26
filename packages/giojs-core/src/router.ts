@@ -44,13 +44,24 @@ export interface RouteModule {
   load: () => Promise<PageModule>;
 }
 
+/** Context handed to getServerSideProps. */
+export interface GsspContext {
+  method: string;
+  path: string;
+  params: Record<string, string>;
+  query: Record<string, string>;
+  /** Lowercased request headers. */
+  headers: Record<string, string>;
+  /** Cookie header parsed into name → value. */
+  cookies: Record<string, string>;
+  locale?: string;
+}
+
 export interface PageModule {
-  default: React.ComponentType<any>;
-  getServerSideProps?: (ctx: {
-    params: Record<string, string>;
-    query: Record<string, string>;
-    locale?: string;
-  }) => Promise<Record<string, unknown> | RedirectResult>;
+  default: React.ComponentType<Record<string, unknown>>;
+  getServerSideProps?: (
+    ctx: GsspContext,
+  ) => Promise<Record<string, unknown> | RedirectResult>;
   revalidate?: number | false;
   dynamic?: 'force-dynamic' | 'force-static' | 'auto';
   /** SSE route handler — return a GioEventStream to switch to streaming mode. */
@@ -60,6 +71,54 @@ export interface PageModule {
 export interface RouteFile {
   filePath: string;
   urlPattern: string;
+}
+
+// ── route.ts method handlers ──────────────────────────────────────────────────
+
+/**
+ * A route.ts method handler returns one of:
+ *  - a web-standard `Response` (status/headers/body used as-is),
+ *  - a `GioEventStream` (GET only — switches the connection to SSE),
+ *  - any JSON-serializable value (sent as `application/json`, status 200).
+ * Handler responses are never cached or coalesced.
+ */
+export type RouteHandlerFn = (req: GioRequest) => unknown;
+
+export const HANDLER_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
+
+export interface HandlerEntry {
+  filePath: string;
+  urlPattern: string;
+  methods: Map<string, RouteHandlerFn>;
+}
+
+/** Root-level special pages: app/not-found.* and app/error.* */
+export interface SpecialPages {
+  notFound?: () => Promise<PageModule>;
+  error?: () => Promise<PageModule>;
+}
+
+/** Discover app/not-found.* and app/error.* (component extensions only). */
+export async function discoverSpecialPages(appDir: string): Promise<SpecialPages> {
+  let entries;
+  try {
+    entries = await readdir(appDir, { withFileTypes: true });
+  } catch {
+    return {};
+  }
+  const fileNames = new Set(entries.filter(e => e.isFile()).map(e => e.name));
+  const special: SpecialPages = {};
+  const notFoundFile = pickByExt(fileNames, 'not-found', COMPONENT_EXTS);
+  if (notFoundFile !== null) {
+    const fileUrl = pathToFileURL(join(appDir, notFoundFile)).href;
+    special.notFound = () => tsImport(fileUrl, import.meta.url) as Promise<PageModule>;
+  }
+  const errorFile = pickByExt(fileNames, 'error', COMPONENT_EXTS);
+  if (errorFile !== null) {
+    const fileUrl = pathToFileURL(join(appDir, errorFile)).href;
+    special.error = () => tsImport(fileUrl, import.meta.url) as Promise<PageModule>;
+  }
+  return special;
 }
 
 export interface LayoutModule {

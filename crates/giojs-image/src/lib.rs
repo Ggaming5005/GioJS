@@ -2,18 +2,24 @@
 //!
 //! On-demand image optimization: resize, format conversion, two-layer cache.
 //! Route: GET /_gio/image?src=&w=&q=&f=
-//! All CPU work is spawn_blocking. Source validation enforces remotePatterns + path traversal.
+//! All CPU work is spawn_blocking. Source validation enforces remotePatterns +
+//! path traversal. Remote fetches never follow redirects and are size-capped.
 
 pub mod cache;
 pub mod processor;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use cache::ImageCache;
 use processor::{process_image, ImageParams, OutputFormat};
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::time::Duration;
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
+
+const DEFAULT_MAX_REMOTE_BYTES: u64 = 20 * 1024 * 1024;
+const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct RemotePattern {
@@ -61,6 +67,12 @@ impl Default for ImageConfig {
 pub enum ImageError {
     #[error("invalid width {0}: not in allowed list")]
     InvalidWidth(u32),
+    #[error("invalid quality {0}: must be 1-100")]
+    InvalidQuality(u8),
+    #[error("redirect blocked for remote source: {0}")]
+    RedirectBlocked(String),
+    #[error("remote source exceeds size limit of {0} bytes")]
+    TooLarge(u64),
     #[error("src is required")]
     MissingSrc,
     #[error("source not allowed: {0}")]
@@ -89,16 +101,46 @@ pub struct ImageHandler {
     config: ImageConfig,
     cache: ImageCache,
     public_dir: PathBuf,
+    /// None only if TLS backend init fails; remote fetches then error per-request.
+    http_client: Option<reqwest::Client>,
+    max_remote_bytes: u64,
 }
 
 impl ImageHandler {
     pub fn new(config: ImageConfig, disk_dir: PathBuf, public_dir: PathBuf) -> Self {
         let cache = ImageCache::new(200 * 1024 * 1024, disk_dir);
+        // Redirects are refused so an allowlisted host cannot bounce fetches to internal IPs.
+        let http_client = match reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(REMOTE_CONNECT_TIMEOUT)
+            .timeout(REMOTE_REQUEST_TIMEOUT)
+            .build()
+        {
+            Ok(client) => Some(client),
+            Err(e) => {
+                warn!(error = %e, "image HTTP client init failed; remote sources disabled");
+                None
+            }
+        };
         Self {
             config,
             cache,
             public_dir,
+            http_client,
+            max_remote_bytes: DEFAULT_MAX_REMOTE_BYTES,
         }
+    }
+
+    /// Override the remote download size cap (bytes). Builder-style, for startup wiring.
+    pub fn with_max_remote_bytes(mut self, max_remote_bytes: u64) -> Self {
+        self.max_remote_bytes = max_remote_bytes;
+        self
+    }
+
+    /// Override the disk cache size cap (bytes). Builder-style, for startup wiring.
+    pub fn with_disk_max_bytes(mut self, disk_max_bytes: u64) -> Self {
+        self.cache.set_disk_max_bytes(disk_max_bytes);
+        self
     }
 
     /// Returns `(data, format, cache_hit)`.
@@ -108,7 +150,11 @@ impl ImageHandler {
         accept: Option<&str>,
     ) -> Result<(Bytes, OutputFormat, bool), ImageError> {
         let src = query.src.as_deref().ok_or(ImageError::MissingSrc)?;
-        let quality = query.q.unwrap_or(self.config.quality);
+        let quality = match query.q {
+            Some(q) if !(1..=100).contains(&q) => return Err(ImageError::InvalidQuality(q)),
+            Some(q) => q,
+            None => self.config.quality.clamp(1, 100),
+        };
         let width = match query.w {
             Some(w) if !self.config.allowed_widths.contains(&w) => {
                 return Err(ImageError::InvalidWidth(w));
@@ -147,18 +193,52 @@ impl ImageHandler {
     async fn fetch_source(&self, src: &str) -> Result<Bytes, ImageError> {
         if src.starts_with("http://") || src.starts_with("https://") {
             self.validate_remote(src)?;
-            return reqwest::get(src)
-                .await
-                .map_err(|e| ImageError::FetchFailed(e.to_string()))?
-                .bytes()
-                .await
-                .map_err(|e| ImageError::FetchFailed(e.to_string()));
+            return self.fetch_remote(src).await;
         }
         let local_path = self.validate_local_path(src)?;
         tokio::fs::read(&local_path)
             .await
             .map(Bytes::from)
             .map_err(|_| ImageError::NotFound)
+    }
+
+    async fn fetch_remote(&self, src: &str) -> Result<Bytes, ImageError> {
+        let client = self
+            .http_client
+            .as_ref()
+            .ok_or_else(|| ImageError::FetchFailed("HTTP client unavailable".into()))?;
+        let mut response = client
+            .get(src)
+            .send()
+            .await
+            .map_err(|e| ImageError::FetchFailed(e.to_string()))?;
+        if response.status().is_redirection() {
+            return Err(ImageError::RedirectBlocked(src.to_string()));
+        }
+        if !response.status().is_success() {
+            return Err(ImageError::FetchFailed(format!(
+                "upstream status {}",
+                response.status()
+            )));
+        }
+        // Content-Length lets us bail early, but the streamed count is authoritative.
+        if let Some(declared_len) = response.content_length() {
+            if declared_len > self.max_remote_bytes {
+                return Err(ImageError::TooLarge(self.max_remote_bytes));
+            }
+        }
+        let mut body = BytesMut::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| ImageError::FetchFailed(e.to_string()))?
+        {
+            if (body.len() as u64).saturating_add(chunk.len() as u64) > self.max_remote_bytes {
+                return Err(ImageError::TooLarge(self.max_remote_bytes));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body.freeze())
     }
 
     fn validate_remote(&self, src: &str) -> Result<(), ImageError> {
@@ -225,6 +305,40 @@ mod tests {
         };
         let err = handler.handle(query, None).await.unwrap_err();
         assert!(matches!(err, ImageError::InvalidWidth(999)));
+    }
+
+    #[tokio::test]
+    async fn quality_zero_is_rejected() {
+        let handler = ImageHandler::new(
+            ImageConfig::default(),
+            std::env::temp_dir().join("gio_test_image_cache"),
+            std::env::temp_dir().join("gio_test_public"),
+        );
+        let query = ImageQuery {
+            src: Some("/test.jpg".into()),
+            w: None,
+            q: Some(0),
+            f: None,
+        };
+        let err = handler.handle(query, None).await.unwrap_err();
+        assert!(matches!(err, ImageError::InvalidQuality(0)));
+    }
+
+    #[tokio::test]
+    async fn quality_above_100_is_rejected() {
+        let handler = ImageHandler::new(
+            ImageConfig::default(),
+            std::env::temp_dir().join("gio_test_image_cache"),
+            std::env::temp_dir().join("gio_test_public"),
+        );
+        let query = ImageQuery {
+            src: Some("/test.jpg".into()),
+            w: None,
+            q: Some(101),
+            f: None,
+        };
+        let err = handler.handle(query, None).await.unwrap_err();
+        assert!(matches!(err, ImageError::InvalidQuality(101)));
     }
 
     #[tokio::test]

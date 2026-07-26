@@ -1,0 +1,21 @@
+{
+  "name": "@gio.js/server-linux-x64-musl",
+  "version": "0.1.0-beta.5",
+  "description": "GioJS pre-built binary for Linux x64 (musl libc / Alpine)",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "musl"
+  ],
+  "files": [
+    "bin"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

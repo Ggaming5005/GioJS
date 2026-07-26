@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "giojs-core": "workspace:*",
-    "giojs-react": "workspace:*",
+    "@gio.js/core": "workspace:*",
+    "@gio.js/react": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   }

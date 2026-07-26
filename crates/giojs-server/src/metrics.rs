@@ -2,7 +2,9 @@
 //!
 //! Lock-free Prometheus metrics. Counters use AtomicU64. Labeled counters use
 //! DashMap keyed by NUL-delimited label values. Histograms store per-bucket
-//! cumulative counts (in nanoseconds) plus a running sum.
+//! cumulative counts (in nanoseconds) plus a running sum. Label maps fed by
+//! request data are capped at MAX_LABEL_SET_SIZE distinct keys; overflow
+//! aggregates into a reserved "_other" label.
 
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +24,28 @@ const DURATION_BUCKETS_NS: &[u64] = &[
 ];
 
 const BUCKET_COUNT: usize = DURATION_BUCKETS_NS.len() + 1; // +1 for +Inf
+
+// Caps cardinality of label maps whose keys derive from request data.
+const MAX_LABEL_SET_SIZE: usize = 512;
+const OVERFLOW_LABEL: &str = "_other";
+
+/// Increment `key` in `map`, but once the map holds MAX_LABEL_SET_SIZE distinct
+/// keys, route new keys into `overflow_key` so attacker-chosen values (paths,
+/// methods) cannot grow the map without bound.
+fn increment_bounded(map: &DashMap<String, AtomicU64>, key: String, overflow_key: &str) {
+    if let Some(counter) = map.get(&key) {
+        counter.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let effective_key = if map.len() >= MAX_LABEL_SET_SIZE {
+        overflow_key.to_string()
+    } else {
+        key
+    };
+    map.entry(effective_key)
+        .or_insert_with(|| AtomicU64::new(0))
+        .fetch_add(1, Ordering::Relaxed);
+}
 
 fn zero_buckets() -> Box<[AtomicU64]> {
     (0..BUCKET_COUNT)
@@ -71,11 +95,13 @@ impl Metrics {
     }
 
     pub fn record_request(&self, method: &str, status: u16, cache: &str, duration_ns: u64) {
+        // Method is client-controlled (extension methods), so this map is bounded too.
         let key = format!("{method}\x00{status}\x00{cache}");
-        self.requests_total
-            .entry(key)
-            .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::Relaxed);
+        increment_bounded(
+            &self.requests_total,
+            key,
+            "_other\x00_other\x00_other",
+        );
         observe_histogram(
             &self.request_duration_buckets,
             &self.request_duration_sum_ns,
@@ -103,18 +129,20 @@ impl Metrics {
     }
 
     pub fn record_ratelimit_checked(&self, path: &str) {
-        self.ratelimit_checked_total
-            .entry(path.to_string())
-            .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::Relaxed);
+        increment_bounded(
+            &self.ratelimit_checked_total,
+            path.to_string(),
+            OVERFLOW_LABEL,
+        );
     }
 
     pub fn record_ratelimit_rejected(&self, path: &str, rule: &str) {
         let key = format!("{path}\x00{rule}");
-        self.ratelimit_rejected_total
-            .entry(key)
-            .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::Relaxed);
+        increment_bounded(
+            &self.ratelimit_rejected_total,
+            key,
+            "_other\x00_other",
+        );
     }
 
     /// Render all metrics in Prometheus text format (version 0.0.4).
@@ -335,6 +363,48 @@ mod tests {
             m.request_duration_buckets[BUCKET_COUNT - 1].load(Ordering::Relaxed),
             1
         );
+    }
+
+    #[test]
+    fn ratelimit_path_cardinality_is_capped_with_overflow_bucket() {
+        let m = Metrics::new();
+        let total = MAX_LABEL_SET_SIZE + 100;
+        for i in 0..total {
+            m.record_ratelimit_checked(&format!("/attack/{i}"));
+        }
+        assert!(m.ratelimit_checked_total.len() <= MAX_LABEL_SET_SIZE + 1);
+
+        let sum: u64 = m
+            .ratelimit_checked_total
+            .iter()
+            .map(|e| e.value().load(Ordering::Relaxed))
+            .sum();
+        assert_eq!(sum as usize, total);
+
+        let overflow = m
+            .ratelimit_checked_total
+            .get(OVERFLOW_LABEL)
+            .map(|e| e.load(Ordering::Relaxed));
+        assert_eq!(overflow, Some(100));
+
+        // Existing keys still increment normally once the cap is reached.
+        m.record_ratelimit_checked("/attack/0");
+        assert_eq!(
+            m.ratelimit_checked_total
+                .get("/attack/0")
+                .map(|e| e.load(Ordering::Relaxed)),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn ratelimit_rejected_overflow_key_still_renders_both_labels() {
+        let m = Metrics::new();
+        for i in 0..(MAX_LABEL_SET_SIZE + 1) {
+            m.record_ratelimit_rejected(&format!("/attack/{i}"), "/api/*");
+        }
+        let output = m.format_prometheus(0, 0, 0);
+        assert!(output.contains("path=\"_other\",rule=\"_other\""));
     }
 
     #[test]

@@ -370,19 +370,20 @@ var uptime="##,
 setInterval(function(){uptime++;document.getElementById('uptime').textContent=uptime},1000);
 function fmtBytes(b){if(!b)return'0B';if(b<1024)return b+'B';if(b<1048576)return(b/1024).toFixed(1)+'KB';return(b/1048576).toFixed(1)+'MB';}
 function sc(s){return s>=500?'s5xx':s>=400?'s4xx':'s2xx';}
-function badge(m,r){var cls='badge mode-'+m;var lbl=m==='isr'?('isr('+r+'s)'):m;return'<span class="'+cls+'">'+lbl+'</span>';}
+function esc(v){return String(v).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function badge(m,r){var cls='badge mode-'+esc(m);var lbl=m==='isr'?('isr('+esc(r)+'s)'):esc(m);return'<span class="'+cls+'">'+lbl+'</span>';}
 function renderLog(entries){
   var rows=entries.slice(0,100).map(function(e){
     var t=new Date(e.timestamp_ms).toLocaleTimeString();
-    return'<tr><td>'+e.method+'</td><td title="'+e.path+'">'+e.path+'</td>'+
-      '<td class="'+sc(e.status)+'">'+e.status+'</td><td>'+e.cache_status+'</td>'+
-      '<td>'+e.encoding+'</td><td>'+e.duration_ms+'</td><td>'+e.locale+'</td><td>'+t+'</td></tr>';
+    return'<tr><td>'+esc(e.method)+'</td><td title="'+esc(e.path)+'">'+esc(e.path)+'</td>'+
+      '<td class="'+sc(e.status)+'">'+esc(e.status)+'</td><td>'+esc(e.cache_status)+'</td>'+
+      '<td>'+esc(e.encoding)+'</td><td>'+esc(e.duration_ms)+'</td><td>'+esc(e.locale)+'</td><td>'+esc(t)+'</td></tr>';
   }).join('');
   document.getElementById('log-body').innerHTML=rows;
 }
 function renderRoutes(routes){
   document.getElementById('routes-body').innerHTML=(routes||[]).map(function(r){
-    return'<tr><td>'+r.pattern+'</td><td>'+badge(r.mode,r.revalidate)+'</td><td>'+(r.revalidate!=null?r.revalidate+'s':'-')+'</td></tr>';
+    return'<tr><td>'+esc(r.pattern)+'</td><td>'+badge(r.mode,r.revalidate)+'</td><td>'+(r.revalidate!=null?esc(r.revalidate)+'s':'-')+'</td></tr>';
   }).join('');
 }
 function renderCache(c){
@@ -463,6 +464,17 @@ mod tests {
         assert!(html.contains("Memory"));
         assert!(html.contains("IPC Latency"));
         assert!(html.contains("Connections"));
+    }
+
+    #[test]
+    fn devtools_js_escapes_request_log_values() {
+        let html = devtools_html("abc123", 1, "{}");
+        assert!(html.contains("function esc("));
+        assert!(html.contains("esc(e.path)"));
+        assert!(html.contains("esc(e.method)"));
+        assert!(html.contains("esc(r.pattern)"));
+        // No unescaped path interpolation remains in the row templates.
+        assert!(!html.contains("'+e.path+'"));
     }
 
     #[test]

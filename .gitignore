@@ -52,3 +52,7 @@ platform/*/bin/*
 /SPEC.md
 /SPEC2.md
 /OPEN_QUESTIONS.md
+tests/integration/.dev-fixture/
+
+# stray local probe file
+probe.tmp

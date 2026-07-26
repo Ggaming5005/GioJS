@@ -18,9 +18,65 @@ interface Release {
 
 const RELEASES: Release[] = [
   {
+    version: '0.1.0-beta.5',
+    date: 'July 26, 2026',
+    tag: 'latest',
+    summary:
+      'The big one: client-side hydration, API routes, dev watch mode, worker supervision, and a hardened Rust↔Node boundary.',
+    groups: [
+      {
+        title: 'New',
+        items: [
+          'Client-side hydration: per-route esbuild bundles, a #__gio hydration boundary, and props serialized safely into the page — interactive React with zero hydration-mismatch surface. getServerSideProps and its server-only imports are stripped from client bundles.',
+          'API routes: route.ts files export GET/POST/PUT/PATCH/DELETE handlers receiving params, query, headers, parsed cookies, and the request body — return JSON, a web Response, or a GioEventStream (SSE). Unexported methods get a proper 405.',
+          'getServerSideProps now receives the full request (method, path, headers, cookies) and can return response headers like set-cookie — such pages are automatically uncacheable.',
+          'app/not-found.tsx and app/error.tsx render real 404/500 pages through your layouts; static export writes 404.html so hosts like Cloudflare Pages return a real 404 for unknown URLs instead of the home page.',
+          'Dev watch mode: edit a file and the server clears caches, restarts the worker, and reloads your browser — about 1.5 seconds edit-to-browser.',
+          'Alpine/musl Linux binaries (@gio.js/server-linux-x64-musl) with automatic libc detection.',
+        ],
+      },
+      {
+        title: 'Reliability & security',
+        items: [
+          'The Node worker is supervised: crashes respawn in ~300 ms instead of taking the server down, and a hard-killed server can never orphan the worker (Windows Job Objects).',
+          'Renders are never shared across users: coalescing is credential-aware and only ever shares explicitly cacheable pages.',
+          'The IPC boundary is versioned (enforced at handshake), authenticated with per-instance tokens, and carries request bodies — binary-safe — plus vary/cacheTags/cancel frames.',
+          'Client disconnects and timeouts now abort in-flight React renders instead of finishing work nobody reads.',
+          'All @gio.js/* packages, platform binaries, and templates are version-locked; releases publish with npm provenance; CI runs a real Rust↔Node integration suite on Linux and Windows.',
+        ],
+      },
+    ],
+  },
+  {
+    version: '0.1.0-beta.4',
+    date: 'June 13, 2026',
+    summary: 'Packaging and clean-install fixes following beta.3.',
+    groups: [
+      {
+        title: 'Fixed',
+        items: [
+          'Clean-install issues found while testing the published packages end-to-end: tsx as a runtime dependency, package file lists, and template fixes.',
+        ],
+      },
+    ],
+  },
+  {
+    version: '0.1.0-beta.3',
+    date: 'June 13, 2026',
+    summary: 'SEO-ready static exports.',
+    groups: [
+      {
+        title: 'New',
+        items: [
+          'Static export auto-generates robots.txt and a full sitemap.xml (absolute URLs from GIO_SITE_URL).',
+          'Exported pages no longer reference a client bootstrap script that 404s on static hosts.',
+        ],
+      },
+    ],
+  },
+  {
     version: '0.1.0-beta.2',
     date: 'June 2, 2026',
-    tag: 'latest',
     summary: 'Static export — build to plain HTML and deploy anywhere, for free.',
     groups: [
       {

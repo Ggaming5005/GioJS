@@ -1,12 +1,15 @@
 {
   "name": "@gio.js/server-linux-x64",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.5",
   "description": "GioJS pre-built binary for Linux x64",
   "os": [
     "linux"
   ],
   "cpu": [
     "x64"
+  ],
+  "libc": [
+    "glibc"
   ],
   "files": [
     "bin"

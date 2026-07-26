@@ -24,6 +24,13 @@ struct DiskEntry {
     created_at_secs: u64,
     max_age_secs: u64,
     deployment_id: String,
+    /// Defaults to false so entries written before this field existed are
+    /// treated as uncomposed and re-injected per request instead of mis-served.
+    #[serde(default)]
+    composed: bool,
+    /// Defaults to empty for entries written before tags existed.
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 impl From<&CacheEntry> for DiskEntry {
@@ -40,6 +47,8 @@ impl From<&CacheEntry> for DiskEntry {
             created_at_secs,
             max_age_secs: e.max_age_secs,
             deployment_id: e.deployment_id.clone(),
+            composed: e.composed,
+            tags: e.tags.clone(),
         }
     }
 }
@@ -54,6 +63,8 @@ impl From<DiskEntry> for CacheEntry {
             created_at,
             max_age_secs: d.max_age_secs,
             deployment_id: d.deployment_id,
+            composed: d.composed,
+            tags: d.tags,
         }
     }
 }
@@ -88,6 +99,21 @@ impl DiskLayer {
                 Err(e) => warn!(key = %key, error = %e, "disk cache write failed"),
             }
         });
+    }
+
+    /// Remove every cache file. Best-effort (dev-mode invalidation).
+    pub(crate) async fn clear_all(&self) {
+        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    warn!(path = %path.display(), error = %e, "disk cache clear failed");
+                }
+            }
+        }
     }
 
     /// Evict the oldest files until total directory size is within `max_bytes`.
@@ -161,7 +187,48 @@ mod tests {
             created_at: SystemTime::now(),
             max_age_secs: 60,
             deployment_id: "d".into(),
+            composed: false,
+            tags: Vec::new(),
         }
+    }
+
+    #[test]
+    fn legacy_json_without_composed_field_defaults_to_false() {
+        let json = r#"{"html":"<h1>x</h1>","status":200,"headers":{},"created_at_secs":0,"max_age_secs":60,"deployment_id":"d"}"#;
+        let disk_entry: DiskEntry = serde_json::from_str(json).unwrap();
+        let entry = CacheEntry::from(disk_entry);
+        assert!(!entry.composed);
+    }
+
+    #[test]
+    fn composed_flag_survives_serde_roundtrip() {
+        let mut entry = entry_of_size(16);
+        entry.composed = true;
+        let json = serde_json::to_string(&DiskEntry::from(&entry)).unwrap();
+        let restored = CacheEntry::from(serde_json::from_str::<DiskEntry>(&json).unwrap());
+        assert!(restored.composed);
+        assert_eq!(restored.html, entry.html);
+        assert_eq!(restored.status, entry.status);
+        assert_eq!(restored.max_age_secs, entry.max_age_secs);
+        assert_eq!(restored.deployment_id, entry.deployment_id);
+    }
+
+    #[tokio::test]
+    async fn composed_flag_survives_disk_write_and_read() {
+        let dir = std::env::temp_dir().join(format!("giojs-disk-composed-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let layer = DiskLayer::new(dir.clone());
+
+        let mut entry = entry_of_size(32);
+        entry.composed = true;
+        write_entry(&layer.path_for("composed"), &DiskEntry::from(&entry))
+            .await
+            .unwrap();
+
+        let restored = layer.get("composed").await.expect("entry should exist");
+        assert!(restored.composed);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]

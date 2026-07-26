@@ -3,14 +3,28 @@ const { existsSync } = require('fs');
 const { join, dirname } = require('path');
 
 const EXT = process.platform === 'win32' ? '.exe' : '';
-const key = `${process.platform}-${process.arch}`;
+
+// Alpine and other musl distros need the musl build; a glibc binary fails
+// there with a confusing loader error. process.report exposes the runtime
+// libc without shelling out (no glibcVersionRuntime on linux = musl).
+function isMusl() {
+  if (process.platform !== 'linux') return false;
+  try {
+    return !process.report.getReport().header.glibcVersionRuntime;
+  } catch (_) {
+    return false;
+  }
+}
+
+const key = `${process.platform}-${process.arch}${isMusl() ? '-musl' : ''}`;
 
 const PLATFORM_PACKAGES = {
-  'linux-x64':    '@gio.js/server-linux-x64',
-  'linux-arm64':  '@gio.js/server-linux-arm64',
-  'win32-x64':    '@gio.js/server-win32-x64',
-  'darwin-x64':   '@gio.js/server-darwin-x64',
-  'darwin-arm64': '@gio.js/server-darwin-arm64',
+  'linux-x64':      '@gio.js/server-linux-x64',
+  'linux-x64-musl': '@gio.js/server-linux-x64-musl',
+  'linux-arm64':    '@gio.js/server-linux-arm64',
+  'win32-x64':      '@gio.js/server-win32-x64',
+  'darwin-x64':     '@gio.js/server-darwin-x64',
+  'darwin-arm64':   '@gio.js/server-darwin-arm64',
 };
 
 function findBinary() {

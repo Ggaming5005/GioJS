@@ -36,6 +36,11 @@ impl MemoryLayer {
         guard.put(key, entry);
     }
 
+    pub(crate) fn clear(&self) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clear();
+    }
+
     pub(crate) fn stats(&self) -> (usize, usize) {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let count = guard.len();
@@ -60,6 +65,8 @@ mod tests {
             created_at: SystemTime::now(),
             max_age_secs: 60,
             deployment_id: "test-deploy".to_string(),
+            composed: false,
+            tags: Vec::new(),
         }
     }
 
