@@ -5,13 +5,20 @@
  * sitemap.xml) using the GioJS exporter. Run via `npm run export`.
  */
 import { tsImport } from 'tsx/esm/api';
-import { cp } from 'node:fs/promises';
+import { cp, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
 process.env.GIO_SITE_URL = process.env.GIO_SITE_URL || 'https://giojs.com';
+
+// Cache-bust globals.css: its URL is unhashed, so a stale copy would linger in
+// the CDN/browser across deploys. A content hash in the query string makes each
+// changed build a fresh URL. layout.tsx reads this via process.env.
+const cssBytes = await readFile(join(here, 'public', 'globals.css'));
+process.env.GIO_ASSET_VERSION = createHash('sha256').update(cssBytes).digest('hex').slice(0, 8);
 
 const { exportSite } = await tsImport('../packages/giojs-core/src/export.ts', import.meta.url);
 const { written, skipped } = await exportSite(join(here, 'app'), join(here, 'out'));

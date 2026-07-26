@@ -45,7 +45,7 @@ export default function RootLayout({ children }: RootLayoutProps): React.JSX.Ele
           rel="stylesheet"
           href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,600;1,9..144,500;1,9..144,600&family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
         />
-        <link rel="stylesheet" href="/public/globals.css" />
+        <link rel="stylesheet" href={`/public/globals.css?v=${process.env.GIO_ASSET_VERSION ?? 'dev'}`} />
       </head>
       <body>
         {children}
