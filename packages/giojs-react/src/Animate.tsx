@@ -4,7 +4,7 @@
  * Entrance animation component driven by IntersectionObserver. Renders children
  * hidden (opacity: 0) during SSR; the observer sets data-gio-animate-state="entered"
  * when the element scrolls into view, triggering the CSS animation.
- * CSS is auto-hoisted via React 19 <style precedence> — no manual import needed.
+ * CSS is auto-hoisted via React 19 <style precedence> - no manual import needed.
  */
 import React from 'react';
 import { observeElement } from './animate-observer.js';

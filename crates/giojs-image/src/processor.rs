@@ -92,7 +92,7 @@ pub fn process_image(
         Some(target_w) if target_w < img.width() => {
             img.resize(target_w, u32::MAX, image::imageops::FilterType::Lanczos3)
         }
-        _ => img, // no upscaling — serve at source width
+        _ => img, // no upscaling - serve at source width
     };
 
     let data = encode(&img, params)?;

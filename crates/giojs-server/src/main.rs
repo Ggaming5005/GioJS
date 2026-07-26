@@ -72,7 +72,7 @@ struct RenderedPage {
 /// Result of a coalesced render. `Page` is a shareable cached response.
 /// `Error` is a shared IPC failure so followers don't stampede a sick worker.
 /// `Private` means the render must not be shared across requests (uncacheable
-/// page — possibly personalized by the leader's cookies — or an SSE stream):
+/// page - possibly personalized by the leader's cookies - or an SSE stream):
 /// the leader's own result is parked in its slot and followers render fresh.
 #[derive(Clone)]
 enum CoalescedRender {
@@ -82,7 +82,7 @@ enum CoalescedRender {
 }
 
 /// A render may be handed to concurrent followers only when the page declared
-/// itself cacheable — i.e. its content is the same for every visitor. Sharing
+/// itself cacheable - i.e. its content is the same for every visitor. Sharing
 /// anything else leaks the leader's cookie-derived HTML across users. A
 /// non-empty `vary` also disqualifies: the cache key cannot express varied
 /// dimensions yet, so such responses stay per-request.
@@ -248,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(Arc::new(client))
             }
             Err(e) => {
-                warn!(error = %e, "WS IPC connect failed — WebSocket disabled");
+                warn!(error = %e, "WS IPC connect failed - WebSocket disabled");
                 None
             }
         }
@@ -332,7 +332,7 @@ async fn main() -> anyhow::Result<()> {
         && state.metrics_config.token.is_empty()
         && state.metrics_config.ip_allowlist.is_empty()
     {
-        warn!("/_gio/metrics is unauthenticated — set [metrics] token or ip_allowlist in gio.toml");
+        warn!("/_gio/metrics is unauthenticated - set [metrics] token or ip_allowlist in gio.toml");
     }
 
     if dev_mode {
@@ -901,14 +901,14 @@ async fn dynamic_handler(
             );
             return resp;
         }
-        None => {} // cache miss — fall through to IPC
+        None => {} // cache miss - fall through to IPC
     }
 
     // ── IPC render (cache miss), coalesced per cache key ──────────────────────
     // Concurrent misses for the same key share a single render only when the
     // page turns out to be cacheable (same content for everyone). The coalesce
     // key also folds in a hash of the caller's credentials so requests with
-    // different cookies never wait on — or receive — each other's renders.
+    // different cookies never wait on - or receive - each other's renders.
     let query = parse_query(&query_str);
     let headers = extract_headers(&req);
 
@@ -1246,7 +1246,7 @@ async fn render_uncoalesced(
                 .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
             error!(path = %path, error = %e, "IPC error");
             // ipc.rs bails with a plain string on timeout (the tokio Elapsed is
-            // discarded), so downcast_ref is impossible — the message is the only signal.
+            // discarded), so downcast_ref is impossible - the message is the only signal.
             let timeout = e.to_string().contains("timeout");
             respond_ipc_error(state, method, path, timeout, encoding, locale, start)
         }
@@ -1254,7 +1254,7 @@ async fn render_uncoalesced(
 }
 
 /// Build the HTTP response for a completed Node render: cache it when
-/// cacheable (GET/HEAD only — mutation responses must never be replayed),
+/// cacheable (GET/HEAD only - mutation responses must never be replayed),
 /// compose head snippets, and record metrics/devtools.
 #[allow(clippy::too_many_arguments)]
 async fn respond_from_render(
@@ -1559,7 +1559,7 @@ fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
             if fs_rx.recv().await.is_none() {
                 return;
             }
-            // Debounce bursts — editors emit several events per save.
+            // Debounce bursts - editors emit several events per save.
             loop {
                 match tokio::time::timeout(Duration::from_millis(300), fs_rx.recv()).await {
                     Ok(Some(())) => continue,
@@ -1567,7 +1567,7 @@ fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
                     Err(_) => break,
                 }
             }
-            info!("dev watch: change detected — restarting worker, clearing caches");
+            info!("dev watch: change detected - restarting worker, clearing caches");
             state.cache.clear().await;
             if state.css_config.enabled {
                 load_css_cache(&state.css_cache, &app_dir, false).await;
@@ -1580,7 +1580,7 @@ fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
                         .devtools
                         .log_tx
                         .send("event: reload\ndata: {}\n\n".to_string());
-                    info!("dev watch: worker restarted — browsers reloading");
+                    info!("dev watch: worker restarted - browsers reloading");
                 }
                 _ => warn!("dev watch: worker restart did not complete in time"),
             }
@@ -1711,7 +1711,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Compose the final HTML document served for a cached page: critical CSS,
 /// font preloads, and the deployment-id script spliced before `</head>`.
-/// CPU-bound (critical extraction parses CSS and scans the body) — callers on
+/// CPU-bound (critical extraction parses CSS and scans the body) - callers on
 /// an async path must run this inside `spawn_blocking`.
 fn compose_final_html(
     html: Bytes,
@@ -1742,7 +1742,7 @@ fn compose_final_html(
 
 /// Compose `body` for caching, off the async thread. Returns the composed
 /// bytes plus `composed = true`, or the raw body with `false` when composition
-/// does not apply (dev mode, non-HTML) or the blocking task fails — the entry
+/// does not apply (dev mode, non-HTML) or the blocking task fails - the entry
 /// is then served through the per-request injection fallback.
 ///
 /// Dev mode never composes: baked snippets would go stale when CSS changes on
@@ -1778,7 +1778,7 @@ async fn compose_for_cache(
     {
         Ok(composed_html) => (composed_html, true),
         Err(join_err) => {
-            warn!(error = %join_err, "HTML composition task failed — caching raw body");
+            warn!(error = %join_err, "HTML composition task failed - caching raw body");
             (body, false)
         }
     }
@@ -1801,7 +1801,7 @@ fn is_prefetch(req: &Request) -> bool {
 }
 
 /// Inspect Accept-Encoding and return the best encoding the CompressionLayer will apply.
-/// This is used only for logging — the actual negotiation happens in tower-http.
+/// This is used only for logging - the actual negotiation happens in tower-http.
 fn negotiate_encoding(req: &Request) -> &'static str {
     let accept = req
         .headers()
@@ -2121,7 +2121,7 @@ fn spawn_revalidation(state: AppState, key: String, req: IpcRequest, default_loc
                     warn!(key = %key, error = %e, "background revalidation cache write failed");
                 }
             }
-            Ok(_) => {} // not cacheable or SSE — don't update
+            Ok(_) => {} // not cacheable or SSE - don't update
             Err(e) => warn!(key = %key, error = %e, "background revalidation IPC error"),
         }
     });
@@ -2234,7 +2234,7 @@ async fn serve_connections(
                 });
             }
             _ = &mut shutdown => {
-                info!("Shutdown signal received — draining in-flight requests");
+                info!("Shutdown signal received - draining in-flight requests");
                 break;
             }
         }

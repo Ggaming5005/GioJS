@@ -84,7 +84,7 @@ export default function KnownIssuesPage(): React.JSX.Element {
       <h1>Known Issues</h1>
       <p className="page-subtitle">
         Bugs discovered during the P3.7 dogfooding phase (building this docs site on GioJS).
-        All three were fixed before the docs site shipped — per the project rule:
+        All three were fixed before the docs site shipped - per the project rule:
         &ldquo;Any workaround is a bug to fix first.&rdquo;
       </p>
 

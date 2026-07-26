@@ -45,7 +45,7 @@ sample_memory() {
 
 # ── autocannon check ──────────────────────────────────────────────────────────
 if ! command -v autocannon &>/dev/null; then
-    echo 'autocannon not found — installing globally...'
+    echo 'autocannon not found - installing globally...'
     npm install -g autocannon
 fi
 

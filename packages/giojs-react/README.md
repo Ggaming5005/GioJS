@@ -1,6 +1,6 @@
 # @gio.js/react
 
-React components for [**GioJS**](https://giojs.com) — the Rust-powered React framework.
+React components for [**GioJS**](https://giojs.com) - the Rust-powered React framework.
 
 ```bash
 npm create giojs@latest   # installs this for you
@@ -18,14 +18,14 @@ import { GioLink, GioImage } from '@gio.js/react';
 <GioImage src="/public/hero.png" alt="" width={1200} height={630} priority />
 ```
 
-- **`GioLink`** — internal navigation with budgeted prefetch and optional view transitions.
-- **`GioImage`** — automatic format conversion and resizing, no CDN required.
-- **`GioFont`** — self-hosted fonts with correct preload headers.
+- **`GioLink`** - internal navigation with budgeted prefetch and optional view transitions.
+- **`GioImage`** - automatic format conversion and resizing, no CDN required.
+- **`GioFont`** - self-hosted fonts with correct preload headers.
 
 ## Links
 
-- 🌐 Website & docs — **https://giojs.com**
-- 📖 Components reference — https://giojs.com/docs/components
-- 🐙 GitHub — https://github.com/Ggaming5005/GioJS
+- 🌐 Website & docs - **https://giojs.com**
+- 📖 Components reference - https://giojs.com/docs/components
+- 🐙 GitHub - https://github.com/Ggaming5005/GioJS
 
 MIT © GioJS

@@ -117,7 +117,7 @@ impl DiskLayer {
     }
 
     /// Evict the oldest files until total directory size is within `max_bytes`.
-    /// Errors on individual files are logged and skipped — eviction is best-effort.
+    /// Errors on individual files are logged and skipped - eviction is best-effort.
     pub(crate) async fn enforce_limit(&self, max_bytes: u64) {
         let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
         let mut total: u64 = 0;

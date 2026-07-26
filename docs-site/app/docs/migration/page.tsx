@@ -63,7 +63,7 @@ export default function MigrationPage(): React.JSX.Element {
           <tr>
             <td>Font imports</td>
             <td><code>from 'next/font/google'</code></td>
-            <td>TODO comment added — move to <code>gio.toml</code></td>
+            <td>TODO comment added - move to <code>gio.toml</code></td>
           </tr>
         </tbody>
       </table>
@@ -79,25 +79,25 @@ export default function MigrationPage(): React.JSX.Element {
       <h2>What requires manual migration</h2>
       <ul>
         <li>
-          <strong>next/font</strong> — declare fonts in <code>gio.toml</code>{' '}
+          <strong>next/font</strong> - declare fonts in <code>gio.toml</code>{' '}
           <code>[[fonts]]</code> section instead of importing from <code>next/font</code>
         </li>
         <li>
-          <strong>Middleware</strong> — GioJS compiles middleware rules to Rust at build time.
+          <strong>Middleware</strong> - GioJS compiles middleware rules to Rust at build time.
           Define rules in <code>middleware.ts</code> and run <code>gio build</code>
         </li>
         <li>
-          <strong>Route Handlers</strong> (<code>route.ts</code>) — supported, no changes needed
+          <strong>Route Handlers</strong> (<code>route.ts</code>) - supported, no changes needed
         </li>
         <li>
-          <strong>Server Actions</strong> — not yet supported (see{' '}
+          <strong>Server Actions</strong> - not yet supported (see{' '}
           <a href="/docs/known-issues">Known Issues</a>)
         </li>
       </ul>
 
       <div className="callout">
         After running the codemod, run <code>npx gio build</code> and check for type errors.
-        The codemod is conservative — it only transforms patterns it can identify with certainty.
+        The codemod is conservative - it only transforms patterns it can identify with certainty.
       </div>
     </>
   );

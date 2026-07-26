@@ -44,7 +44,7 @@ export function parseArgs(argv: string[]): CliArgs {
 }
 
 function monorepoRoot(): string | null {
-  // dist/create.js is at packages/giojs-cli/dist/ — four levels up is the workspace root
+  // dist/create.js is at packages/giojs-cli/dist/ - four levels up is the workspace root
   const root = join(fileURLToPath(import.meta.url), '..', '..', '..', '..');
   return existsSync(join(root, 'gio.toml')) ? root : null;
 }
@@ -82,7 +82,7 @@ export async function create(argv: string[]): Promise<void> {
 
   const langLabel = config.language === 'js' ? 'JavaScript (.jsx)' : 'TypeScript (.tsx)';
   const modeLabel = config.mode === 'static' ? 'static site' : 'server app';
-  console.log(`\nCreating ${config.projectName} — ${langLabel}, ${modeLabel}...`);
+  console.log(`\nCreating ${config.projectName} - ${langLabel}, ${modeLabel}...`);
   await copyTemplate(config.template, destDir, config.projectName);
   await patchPackageJson(destDir, config.mode);
   console.log('Template copied.');

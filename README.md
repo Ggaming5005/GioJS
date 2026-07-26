@@ -1,6 +1,6 @@
 <div align="center">
 
-![GioJS — self-hosted React at Vercel speed](docs-site/public/og.png)
+![GioJS - self-hosted React at Vercel speed](docs-site/public/og.png)
 
 # GioJS
 
@@ -17,7 +17,7 @@
 
 ---
 
-GioJS gives every developer the performance profile that a managed cloud provides — image optimization, brotli compression, HTTP/2, ISR caching, font self-hosting, rate limiting, i18n routing, and WebSockets — **without a CDN and without a cloud tax.** The hot path runs in compiled Rust; React SSR runs in Node. Memory stays flat under load because Rust owns the HTTP server and Node only renders.
+GioJS gives every developer the performance profile that a managed cloud provides - image optimization, brotli compression, HTTP/2, ISR caching, font self-hosting, rate limiting, i18n routing, and WebSockets - **without a CDN and without a cloud tax.** The hot path runs in compiled Rust; React SSR runs in Node. Memory stays flat under load because Rust owns the HTTP server and Node only renders.
 
 ## Get started
 
@@ -44,7 +44,7 @@ Pick TypeScript/JavaScript and **Server app** or **Static site** at the prompt, 
 
 ## Architecture
 
-Incoming requests hit a Rust HTTP server (axum + hyper) which handles TLS, routing, compression, caching, image processing, and static file serving — without ever touching Node. Only cache-missed dynamic routes cross the IPC boundary (a named pipe on Windows, a Unix socket on Linux/macOS) to a persistent Node worker that runs React SSR via `renderToReadableStream`. Rendered HTML returns to Rust for compression, caching, and delivery.
+Incoming requests hit a Rust HTTP server (axum + hyper) which handles TLS, routing, compression, caching, image processing, and static file serving - without ever touching Node. Only cache-missed dynamic routes cross the IPC boundary (a named pipe on Windows, a Unix socket on Linux/macOS) to a persistent Node worker that runs React SSR via `renderToReadableStream`. Rendered HTML returns to Rust for compression, caching, and delivery.
 
 Read more: [**How GioJS works →**](https://giojs.com/docs/architecture)
 
@@ -53,15 +53,15 @@ Read more: [**How GioJS works →**](https://giojs.com/docs/architecture)
 | Package | Description |
 |---|---|
 | [`create-giojs`](https://www.npmjs.com/package/create-giojs) | Project scaffolder (`npm create giojs`) |
-| [`@gio.js/server`](https://www.npmjs.com/package/@gio.js/server) | The server — Rust binary + Node bridge |
+| [`@gio.js/server`](https://www.npmjs.com/package/@gio.js/server) | The server - Rust binary + Node bridge |
 | [`@gio.js/react`](https://www.npmjs.com/package/@gio.js/react) | React components (`GioLink`, `GioImage`, `GioFont`) |
 | [`@gio.js/core`](https://www.npmjs.com/package/@gio.js/core) | Internal Node runtime + static export |
 
 ## Links
 
-- 🌐 **Website & docs** — https://giojs.com
-- 📦 **npm** — https://www.npmjs.com/package/create-giojs
-- 📋 **Releases** — https://giojs.com/releases
+- 🌐 **Website & docs** - https://giojs.com
+- 📦 **npm** - https://www.npmjs.com/package/create-giojs
+- 📋 **Releases** - https://giojs.com/releases
 
 ## Status
 

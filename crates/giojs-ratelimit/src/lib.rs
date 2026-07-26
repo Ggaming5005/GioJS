@@ -2,7 +2,7 @@
 //!
 //! Token-bucket rate limiter. Multiple rules are evaluated in specificity order
 //! (longest matching path prefix wins). Per-IP by default; per (IP, header
-//! value) when `key_header` is configured — the IP is always part of the key
+//! value) when `key_header` is configured - the IP is always part of the key
 //! so a client rotating header values cannot mint unlimited fresh buckets,
 //! and each IP is capped at a fixed number of distinct header-value buckets.
 //!
@@ -37,8 +37,8 @@ pub struct RateLimitRule {
     pub window_seconds: u64,
     /// Extra requests permitted as a burst above the steady-state rate.
     pub burst: u64,
-    /// If set, rate-limit by (client IP, value of this header) pairs — e.g.
-    /// "x-api-key" — instead of the client IP alone. The value is truncated to
+    /// If set, rate-limit by (client IP, value of this header) pairs - e.g.
+    /// "x-api-key" - instead of the client IP alone. The value is truncated to
     /// MAX_KEY_HEADER_VALUE_BYTES; once an IP has created
     /// MAX_DISTINCT_HEADER_KEYS_PER_IP distinct buckets for this rule, further
     /// values share the per-IP bucket. Absent header falls back to the IP.
@@ -323,13 +323,13 @@ mod tests {
             RateLimitResult::Rejected { .. }
         ));
 
-        // Same IP, different key — separate bucket
+        // Same IP, different key - separate bucket
         assert!(matches!(
             rl.check("/api/data", LOCAL, &headers_bob),
             RateLimitResult::Allowed { .. }
         ));
 
-        // Different IP, same key — its own bucket (keys are compounded with IP)
+        // Different IP, same key - its own bucket (keys are compounded with IP)
         assert!(matches!(
             rl.check("/api/data", OTHER, &headers_alice),
             RateLimitResult::Allowed { .. }
@@ -432,7 +432,7 @@ mod tests {
             rl.check("/api/status", LOCAL, &empty_headers()),
             RateLimitResult::Rejected { .. }
         ));
-        // Different path — no match
+        // Different path - no match
         assert!(matches!(
             rl.check("/api/status/detail", LOCAL, &empty_headers()),
             RateLimitResult::Allowed {

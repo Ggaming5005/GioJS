@@ -2,8 +2,8 @@
 
 GioJS plugins extend the framework without touching core. There are two independent surfaces:
 
-- **Node plugins** (`GioNodePlugin`) — intercept HTTP requests and responses in the Node SSR layer
-- **Rust plugins** (`GioPlugin`) — add Tower middleware and axum routes to the Rust HTTP layer
+- **Node plugins** (`GioNodePlugin`) - intercept HTTP requests and responses in the Node SSR layer
+- **Rust plugins** (`GioPlugin`) - add Tower middleware and axum routes to the Rust HTTP layer
 
 Most plugins only need the Node surface. The Rust surface is for advanced middleware (auth header
 inspection at the edge, custom route namespaces) that benefits from running before the IPC round-trip.
@@ -39,10 +39,10 @@ export interface GioNodePlugin {
 
 | Hook | When called | Short-circuit? |
 |---|---|---|
-| `onRequest` | Before route matching and SSR | Yes — return `IPCResponse` to skip SSR |
-| `onResponse` | After SSR, before sending to Rust | No — must return modified response |
-| `onStartup` | Once at Node process startup | — |
-| `onShutdown` | On `SIGTERM` | — |
+| `onRequest` | Before route matching and SSR | Yes - return `IPCResponse` to skip SSR |
+| `onResponse` | After SSR, before sending to Rust | No - must return modified response |
+| `onStartup` | Once at Node process startup | - |
+| `onShutdown` | On `SIGTERM` | - |
 
 Plugins run in **registration order** for `onRequest`/`onResponse`/`onStartup`. `onShutdown` runs in **reverse** registration order (last-in, first-out).
 
@@ -64,7 +64,7 @@ export default {
 } satisfies GioConfig;
 ```
 
-`gio.config.ts` is **optional** — if absent, the server starts with no plugins.
+`gio.config.ts` is **optional** - if absent, the server starts with no plugins.
 
 ---
 

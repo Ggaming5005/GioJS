@@ -242,7 +242,7 @@ mod tests {
 
         let base: axum::Router = axum::Router::new();
         let merged = registry.merge_routes(base);
-        // Verify the router was constructed without panic — route resolution is runtime
+        // Verify the router was constructed without panic - route resolution is runtime
         let _ = merged;
     }
 

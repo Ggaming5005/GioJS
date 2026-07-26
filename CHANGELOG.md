@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
   on change it clears the page cache (memory + disk), re-transforms CSS,
   restarts the Node worker through the supervisor (fresh module cache, route
   discovery, and client bundles), and broadcasts `reload` on the devtools SSE
-  stream — the dev overlay listens and reloads open browser tabs. Measured
+  stream - the dev overlay listens and reloads open browser tabs. Measured
   edit-to-browser round trip: ~1.5 s. Events under `.gio/` and
   `node_modules` are ignored so build outputs can't retrigger the loop.
 - **API routes.** `route.ts` files now export HTTP method handlers
@@ -21,12 +21,12 @@ All notable changes to this project will be documented in this file.
   `GioEventStream` (SSE), `null`/`undefined` (204), or any JSON value
   (`application/json` 200). Unexported methods get 405 + `Allow`; pages only
   answer GET/HEAD; handler errors return a JSON 500 without leaking details.
-  This also makes SSE-over-route.ts actually work — route files were
+  This also makes SSE-over-route.ts actually work - route files were
   previously only mined for `wsHandler`, so their `GET` stream handlers were
   unreachable (and cross-namespace `instanceof` would have dropped them
   anyway; `GioEventStream` detection is now brand-based).
 - **`getServerSideProps` gets the full request.** The context now carries
-  `method`, `path`, `headers`, and parsed `cookies` — cookie-based auth no
+  `method`, `path`, `headers`, and parsed `cookies` - cookie-based auth no
   longer requires the plugin workaround. Returning `{ props, headers }`
   merges response headers (e.g. `set-cookie`), and any page doing so is
   forced uncacheable so per-request headers can never be cached and replayed
@@ -46,10 +46,10 @@ All notable changes to this project will be documented in this file.
   React `bootstrapModules`. SSR renders a `<div id="__gio">` hydration
   boundary around the page and its non-root layouts, with props serialized in
   a sibling `<script id="__gio_props" type="application/json">` (`<` escaped,
-  so `</script>` in props can never break out — verified by test). The client
+  so `</script>` in props can never break out - verified by test). The client
   runtime hydrates exactly that boundary, so everything Rust injects after
   render (critical CSS, fonts, deployment script, `lang`, dev overlay) stays
-  outside React's diff — zero hydration-mismatch surface by construction. The
+  outside React's diff - zero hydration-mismatch surface by construction. The
   root layout remains a server-rendered shell: its `<GioLink>`s degrade to
   normal anchors. Soft navigation now swaps the envelope with the content and
   re-mounts via the shared runtime, dynamically importing the target route's
@@ -58,7 +58,7 @@ All notable changes to this project will be documented in this file.
 - **Server code is stripped from client bundles.** `getServerSideProps` /
   `getStaticPaths` are demoted from exports before bundling and project
   modules are tree-shaken as side-effect free, so gSSP-only imports (db
-  clients, secrets, `node:*` builtins) stay out of the browser bundle — a
+  clients, secrets, `node:*` builtins) stay out of the browser bundle - a
   regression test builds a fixture whose gSSP reads a secret via `node:fs`
   and asserts neither reaches any emitted chunk. Remaining `node:*` imports
   are stubbed so a stray server import degrades that route to server-only
@@ -89,14 +89,14 @@ All notable changes to this project will be documented in this file.
   orphan-free server shutdown. A new CI workflow runs it on Linux and
   Windows alongside cargo test/clippy and the Node suites. Writing it
   immediately caught a real bug: projects with a `gio.config.ts` crashed the
-  worker on Windows (raw path handed to the ESM loader) — fixed via
+  worker on Windows (raw path handed to the ESM loader) - fixed via
   `pathToFileURL` in the config loader.
 
 ### Security
 
 - **Coalesced renders are no longer shared across users.** Concurrent cache
   misses for one URL previously received the first caller's render even when
-  the page was uncacheable — leaking cookie-personalized HTML between users
+  the page was uncacheable - leaking cookie-personalized HTML between users
   and collapsing concurrent POSTs into a single execution. Renders are now
   shared only when the page is cacheable, the coalesce key includes a hash of
   the caller's `cookie`/`authorization` headers, and non-GET/HEAD requests
@@ -112,15 +112,15 @@ All notable changes to this project will be documented in this file.
 - **The IPC handshake is authenticated and pipe names are per-instance.**
   Windows pipe names now carry a per-process random suffix (no more
   collisions between GioJS instances on one machine), and both IPC channels
-  exchange proofs derived from a per-instance secret — Node proves
+  exchange proofs derived from a per-instance secret - Node proves
   `sha256(token:ready)`, Rust proves `sha256(token:ack)` (WS channel:
-  `ws_auth` with `sha256(token:ws)`) — so a foreign local process can neither
+  `ws_auth` with `sha256(token:ws)`) - so a foreign local process can neither
   impersonate the SSR worker nor drive it.
 - **Image optimizer:** remote fetches no longer follow redirects (an allowlisted
   host could 302 to internal addresses), stream with a size cap
   (`images.max_remote_bytes`, default 20 MB), and reuse one shared HTTP client.
 - **Rate limiting:** header-keyed buckets (`key_header`) are now scoped per
-  client IP with a per-IP distinct-key cap — rotating an API-key header no
+  client IP with a per-IP distinct-key cap - rotating an API-key header no
   longer mints unlimited fresh buckets.
 - **IPC:** both the HTTP and WS IPC pipes enforce a 64 MB frame cap on both
   sides of the boundary instead of allocating from wire-provided lengths; Unix
@@ -150,27 +150,27 @@ All notable changes to this project will be documented in this file.
   (client disconnects and timeouts now abort the React render via
   `AbortController` instead of finishing output nobody reads), a reserved
   `chunk` frame type for future streaming SSR, and an `IPC_PROTOCOL_VERSION`
-  echoed in READY that Rust *enforces* — a mismatched binary/worker pair now
+  echoed in READY that Rust *enforces* - a mismatched binary/worker pair now
   fails the handshake with an explicit error instead of drifting silently.
 
 ### Fixed
 
 - **The Node worker is now supervised: a crash is a blip, not an outage.**
   Previously the server reconnected to the socket but never restarted the
-  process — if the worker died, every dynamic request failed until a manual
+  process - if the worker died, every dynamic request failed until a manual
   restart. The supervisor now owns the child: on exit it drains in-flight
   requests with 503, respawns the worker, re-runs the authenticated
-  handshake, and refreshes the route manifest — forever, with capped backoff
+  handshake, and refreshes the route manifest - forever, with capped backoff
   (measured recovery from `taskkill /F` on the worker: ~300 ms). Requests
   queued for a dead connection fail fast with 503 instead of waiting out the
   30 s timeout.
 - **Hard-killing the server no longer orphans the Node worker.** The worker
   is spawned with `kill_on_drop` and, on Windows, assigned to a Job Object
   with KILL_ON_JOB_CLOSE, so the whole worker tree (tsx wrapper + runtime
-  child) dies with the server — the stale-pipe orphan documented in the
+  child) dies with the server - the stale-pipe orphan documented in the
   clean-install report is gone. Startup also replaces the fixed 800 ms boot
   sleep with a connect-retry loop on both platforms.
-- **WebSockets survive worker restarts — and now actually work.** The WS IPC
+- **WebSockets survive worker restarts - and now actually work.** The WS IPC
   bridge previously died permanently on its first socket error; it now
   reconnects with capped backoff, closing browser sockets on disconnect so
   clients re-register against the fresh worker. This also fixes a framing
@@ -196,19 +196,19 @@ All notable changes to this project will be documented in this file.
   `noUnusedParameters`); all `any` removed from the render path; structured
   JSON logging replaces `console.*` in the Node runtime; `index.ts` is now a
   logic-free entrypoint; new test suites for IPC framing/validation (18) and
-  WS IPC (21) — core suite now 57 tests.
+  WS IPC (21) - core suite now 57 tests.
 
 ## 0.1.0-beta.3 (2026-06-02)
 
 - **Static export** now auto-generates `robots.txt` and a full `sitemap.xml`
-  (absolute URLs from `GIO_SITE_URL`) — every static build is SEO-ready.
+  (absolute URLs from `GIO_SITE_URL`) - every static build is SEO-ready.
 - **Fix:** exported pages no longer reference a `/_next/static/chunks/main.js`
   bootstrap script (it 404'd on static hosts and tripped strict MIME checks).
   `@gio.js/core` and `@gio.js/server` only.
 
 ## 0.1.0-beta.2 (2026-06-02)
 
-- **Static export** — `gio export` pre-renders the app to `out/` as plain HTML,
+- **Static export** - `gio export` pre-renders the app to `out/` as plain HTML,
   deployable free to any static host. `getServerSideProps` runs at build time;
   dynamic routes export via a new `getStaticPaths()`; server-only routes (route
   handlers, SSE, WebSockets, ISR) are skipped with a warning.
@@ -217,10 +217,10 @@ All notable changes to this project will be documented in this file.
 
 ## 0.1.0-beta.1 (2026-05-31)
 
-First public beta on npm. Published under the **`@gio.js/*`** scope —
+First public beta on npm. Published under the **`@gio.js/*`** scope -
 `@gio.js/server` (the binary + Node bridge, formerly the unscoped `giojs` name,
 which was already taken), `@gio.js/core`, `@gio.js/react`, and the five
-`@gio.js/server-<platform>` binary packages — plus the unscoped `create-giojs`.
+`@gio.js/server-<platform>` binary packages - plus the unscoped `create-giojs`.
 Scaffold a project with `npm create giojs@latest`.
 
 ### JavaScript / JSX support
@@ -233,7 +233,7 @@ Scaffold a project with `npm create giojs@latest`.
 
 ### CLI (`create-giojs`)
 
-- Interactive arrow-key language picker (TypeScript / JavaScript) — zero
+- Interactive arrow-key language picker (TypeScript / JavaScript) - zero
   dependencies, raw-mode TTY, falls back to the default on non-interactive stdin.
 - New flags: `--ts`/`--js`, `--install`/`--no-install`, `-y`/`--yes`.
 - Ships a `default-js` template (`.jsx` + `jsconfig.json`, no TypeScript toolchain).
@@ -298,7 +298,7 @@ Covers Phase 1 through Phase 5 of the GioJS roadmap.
 - Full-duplex WebSocket connections via dedicated IPC pipe (giojs-ws)
 - Route-based `wsHandler` exports in `route.ts` files
 - Connection registry with `send`, `broadcast`, `close`, and `on()` hooks
-- WebSocket and HTTP IPC are fully independent — no head-of-line blocking
+- WebSocket and HTTP IPC are fully independent - no head-of-line blocking
 
 ### i18n Routing (P5.2)
 
@@ -311,14 +311,14 @@ Covers Phase 1 through Phase 5 of the GioJS roadmap.
 
 - Browser-based observability dashboard at `/_gio/devtools` (dev mode only; 404 in prod)
 - Six live panels: request log, route manifest, cache stats, memory sparkline, IPC latency histogram, connection counts
-- Self-contained HTML generated in Rust — no React, no external requests
+- Self-contained HTML generated in Rust - no React, no external requests
 - Real-time updates via Server-Sent Events
 
 ### Plugin API (P5.4)
 
 - `GioPlugin` Rust trait for adding Tower middleware and axum routes without touching core
 - `GioNodePlugin` TypeScript interface for `onRequest`/`onResponse` SSR interception
-- `gio.config.ts` for typed plugin configuration (optional — no error if absent)
+- `gio.config.ts` for typed plugin configuration (optional - no error if absent)
 - Plugin errors yield 500; Node process never crashes due to a plugin fault
 - Reference auth plugin skeleton (`packages/giojs-auth-example`)
 

@@ -1,6 +1,6 @@
 # @gio.js/core
 
-Internal Node runtime for [**GioJS**](https://giojs.com) — the React SSR bridge that the Rust server talks to over IPC. It also powers `gio export` (static export).
+Internal Node runtime for [**GioJS**](https://giojs.com) - the React SSR bridge that the Rust server talks to over IPC. It also powers `gio export` (static export).
 
 > **You probably don't want to install this directly.** Scaffold an app instead:
 >
@@ -19,7 +19,7 @@ Internal Node runtime for [**GioJS**](https://giojs.com) — the React SSR bridg
 
 ## Links
 
-- 🌐 Website & docs — **https://giojs.com**
-- 🐙 GitHub — https://github.com/Ggaming5005/GioJS
+- 🌐 Website & docs - **https://giojs.com**
+- 🐙 GitHub - https://github.com/Ggaming5005/GioJS
 
 MIT © GioJS

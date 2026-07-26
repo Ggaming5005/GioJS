@@ -1,5 +1,5 @@
 /* ============================================================
-   GioJS Docs — clean, Next.js-style documentation theme
+   GioJS Docs - clean, Next.js-style documentation theme
    Ember accent · Hanken Grotesk × JetBrains Mono · light + dark
    ============================================================ */
 
@@ -65,6 +65,9 @@ code {
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 0.08em 0.36em;
+  /* Long identifiers (getServerSideProps, renderToReadableStream) break
+     instead of forcing the page wider than the viewport on phones. */
+  overflow-wrap: anywhere;
 }
 
 /* ── Header ─────────────────────────────────────── */
@@ -108,6 +111,39 @@ code {
 .docs-header__right { display: flex; align-items: center; gap: 1.25rem; }
 .docs-header__link { color: var(--muted); font-size: 0.875rem; font-weight: 500; }
 .docs-header__link:hover { color: var(--text); text-decoration: none; }
+
+/* Header hamburger — hidden on desktop, shown in the header flow on mobile. */
+.docs-menu-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-left: -0.5rem;
+  margin-right: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-elev);
+  cursor: pointer;
+  flex: none;
+}
+.docs-menu-btn__bars,
+.docs-menu-btn__bars::before,
+.docs-menu-btn__bars::after {
+  content: "";
+  display: block;
+  width: 17px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--text);
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+.docs-menu-btn__bars::before { transform: translateY(-5px); }
+.docs-menu-btn__bars::after { transform: translateY(3px); }
+/* Morph into an ✕ while the drawer is open. */
+.docs-menu-btn[aria-expanded="true"] .docs-menu-btn__bars { background: transparent; }
+.docs-menu-btn[aria-expanded="true"] .docs-menu-btn__bars::before { transform: translateY(0) rotate(45deg); }
+.docs-menu-btn[aria-expanded="true"] .docs-menu-btn__bars::after { transform: translateY(-2px) rotate(-45deg); }
 
 /* ── Shell / layout ─────────────────────────────── */
 .docs-body {
@@ -154,6 +190,9 @@ code {
   background: var(--accent-weak);
   font-weight: 600;
 }
+/* Drawer-only chrome — surfaced by the mobile media query. */
+.sidebar-drawer-head { display: none; }
+.sidebar-drawer-foot { display: none; }
 
 /* ── Main content ───────────────────────────────── */
 .docs-main {
@@ -198,19 +237,27 @@ code {
   font-weight: 650;
   margin: 2rem 0 0.65rem;
 }
-.docs-main p { margin-bottom: 1.05rem; color: var(--text); }
+.docs-main p { margin-bottom: 1.05rem; color: var(--text); overflow-wrap: break-word; }
 .docs-main ul, .docs-main ol { margin: 0 0 1.1rem 1.4rem; }
+.docs-main li { overflow-wrap: break-word; }
 .docs-main li { margin-bottom: 0.4rem; }
 .docs-main li::marker { color: var(--faint); }
 .docs-main strong { font-weight: 700; }
 .docs-main hr { border: none; border-top: 1px solid var(--border); margin: 2.5rem 0; }
 
-/* tables */
+/* tables — scroll horizontally within their own box on narrow screens
+   instead of stretching the page. `display:block` makes the table itself the
+   scroll container (works without wrapping every table in markup). */
 .docs-main table {
   width: 100%;
   border-collapse: collapse;
   margin: 1.5rem 0;
   font-size: 0.9rem;
+}
+.docs-main table {
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .docs-main th {
   text-align: left;
@@ -226,20 +273,25 @@ code {
 .docs-main td { padding: 0.6rem 0.9rem; border: 1px solid var(--border); vertical-align: top; }
 .docs-main td code { font-size: 0.82em; }
 
-/* callouts */
+/* callouts — marker is absolutely placed so the text is normal block flow and
+   wraps against the container edge (a flex marker leaves the text as an
+   anonymous flex item that won't shrink below its content on narrow screens). */
 .docs-main .callout {
-  display: flex;
-  gap: 0.7rem;
+  position: relative;
   background: var(--accent-weak);
   border: 1px solid var(--accent-line);
   border-radius: 10px;
-  padding: 0.9rem 1.1rem;
+  padding: 0.9rem 1.1rem 0.9rem 2.2rem;
   margin: 1.5rem 0;
   font-size: 0.93rem;
   color: var(--text);
+  overflow-wrap: break-word;
 }
 .docs-main .callout::before {
   content: "›";
+  position: absolute;
+  left: 1.1rem;
+  top: 0.9rem;
   color: var(--accent-text);
   font-weight: 700;
 }
@@ -331,44 +383,100 @@ code {
 @media (prefers-color-scheme: dark) { .bench-win { color: #4ec98a; } }
 
 /* ── Mobile ─────────────────────────────────────── */
-.mobile-nav-toggle {
-  display: none;
-  position: fixed;
-  top: 0.8rem;
-  left: 0.9rem;
-  z-index: 100;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.4rem 0.6rem;
-  cursor: pointer;
-  color: var(--text);
-  font-size: 1.1rem;
-  line-height: 1;
-}
 .mobile-overlay { display: none; }
 
 @media (max-width: 960px) {
+  /* Header: reveal the hamburger, keep only high-value links. */
+  .docs-menu-btn { display: inline-flex; }
+  .docs-header { padding: 0 1rem; gap: 0.4rem; }
+  .docs-brand { margin-right: auto; }
+  .docs-header__right { gap: 0.9rem; }
+
   .docs-body { grid-template-columns: 1fr; }
+
+  /* Sidebar becomes a slide-in drawer. */
   .sidebar {
     position: fixed;
     top: 0;
-    left: -100%;
-    width: var(--sidebar-w);
-    height: 100vh;
+    left: 0;
+    width: min(86vw, 340px);
+    height: 100dvh;
     background: var(--bg);
+    border-right: 1px solid var(--border);
+    box-shadow: 0 0 60px rgba(0, 0, 0, 0.35);
     z-index: 60;
-    transition: left 0.25s ease;
-    padding-top: 1.25rem;
+    padding: 0 0.75rem 2rem;
+    transform: translateX(-102%);
+    transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+    overscroll-behavior: contain;
   }
-  .sidebar.open { left: 0; }
-  .mobile-nav-toggle { display: block; }
+  .sidebar.open { transform: translateX(0); }
+
+  /* Drawer header — sticky title bar so it stays put while the list scrolls. */
+  .sidebar-drawer-head {
+    display: flex;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    height: var(--header-h);
+    margin: 0 -0.75rem 0.5rem;
+    padding: 0 1.1rem;
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+  }
+  .sidebar-drawer-title {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  /* Roomier tap targets in the drawer (≈44px rows). */
+  .sidebar-link { padding: 0.62rem 0.8rem; font-size: 0.95rem; }
+  .sidebar-group { margin-bottom: 1.1rem; }
+  .sidebar-group-title { font-size: 0.68rem; margin-bottom: 0.5rem; }
+
+  .sidebar-drawer-foot {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+  }
+
   .mobile-overlay {
     display: block; position: fixed; inset: 0;
-    background: rgba(0,0,0,0.45); z-index: 55;
-    opacity: 0; pointer-events: none; transition: opacity 0.25s;
+    background: rgba(0, 0, 0, 0.5); z-index: 55;
+    opacity: 0; pointer-events: none; transition: opacity 0.26s;
   }
   .mobile-overlay.visible { opacity: 1; pointer-events: auto; }
-  .docs-main { padding: 3.5rem 1.35rem 4rem; }
+  /* Freeze the page behind the open drawer. */
+  body.nav-locked { overflow: hidden; }
+
+  /* Content: comfortable gutters, no fixed-toggle clearance needed now. */
+  .docs-main { padding: 2rem 1.15rem 4rem; }
+  .docs-main h1 { font-size: clamp(1.7rem, 7vw, 2.1rem); }
+  .docs-main .page-subtitle { font-size: 1rem; margin-bottom: 1.75rem; padding-bottom: 1.25rem; }
+  .docs-main h2 { font-size: 1.28rem; margin-top: 2.25rem; }
+  .code-block pre { padding: 0.9rem 1rem; }
+  .code-block pre code { font-size: 0.78rem; }
   .docs-pager { grid-template-columns: 1fr; }
+}
+
+/* Very small phones: keep the header from crowding. */
+@media (max-width: 400px) {
+  .docs-brand__tag { display: none; }
+  .docs-header__right .docs-header__link:not([href="https://github.com/Ggaming5005/GioJS"]) { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar { transition: none; }
+  .docs-menu-btn__bars,
+  .docs-menu-btn__bars::before,
+  .docs-menu-btn__bars::after { transition: none; }
 }

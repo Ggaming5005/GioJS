@@ -4,7 +4,7 @@
 //! (minification, vendor prefixes, CSS Modules) and provides critical CSS
 //! extraction for zero-render-blocking first paint.
 //!
-//! This crate owns CSS logic only — no HTTP handling, no routing, no caching.
+//! This crate owns CSS logic only - no HTTP handling, no routing, no caching.
 
 pub mod critical;
 pub mod error;

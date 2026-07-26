@@ -105,7 +105,7 @@ pub struct RouteInfo {
     pub has_ws_handler: bool,
 }
 
-/// Result of an IPC send — either a normal response or an SSE stream.
+/// Result of an IPC send - either a normal response or an SSE stream.
 pub enum IpcSendResult {
     Response(IpcResponse),
     SseStream {
@@ -146,7 +146,7 @@ pub struct IpcResponse {
     #[allow(dead_code)]
     pub swr_window_secs: u64,
     /// Deployment ID echoed back by Node (forwarded from the ACK).
-    /// Currently unused — Rust uses the IpcClient's own deployment_id.
+    /// Currently unused - Rust uses the IpcClient's own deployment_id.
     #[serde(rename = "deploymentId", default)]
     #[allow(dead_code)]
     pub deployment_id: String,
@@ -268,8 +268,8 @@ impl IpcClient {
         let (tx, rx) = oneshot::channel();
         self.inner.pending.insert(id.clone(), tx);
 
-        // While armed, dropping this future — client disconnect mid-render,
-        // or the timeout below — removes the pending waiter and tells Node to
+        // While armed, dropping this future - client disconnect mid-render,
+        // or the timeout below - removes the pending waiter and tells Node to
         // abort the render instead of finishing work nobody will read.
         let mut cancel_guard = CancelGuard {
             inner: &self.inner,
@@ -278,7 +278,7 @@ impl IpcClient {
         };
 
         if self.inner.write_tx.send(payload).await.is_err() {
-            // The request never reached Node — nothing to cancel there.
+            // The request never reached Node - nothing to cancel there.
             cancel_guard.armed = false;
             self.inner.pending.remove(&id);
             anyhow::bail!("IPC writer closed");
@@ -290,7 +290,7 @@ impl IpcClient {
                 Ok(result)
             }
             Ok(Err(_)) => {
-                // Waiter was removed and dropped by recovery code — the
+                // Waiter was removed and dropped by recovery code - the
                 // connection is gone, so a cancel frame has nowhere to go.
                 cancel_guard.armed = false;
                 self.inner.pending.remove(&id);
@@ -329,7 +329,7 @@ impl Drop for CancelGuard<'_> {
 }
 
 /// Best-effort control frame `{type, id}` (cancel / sse_close). Dropped if
-/// the write channel is full or the connection is down — Node then just
+/// the write channel is full or the connection is down - Node then just
 /// finishes a render nobody reads, which is the pre-cancel behavior.
 fn send_cancel_like_frame(inner: &IpcClientInner, frame_type: &str, req_id: &str) {
     let Ok(payload) = serde_json::to_vec(&serde_json::json!({
@@ -408,7 +408,7 @@ fn generate_deployment_id() -> String {
     let mut h = Sha256::new();
     h.update(secs.to_be_bytes());
     h.update(&manifest);
-    // 16 hex chars (64 bits) — human-readable, collision-resistant for deployment tracking
+    // 16 hex chars (64 bits) - human-readable, collision-resistant for deployment tracking
     h.finalize()
         .iter()
         .take(8)
@@ -419,8 +419,8 @@ fn generate_deployment_id() -> String {
 // ── Node spawning ─────────────────────────────────────────────────────────────
 
 /// On Windows, children are additionally assigned to a Job Object configured
-/// with KILL_ON_JOB_CLOSE: if this process dies for any reason — including a
-/// hard `taskkill /F` that `kill_on_drop` cannot observe — the OS reaps the
+/// with KILL_ON_JOB_CLOSE: if this process dies for any reason - including a
+/// hard `taskkill /F` that `kill_on_drop` cannot observe - the OS reaps the
 /// Node worker instead of leaving an orphan holding the IPC pipe.
 #[cfg(windows)]
 fn assign_to_job(child: &tokio::process::Child) {
@@ -433,18 +433,18 @@ fn assign_to_job(child: &tokio::process::Child) {
                 match job.set_extended_limit_info(&info) {
                     Ok(()) => Some(job),
                     Err(e) => {
-                        warn!(error = %e, "job object limit setup failed — orphan protection reduced to kill_on_drop");
+                        warn!(error = %e, "job object limit setup failed - orphan protection reduced to kill_on_drop");
                         None
                     }
                 }
             }
             Err(e) => {
-                warn!(error = %e, "job object query failed — orphan protection reduced to kill_on_drop");
+                warn!(error = %e, "job object query failed - orphan protection reduced to kill_on_drop");
                 None
             }
         },
         Err(e) => {
-            warn!(error = %e, "job object creation failed — orphan protection reduced to kill_on_drop");
+            warn!(error = %e, "job object creation failed - orphan protection reduced to kill_on_drop");
             None
         }
     });
@@ -597,7 +597,7 @@ async fn connect_and_handshake(
         let proof = ready["token"].as_str().unwrap_or("");
         if proof != expected_ready_proof {
             anyhow::bail!(
-                "IPC endpoint at {path} failed token verification — refusing to use it"
+                "IPC endpoint at {path} failed token verification - refusing to use it"
             );
         }
         let worker_protocol = ready["protocol"].as_u64();
@@ -639,7 +639,7 @@ async fn connect_and_handshake(
     )
 }
 
-// ── IPC supervisor — reconnects on disconnect ─────────────────────────────────
+// ── IPC supervisor - reconnects on disconnect ─────────────────────────────────
 
 /// Dispatch loop for frames arriving from Node. Exits when the connection dies.
 async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
@@ -668,7 +668,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                             // Reserved for streaming SSR (protocol v2+): a
                             // v1 server must skip it, not mis-parse it.
                             Some("chunk") => {
-                                warn!("IPC chunk frame received — streaming responses are not supported by this server version");
+                                warn!("IPC chunk frame received - streaming responses are not supported by this server version");
                                 continue;
                             }
                             _ => {}
@@ -716,7 +716,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                         let resp_id = resp.id.clone();
 
                         // Claim the pending waiter first. If it is gone (request already
-                        // timed out), do not register an SSE stream — that would leak the
+                        // timed out), do not register an SSE stream - that would leak the
                         // sender in `sse_streams` forever. Tell Node to clean up instead.
                         let Some((_, pending_tx)) = inner.pending.remove(&resp_id) else {
                             if is_sse {
@@ -785,17 +785,17 @@ fn drain_pending_with_503(inner: &IpcClientInner) {
 
 /// Why the serve loop stopped.
 enum ServeEnd {
-    /// Socket read/write failed — the connection is gone (worker may live).
+    /// Socket read/write failed - the connection is gone (worker may live).
     ConnLost,
     /// The Node process exited.
     ChildExit,
-    /// The IpcClient was dropped — the server is shutting down.
+    /// The IpcClient was dropped - the server is shutting down.
     Shutdown,
 }
 
 /// Owns the Node child and the IPC connection. Serves frames until the
 /// connection or the child dies, then drains in-flight requests with 503,
-/// respawns the worker if needed, and reconnects — forever, with capped
+/// respawns the worker if needed, and reconnects - forever, with capped
 /// backoff. The worker being down is an outage to recover from, never a
 /// reason to give up.
 async fn ipc_supervisor(
@@ -876,7 +876,7 @@ async fn ipc_supervisor(
             {
                 Ok(conn) => break conn,
                 Err(e) => {
-                    warn!(error = %e, "IPC recovery round failed — killing worker and retrying");
+                    warn!(error = %e, "IPC recovery round failed - killing worker and retrying");
                     // A worker that is alive but not completing the handshake
                     // is wedged; kill it so the next round starts fresh.
                     let _ = child.kill().await;
@@ -903,7 +903,7 @@ async fn ipc_supervisor(
 /// During recovery downtime, sleep for `backoff` while failing any frames
 /// queued for the dead connection: each request frame's pending waiter gets
 /// an immediate 503 instead of waiting out the 30s IPC timeout. Returns true
-/// when the write channel closed (IpcClient dropped — shut down).
+/// when the write channel closed (IpcClient dropped - shut down).
 async fn fail_queued_writes(
     write_rx: &mut mpsc::Receiver<Bytes>,
     inner: &IpcClientInner,
@@ -1014,7 +1014,7 @@ mod tests {
         );
     }
 
-    // Pinned vector shared with packages/giojs-core/src/ipc.test.ts — both
+    // Pinned vector shared with packages/giojs-core/src/ipc.test.ts - both
     // sides must derive identical proofs or the handshake always fails.
     #[test]
     fn handshake_proof_matches_node_known_vector() {

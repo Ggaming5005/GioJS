@@ -91,7 +91,7 @@ mod tests {
         layer.put("b".to_string(), make_entry("b"));
         // Access "a" so "b" becomes the LRU
         layer.get("a");
-        // Insert "c" — should evict "b"
+        // Insert "c" - should evict "b"
         layer.put("c".to_string(), make_entry("c"));
         assert!(layer.get("a").is_some());
         assert!(layer.get("b").is_none());

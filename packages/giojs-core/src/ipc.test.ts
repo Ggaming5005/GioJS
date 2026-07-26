@@ -173,7 +173,7 @@ describe('makeFrameHandler frame reassembly', () => {
 });
 
 describe('handshakeProof', () => {
-  // Pinned vector shared with crates/giojs-server/src/ipc.rs — both sides
+  // Pinned vector shared with crates/giojs-server/src/ipc.rs - both sides
   // must derive identical proofs or the handshake always fails.
   it('matches the Rust known vector', () => {
     expect(handshakeProof('secret', 'ready')).toBe(

@@ -13,7 +13,7 @@ GioJS ships as two processes: the `giojs-server` Rust binary (handles HTTP, rout
 
 ## Memory advantage
 
-GioJS keeps memory flat under sustained load because Rust owns the HTTP layer — cache hits never allocate in Node. Self-hosted Next.js allocates in the Node event loop for every request, including cache hits.
+GioJS keeps memory flat under sustained load because Rust owns the HTTP layer - cache hits never allocate in Node. Self-hosted Next.js allocates in the Node event loop for every request, including cache hits.
 
 See `benchmarks/memory-stability.md` for measured numbers comparing GioJS vs self-hosted Next.js 15 under 50 concurrent connections for 60 seconds.
 
@@ -35,7 +35,7 @@ See `benchmarks/memory-stability.md` for measured numbers comparing GioJS vs sel
 
 ## Health check
 
-`/_gio/health` returns JSON and is always available — use it for readiness probes and uptime monitors:
+`/_gio/health` returns JSON and is always available - use it for readiness probes and uptime monitors:
 
 ```json
 {

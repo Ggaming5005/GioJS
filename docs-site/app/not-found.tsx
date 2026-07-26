@@ -3,28 +3,89 @@
  *
  * Rendered for unmatched paths: by the server with status 404, and exported
  * to out/404.html so Cloudflare Pages serves a real 404 for unknown URLs
- * instead of falling back to the home page.
+ * instead of falling back to the home page. Fully self-contained inline
+ * styles — no dependency on the landing page's scoped CSS, since 404.html is
+ * served on its own.
  */
 import React from 'react';
 
+const btnBase: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: '0.7rem 1.3rem',
+  borderRadius: '10px',
+  fontWeight: 650,
+  fontSize: '0.95rem',
+  textDecoration: 'none',
+  border: '1px solid transparent',
+};
+
 export default function NotFound(): React.JSX.Element {
   return (
-    <main className="lp" style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div style={{ textAlign: 'center', padding: '2rem' }}>
-        <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '0.8rem', letterSpacing: '0.2em', opacity: 0.6, marginBottom: '0.75rem' }}>
+    <main
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '2rem 1.25rem',
+      }}
+    >
+      <div style={{ textAlign: 'center', maxWidth: '30rem', width: '100%' }}>
+        <div
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: '0.75rem',
+            letterSpacing: '0.2em',
+            opacity: 0.55,
+            marginBottom: '0.75rem',
+          }}
+        >
           HTTP 404
         </div>
-        <h1 style={{ fontFamily: 'Fraunces, serif', fontSize: '2.4rem', margin: '0 0 0.75rem' }}>
+        <h1
+          style={{
+            fontFamily: "'Fraunces', Georgia, serif",
+            fontStyle: 'italic',
+            fontWeight: 600,
+            fontSize: 'clamp(2rem, 9vw, 2.8rem)',
+            lineHeight: 1.05,
+            letterSpacing: '-0.02em',
+            margin: '0 0 0.75rem',
+          }}
+        >
           Page not found
         </h1>
-        <p style={{ opacity: 0.75, maxWidth: '32rem', margin: '0 auto 1.75rem' }}>
+        <p style={{ opacity: 0.75, lineHeight: 1.6, margin: '0 0 1.75rem' }}>
           This page doesn&apos;t exist or was moved. The docs index is the best
           place to find what you were looking for.
         </p>
-        <p>
-          <a className="lp-btn lp-btn--primary" href="/docs/getting-started">Open the docs</a>{' '}
-          <a className="lp-btn lp-btn--ghost" href="/">Go home</a>
-        </p>
+        <div
+          style={{
+            display: 'flex',
+            gap: '0.75rem',
+            justifyContent: 'center',
+            flexWrap: 'wrap',
+          }}
+        >
+          <a
+            href="/docs/getting-started"
+            style={{ ...btnBase, background: 'var(--accent)', color: '#fff' }}
+          >
+            Open the docs
+          </a>
+          <a
+            href="/"
+            style={{
+              ...btnBase,
+              borderColor: 'var(--border)',
+              color: 'var(--text)',
+            }}
+          >
+            Go home
+          </a>
+        </div>
       </div>
     </main>
   );

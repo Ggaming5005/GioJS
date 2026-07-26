@@ -1,6 +1,6 @@
 //! ws.rs
 //!
-//! axum WebSocket handler — upgrades connections, assigns a UUID connId,
+//! axum WebSocket handler - upgrades connections, assigns a UUID connId,
 //! and bridges messages between the browser and the WS IPC client.
 
 use std::net::SocketAddr;

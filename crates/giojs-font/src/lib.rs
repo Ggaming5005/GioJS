@@ -2,7 +2,7 @@
 //!
 //! Font self-hosting: downloads WOFF2 files at startup and generates
 //! @font-face CSS. HTTP serving is handled by the caller (ServeDir in
-//! giojs-server) — this crate owns only download and CSS generation.
+//! giojs-server) - this crate owns only download and CSS generation.
 
 use std::path::Path;
 

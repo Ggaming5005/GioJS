@@ -2,8 +2,8 @@
  * tests/integration/fixture/gio.config.ts
  *
  * Test plugin giving the integration harness observable endpoints:
- *   /echo   — echoes method + forwarded body (proves body forwarding)
- *   /whoami — echoes the caller's cookie, uncacheable (proves render isolation)
+ *   /echo   - echoes method + forwarded body (proves body forwarding)
+ *   /whoami - echoes the caller's cookie, uncacheable (proves render isolation)
  */
 import type { GioConfig } from '../../../packages/giojs-core/src/config-loader.ts';
 import type { IPCRequest, IPCResponse } from '../../../packages/giojs-core/src/context.ts';

@@ -1,7 +1,7 @@
 /**
  * giojs-core/src/ws-ipc.ts
  *
- * Second IPC server — WebSocket events. Rust connects to this pipe;
+ * Second IPC server - WebSocket events. Rust connects to this pipe;
  * messages use the same 4-byte length-prefixed JSON framing as HTTP IPC.
  * Binary WebSocket payloads cross the pipe base64-encoded with
  * `isBinary: true`; text payloads keep the original shape.
@@ -189,7 +189,7 @@ export function createWsIpcServer(wsHandlers: Map<string, WsHandlerFn>): net.Ser
           if (wsAuthIsValid(parsed, WS_IPC_TOKEN)) {
             authed = true;
           } else {
-            logger.error('ws-ipc first frame failed auth — destroying connection');
+            logger.error('ws-ipc first frame failed auth - destroying connection');
             socket.destroy();
           }
           return;
@@ -233,7 +233,7 @@ export function createWsIpcServer(wsHandlers: Map<string, WsHandlerFn>): net.Ser
         }
       },
       declaredLength => {
-        logger.error('ws-ipc frame exceeds max size — destroying connection', {
+        logger.error('ws-ipc frame exceeds max size - destroying connection', {
           frameBytes: declaredLength,
           maxBytes: MAX_WS_IPC_FRAME_BYTES,
         });
@@ -245,7 +245,7 @@ export function createWsIpcServer(wsHandlers: Map<string, WsHandlerFn>): net.Ser
     socket.on('error', err => logger.error('ws-ipc socket error', { error: String(err) }));
     socket.on('close', () => {
       logger.info('ws-ipc client disconnected', { activeConnections: activeSockets.size });
-      // Rust disconnected — notify all active sockets
+      // Rust disconnected - notify all active sockets
       for (const [, s] of activeSockets) {
         s._dispatchClose(1001, 'server disconnected');
       }

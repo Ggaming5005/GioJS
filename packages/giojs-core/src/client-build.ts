@@ -15,7 +15,7 @@
  * free so the demoted code's imports (db clients, fs helpers) drop with it.
  * Node builtin imports that survive are stubbed so a stray server import can
  * never fail the build. A route whose entry fails to build is logged and
- * served without hydration — client build errors must not take down SSR.
+ * served without hydration - client build errors must not take down SSR.
  */
 import { build, type Plugin, type Loader } from 'esbuild';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -58,7 +58,7 @@ function importPath(p: string): string {
 
 /**
  * Non-root layouts that apply to every path this pattern can match. Layouts
- * with dynamic segments in their prefix are excluded — the server's runtime
+ * with dynamic segments in their prefix are excluded - the server's runtime
  * prefix match never applies them to concrete paths, and the client must
  * wrap exactly what the server wrapped.
  */
@@ -261,7 +261,7 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
     } catch (combinedError) {
       // One broken page must not cost every route its bundle: retry each
       // entry alone and keep the ones that build.
-      logger.warn('client build failed — retrying routes individually', {
+      logger.warn('client build failed - retrying routes individually', {
         error: combinedError instanceof Error ? combinedError.message : String(combinedError),
       });
       entryFileToUrl = new Map();
@@ -276,7 +276,7 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
           });
           for (const [file, url] of single) entryFileToUrl.set(file, url);
         } catch (entryError) {
-          logger.error('client bundle failed — route will render without hydration', {
+          logger.error('client bundle failed - route will render without hydration', {
             pattern: entry.pattern,
             error: entryError instanceof Error ? entryError.message : String(entryError),
           });
@@ -293,7 +293,7 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
       durationMs: Date.now() - started,
     });
   } catch (buildError) {
-    logger.error('client build failed — pages will render without hydration', {
+    logger.error('client build failed - pages will render without hydration', {
       error: buildError instanceof Error ? buildError.message : String(buildError),
     });
   }

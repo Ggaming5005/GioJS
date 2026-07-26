@@ -1,4 +1,4 @@
-# GioJS vs Next.js 15 — Memory Stability
+# GioJS vs Next.js 15 - Memory Stability
 
 > Run `benchmarks/memory-stability/run-benchmark.ps1` (Windows) or
 > `bash benchmarks/memory-stability/run-benchmark.sh` (Linux/macOS),

@@ -4,7 +4,7 @@ Recommended for multi-instance deployments behind a load balancer. Use Redis for
 
 ## Why GioJS is stable in Kubernetes
 
-Self-hosted Next.js has documented memory leak issues in long-running Kubernetes pods — the Node.js HTTP layer allocates on every request, and the GC pressure grows under sustained load. OOM restarts are common in production clusters with >20 req/s.
+Self-hosted Next.js has documented memory leak issues in long-running Kubernetes pods - the Node.js HTTP layer allocates on every request, and the GC pressure grows under sustained load. OOM restarts are common in production clusters with >20 req/s.
 
 GioJS avoids this by design: Rust owns the HTTP layer, so cache hits never allocate in Node. Memory stays flat under sustained load.
 
@@ -12,7 +12,7 @@ See `benchmarks/memory-stability.md` for measured RSS numbers comparing GioJS vs
 
 ---
 
-## ConfigMap — gio.toml
+## ConfigMap - gio.toml
 
 ```yaml
 apiVersion: v1

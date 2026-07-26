@@ -56,7 +56,7 @@ export async function gatherConfig(args: CliArgs): Promise<ProjectConfig> {
   const language = args.language ?? (await select<Language>(
     'Which language would you like to use?',
     [
-      { label: 'TypeScript', value: 'ts', hint: '.tsx — recommended' },
+      { label: 'TypeScript', value: 'ts', hint: '.tsx - recommended' },
       { label: 'JavaScript', value: 'js', hint: '.jsx' },
     ],
     0,
@@ -65,8 +65,8 @@ export async function gatherConfig(args: CliArgs): Promise<ProjectConfig> {
   const mode = args.mode ?? (await select<Mode>(
     'What are you building?',
     [
-      { label: 'Server app', value: 'server', hint: 'SSR, ISR, image optimization, route handlers — runs the GioJS server' },
-      { label: 'Static site', value: 'static', hint: 'exports to HTML — deploy free to any static host' },
+      { label: 'Server app', value: 'server', hint: 'SSR, ISR, image optimization, route handlers - runs the GioJS server' },
+      { label: 'Static site', value: 'static', hint: 'exports to HTML - deploy free to any static host' },
     ],
     0,
   ));

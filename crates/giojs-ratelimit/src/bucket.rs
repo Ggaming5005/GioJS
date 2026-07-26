@@ -75,7 +75,7 @@ impl TokenBucket {
                 );
                 return true;
             }
-            // CAS lost — another thread updated tokens concurrently; retry.
+            // CAS lost - another thread updated tokens concurrently; retry.
         }
     }
 
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn refill_over_time() {
-        // 10 per second, burst 0 — drain it, sleep 200ms, should have ~2 tokens
+        // 10 per second, burst 0 - drain it, sleep 200ms, should have ~2 tokens
         let bucket = TokenBucket::new(10, 1, 0);
         for _ in 0..10 {
             bucket.try_consume();
@@ -147,13 +147,13 @@ mod tests {
         for i in 0..5 {
             assert!(bucket.try_consume(), "burst request {i} should be allowed");
         }
-        // 6th should fail — burst exhausted
+        // 6th should fail - burst exhausted
         assert!(!bucket.try_consume(), "6th request exceeds burst limit");
     }
 
     #[test]
     fn concurrent_try_consume_is_safe() {
-        // 100 per 600s, burst 0 — 200 threads each try once.
+        // 100 per 600s, burst 0 - 200 threads each try once.
         // The long window keeps refill below 1 token even if threads take a few ms.
         // Per SPEC2 §27: remaining count is approximate; allow ±1 inaccuracy.
         let bucket = Arc::new(TokenBucket::new(100, 600, 0));

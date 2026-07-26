@@ -41,11 +41,11 @@ docs-site/_*.mjs
 /dist-test/
 /test-app/
 
-# Platform binaries — provided by CI at release, never committed
+# Platform binaries - provided by CI at release, never committed
 platform/*/bin/*
 !platform/*/bin/.gitkeep
 
-# Internal docs / specs — NOT for public release
+# Internal docs / specs - NOT for public release
 /CLAUDE.md
 /SPEC.MD
 /SPEC2.MD

@@ -20,7 +20,7 @@ for (const w of written.sort()) console.log(`   ✓ ${w === '/' ? '/ (index)' : 
 
 if (skipped.length > 0) {
   console.log(`\n[giojs] skipped ${skipped.length} (server-only):`);
-  for (const s of skipped) console.log(`   - ${s.route}  —  ${s.reason}`);
+  for (const s of skipped) console.log(`   - ${s.route}  -  ${s.reason}`);
 }
 
 console.log(`\n[giojs] ✔ static export complete → ${outDir}`);

@@ -37,7 +37,7 @@ pub struct CacheEntry {
     /// True when `html` is the final composed document (critical CSS, font
     /// preloads, and deployment script already injected at put time), so it
     /// can be served byte-for-byte on a hit. False for entries written by
-    /// older versions or in dev mode — those are injected per request.
+    /// older versions or in dev mode - those are injected per request.
     pub composed: bool,
     /// Cache tags declared by the render (IPC `cacheTags`). Stored now so a
     /// tag-based revalidation endpoint can invalidate by tag later without a
@@ -48,7 +48,7 @@ pub struct CacheEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheStatus {
     Hit,
-    /// Past `max_age` but within `max_age * swr_multiplier` — serve stale,
+    /// Past `max_age` but within `max_age * swr_multiplier` - serve stale,
     /// trigger background revalidation.
     Stale,
 }

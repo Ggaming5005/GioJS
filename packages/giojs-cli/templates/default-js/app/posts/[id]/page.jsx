@@ -22,7 +22,7 @@ export default function PostPage({ post }) {
           <p>{post.body}</p>
           <p>
             This page is rendered server-side via <code>getServerSideProps</code>. The post
-            ID comes from the URL parameter — try changing it in the address bar.
+            ID comes from the URL parameter - try changing it in the address bar.
           </p>
         </div>
       </article>

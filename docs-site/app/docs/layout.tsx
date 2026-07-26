@@ -1,7 +1,7 @@
 /**
  * docs-site/app/docs/layout.tsx
  *
- * Docs chrome — sticky header + grouped sidebar + readable content column.
+ * Docs chrome - sticky header + grouped sidebar + readable content column.
  * Receives `path` from giojs-core so the Sidebar can mark the active link.
  */
 import React from 'react';
@@ -17,13 +17,22 @@ export default function DocsLayout({ children, path = '/' }: DocsLayoutProps): R
   return (
     <>
       <header className="docs-header">
+        <button
+          id="mobile-nav-toggle"
+          className="docs-menu-btn"
+          aria-label="Open navigation"
+          aria-expanded="false"
+          aria-controls="sidebar"
+          type="button"
+        >
+          <span className="docs-menu-btn__bars" aria-hidden="true" />
+        </button>
         <a className="docs-brand" href="/docs/getting-started">
           <img className="docs-brand__mark" src="/public/giojs-logo.svg" alt="" width={26} height={26} />
           GioJS
           <span className="docs-brand__tag">docs</span>
         </a>
         <div className="docs-header__right">
-          <a className="docs-header__link" href="/docs/getting-started">Get Started</a>
           <a className="docs-header__link" href="/releases">Releases</a>
           <a className="docs-header__link" href="https://github.com/Ggaming5005/GioJS">GitHub ↗</a>
         </div>

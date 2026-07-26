@@ -29,7 +29,7 @@ export default function Page(): React.JSX.Element {
   };
 }`} />
       <p>
-        A page that returns response headers is automatically made uncacheable —
+        A page that returns response headers is automatically made uncacheable -
         caching a per-request <code>set-cookie</code> would replay one visitor&apos;s
         cookie to everyone.
       </p>
@@ -51,7 +51,7 @@ export default function Page(): React.JSX.Element {
       <p>
         <code>route.ts</code> files export <code>GET</code> / <code>POST</code> /{' '}
         <code>PUT</code> / <code>PATCH</code> / <code>DELETE</code> (API endpoints,
-        SSE) and <code>wsHandler</code> (WebSockets) — see Route Handlers.
+        SSE) and <code>wsHandler</code> (WebSockets) - see Route Handlers.
       </p>
     </>
   );

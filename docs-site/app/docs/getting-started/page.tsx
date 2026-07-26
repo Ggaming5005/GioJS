@@ -11,22 +11,22 @@ export default function IntroductionPage(): React.JSX.Element {
       <p className="page-subtitle">
         GioJS is a Rust-powered React framework. You write familiar React with
         file-based routing; the performance-critical hot path runs in compiled Rust,
-        and Node does what it is best at — rendering React.
+        and Node does what it is best at - rendering React.
       </p>
 
       <h2>Why GioJS</h2>
       <p>
-        Most of the things that make a React app fast in production — HTTP/2, brotli
-        compression, image optimization, ISR caching, font self-hosting — are usually
+        Most of the things that make a React app fast in production - HTTP/2, brotli
+        compression, image optimization, ISR caching, font self-hosting - are usually
         provided by a proprietary cloud. Self-host that same stack and you typically lose
         them. GioJS compiles all of it into a single binary so you get the same performance
-        profile on a $5 VPS, bare metal, Windows, or Kubernetes — no CDN tax.
+        profile on a $5 VPS, bare metal, Windows, or Kubernetes - no CDN tax.
       </p>
 
       <h2>The split</h2>
       <p>The framework is two cooperating layers:</p>
       <ul>
-        <li><strong>Rust</strong> owns the hot path — HTTP/2 &amp; TLS, routing, brotli/gzip compression, image optimization, the ISR page cache, static files, and middleware.</li>
+        <li><strong>Rust</strong> owns the hot path - HTTP/2 &amp; TLS, routing, brotli/gzip compression, image optimization, the ISR page cache, static files, and middleware.</li>
         <li><strong>Node</strong> renders React via <code>renderToReadableStream</code>, runs <code>getServerSideProps</code>, and gives you the full npm ecosystem.</li>
       </ul>
       <p>

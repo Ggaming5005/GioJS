@@ -7,7 +7,7 @@ on:
 
 jobs:
   # Every publishable package, platform pin, and template range must carry the
-  # same version — a beta-N wrapper resolving beta-M binaries is protocol
+  # same version - a beta-N wrapper resolving beta-M binaries is protocol
   # drift waiting to happen.
   version-lockstep:
     name: Version lockstep check
@@ -32,7 +32,7 @@ jobs:
         include:
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  pkg: giojs-linux-x64,      cross: false }
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl, pkg: giojs-linux-x64-musl, cross: false }
-          # linux-arm64 (aarch64 cross-compile) deferred — fails to build under `cross`; re-add once fixed
+          # linux-arm64 (aarch64 cross-compile) deferred - fails to build under `cross`; re-add once fixed
           - { os: windows-latest, target: x86_64-pc-windows-msvc,    pkg: giojs-win32-x64,      cross: false }
           - { os: macos-13,       target: x86_64-apple-darwin,       pkg: giojs-darwin-x64,     cross: false }
           - { os: macos-14,       target: aarch64-apple-darwin,      pkg: giojs-darwin-arm64,   cross: false }
@@ -82,7 +82,7 @@ jobs:
           name=$(node -p "require('$dir/package.json').name")
           ver=$(node -p "require('$dir/package.json').version")
           if npm view "$name@$ver" version >/dev/null 2>&1; then
-            echo "✓ $name@$ver already on npm — skipping"
+            echo "✓ $name@$ver already on npm - skipping"
           else
             npm publish "$dir" --access public --tag beta --provenance
           fi
@@ -114,7 +114,7 @@ jobs:
             name=$(node -p "require('./$dir/package.json').name")
             ver=$(node -p "require('./$dir/package.json').version")
             if npm view "$name@$ver" version >/dev/null 2>&1; then
-              echo "✓ $name@$ver already on npm — skipping"
+              echo "✓ $name@$ver already on npm - skipping"
             else
               echo "publishing $name@$ver"
               npm publish "./$dir" --access public --tag beta --provenance

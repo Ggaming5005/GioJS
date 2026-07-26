@@ -44,7 +44,7 @@ struct HtmlIdentifiers {
 }
 
 /// Byte-scan HTML to collect class names, IDs, and element tag names.
-/// No DOM parser required — attribute scanning is sufficient.
+/// No DOM parser required - attribute scanning is sufficient.
 fn extract_html_identifiers(html: &str) -> HtmlIdentifiers {
     let mut classes = HashSet::new();
     let mut ids = HashSet::new();
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn does_not_panic_on_malformed_css() {
-        // lightningcss uses error recovery — malformed input does not necessarily
+        // lightningcss uses error recovery - malformed input does not necessarily
         // return an error, but must never panic.
         let html = "<div>test</div>";
         let css = ".broken { color: "; // unclosed declaration

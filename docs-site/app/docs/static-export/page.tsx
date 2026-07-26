@@ -10,7 +10,7 @@ export default function Page(): React.JSX.Element {
       <h1>Static Export</h1>
       <p className="page-subtitle">
         Pre-render your whole app to plain HTML and deploy it free to any static
-        host — Cloudflare Pages, GitHub Pages, Netlify, or an S3 bucket. Static when
+        host - Cloudflare Pages, GitHub Pages, Netlify, or an S3 bucket. Static when
         you can, server when you must.
       </p>
 
@@ -38,9 +38,9 @@ export default function Page(): React.JSX.Element {
         runs at build time and its data is baked into the HTML.
       </p>
       <p>
-        Every export also writes <code>out/404.html</code> — your{` `}
+        Every export also writes <code>out/404.html</code> - your{` `}
         <code>app/not-found.tsx</code> if you have one, otherwise the built-in 404
-        page — so static hosts return a real 404 for unknown URLs instead of
+        page - so static hosts return a real 404 for unknown URLs instead of
         falling back to the home page.
       </p>
 
@@ -54,7 +54,7 @@ export default function Page(): React.JSX.Element {
   return { paths: posts.map((p) => ({ params: { id: String(p.id) } })) };
 }`} />
       <div className="callout">
-        Dynamic routes without <code>getStaticPaths</code> are skipped with a warning —
+        Dynamic routes without <code>getStaticPaths</code> are skipped with a warning -
         they can only be served by the GioJS server.
       </div>
 
@@ -63,14 +63,14 @@ export default function Page(): React.JSX.Element {
       <ul>
         <li><code>route.ts</code> handlers and Server-Sent Events</li>
         <li>WebSocket (<code>wsHandler</code>) routes</li>
-        <li>ISR revalidation (<code>export const revalidate</code> — there's no server to revalidate on)</li>
+        <li>ISR revalidation (<code>export const revalidate</code> - there's no server to revalidate on)</li>
         <li>Runtime image optimization via <code>/_gio/image</code> (use pre-sized images)</li>
       </ul>
       <p>If you need any of those, use <strong>Server</strong> mode instead.</p>
 
       <h2>Deploy</h2>
       <p>
-        <code>out/</code> is a self-contained static site — no runtime required. Drop it
+        <code>out/</code> is a self-contained static site - no runtime required. Drop it
         on any static host:
       </p>
       <CodeBlock lang="bash" code={`# Cloudflare Pages / Netlify: build command "npm run build", output dir "out"

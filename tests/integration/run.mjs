@@ -3,7 +3,7 @@
  *
  * End-to-end harness for the real Rust↔Node pair: spawns the actual
  * giojs-server binary against tests/integration/fixture, then exercises the
- * failure modes unit tests cannot reach — render, request-body forwarding
+ * failure modes unit tests cannot reach - render, request-body forwarding
  * (UTF-8 and binary), cross-user render isolation, cache hits, and killing
  * the Node worker mid-flight to verify supervision recovers.
  *
@@ -32,7 +32,7 @@ function findServerBinary() {
     const p = join(repoRoot, 'target', profile, `giojs-server${EXT}`);
     if (existsSync(p)) return p;
   }
-  throw new Error('giojs-server binary not found — run `cargo build -p giojs-server` first');
+  throw new Error('giojs-server binary not found - run `cargo build -p giojs-server` first');
 }
 
 let passed = 0;

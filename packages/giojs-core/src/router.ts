@@ -2,7 +2,7 @@
  * giojs-core/src/router.ts
  *
  * Discovers page, layout, and route files under app/, mapping them to URL
- * patterns. Each file may be authored in TypeScript or JavaScript — the
+ * patterns. Each file may be authored in TypeScript or JavaScript - the
  * extension is resolved by precedence so a directory holding page.tsx and a
  * stray page.js still yields a single deterministic match. Layout discovery
  * mirrors page discovery but keys entries by URL prefix so ssr.ts can apply
@@ -64,7 +64,7 @@ export interface PageModule {
   ) => Promise<Record<string, unknown> | RedirectResult>;
   revalidate?: number | false;
   dynamic?: 'force-dynamic' | 'force-static' | 'auto';
-  /** SSE route handler — return a GioEventStream to switch to streaming mode. */
+  /** SSE route handler - return a GioEventStream to switch to streaming mode. */
   GET?: (req: GioRequest) => GioEventStream;
 }
 
@@ -78,7 +78,7 @@ export interface RouteFile {
 /**
  * A route.ts method handler returns one of:
  *  - a web-standard `Response` (status/headers/body used as-is),
- *  - a `GioEventStream` (GET only — switches the connection to SSE),
+ *  - a `GioEventStream` (GET only - switches the connection to SSE),
  *  - any JSON-serializable value (sent as `application/json`, status 200).
  * Handler responses are never cached or coalesced.
  */
@@ -122,7 +122,7 @@ export async function discoverSpecialPages(appDir: string): Promise<SpecialPages
 }
 
 export interface LayoutModule {
-  // path is the current request path — allows layouts to highlight active nav links
+  // path is the current request path - allows layouts to highlight active nav links
   default: React.ComponentType<{ children: React.ReactNode; path?: string }>;
 }
 

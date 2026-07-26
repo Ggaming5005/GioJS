@@ -31,7 +31,7 @@ impl<V: Clone + Send + 'static> SingleFlight<V> {
 
     /// Run `compute` once per in-flight `key`. The first caller executes it;
     /// concurrent callers await its result. If the leader is dropped before
-    /// completing (e.g. client disconnect), a waiting follower is promoted —
+    /// completing (e.g. client disconnect), a waiting follower is promoted -
     /// hence `compute` is `Fn`, callable again on a later loop iteration.
     pub async fn run<F, Fut>(&self, key: &str, compute: F) -> V
     where

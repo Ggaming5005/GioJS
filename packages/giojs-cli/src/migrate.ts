@@ -65,7 +65,7 @@ export function transformSource(source: string): { output: string; transforms: s
   if (useClientPattern.test(text)) {
     text = text.replace(
       useClientPattern,
-      "// GioJS: 'use client' removed — not needed without RSC\n",
+      "// GioJS: 'use client' removed - not needed without RSC\n",
     );
     transforms.push("removed 'use client'");
   }
@@ -107,7 +107,7 @@ export function transformSource(source: string): { output: string; transforms: s
     if (needsGioLink) transforms.push('next/link → GioLink');
   }
 
-  // 5. JSX element renaming — must happen after import removal
+  // 5. JSX element renaming - must happen after import removal
   if (needsGioImage) {
     // Match <Image followed by whitespace, >, or /
     const jsxImageOpen = /<Image(?=[\s\/>])/g;
@@ -139,7 +139,7 @@ export function transformSource(source: string): { output: string; transforms: s
   if (fontPattern.test(text)) {
     text = text.replace(
       fontPattern,
-      '// TODO: move font declaration to gio.toml [[fonts]] — see docs/deployment/README.md\n$1',
+      '// TODO: move font declaration to gio.toml [[fonts]] - see docs/deployment/README.md\n$1',
     );
     transforms.push('next/font → TODO comment (move to gio.toml)');
   }

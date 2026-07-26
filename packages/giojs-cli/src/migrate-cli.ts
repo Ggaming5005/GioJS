@@ -49,7 +49,7 @@ function printResults(results: TransformResult[], dryRun: boolean): void {
       totalFiles++;
       totalTransforms += r.count;
       const label = dryRun ? '(dry-run) ' : '';
-      console.log(`  ✔ ${label}${r.filePath} — ${r.count} transform${r.count !== 1 ? 's' : ''} (${r.transforms.join(', ')})`);
+      console.log(`  ✔ ${label}${r.filePath} - ${r.count} transform${r.count !== 1 ? 's' : ''} (${r.transforms.join(', ')})`);
       if (r.diff) {
         console.log('');
         for (const line of r.diff.split('\n')) {
@@ -64,13 +64,13 @@ function printResults(results: TransformResult[], dryRun: boolean): void {
         console.log('');
       }
     } else {
-      console.log(`    ${r.filePath} — skipped (no Next.js imports found)`);
+      console.log(`    ${r.filePath} - skipped (no Next.js imports found)`);
     }
   }
 
   console.log('');
   if (dryRun) {
-    console.log(`Dry run — no files modified.`);
+    console.log(`Dry run - no files modified.`);
   }
   console.log(`Total: ${totalFiles} file${totalFiles !== 1 ? 's' : ''} modified, ${totalTransforms} transform${totalTransforms !== 1 ? 's' : ''} applied`);
 }

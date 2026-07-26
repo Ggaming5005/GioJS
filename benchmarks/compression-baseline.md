@@ -1,9 +1,9 @@
-# Compression Baseline — P2.1
+# Compression Baseline - P2.1
 
 **Date:** 2026-05-16  
-**Route:** `GET /` — `examples/basic-app` home page with representative paragraph content  
+**Route:** `GET /` - `examples/basic-app` home page with representative paragraph content  
 **Platform:** Windows 11 Pro, Node.js v24.15.0  
-**Threshold:** responses < 1024 bytes are not compressed (correct — basic-app default pages are ~450 bytes)
+**Threshold:** responses < 1024 bytes are not compressed (correct - basic-app default pages are ~450 bytes)
 
 The benchmark page was padded to 1343 bytes to exceed the 1KB compression threshold.
 

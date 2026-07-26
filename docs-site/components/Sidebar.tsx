@@ -3,7 +3,7 @@
  *
  * Grouped sidebar navigation. Receives the current path so the active link is
  * marked server-side with aria-current="page". Plain anchors keep it robust
- * (full-page nav) — no client runtime needed for docs.
+ * (full-page nav) - no client runtime needed for docs.
  */
 import React from 'react';
 
@@ -87,6 +87,10 @@ interface SidebarProps {
 export function Sidebar({ currentPath }: SidebarProps): React.JSX.Element {
   return (
     <aside className="sidebar" id="sidebar">
+      {/* Shown only in the mobile drawer (hidden on desktop via CSS). */}
+      <div className="sidebar-drawer-head">
+        <span className="sidebar-drawer-title">Documentation</span>
+      </div>
       <nav className="sidebar-nav" aria-label="Documentation">
         {NAV_GROUPS.map(group => (
           <div className="sidebar-group" key={group.title}>
@@ -103,6 +107,11 @@ export function Sidebar({ currentPath }: SidebarProps): React.JSX.Element {
             ))}
           </div>
         ))}
+        {/* Drawer footer — surfaces the links dropped from the mobile header. */}
+        <div className="sidebar-drawer-foot">
+          <a href="/releases" className="sidebar-link">Releases</a>
+          <a href="https://github.com/Ggaming5005/GioJS" className="sidebar-link">GitHub ↗</a>
+        </div>
       </nav>
     </aside>
   );

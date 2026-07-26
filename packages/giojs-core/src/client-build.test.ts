@@ -3,7 +3,7 @@
  *
  * Integration tests for the client bundle pipeline: builds a real fixture app
  * with esbuild and asserts the manifest, hashed output, hydration wiring, and
- * — critically — that getServerSideProps and its server-only imports (secrets,
+ * - critically - that getServerSideProps and its server-only imports (secrets,
  * node builtins) never reach the client bundle.
  */
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';

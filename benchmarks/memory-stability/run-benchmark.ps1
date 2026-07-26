@@ -54,7 +54,7 @@ function Sample-Memory {
 
 # ── autocannon check ──────────────────────────────────────────────────────────
 if (-not (Get-Command autocannon -ErrorAction SilentlyContinue)) {
-    Write-Host 'autocannon not found — installing globally...'
+    Write-Host 'autocannon not found - installing globally...'
     npm install -g autocannon
 }
 

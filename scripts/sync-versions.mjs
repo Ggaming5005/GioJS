@@ -4,7 +4,7 @@
  * Single source of truth for every published @gio.js/* version. The wrapper
  * (packages/giojs) defines the release version; this script stamps it onto
  * every publishable package, the wrapper's platform/core pins, and the CLI
- * templates' dependency ranges — so a release can never ship a beta-N
+ * templates' dependency ranges - so a release can never ship a beta-N
  * wrapper pinning beta-M binaries again.
  *
  *   node scripts/sync-versions.mjs           # stamp everything
@@ -77,7 +77,7 @@ for (const { file: rel, exact } of dependentFiles) {
 if (mismatches === 0) {
   console.log(`all packages in lockstep at ${version}`);
 } else if (checkOnly) {
-  console.error(`${mismatches} version mismatch(es) — run: node scripts/sync-versions.mjs`);
+  console.error(`${mismatches} version mismatch(es) - run: node scripts/sync-versions.mjs`);
   process.exit(1);
 } else {
   console.log(`stamped ${mismatches} field(s) to ${version}`);

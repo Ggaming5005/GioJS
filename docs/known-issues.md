@@ -1,12 +1,12 @@
 # Known Issues
 
 Bugs discovered during P3.7 dogfooding (building `docs-site/` on GioJS).
-All three were fixed before the docs site shipped — per the project rule:
+All three were fixed before the docs site shipped - per the project rule:
 **"Any workaround is a bug to fix first."**
 
 ---
 
-## CORE-001 — layout.tsx files not discovered or applied
+## CORE-001 - layout.tsx files not discovered or applied
 
 **Status:** Fixed in P3.7
 
@@ -32,7 +32,7 @@ rendered content, producing malformed HTML.
 
 ---
 
-## CORE-002 — `revalidate = false` produces `cacheMaxAge = 0`
+## CORE-002 - `revalidate = false` produces `cacheMaxAge = 0`
 
 **Status:** Fixed in P3.7
 
@@ -66,7 +66,7 @@ and HTTP caches.
 
 ---
 
-## CORE-003 — No server-side redirect support in `getServerSideProps`
+## CORE-003 - No server-side redirect support in `getServerSideProps`
 
 **Status:** Fixed in P3.7
 
@@ -103,11 +103,11 @@ an `IPCResponse` with status 301 (permanent) or 302 (temporary) and a `location`
 
 ---
 
-## Pre-publish audit — 10 issues fixed (2026-05-26)
+## Pre-publish audit - 10 issues fixed (2026-05-26)
 
 The following issues were identified and fixed before the first public release.
 
-### PUB-001 — giojs-react missing `files` field and dist configuration
+### PUB-001 - giojs-react missing `files` field and dist configuration
 
 **Files:** `packages/giojs-react/package.json`, `packages/giojs-react/tsconfig.build.json`
 
@@ -117,7 +117,7 @@ The following issues were identified and fixed before the first public release.
 
 ---
 
-### PUB-002 — giojs-core missing `files` field
+### PUB-002 - giojs-core missing `files` field
 
 **File:** `packages/giojs-core/package.json`
 
@@ -127,7 +127,7 @@ The following issues were identified and fixed before the first public release.
 
 ---
 
-### PUB-003 — IPC writer/reader tasks silently die on socket error (no reconnect)
+### PUB-003 - IPC writer/reader tasks silently die on socket error (no reconnect)
 
 **File:** `crates/giojs-server/src/ipc.rs`
 
@@ -137,7 +137,7 @@ The following issues were identified and fixed before the first public release.
 
 ---
 
-### PUB-004 — `useWebSocket` crashes during SSR
+### PUB-004 - `useWebSocket` crashes during SSR
 
 **File:** `packages/giojs-react/src/hooks/useWebSocket.ts`
 
@@ -147,7 +147,7 @@ The following issues were identified and fixed before the first public release.
 
 ---
 
-### PUB-005 — `/_gio/metrics` endpoint unauthenticated
+### PUB-005 - `/_gio/metrics` endpoint unauthenticated
 
 **Files:** `crates/giojs-server/src/config.rs`, `crates/giojs-server/src/main.rs`
 
@@ -157,7 +157,7 @@ The following issues were identified and fixed before the first public release.
 
 ---
 
-### PUB-006 — Bootstrap script paths interpolated unescaped into HTML attributes
+### PUB-006 - Bootstrap script paths interpolated unescaped into HTML attributes
 
 **File:** `packages/giojs-core/src/ssr.ts`
 
@@ -167,7 +167,7 @@ The following issues were identified and fixed before the first public release.
 
 ---
 
-### PUB-007 — IPC socket in `/tmp` with world-accessible permissions
+### PUB-007 - IPC socket in `/tmp` with world-accessible permissions
 
 **Files:** `packages/giojs-core/src/ipc.ts`, `crates/giojs-server/src/ipc.rs`
 
@@ -177,7 +177,7 @@ The following issues were identified and fixed before the first public release.
 
 ---
 
-### PUB-008 — Prometheus label values not escaped
+### PUB-008 - Prometheus label values not escaped
 
 **File:** `crates/giojs-server/src/metrics.rs`
 
@@ -187,7 +187,7 @@ The following issues were identified and fixed before the first public release.
 
 ---
 
-### PUB-009 — `prefetchCache` in `GioLink` grows without bound
+### PUB-009 - `prefetchCache` in `GioLink` grows without bound
 
 **File:** `packages/giojs-react/src/Link.tsx`
 
@@ -197,7 +197,7 @@ The following issues were identified and fixed before the first public release.
 
 ---
 
-### PUB-010 — Integer overflow when encoding large IPC frames
+### PUB-010 - Integer overflow when encoding large IPC frames
 
 **File:** `crates/giojs-server/src/ipc.rs`
 

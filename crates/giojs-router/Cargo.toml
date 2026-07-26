@@ -4,4 +4,4 @@ version = "0.1.0-beta.1"
 edition = "2021"
 
 [dependencies]
-# no external deps — pure trie logic
+# no external deps - pure trie logic

@@ -14,7 +14,7 @@ use crate::disk::DiskLayer;
 use crate::memory::MemoryLayer;
 use crate::{CacheEntry, CacheError};
 
-/// Raw entry storage. Holds no TTL / deployment-ID / SWR policy — that lives in
+/// Raw entry storage. Holds no TTL / deployment-ID / SWR policy - that lives in
 /// `PageCache`. Implementations only store and retrieve entries by key.
 pub trait CacheBackend: Send + Sync {
     fn get(&self, key: &str) -> impl Future<Output = Option<CacheEntry>> + Send;

@@ -21,7 +21,7 @@ export async function getServerSideProps(ctx) {
       <h2>Redirects</h2>
       <p>Return a redirect instead of props to send the visitor elsewhere.</p>
       <CodeBlock lang="tsx" code={`return { redirect: { destination: '/login', permanent: false } };`} />
-      <div className="callout">Never fetch data inside the component body — it runs during SSR and inflates time-to-first-byte. Use getServerSideProps.</div>
+      <div className="callout">Never fetch data inside the component body - it runs during SSR and inflates time-to-first-byte. Use getServerSideProps.</div>
     </>
   );
 }

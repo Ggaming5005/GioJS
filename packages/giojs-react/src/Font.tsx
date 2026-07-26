@@ -1,7 +1,7 @@
 /**
  * packages/giojs-react/src/Font.tsx
  *
- * Declarative font registration. No runtime output — the server reads
+ * Declarative font registration. No runtime output - the server reads
  * [[fonts]] from gio.toml and injects preload + @font-face CSS into <head>.
  * This component exists as a typed marker for tooling; it renders nothing.
  */

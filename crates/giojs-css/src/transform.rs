@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn invalid_css_returns_error() {
-        let css = ".button { color: ; }"; // missing value — lightningcss may or may not error
+        let css = ".button { color: ; }"; // missing value - lightningcss may or may not error
                                           // We just ensure it doesn't panic; it may succeed with recovery or error
         let _ = transformer(false).transform(css, "styles.css");
     }

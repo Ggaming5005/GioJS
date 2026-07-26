@@ -12,7 +12,7 @@ export default function Page(): React.JSX.Element {
 
       <p>
         A <code>route.ts</code> (or <code>route.js</code>) file turns its folder into a
-        server endpoint. Export a function per HTTP method — <code>GET</code>,{' '}
+        server endpoint. Export a function per HTTP method - <code>GET</code>,{' '}
         <code>POST</code>, <code>PUT</code>, <code>PATCH</code>, <code>DELETE</code>:
       </p>
       <CodeBlock lang="ts" code={`// app/api/notes/[id]/route.ts
@@ -35,10 +35,10 @@ export async function POST(req: GioRequest) {
 
       <h2>What you can return</h2>
       <ul>
-        <li>Any JSON-serializable value — sent as <code>application/json</code> with status 200.</li>
-        <li>A web-standard <code>Response</code> — its status, headers, and body pass through.</li>
-        <li><code>null</code> / <code>undefined</code> — 204 No Content.</li>
-        <li>A <code>GioEventStream</code> (GET only) — switches the connection to SSE.</li>
+        <li>Any JSON-serializable value - sent as <code>application/json</code> with status 200.</li>
+        <li>A web-standard <code>Response</code> - its status, headers, and body pass through.</li>
+        <li><code>null</code> / <code>undefined</code> - 204 No Content.</li>
+        <li>A <code>GioEventStream</code> (GET only) - switches the connection to SSE.</li>
       </ul>
       <CodeBlock lang="ts" code={`export function DELETE() {
   return new Response('gone', { status: 202, headers: { 'X-Reason': 'cleanup' } });
@@ -57,12 +57,12 @@ export function GET() {
 
       <h2>Rules</h2>
       <ul>
-        <li>Handler responses are never cached or coalesced — every request runs your code.</li>
+        <li>Handler responses are never cached or coalesced - every request runs your code.</li>
         <li>Requests for methods you didn&apos;t export get <code>405</code> with an <code>Allow</code> header.</li>
         <li>A GET without a GET handler falls through to a sibling <code>page.tsx</code> if one exists.</li>
-        <li>Pages only answer GET/HEAD — mutations belong in route handlers.</li>
+        <li>Pages only answer GET/HEAD - mutations belong in route handlers.</li>
         <li>A thrown error is logged server-side and answered with a JSON 500 (no internals leaked).</li>
-        <li>Export <code>wsHandler</code> from the same file for WebSockets — see the WebSockets page.</li>
+        <li>Export <code>wsHandler</code> from the same file for WebSockets - see the WebSockets page.</li>
       </ul>
     </>
   );

@@ -2,7 +2,7 @@
  * packages/giojs-react/src/animate-observer.ts
  *
  * Singleton IntersectionObserver for entrance animations. Shared across all
- * Animate instances — one observer handles every animated element on the page.
+ * Animate instances - one observer handles every animated element on the page.
  * Every DOM access is guarded so this module is safe to import in SSR context.
  */
 

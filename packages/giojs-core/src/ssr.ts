@@ -96,7 +96,7 @@ function makeGioRequest(req: IPCRequest, params: Record<string, string>): GioReq
     bodyBase64: req.bodyBase64,
     json<T = unknown>(): T {
       if (req.body === null) throw new Error('request has no body');
-      if (req.bodyBase64) throw new Error('request body is binary (base64) — decode it manually');
+      if (req.bodyBase64) throw new Error('request body is binary (base64) - decode it manually');
       return JSON.parse(req.body) as T;
     },
     locale: req.locale,
@@ -173,7 +173,7 @@ const OBSERVER_SCRIPT = `<script>(function(){var o=new IntersectionObserver(func
  * to `out/404.html` on static export, so every deployed site returns a real
  * 404 for unknown paths by default (add app/not-found.* to customize it).
  */
-export const BUILTIN_404_HTML = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>404 — Page not found</title><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0a09;color:#e7e5e4;font-family:system-ui,-apple-system,sans-serif}main{text-align:center;padding:2rem}p.code{font-family:ui-monospace,monospace;font-size:.8rem;letter-spacing:.2em;opacity:.55;margin:0 0 .6rem}h1{font-size:2rem;margin:0 0 .6rem;font-weight:650}p.hint{opacity:.7;margin:0 0 1.5rem}a{color:#0b0a09;background:#e7e5e4;text-decoration:none;padding:.55rem 1.1rem;border-radius:999px;font-weight:600;font-size:.9rem}</style></head><body><main><p class="code">HTTP 404</p><h1>Page not found</h1><p class="hint">This page doesn't exist or was moved.</p><a href="/">Go home</a></main></body></html>`;
+export const BUILTIN_404_HTML = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>404 - Page not found</title><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0a09;color:#e7e5e4;font-family:system-ui,-apple-system,sans-serif}main{text-align:center;padding:2rem}p.code{font-family:ui-monospace,monospace;font-size:.8rem;letter-spacing:.2em;opacity:.55;margin:0 0 .6rem}h1{font-size:2rem;margin:0 0 .6rem;font-weight:650}p.hint{opacity:.7;margin:0 0 1.5rem}a{color:#0b0a09;background:#e7e5e4;text-decoration:none;padding:.55rem 1.1rem;border-radius:999px;font-weight:600;font-size:.9rem}</style></head><body><main><p class="code">HTTP 404</p><h1>Page not found</h1><p class="hint">This page doesn't exist or was moved.</p><a href="/">Go home</a></main></body></html>`;
 
 function wrapWithDocument(inner: string): string {
   // The #__gio boundary and bootstrap module scripts are rendered by React
@@ -185,7 +185,7 @@ function wrapWithDocument(inner: string): string {
 /**
  * Serialize the hydration envelope for the `#__gio_props` JSON script.
  * `<` is escaped so props containing `</script>` (or `<!--`) can never
- * terminate the script element early — the classic serialization XSS.
+ * terminate the script element early - the classic serialization XSS.
  * Returns null when props are not JSON-serializable; the page then renders
  * server-only instead of hydrating with wrong data.
  */
@@ -232,7 +232,7 @@ function isIPCResponse(value: IPCOutbound): value is IPCResponse {
   return 'status' in value;
 }
 
-/** Plugins are user code — verify the shape at runtime, not just via types. */
+/** Plugins are user code - verify the shape at runtime, not just via types. */
 function isPluginResponse(value: IPCRequest | IPCResponse): value is IPCResponse {
   return isRecord(value) && typeof value['status'] === 'number' && typeof value['body'] === 'string';
 }
@@ -299,7 +299,7 @@ export async function renderRoute(
   try {
     const pageModule = await match.module.load();
 
-    // Legacy SSE shape — a page module exporting GET(req) → GioEventStream.
+    // Legacy SSE shape - a page module exporting GET(req) → GioEventStream.
     // route.ts handlers are the supported home for SSE; this stays for
     // back-compat.
     if (pageModule.GET !== undefined) {
@@ -375,7 +375,7 @@ export async function renderRoute(
         ? serializeEnvelope({ props, path: req.path, pattern, entry: entryScript })
         : null;
     if (entryScript !== undefined && envelopeJson === null) {
-      logger.warn('props are not JSON-serializable — page will render without hydration', {
+      logger.warn('props are not JSON-serializable - page will render without hydration', {
         path: req.path,
       });
     }
@@ -423,7 +423,7 @@ export async function renderRoute(
     if (gsspHeaders !== null && cacheable) {
       // Response headers from gSSP are per-request (set-cookie above all);
       // caching them would replay one user's headers to everyone.
-      logger.warn('getServerSideProps returned headers — page made uncacheable', {
+      logger.warn('getServerSideProps returned headers - page made uncacheable', {
         path: req.path,
       });
       cacheable = false;
@@ -545,7 +545,7 @@ async function runRouteHandler(
 /**
  * Render a special page (404/500) through the normal layout pipeline,
  * server-only (no hydration envelope). Returns null when the page is absent
- * or its render fails — callers fall back to the built-in plain response.
+ * or its render fails - callers fall back to the built-in plain response.
  */
 async function renderSpecialPage(
   req: IPCRequest,
@@ -598,7 +598,7 @@ async function renderSpecialPage(
       cacheMaxAge: 0,
     };
   } catch (specialError) {
-    logger.error('special page render failed — falling back to built-in response', {
+    logger.error('special page render failed - falling back to built-in response', {
       path: req.path,
       status,
       error: specialError instanceof Error ? specialError.message : String(specialError),

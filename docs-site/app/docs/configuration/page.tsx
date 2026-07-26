@@ -9,7 +9,7 @@ export default function ConfigurationPage(): React.JSX.Element {
       <h1>Configuration</h1>
       <p className="page-subtitle">
         All GioJS configuration lives in <code>gio.toml</code> at the project root.
-        Every field is optional — defaults are production-ready.
+        Every field is optional - defaults are production-ready.
       </p>
 
       <h2>Full reference</h2>
@@ -58,7 +58,7 @@ destination = "http://internal-api/:path*"`} />
       <h2>Health &amp; metrics</h2>
       <p>
         GioJS serves two built-in observability endpoints directly from the Rust
-        layer — no Node round-trip, so they stay responsive even under load:
+        layer - no Node round-trip, so they stay responsive even under load:
       </p>
       <table>
         <thead>
@@ -68,7 +68,7 @@ destination = "http://internal-api/:path*"`} />
           <tr>
             <td><code>/_gio/health</code></td>
             <td>always on</td>
-            <td>Liveness probe — returns <code>200</code> once the server and the Node SSR worker are ready. Point your load balancer or container healthcheck here.</td>
+            <td>Liveness probe - returns <code>200</code> once the server and the Node SSR worker are ready. Point your load balancer or container healthcheck here.</td>
           </tr>
           <tr>
             <td><code>/_gio/metrics</code></td>
@@ -84,7 +84,7 @@ destination = "http://internal-api/:path*"`} />
       <CodeBlock lang="toml" code={`[metrics]
 enabled = true          # serve /_gio/metrics
 
-# Secure it for production — use either or both:
+# Secure it for production - use either or both:
 token        = "a-long-random-secret"     # require Authorization: Bearer <token>
 ip_allowlist = ["10.0.0.5", "10.0.0.6"]   # only allow these client IPs`} />
       <CodeBlock lang="bash" code={`# Scrape with a token:
@@ -92,7 +92,7 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
   http://localhost:3000/_gio/metrics`} />
       <div className="callout">
         With <code>enabled = true</code> but no <code>token</code> or
-        <code>ip_allowlist</code>, GioJS logs a warning at startup —
+        <code>ip_allowlist</code>, GioJS logs a warning at startup -
         unauthenticated metrics are fine on localhost but should never face the
         public internet.
       </div>
@@ -126,7 +126,7 @@ export const revalidate = 60;
 // (omit the export)`} />
       <div className="callout">
         <code>revalidate = false</code> maps to a one-year TTL (31536000 seconds) in the
-        Rust cache layer — the standard sentinel for "cache indefinitely."
+        Rust cache layer - the standard sentinel for "cache indefinitely."
       </div>
     </>
   );

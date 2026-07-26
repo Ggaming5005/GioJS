@@ -134,7 +134,7 @@ export async function navigateTo(
   } else {
     const fetched = await fetchPageHtml(href);
     if (fetched === null) {
-      // Deployment changed — navigate to the new URL with a fresh load.
+      // Deployment changed - navigate to the new URL with a fresh load.
       window.location.href = href;
       return;
     }

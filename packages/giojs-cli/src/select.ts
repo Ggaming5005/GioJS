@@ -36,7 +36,7 @@ export async function select<T>(
   const output = process.stdout;
 
   // Without an interactive TTY (CI, piped input) there is no way to capture
-  // keystrokes — return the default rather than blocking forever.
+  // keystrokes - return the default rather than blocking forever.
   if (!input.isTTY || choices.length === 0) {
     const fallback = choices[initial] ?? choices[0];
     if (!fallback) throw new Error('select() requires at least one choice');

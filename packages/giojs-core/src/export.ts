@@ -13,7 +13,7 @@ import { discoverRoutes, discoverLayouts, discoverSpecialPages } from './router.
 import { renderRoute } from './ssr.ts';
 import type { IPCRequest, IPCResponse } from './context.ts';
 
-// Tells the SSR pipeline this is a static build — no client bundle to hydrate,
+// Tells the SSR pipeline this is a static build - no client bundle to hydrate,
 // so no /_next bootstrap script is injected.
 process.env.GIO_EXPORT = '1';
 
@@ -83,7 +83,7 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
       const out = await renderRoute(makeRequest(target.path, target.params), routes, layouts);
 
       if ('type' in out && out.type === 'sse') {
-        skipped.push({ route: target.path, reason: 'streaming/SSE route — server only' });
+        skipped.push({ route: target.path, reason: 'streaming/SSE route - server only' });
         continue;
       }
       if ('error' in out && out.error) {
@@ -98,7 +98,7 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
         await writeFile(file, res.body, 'utf8');
         written.push(target.path);
       } else if (res.status >= 300 && res.status < 400) {
-        skipped.push({ route: target.path, reason: `redirect (${res.status}) — server only` });
+        skipped.push({ route: target.path, reason: `redirect (${res.status}) - server only` });
       } else {
         skipped.push({ route: target.path, reason: `status ${res.status}` });
       }
@@ -107,7 +107,7 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
 
   // 404.html: static hosts (Cloudflare Pages, GitHub Pages, Netlify) serve it
   // with a real 404 status for unmatched paths. Without it, Cloudflare Pages
-  // falls back to index.html — every unknown URL would 200 with the home page.
+  // falls back to index.html - every unknown URL would 200 with the home page.
   // Renders app/not-found.* through the layout pipeline, or the built-in 404.
   const specialPages = await discoverSpecialPages(appDir);
   const notFoundOut = await renderRoute(

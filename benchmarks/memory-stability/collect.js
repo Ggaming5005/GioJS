@@ -59,7 +59,7 @@ const nextDrift = nextEnd - nextStart;
 
 const now = new Date().toISOString().slice(0, 10);
 
-const report = `# GioJS vs Next.js 15 — Memory Stability
+const report = `# GioJS vs Next.js 15 - Memory Stability
 
 ## Test Configuration
 

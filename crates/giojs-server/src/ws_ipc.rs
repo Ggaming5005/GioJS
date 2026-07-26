@@ -1,6 +1,6 @@
 //! ws_ipc.rs
 //!
-//! WS IPC client — connects to Node's second named pipe / Unix socket,
+//! WS IPC client - connects to Node's second named pipe / Unix socket,
 //! forwards WebSocket events using the same 4-byte length-prefixed JSON
 //! framing as the HTTP IPC channel. Binary WebSocket payloads cross the
 //! pipe base64-encoded with `isBinary: true`; text payloads pass through
@@ -104,7 +104,7 @@ impl WsIpcClient {
         // length prefix. (Pre-framing here double-prefixed every frame and
         // Node dropped them all as non-JSON.)
         if self.write_tx.try_send(Bytes::from(payload)).is_err() {
-            warn!("WS IPC write channel full or closed — dropping frame");
+            warn!("WS IPC write channel full or closed - dropping frame");
         }
     }
 }

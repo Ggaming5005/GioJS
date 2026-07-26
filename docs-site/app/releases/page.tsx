@@ -1,7 +1,7 @@
 /**
  * docs-site/app/releases/page.tsx
  *
- * Top-level /releases page (changelog) as a card timeline — newest first, the
+ * Top-level /releases page (changelog) as a card timeline - newest first, the
  * latest release glows. Standalone (root layout only), linked from the nav.
  */
 import React from 'react';
@@ -27,11 +27,11 @@ const RELEASES: Release[] = [
       {
         title: 'New',
         items: [
-          'Client-side hydration: per-route esbuild bundles, a #__gio hydration boundary, and props serialized safely into the page — interactive React with zero hydration-mismatch surface. getServerSideProps and its server-only imports are stripped from client bundles.',
-          'API routes: route.ts files export GET/POST/PUT/PATCH/DELETE handlers receiving params, query, headers, parsed cookies, and the request body — return JSON, a web Response, or a GioEventStream (SSE). Unexported methods get a proper 405.',
-          'getServerSideProps now receives the full request (method, path, headers, cookies) and can return response headers like set-cookie — such pages are automatically uncacheable.',
+          'Client-side hydration: per-route esbuild bundles, a #__gio hydration boundary, and props serialized safely into the page - interactive React with zero hydration-mismatch surface. getServerSideProps and its server-only imports are stripped from client bundles.',
+          'API routes: route.ts files export GET/POST/PUT/PATCH/DELETE handlers receiving params, query, headers, parsed cookies, and the request body - return JSON, a web Response, or a GioEventStream (SSE). Unexported methods get a proper 405.',
+          'getServerSideProps now receives the full request (method, path, headers, cookies) and can return response headers like set-cookie - such pages are automatically uncacheable.',
           'app/not-found.tsx and app/error.tsx render real 404/500 pages through your layouts; static export writes 404.html so hosts like Cloudflare Pages return a real 404 for unknown URLs instead of the home page.',
-          'Dev watch mode: edit a file and the server clears caches, restarts the worker, and reloads your browser — about 1.5 seconds edit-to-browser.',
+          'Dev watch mode: edit a file and the server clears caches, restarts the worker, and reloads your browser - about 1.5 seconds edit-to-browser.',
           'Alpine/musl Linux binaries (@gio.js/server-linux-x64-musl) with automatic libc detection.',
         ],
       },
@@ -40,7 +40,7 @@ const RELEASES: Release[] = [
         items: [
           'The Node worker is supervised: crashes respawn in ~300 ms instead of taking the server down, and a hard-killed server can never orphan the worker (Windows Job Objects).',
           'Renders are never shared across users: coalescing is credential-aware and only ever shares explicitly cacheable pages.',
-          'The IPC boundary is versioned (enforced at handshake), authenticated with per-instance tokens, and carries request bodies — binary-safe — plus vary/cacheTags/cancel frames.',
+          'The IPC boundary is versioned (enforced at handshake), authenticated with per-instance tokens, and carries request bodies - binary-safe - plus vary/cacheTags/cancel frames.',
           'Client disconnects and timeouts now abort in-flight React renders instead of finishing work nobody reads.',
           'All @gio.js/* packages, platform binaries, and templates are version-locked; releases publish with npm provenance; CI runs a real Rust↔Node integration suite on Linux and Windows.',
         ],
@@ -77,12 +77,12 @@ const RELEASES: Release[] = [
   {
     version: '0.1.0-beta.2',
     date: 'June 2, 2026',
-    summary: 'Static export — build to plain HTML and deploy anywhere, for free.',
+    summary: 'Static export - build to plain HTML and deploy anywhere, for free.',
     groups: [
       {
         title: 'New',
         items: [
-          'Static export: gio export pre-renders your whole app to out/ as plain HTML — deploy free to Cloudflare Pages, GitHub Pages, or any static host.',
+          'Static export: gio export pre-renders your whole app to out/ as plain HTML - deploy free to Cloudflare Pages, GitHub Pages, or any static host.',
           'create-giojs now asks "Server app or Static site?" and wires npm run build accordingly (gio export for static).',
           'getStaticPaths() convention to pre-render dynamic routes during export.',
           'getServerSideProps runs at build time, baking its data into the exported HTML.',
@@ -99,7 +99,7 @@ const RELEASES: Release[] = [
         title: 'Highlights',
         items: [
           'Published to npm: @gio.js/server, @gio.js/core, @gio.js/react, create-giojs, and prebuilt platform binaries (linux-x64, win32-x64, darwin-x64, darwin-arm64).',
-          'npm create giojs@latest — interactive scaffolder with an arrow-key picker for TypeScript / JavaScript.',
+          'npm create giojs@latest - interactive scaffolder with an arrow-key picker for TypeScript / JavaScript.',
         ],
       },
       {

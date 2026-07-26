@@ -59,25 +59,25 @@ to `giojs` dependencies.
 
 ### Bug 4: CSS import in layout.tsx crashing tsx SSR
 **File:** `packages/giojs-cli/templates/default/app/layout.tsx`
-**Symptom:** `Unknown file extension ".css"` — tsx/esbuild cannot process CSS during SSR.
+**Symptom:** `Unknown file extension ".css"` - tsx/esbuild cannot process CSS during SSR.
 **Fix:** Removed `import '@/styles/globals.css'`; replaced with
 `<link rel="stylesheet" href="/public/styles/globals.css" />` in the `<head>`.
 Moved `styles/globals.css` to `public/styles/globals.css` so Rust's ServeDir serves it.
 
 ### Bug 5: Unescaped apostrophe in template page.tsx
 **File:** `packages/giojs-cli/templates/default/app/page.tsx` (line 14)
-**Symptom:** esbuild transform error `Expected "}" but found "s"` — the apostrophe in
+**Symptom:** esbuild transform error `Expected "}" but found "s"` - the apostrophe in
 `Vercel's` inside a single-quoted string terminated the string early.
 **Fix:** Changed single quotes to double quotes on that string literal.
 
 ### Bug 6: `giojs-react` peer dependency too strict
 **File:** `packages/giojs-react/package.json`
-**Symptom:** `ERESOLVE` — peer dep required `react@^19.0.0` but the template used React 18.
+**Symptom:** `ERESOLVE` - peer dep required `react@^19.0.0` but the template used React 18.
 **Fix:** Changed peerDependency to `^18.0.0 || ^19.0.0`; updated template to React 19.
 
 ### Bug 7: `getServerSideProps` props not extracted from `{ props: {...} }` wrapper
 **File:** `packages/giojs-core/src/ssr.ts` (line 170)
-**Symptom:** `Cannot read properties of undefined (reading 'title')` — the SSR renderer
+**Symptom:** `Cannot read properties of undefined (reading 'title')` - the SSR renderer
 assigned the full `{ props: { post } }` return value as component props instead of
 extracting `.props`, so `post` was always `undefined`.
 **Fix:** Added detection for the `{ props: {...} }` Next.js convention:
@@ -99,7 +99,7 @@ response to `{"status":"ok","http2":false,"tls":false}`.
 
 ### Bug 9: `.npmignore` too aggressive for `giojs-react`
 **File:** `packages/giojs-react/.npmignore`
-**Symptom:** Tarball contained only `package.json` — all source files excluded.
+**Symptom:** Tarball contained only `package.json` - all source files excluded.
 Since `giojs-react` is a tsx-first package (no build step), source must ship.
 **Fix:** Changed `.npmignore` to only exclude test files and tsconfig; kept all `src/`.
 

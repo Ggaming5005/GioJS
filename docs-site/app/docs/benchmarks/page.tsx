@@ -7,12 +7,12 @@ export default function BenchmarksPage(): React.JSX.Element {
     <>
       <h1>Benchmarks</h1>
       <p className="page-subtitle">
-        GioJS keeps memory flat under sustained load because Rust owns the HTTP layer —
+        GioJS keeps memory flat under sustained load because Rust owns the HTTP layer -
         cache hits never allocate in Node. Self-hosted Next.js allocates in the Node event
         loop for every request, including cache hits.
       </p>
 
-      <h2>Memory stability — GioJS vs Next.js 15</h2>
+      <h2>Memory stability - GioJS vs Next.js 15</h2>
       <p>
         Methodology: 50 concurrent connections, 60 seconds, 3 runs each.
         RSS sampled every 5 seconds. Median across runs.
@@ -51,12 +51,12 @@ export default function BenchmarksPage(): React.JSX.Element {
       <h2>Why GioJS stays flat</h2>
       <p>
         In self-hosted Next.js, the Node.js HTTP layer allocates a new buffer for every
-        incoming request — even when the response is a cache hit. Under 50 req/s, GC
+        incoming request - even when the response is a cache hit. Under 50 req/s, GC
         pressure grows continuously and RSS climbs 2–5 MB per minute.
       </p>
       <p>
         GioJS routes HTTP in Rust. A cache hit in the Rust layer is zero bytes allocated in
-        Node — the response is served directly from the LRU without touching the V8 heap.
+        Node - the response is served directly from the LRU without touching the V8 heap.
         Only cache misses cross the IPC boundary to Node for rendering.
       </p>
 
@@ -67,7 +67,7 @@ export default function BenchmarksPage(): React.JSX.Element {
         Next.js on the same hardware: ~8,000 req/s with p99 ~12ms.
       </p>
       <p>
-        For dynamic pages (cache misses), throughput is similar — both are bounded by React
+        For dynamic pages (cache misses), throughput is similar - both are bounded by React
         render time.
       </p>
 
@@ -76,10 +76,10 @@ export default function BenchmarksPage(): React.JSX.Element {
         The benchmark infrastructure lives in <code>benchmarks/memory-stability/</code>:
       </p>
       <ul>
-        <li><code>run-benchmark.ps1</code> — Windows PowerShell script</li>
-        <li><code>run-benchmark.sh</code> — Linux/macOS bash script</li>
-        <li><code>collect.js</code> — parses raw samples, computes medians, writes the markdown table</li>
-        <li><code>baseline-nextjs/</code> — the Next.js 15 app used as a baseline</li>
+        <li><code>run-benchmark.ps1</code> - Windows PowerShell script</li>
+        <li><code>run-benchmark.sh</code> - Linux/macOS bash script</li>
+        <li><code>collect.js</code> - parses raw samples, computes medians, writes the markdown table</li>
+        <li><code>baseline-nextjs/</code> - the Next.js 15 app used as a baseline</li>
       </ul>
     </>
   );

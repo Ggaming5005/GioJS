@@ -93,10 +93,10 @@ export function createIPCServer(
 
       if (!ackReceived) {
         if (msg['type'] === 'ack') {
-          // Only a client that knows the instance token may drive renders —
+          // Only a client that knows the instance token may drive renders -
           // a foreign local process connecting to the pipe is cut off here.
           if (IPC_TOKEN !== '' && msg['token'] !== handshakeProof(IPC_TOKEN, 'ack')) {
-            logger.error('ack token mismatch — destroying connection');
+            logger.error('ack token mismatch - destroying connection');
             socket.destroy();
             return;
           }
@@ -112,7 +112,7 @@ export function createIPCServer(
         return;
       }
 
-      // Browser disconnected from SSE — run cleanup
+      // Browser disconnected from SSE - run cleanup
       if (msg['type'] === 'sse_close') {
         if (typeof msg['id'] !== 'string') {
           logger.warn('sse_close frame missing string id');
@@ -221,7 +221,7 @@ export function createIPCServer(
         const cleanup = routeResult.stream.handler(sseStream);
         activeSseCleanups.set(req.id, cleanup);
       } catch (handlerError) {
-        // Headers already sent — terminate the stream instead of erroring
+        // Headers already sent - terminate the stream instead of erroring
         logger.error('sse handler threw', {
           id: req.id,
           path: req.path,
@@ -286,7 +286,7 @@ export function createIPCServer(
 
   server.on('error', serverError => {
     if (!listening) {
-      // Startup failure (EADDRINUSE, EACCES, ...) — nothing can recover this.
+      // Startup failure (EADDRINUSE, EACCES, ...) - nothing can recover this.
       logger.error('ipc server failed to start', { error: serverError.message });
       process.exit(1);
     }
@@ -355,7 +355,7 @@ export interface FrameHandlerOptions {
 /**
  * Returns a `data` event handler that accumulates bytes and calls `onFrame`
  * whenever a complete length-prefixed frame arrives. A declared frame length
- * above `maxFrameBytes` triggers `onOversize` and disables the handler — the
+ * above `maxFrameBytes` triggers `onOversize` and disables the handler - the
  * stream is unrecoverable at that point and the caller must drop the socket.
  */
 export function makeFrameHandler(

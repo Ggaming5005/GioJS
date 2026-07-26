@@ -5,7 +5,7 @@ const STRUCTURE = [
   { path: 'app/', desc: 'File-based routes. A page.tsx is a route; layout.tsx wraps the pages beneath it.' },
   { path: 'app/posts/[id]/', desc: 'A dynamic route with server-side data via getServerSideProps.' },
   { path: 'components/', desc: 'Your shared React components.' },
-  { path: 'public/', desc: 'Static files served as-is — images, styles, fonts.' },
+  { path: 'public/', desc: 'Static files served as-is - images, styles, fonts.' },
   { path: 'gio.toml', desc: 'Server configuration: port, HTTP/2, image settings.' },
 ] as const;
 

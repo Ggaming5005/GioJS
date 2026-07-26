@@ -13,7 +13,7 @@ import { initAnimateObserver, observeElement } from './animate-observer.ts';
 // @ts-expect-error global React act environment flag
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-// Default IntersectionObserver stub — jsdom does not implement it.
+// Default IntersectionObserver stub - jsdom does not implement it.
 const mockObserve = vi.fn();
 const mockUnobserve = vi.fn();
 

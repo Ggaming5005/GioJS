@@ -10,7 +10,7 @@ import React from 'react';
 export const revalidate = false;
 
 const FEATURES = [
-  { tag: 'Rust', title: 'HTTP/2 by default', desc: 'Every connection multiplexed and header-compressed — h2c or TLS, zero config.' },
+  { tag: 'Rust', title: 'HTTP/2 by default', desc: 'Every connection multiplexed and header-compressed - h2c or TLS, zero config.' },
   { tag: 'Rust', title: 'Image optimization', desc: 'AVIF → WebP → JPEG with a two-layer cache. CDN-grade, fully self-hosted.' },
   { tag: 'Rust', title: 'ISR page cache', desc: 'Stale-while-revalidate out of the box. Serve cached HTML in microseconds.' },
   { tag: 'Rust', title: 'Brotli compression', desc: 'Zero-copy tower middleware on every response. No Node event-loop cost.' },
@@ -52,7 +52,7 @@ export default function Home(): React.JSX.Element {
       <header className="lp-hero">
         <div className="lp-reveal">
           <span className="lp-pill">
-            <span className="lp-pill__dot" /> v0.1.0 — public beta
+            <span className="lp-pill__dot" /> v0.1.0 - public beta
           </span>
           <h1 className="lp-title">
             Self-hosted React at<br />
@@ -60,7 +60,7 @@ export default function Home(): React.JSX.Element {
           </h1>
           <p className="lp-sub">
             GioJS runs HTTP/2, compression, image optimization, and ISR caching in
-            compiled Rust — while Node renders the React you already know. The same
+            compiled Rust - while Node renders the React you already know. The same
             performance profile as a managed cloud, on any server you own.
           </p>
           <div className="lp-cta">
@@ -101,7 +101,7 @@ export default function Home(): React.JSX.Element {
 
       <section className="lp-section">
         <div className="lp-section__head">
-          <h2>Everything a managed cloud does — in one binary</h2>
+          <h2>Everything a managed cloud does - in one binary</h2>
           <p>The performance features that normally live behind a paywall, compiled into a server you run anywhere.</p>
         </div>
         <div className="lp-grid-cards">
@@ -119,7 +119,7 @@ export default function Home(): React.JSX.Element {
         <div className="lp-split__col">
           <span className="lp-chip lp-chip--rust">Rust</span>
           <h3>owns the hot path</h3>
-          <p>HTTP/2 &amp; TLS, routing, brotli/gzip, image optimization, the ISR cache, static files, and middleware — compiled, zero-GC, microsecond overhead.</p>
+          <p>HTTP/2 &amp; TLS, routing, brotli/gzip, image optimization, the ISR cache, static files, and middleware - compiled, zero-GC, microsecond overhead.</p>
         </div>
         <div className="lp-split__arrow">⇄</div>
         <div className="lp-split__col">

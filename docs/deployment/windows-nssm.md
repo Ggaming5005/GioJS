@@ -5,8 +5,8 @@ Run GioJS as a Windows Service using NSSM (Non-Sucking Service Manager). The ser
 ## Prerequisites
 
 - Windows Server 2019 or Windows 10/11
-- Node.js 20+ (`node --version`) — install via `winget install OpenJS.NodeJS.LTS`
-- NSSM — install via `scoop install nssm` or download from nssm.cc
+- Node.js 20+ (`node --version`) - install via `winget install OpenJS.NodeJS.LTS`
+- NSSM - install via `scoop install nssm` or download from nssm.cc
 - `giojs-server.exe` binary from the GitHub release
 
 ## 1. Deploy the app
@@ -128,7 +128,7 @@ gio build
 Start-Service MyGioApp
 ```
 
-## Redis (optional — multi-instance)
+## Redis (optional - multi-instance)
 
 For deployments with multiple Windows Server nodes sharing a cache:
 

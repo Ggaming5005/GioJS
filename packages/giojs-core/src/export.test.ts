@@ -39,7 +39,7 @@ describe('exportSite 404.html', () => {
     await rm(fixtureRoot, { recursive: true, force: true });
   });
 
-  it('always emits 404.html — built-in page by default', async () => {
+  it('always emits 404.html - built-in page by default', async () => {
     const appDir = join(fixtureRoot, 'default', 'app');
     const outDir = join(fixtureRoot, 'default', 'out');
     await mkdir(appDir, { recursive: true });

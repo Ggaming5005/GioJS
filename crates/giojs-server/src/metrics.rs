@@ -55,7 +55,7 @@ fn zero_buckets() -> Box<[AtomicU64]> {
 }
 
 pub struct Metrics {
-    // gio_requests_total{method,status,cache} — key: "METHOD\x00STATUS\x00CACHE"
+    // gio_requests_total{method,status,cache} - key: "METHOD\x00STATUS\x00CACHE"
     pub requests_total: DashMap<String, AtomicU64>,
 
     // gio_request_duration_seconds histogram
@@ -69,13 +69,13 @@ pub struct Metrics {
     // gio_prefetch_rejected_total
     pub prefetch_rejected_total: AtomicU64,
 
-    // gio_image_processed_total{format} — key: "avif"/"webp"/"jpeg"/"png"
+    // gio_image_processed_total{format} - key: "avif"/"webp"/"jpeg"/"png"
     pub image_processed_total: DashMap<String, AtomicU64>,
 
-    // gio_ratelimit_checked_total{path} — key: path
+    // gio_ratelimit_checked_total{path} - key: path
     pub ratelimit_checked_total: DashMap<String, AtomicU64>,
 
-    // gio_ratelimit_rejected_total{path, rule} — key: "path\x00rule"
+    // gio_ratelimit_rejected_total{path, rule} - key: "path\x00rule"
     pub ratelimit_rejected_total: DashMap<String, AtomicU64>,
 }
 
@@ -352,13 +352,13 @@ mod tests {
     #[test]
     fn histogram_buckets_are_cumulative() {
         let m = Metrics::new();
-        // 3ms observation — should land in 5ms bucket (index 1) and all larger
+        // 3ms observation - should land in 5ms bucket (index 1) and all larger
         m.record_request("GET", 200, "miss", 3_000_000);
-        // 1ms bucket (index 0) — not reached by 3ms
+        // 1ms bucket (index 0) - not reached by 3ms
         assert_eq!(m.request_duration_buckets[0].load(Ordering::Relaxed), 0);
-        // 5ms bucket (index 1) — reached
+        // 5ms bucket (index 1) - reached
         assert_eq!(m.request_duration_buckets[1].load(Ordering::Relaxed), 1);
-        // +Inf bucket (last) — always
+        // +Inf bucket (last) - always
         assert_eq!(
             m.request_duration_buckets[BUCKET_COUNT - 1].load(Ordering::Relaxed),
             1

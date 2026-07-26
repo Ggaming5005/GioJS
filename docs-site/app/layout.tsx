@@ -1,7 +1,7 @@
 /**
  * docs-site/app/layout.tsx
  *
- * Root layout — provides <html>, <head>, and <body>. Presence of this file
+ * Root layout - provides <html>, <head>, and <body>. Presence of this file
  * tells giojs-core to skip the wrapWithDocument fallback.
  */
 import React from 'react';
@@ -18,7 +18,7 @@ export default function RootLayout({ children }: RootLayoutProps): React.JSX.Ele
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>GioJS Documentation</title>
-        <meta name="description" content="GioJS — the Rust-powered React framework. Self-hosted React at Vercel speed: HTTP/2, image optimization, ISR caching, and compression in compiled Rust." />
+        <meta name="description" content="GioJS - the Rust-powered React framework. Self-hosted React at Vercel speed: HTTP/2, image optimization, ISR caching, and compression in compiled Rust." />
         <link rel="icon" href="/favicon.ico" sizes="any" />
         <link rel="icon" type="image/svg+xml" href="/public/giojs-logo.svg" />
         <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
@@ -29,14 +29,14 @@ export default function RootLayout({ children }: RootLayoutProps): React.JSX.Ele
         <meta property="og:type" content="website" />
         <meta property="og:site_name" content="GioJS" />
         <meta property="og:url" content="https://giojs.com" />
-        <meta property="og:title" content="GioJS — the Rust-powered React framework" />
-        <meta property="og:description" content="Self-hosted React at Vercel speed. HTTP/2, image optimization, ISR caching, and compression in compiled Rust — deploy anywhere." />
+        <meta property="og:title" content="GioJS - the Rust-powered React framework" />
+        <meta property="og:description" content="Self-hosted React at Vercel speed. HTTP/2, image optimization, ISR caching, and compression in compiled Rust - deploy anywhere." />
         <meta property="og:image" content="https://giojs.com/public/og.png" />
         <meta property="og:image:width" content="1200" />
         <meta property="og:image:height" content="630" />
-        <meta property="og:image:alt" content="GioJS — self-hosted React at Vercel speed" />
+        <meta property="og:image:alt" content="GioJS - self-hosted React at Vercel speed" />
         <meta name="twitter:card" content="summary_large_image" />
-        <meta name="twitter:title" content="GioJS — the Rust-powered React framework" />
+        <meta name="twitter:title" content="GioJS - the Rust-powered React framework" />
         <meta name="twitter:description" content="Self-hosted React at Vercel speed. HTTP/2, image optimization, ISR caching, and compression in one binary." />
         <meta name="twitter:image" content="https://giojs.com/public/og.png" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />

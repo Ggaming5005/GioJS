@@ -1,4 +1,4 @@
-# Dependency Notes — 0.1.0-beta.1
+# Dependency Notes - 0.1.0-beta.1
 
 **Date:** 2026-05-21
 
@@ -22,7 +22,7 @@ Known workspace dependencies and their current locked versions are in `Cargo.loc
 
 ## npm packages
 
-`npm outdated` returned no output — all packages are at their specified versions.
+`npm outdated` returned no output - all packages are at their specified versions.
 
 ## Notable pinned versions
 

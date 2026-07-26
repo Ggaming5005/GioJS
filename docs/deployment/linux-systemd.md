@@ -132,7 +132,7 @@ sudo ln -s /etc/nginx/sites-available/my-app /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-> **Note:** When using nginx for TLS, keep `server.tls.enabled = false` in `gio.toml`. GioJS can also terminate TLS directly — see `gio.toml` `[server.tls]` section for that path.
+> **Note:** When using nginx for TLS, keep `server.tls.enabled = false` in `gio.toml`. GioJS can also terminate TLS directly - see `gio.toml` `[server.tls]` section for that path.
 
 ## Updating
 

@@ -15,7 +15,7 @@ pub struct I18nConfig {
 
 pub struct LocaleResult {
     pub locale: String,
-    /// De-localized path — locale prefix stripped if path detection matched.
+    /// De-localized path - locale prefix stripped if path detection matched.
     pub path: String,
 }
 
@@ -31,7 +31,7 @@ pub fn detect_locale(
         };
     }
 
-    // Always extract path locale — stripping is structural even if "path" strategy is disabled.
+    // Always extract path locale - stripping is structural even if "path" strategy is disabled.
     let (path_locale, delocalized_path) = extract_path_locale(path, &config.locales);
 
     for strategy in &config.detect_from {
