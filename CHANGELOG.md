@@ -79,7 +79,12 @@ All notable changes to this project will be documented in this file.
   the linux packages carry `libc` fields and `find-binary.js` detects musl at
   runtime via `process.report`, so `npm install` in an Alpine container picks
   the right binary instead of failing with a loader error. npm publishes now
-  carry `--provenance`.
+  carry `--provenance`, and every platform package declares its `repository`
+  so provenance verification passes.
+- **No more OpenSSL.** `reqwest` now uses rustls only
+  (`default-features = false`), removing the transitive `native-tls` and
+  `openssl-sys` dependency. This unblocks the musl build (OpenSSL has no musl
+  target) and satisfies the workspace's no-OpenSSL rule.
 - **A real integration harness** (`tests/integration/run.mjs`, no framework,
   plain node) spawns the actual Rust binary + Node worker against a fixture
   app and verifies end-to-end: SSR with hydration boundary + served chunks,

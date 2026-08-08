@@ -36,7 +36,10 @@ anyhow             = "1"
 sha2               = "0.10"
 lru                = "0.12"
 tokio-stream       = { version = "0.1", features = ["sync"] }
-reqwest            = { version = "0.12", features = ["rustls-tls"] }
+# default-features=false drops reqwest's native-tls (OpenSSL) backend, which
+# has no musl build and broke the Alpine target. rustls-tls is the only TLS
+# backend; http2 + charset restore the useful defaults we still want.
+reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "charset"] }
 hyper              = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util         = { version = "0.1", features = ["tokio", "server-auto"] }
 lightningcss       = { version = "1.0.0-alpha.71", features = ["bundler"] }

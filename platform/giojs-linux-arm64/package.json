@@ -15,6 +15,11 @@
     "bin"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ggaming5005/GioJS.git",
+    "directory": "platform/giojs-linux-arm64"
+  },
   "publishConfig": {
     "access": "public"
   }
