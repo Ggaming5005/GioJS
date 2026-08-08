@@ -34,7 +34,10 @@ jobs:
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl, pkg: giojs-linux-x64-musl, cross: false }
           # linux-arm64 (aarch64 cross-compile) deferred - fails to build under `cross`; re-add once fixed
           - { os: windows-latest, target: x86_64-pc-windows-msvc,    pkg: giojs-win32-x64,      cross: false }
-          - { os: macos-13,       target: x86_64-apple-darwin,       pkg: giojs-darwin-x64,     cross: false }
+          # Intel Mac binary is cross-compiled on the arm64 runner: the macos-13
+          # (Intel) hosted pool is being retired and queues for hours. Apple's
+          # clang cross-compiles x86_64 natively, so macos-14 builds both.
+          - { os: macos-14,       target: x86_64-apple-darwin,       pkg: giojs-darwin-x64,     cross: false }
           - { os: macos-14,       target: aarch64-apple-darwin,      pkg: giojs-darwin-arm64,   cross: false }
 
     steps:
