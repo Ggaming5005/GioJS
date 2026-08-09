@@ -1,0 +1,42 @@
+name: Promote latest
+
+# Moves the npm `latest` dist-tag to the current release version for the
+# published @gio.js/* packages and create-giojs. Runs on demand. Uses the
+# automation NPM_TOKEN, which satisfies the packages' "require 2FA or
+# automation token" write policy (an interactive-login token does not).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to promote to latest (blank = read from packages/giojs/package.json)'
+        required: false
+        default: ''
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Move latest to the release version
+        shell: bash
+        run: |
+          ver="${{ github.event.inputs.version }}"
+          if [ -z "$ver" ]; then
+            ver=$(node -p "require('./packages/giojs/package.json').version")
+          fi
+          echo "Promoting latest -> $ver"
+          for pkg in @gio.js/server @gio.js/core @gio.js/react create-giojs; do
+            if npm view "$pkg@$ver" version >/dev/null 2>&1; then
+              npm dist-tag add "$pkg@$ver" latest
+              echo "  $pkg@$ver -> latest"
+            else
+              echo "  skip: $pkg@$ver not on npm"
+            fi
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -125,3 +125,21 @@ jobs:
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Point `latest` at this release so a plain `npm install @gio.js/*` and
+      # `npm create giojs@latest` get it. The whole project is pre-1.0, so
+      # `latest` should track the newest release; leaving it behind means the
+      # default install resolves an older wrapper whose pinned platform binaries
+      # may no longer exist. Uses the automation token (the packages require a
+      # 2FA or automation token for writes).
+      - name: Move latest to this release
+        shell: bash
+        run: |
+          set -e
+          for pkg in @gio.js/server @gio.js/core @gio.js/react create-giojs; do
+            ver=$(node -p "require('./packages/giojs/package.json').version")
+            npm dist-tag add "$pkg@$ver" latest
+            echo "$pkg@$ver -> latest"
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
