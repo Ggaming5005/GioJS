@@ -35,6 +35,18 @@ function findServerBinary() {
   throw new Error('giojs-server binary not found - run `cargo build -p giojs-server` first');
 }
 
+/**
+ * Failure log tail with the request-completed spam removed - a 90s poll loop
+ * otherwise pushes the one line that explains the failure out of the window.
+ */
+function significantLogTail(log) {
+  return log
+    .split('\n')
+    .filter((line) => !line.includes('request completed'))
+    .slice(-80)
+    .join('\n');
+}
+
 let passed = 0;
 async function test(name, fn) {
   try {
@@ -452,7 +464,7 @@ async function main() {
     console.error('\nintegration: FAILED');
     console.error(err);
     console.error('\n── server log tail ──');
-    console.error(log.split('\n').slice(-40).join('\n'));
+    console.error(significantLogTail(log));
     process.exitCode = 1;
   } finally {
     if (!serverGone) server.kill();
@@ -531,7 +543,7 @@ async function devWatchPhase() {
     console.error('\nintegration (dev watch): FAILED');
     console.error(err);
     console.error('\n── dev server log tail ──');
-    console.error(log.split('\n').slice(-40).join('\n'));
+    console.error(significantLogTail(log));
     process.exitCode = 1;
   } finally {
     if (!serverGone) server.kill();
@@ -669,7 +681,7 @@ async function standalonePhase() {
     console.error('\nintegration (standalone): FAILED');
     console.error(err);
     console.error('\n── standalone log tail ──');
-    console.error(log.split('\n').slice(-40).join('\n'));
+    console.error(significantLogTail(log));
     process.exitCode = 1;
   } finally {
     if (run !== null && !runGone) {
