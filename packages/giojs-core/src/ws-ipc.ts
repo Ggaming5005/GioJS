@@ -91,7 +91,7 @@ export function validateWsInbound(value: unknown): WsInbound | null {
   return null;
 }
 
-class GioSocketImpl implements GioSocket {
+export class GioSocketImpl implements GioSocket {
   private readonly messageHandlers: MessageHandler[] = [];
   private readonly closeHandlers: CloseHandler[] = [];
 
@@ -132,12 +132,26 @@ class GioSocketImpl implements GioSocket {
     }
   }
 
+  // User handlers run inside net socket event listeners; an uncaught throw
+  // there would take down the whole SSR worker, so every callback is guarded.
   _dispatchMessage(data: string | Buffer): void {
-    for (const h of this.messageHandlers) h(data);
+    for (const h of this.messageHandlers) {
+      try {
+        h(data);
+      } catch (cause) {
+        logger.error('ws message handler threw', { connId: this.id, error: String(cause) });
+      }
+    }
   }
 
   _dispatchClose(code: number, reason: string): void {
-    for (const h of this.closeHandlers) h(code, reason);
+    for (const h of this.closeHandlers) {
+      try {
+        h(code, reason);
+      } catch (cause) {
+        logger.error('ws close handler threw', { connId: this.id, error: String(cause) });
+      }
+    }
   }
 }
 
@@ -205,7 +219,17 @@ export function createWsIpcServer(wsHandlers: Map<string, WsHandlerFn>): net.Ser
           const gioSocket = new GioSocketImpl(msg.connId, msg.routeId, writeFrame);
           activeSockets.set(msg.connId, gioSocket);
           const wsHandler = wsHandlers.get(msg.routeId);
-          if (wsHandler !== undefined) wsHandler(gioSocket);
+          if (wsHandler !== undefined) {
+            try {
+              wsHandler(gioSocket);
+            } catch (cause) {
+              logger.error('wsHandler threw on connect', {
+                routeId: msg.routeId,
+                connId: msg.connId,
+                error: String(cause),
+              });
+            }
+          }
 
         } else if (msg.type === 'ws_message') {
           const gioSocket = activeSockets.get(msg.connId);

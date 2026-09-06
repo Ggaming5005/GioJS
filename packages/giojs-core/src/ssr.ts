@@ -6,6 +6,7 @@
  * the cache fields Rust reads (revalidate=false → one-year TTL, not 0).
  * Also handles GET() exports that return GioEventStream (SSE routes).
  */
+import { isUtf8 } from 'node:buffer';
 import React from 'react';
 import { renderToReadableStream } from 'react-dom/server';
 import type { IPCRequest, IPCOutbound, IPCResponse, GioRequest } from './context.ts';
@@ -299,10 +300,12 @@ export async function renderRoute(
   try {
     const pageModule = await match.module.load();
 
-    // Legacy SSE shape - a page module exporting GET(req) → GioEventStream.
-    // route.ts handlers are the supported home for SSE; this stays for
-    // back-compat.
-    if (pageModule.GET !== undefined) {
+    // Legacy SSE shape - a component-less page module exporting GET(req) →
+    // GioEventStream. route.ts handlers are the supported home for SSE; this
+    // stays for back-compat. Pages that DO have a component never get their
+    // GET invoked - calling it per render would execute its side effects
+    // (db writes, counters) once per page view and discard the result.
+    if (pageModule.default === undefined && pageModule.GET !== undefined) {
       const result = pageModule.GET(makeGioRequest(req, match.params));
       if (isGioEventStream(result)) {
         return { type: 'sse', stream: result };
@@ -514,7 +517,19 @@ async function runRouteHandler(
         headers[name.toLowerCase()] = value;
       });
       headers['content-type'] ??= 'text/plain; charset=utf-8';
-      return { ...base, status: result.status, headers, body: await result.text() };
+      // text() would lossily transcode binary payloads (images, pdfs) to
+      // U+FFFD; non-UTF-8 bodies cross base64-encoded like request bodies do.
+      const raw = Buffer.from(await result.arrayBuffer());
+      if (isUtf8(raw)) {
+        return { ...base, status: result.status, headers, body: raw.toString('utf8') };
+      }
+      return {
+        ...base,
+        status: result.status,
+        headers,
+        body: raw.toString('base64'),
+        bodyBase64: true,
+      };
     }
     if (result === undefined || result === null) {
       return { ...base, status: 204, headers: {}, body: '' };

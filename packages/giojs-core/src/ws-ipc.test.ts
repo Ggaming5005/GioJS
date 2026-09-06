@@ -10,6 +10,7 @@ import { Buffer } from 'node:buffer';
 import { describe, it, expect, vi } from 'vitest';
 import type { GioSocket, WsOutbound } from './context.ts';
 import {
+  GioSocketImpl,
   MAX_WS_IPC_FRAME_BYTES,
   createWsIpcServer,
   decodeBinaryPayload,
@@ -177,6 +178,30 @@ describe('GioSocket interface', () => {
     socket._dispatchClose(1000, 'normal');
 
     expect(closeHandler).toHaveBeenCalledWith(1000, 'normal');
+  });
+
+  it('a throwing message handler is contained and later handlers still run', () => {
+    const socket = new GioSocketImpl('conn-1', '/chat', () => {});
+    const secondHandler = vi.fn();
+    socket.on('message', () => {
+      throw new Error('user handler bug');
+    });
+    socket.on('message', secondHandler);
+
+    expect(() => socket._dispatchMessage('payload')).not.toThrow();
+    expect(secondHandler).toHaveBeenCalledWith('payload');
+  });
+
+  it('a throwing close handler is contained and later handlers still run', () => {
+    const socket = new GioSocketImpl('conn-1', '/chat', () => {});
+    const secondHandler = vi.fn();
+    socket.on('close', () => {
+      throw new Error('user close handler bug');
+    });
+    socket.on('close', secondHandler);
+
+    expect(() => socket._dispatchClose(1006, 'abnormal')).not.toThrow();
+    expect(secondHandler).toHaveBeenCalledWith(1006, 'abnormal');
   });
 });
 

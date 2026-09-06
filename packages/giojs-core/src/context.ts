@@ -35,6 +35,11 @@ export interface IPCResponse {
   vary?: string[];
   /** Tags for tag-based cache invalidation; stored with the cache entry. */
   cacheTags?: string[];
+  /**
+   * True when `body` is base64 (a route handler returned a binary Response).
+   * Mirrors the request-side flag of the same name.
+   */
+  bodyBase64?: boolean;
 }
 
 export interface IPCError {

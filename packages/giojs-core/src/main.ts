@@ -21,6 +21,23 @@ import { NodePluginRegistry } from './plugin.ts';
 import { logger } from './logger.ts';
 
 export async function runServer(): Promise<void> {
+  // Last-resort guards: log structured context before the supervisor-driven
+  // respawn instead of dying with a bare stack trace on stderr.
+  process.on('uncaughtException', (error: Error) => {
+    logger.error('uncaught exception - worker exiting for respawn', {
+      error: error.message,
+      stack: error.stack ?? '',
+    });
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (reason: unknown) => {
+    logger.error('unhandled promise rejection - worker exiting for respawn', {
+      error: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? (reason.stack ?? '') : '',
+    });
+    process.exit(1);
+  });
+
   const appDir = process.env.GIO_APP_DIR
     ? process.env.GIO_APP_DIR
     : join(process.cwd(), 'app');

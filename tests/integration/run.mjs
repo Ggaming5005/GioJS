@@ -193,6 +193,18 @@ async function main() {
       assert.deepEqual((await list.json()).notes, ['first note']);
     });
 
+    await test('route.ts binary Response bodies survive the IPC boundary byte-for-byte', async () => {
+      const res = await fetch(`${BASE}/api/binary`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /application\/octet-stream/);
+      const body = Buffer.from(await res.arrayBuffer());
+      assert.deepEqual(
+        body,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x01, 0x80]),
+        'binary payload must not be UTF-8 transcoded',
+      );
+    });
+
     await test('unexported methods get 405 with an Allow header', async () => {
       const res = await fetch(`${BASE}/api/notes`, { method: 'DELETE' });
       assert.equal(res.status, 405);

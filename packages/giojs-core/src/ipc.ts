@@ -36,7 +36,7 @@ const VERSION = '0.1.0';
  * mismatch so a stale binary can never silently drive a newer worker.
  * Mirrors IPC_PROTOCOL_VERSION in giojs-server/src/ipc.rs.
  */
-export const IPC_PROTOCOL_VERSION = 1;
+export const IPC_PROTOCOL_VERSION = 2;
 
 export const MAX_IPC_MESSAGE_SIZE = 64 * 1024 * 1024;
 
@@ -258,8 +258,16 @@ export function createIPCServer(
     });
     socket.on('close', () => {
       logger.info('rust disconnected');
-      // Run all pending SSE cleanups on disconnect
-      for (const cleanup of activeSseCleanups.values()) cleanup();
+      // Run all pending SSE cleanups on disconnect. These are user-supplied
+      // callbacks running inside a net 'close' listener - a throw here would
+      // be an uncaught exception that kills the whole worker.
+      for (const cleanup of activeSseCleanups.values()) {
+        try {
+          cleanup();
+        } catch (cause) {
+          logger.error('sse cleanup threw on disconnect', { error: String(cause) });
+        }
+      }
       activeSseCleanups.clear();
     });
   });
