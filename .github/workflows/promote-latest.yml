@@ -30,7 +30,11 @@ jobs:
             ver=$(node -p "require('./packages/giojs/package.json').version")
           fi
           echo "Promoting latest -> $ver"
-          for pkg in @gio.js/server @gio.js/core @gio.js/react create-giojs; do
+          pkgs="@gio.js/server @gio.js/core @gio.js/react create-giojs"
+          for dir in platform/*/; do
+            pkgs="$pkgs $(node -p "require('./$dir/package.json').name")"
+          done
+          for pkg in $pkgs; do
             if npm view "$pkg@$ver" version >/dev/null 2>&1; then
               npm dist-tag add "$pkg@$ver" latest
               echo "  $pkg@$ver -> latest"

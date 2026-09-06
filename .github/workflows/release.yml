@@ -19,9 +19,76 @@ jobs:
           node-version: '20'
       - run: node scripts/sync-versions.mjs --check
 
+  # A tag from a red commit must not publish. These mirror ci.yml - tag pushes
+  # do not trigger the CI workflow, so the release runs its own gate.
+  rust-tests:
+    name: Rust tests + clippy (${{ matrix.os }})
+    needs: version-lockstep
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace -- -D warnings
+
+  node-tests:
+    name: Node tests + typecheck
+    needs: version-lockstep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: giojs-core tests + typecheck
+        working-directory: packages/giojs-core
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+      - name: giojs-react tests + typecheck
+        working-directory: packages/giojs-react
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+
+  integration:
+    name: Integration (${{ matrix.os }})
+    needs: version-lockstep
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: cargo build -p giojs-server
+      - run: node tests/integration/run.mjs
+
   build-platform:
     name: Build ${{ matrix.pkg }}
-    needs: version-lockstep
+    needs: [rust-tests, node-tests, integration]
     runs-on: ${{ matrix.os }}
     permissions:
       id-token: write
@@ -78,6 +145,10 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Verify tarball contains the binary
+        shell: bash
+        run: node scripts/check-tarballs.mjs platform/${{ matrix.pkg }}
+
       - name: Publish platform package (skip if already published)
         shell: bash
         run: |
@@ -102,10 +173,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: pnpm
           registry-url: 'https://registry.npmjs.org'
+
+      # giojs-react and create-giojs publish compiled dist/ that is not in git.
+      # Skipping this build is how @gio.js/react@0.1.0-beta.5 shipped empty.
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build publishable dist/
+        run: |
+          pnpm --filter @gio.js/react run build
+          pnpm --filter create-giojs run build
+
+      # Refuse to publish any tarball whose entry points are missing.
+      - name: Verify tarball contents
+        run: node scripts/check-tarballs.mjs packages/giojs-react packages/giojs-core packages/giojs packages/giojs-cli
 
       # Publish in dependency order, skipping any version already on npm
       # (so re-runs and partial releases are idempotent).
@@ -128,18 +217,26 @@ jobs:
 
       # Point `latest` at this release so a plain `npm install @gio.js/*` and
       # `npm create giojs@latest` get it. The whole project is pre-1.0, so
-      # `latest` should track the newest release; leaving it behind means the
-      # default install resolves an older wrapper whose pinned platform binaries
-      # may no longer exist. Uses the automation token (the packages require a
-      # 2FA or automation token for writes).
+      # `latest` should track the newest release. Platform binary packages are
+      # promoted too - leaving them behind pins `latest` installs to stale
+      # binaries. Uses the automation token (the packages require a 2FA or
+      # automation token for writes).
       - name: Move latest to this release
         shell: bash
         run: |
           set -e
-          for pkg in @gio.js/server @gio.js/core @gio.js/react create-giojs; do
-            ver=$(node -p "require('./packages/giojs/package.json').version")
-            npm dist-tag add "$pkg@$ver" latest
-            echo "$pkg@$ver -> latest"
+          ver=$(node -p "require('./packages/giojs/package.json').version")
+          pkgs="@gio.js/server @gio.js/core @gio.js/react create-giojs"
+          for dir in platform/*/; do
+            pkgs="$pkgs $(node -p "require('./$dir/package.json').name")"
+          done
+          for pkg in $pkgs; do
+            if npm view "$pkg@$ver" version >/dev/null 2>&1; then
+              npm dist-tag add "$pkg@$ver" latest
+              echo "$pkg@$ver -> latest"
+            else
+              echo "skip: $pkg@$ver not on npm"
+            fi
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
