@@ -5,6 +5,14 @@
  * detects getServerSideProps redirect returns, and maps revalidate semantics to
  * the cache fields Rust reads (revalidate=false → one-year TTL, not 0).
  * Also handles GET() exports that return GioEventStream (SSE routes).
+ *
+ * PPR (`export const shell = 'cache'` + `revalidate`): the render streams with
+ * a shell_end frame at the pre-Suspense boundary so Rust can cache the shell;
+ * skipShell requests re-render the whole page (gSSP reruns with the
+ * requester's cookies) but forward only the post-shell hole chunks. The PPR
+ * contract: the SHELL portion must render identically for every visitor (same
+ * tree structure and bytes for the shared request) - the holes are the only
+ * personalized part.
  */
 import { isUtf8 } from 'node:buffer';
 import React from 'react';
@@ -39,6 +47,12 @@ export interface StreamRenderResult {
   stream: ReadableStream<Uint8Array>;
   prefix: string;
   suffix: string;
+  /**
+   * PPR shell handling: 'mark' emits a shell_end frame at the shell boundary
+   * (Rust caches everything before it), 'discard' drops everything before the
+   * boundary and forwards only the hole chunks (skipShell renders).
+   */
+  shellBoundary?: 'mark' | 'discard';
 }
 
 /** Optional render inputs beyond pages/layouts. */
@@ -456,13 +470,27 @@ export async function renderRoute(
     // buffered so they land in the shared cache, everything rendered
     // per-request streams for TTFB. HEAD stays buffered, and onResponse
     // plugins need the full body.
+    //
+    // PPR (`export const shell = 'cache'`) is the exception: a SHAREABLE page
+    // streams so Rust can cache its pre-Suspense shell (shell_end marks the
+    // boundary). The shell must be shareable - a page that fails the
+    // shareability test falls back to plain streaming. skipShell requests
+    // (Rust re-rendering only the holes for a shell cache hit) always stream.
     const shareable = cacheable && cacheMaxAge > 0;
-    const shouldStream =
+    const streamingAvailable =
       extras?.streaming === true &&
-      !shareable &&
       req.method === 'GET' &&
       process.env.GIO_EXPORT !== '1' &&
       (registry === undefined || !registry.hasResponseInterceptors);
+    const skipShell = req.skipShell === true;
+    if (pageModule.shell === 'cache' && !shareable && !skipShell) {
+      logger.warn(
+        "shell='cache' requires a shareable render (revalidate set, no per-request headers) - falling back",
+        { path: req.path },
+      );
+    }
+    const pprShell = pageModule.shell === 'cache' && shareable && streamingAvailable;
+    const shouldStream = streamingAvailable && (!shareable || pprShell || skipShell);
 
     // Resolves once React's shell is ready; Suspense content streams later.
     const stream = await renderToReadableStream(element, {
@@ -479,6 +507,7 @@ export async function renderRoute(
     });
 
     if (shouldStream) {
+      // A skipShell response must never be cached: its body is holes-only.
       return {
         type: 'stream',
         head: {
@@ -486,13 +515,19 @@ export async function renderRoute(
           status: 200,
           headers: responseHeaders,
           body: '',
-          cacheable,
-          cacheMaxAge,
+          cacheable: skipShell ? false : cacheable,
+          cacheMaxAge: skipShell ? 0 : cacheMaxAge,
           streaming: true,
+          ...(pprShell && !skipShell ? { pprShell: true } : {}),
         },
         stream,
         prefix: rootLayoutEntry !== undefined ? '' : DOCUMENT_PREFIX,
         suffix: rootLayoutEntry !== undefined ? '' : DOCUMENT_SUFFIX,
+        ...(skipShell
+          ? { shellBoundary: 'discard' as const }
+          : pprShell
+            ? { shellBoundary: 'mark' as const }
+            : {}),
       };
     }
 

@@ -34,6 +34,8 @@ const MAX_IPC_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// silently driving a beta-M worker is how protocol drift corrupts renders).
 /// Mirrors IPC_PROTOCOL_VERSION in packages/giojs-core/src/ipc.ts.
 /// v3 added streaming SSR responses (`streaming: true` head + chunk frames).
+/// The PPR fields (shell_end frames, `pprShell`, `skipShell`) are additive
+/// within v3 - both sides default them off.
 const IPC_PROTOCOL_VERSION: u64 = 3;
 
 /// Budget for a full buffered response, for a streaming head frame, and for
@@ -158,6 +160,18 @@ pub struct RouteInfo {
     pub has_ws_handler: bool,
 }
 
+/// One frame of a streaming SSR body (protocol v3, PPR additions included).
+#[derive(Debug, PartialEq)]
+pub enum RenderFrame {
+    Chunk(Bytes),
+    /// PPR (shell='cache'): everything before this frame is the cacheable
+    /// static shell.
+    ShellEnd,
+    /// Body complete - clean end, mid-stream abort, and lost connection alike
+    /// (headers are out either way, so the distinction only affects logging).
+    End,
+}
+
 /// Result of an IPC send - a buffered response, an SSE stream, or a
 /// streaming SSR render (head response plus chunked HTML body).
 pub enum IpcSendResult {
@@ -168,7 +182,7 @@ pub enum IpcSendResult {
     },
     RenderStream {
         response: IpcResponse,
-        body_rx: mpsc::UnboundedReceiver<Option<Bytes>>,
+        body_rx: mpsc::UnboundedReceiver<RenderFrame>,
     },
 }
 
@@ -187,6 +201,10 @@ pub struct IpcRequest {
     #[serde(rename = "deploymentId")]
     pub deployment_id: String,
     pub locale: String,
+    /// PPR holes render: Node renders the page fully but forwards only the
+    /// chunks after the shell boundary (the cached shell was already served).
+    #[serde(rename = "skipShell")]
+    pub skip_shell: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,6 +242,10 @@ pub struct IpcResponse {
     /// is empty and chunk frames follow, terminated by chunk_end.
     #[serde(default)]
     pub streaming: bool,
+    /// PPR: this streamed render marks its shell boundary with a shell_end
+    /// frame; everything before it is the cacheable static shell.
+    #[serde(rename = "pprShell", default)]
+    pub ppr_shell: bool,
 }
 
 /// Materialize a response body: base64-decoded when the worker flagged it
@@ -251,9 +273,9 @@ struct IpcClientInner {
     pending: DashMap<String, oneshot::Sender<IpcSendResult>>,
     /// Channels for active SSE streams: req_id → sender of Option<Bytes> chunks
     sse_streams: DashMap<String, mpsc::UnboundedSender<Option<Bytes>>>,
-    /// Channels for active streaming SSR bodies: req_id → chunk sender.
-    /// None terminates the stream (chunk_end, clean or aborted alike).
-    render_streams: DashMap<String, mpsc::UnboundedSender<Option<Bytes>>>,
+    /// Channels for active streaming SSR bodies: req_id → frame sender.
+    /// RenderFrame::End terminates the stream (chunk_end, clean or aborted).
+    render_streams: DashMap<String, mpsc::UnboundedSender<RenderFrame>>,
     /// Send encoded frames to the background writer task
     write_tx: mpsc::Sender<Bytes>,
     deployment_id: String,
@@ -843,12 +865,20 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                 }
                                 continue;
                             }
-                            // ── Streaming SSR chunk / end (protocol v3) ──
+                            // ── Streaming SSR chunk / shell_end / end (protocol v3) ──
                             Some("chunk") => {
                                 let id = val["id"].as_str().unwrap_or("");
                                 let data = val["data"].as_str().unwrap_or("");
                                 if let Some(tx) = inner.render_streams.get(id) {
-                                    let _ = tx.send(Some(Bytes::from(data.to_owned())));
+                                    let _ =
+                                        tx.send(RenderFrame::Chunk(Bytes::from(data.to_owned())));
+                                }
+                                continue;
+                            }
+                            Some("shell_end") => {
+                                let id = val["id"].as_str().unwrap_or("");
+                                if let Some(tx) = inner.render_streams.get(id) {
+                                    let _ = tx.send(RenderFrame::ShellEnd);
                                 }
                                 continue;
                             }
@@ -860,7 +890,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                     warn!(id = %id, "streaming render aborted mid-stream - body truncated");
                                 }
                                 if let Some((_, tx)) = inner.render_streams.remove(&id) {
-                                    let _ = tx.send(None);
+                                    let _ = tx.send(RenderFrame::End);
                                 }
                                 continue;
                             }
@@ -893,6 +923,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                 vary: Vec::new(),
                                 cache_tags: Vec::new(),
                                 streaming: false,
+                                ppr_shell: false,
                             }
                         } else {
                             match serde_json::from_value::<IpcResponse>(val) {
@@ -932,7 +963,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                 body_rx: rx,
                             }
                         } else if resp.streaming {
-                            let (tx, rx) = mpsc::unbounded_channel::<Option<Bytes>>();
+                            let (tx, rx) = mpsc::unbounded_channel::<RenderFrame>();
                             inner.render_streams.insert(resp_id.clone(), tx);
                             IpcSendResult::RenderStream {
                                 response: resp,
@@ -986,6 +1017,7 @@ fn unavailable_response(id: &str) -> IpcResponse {
         cache_tags: Vec::new(),
         body_base64: false,
         streaming: false,
+        ppr_shell: false,
     }
 }
 
@@ -1022,7 +1054,7 @@ fn drain_render_streams(inner: &IpcClientInner) {
         .collect();
     for id in ids {
         if let Some((_, tx)) = inner.render_streams.remove(&id) {
-            let _ = tx.send(None);
+            let _ = tx.send(RenderFrame::End);
         }
     }
 }
@@ -1281,6 +1313,7 @@ mod tests {
             body_base64: false,
             deployment_id: "dep-test".into(),
             locale: String::new(),
+            skip_shell: false,
         };
         let result = client.send_request(req).await;
         assert!(result.is_err());
@@ -1288,6 +1321,39 @@ mod tests {
             client.inner.pending.is_empty(),
             "failed send must not leak its pending waiter"
         );
+    }
+
+    #[test]
+    fn ipc_request_serializes_skip_shell_camel_case() {
+        let req = IpcRequest {
+            id: "req-h".into(),
+            method: "GET".into(),
+            path: "/ppr".into(),
+            params: HashMap::new(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+            body_base64: false,
+            deployment_id: "dep".into(),
+            locale: String::new(),
+            skip_shell: true,
+        };
+        let value = serde_json::to_value(&req).expect("serializable request");
+        assert_eq!(value["skipShell"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn ipc_response_ppr_shell_flag_defaults_false_and_parses_true() {
+        let plain: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"","cacheable":true,"cacheMaxAge":60,"streaming":true}"#,
+        )
+        .expect("valid streaming head frame");
+        assert!(!plain.ppr_shell);
+        let ppr: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"","cacheable":true,"cacheMaxAge":60,"streaming":true,"pprShell":true}"#,
+        )
+        .expect("valid ppr head frame");
+        assert!(ppr.ppr_shell);
     }
 
     #[test]
@@ -1338,12 +1404,20 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(body_rx.recv().await, Some(Some(Bytes::from("<p>hi</p>"))));
+        assert_eq!(
+            body_rx.recv().await,
+            Some(RenderFrame::Chunk(Bytes::from("<p>hi</p>")))
+        );
+
+        write_frame(&mut node_writer, br#"{"type":"shell_end","id":"req-s"}"#)
+            .await
+            .unwrap();
+        assert_eq!(body_rx.recv().await, Some(RenderFrame::ShellEnd));
 
         write_frame(&mut node_writer, br#"{"type":"chunk_end","id":"req-s"}"#)
             .await
             .unwrap();
-        assert_eq!(body_rx.recv().await, Some(None));
+        assert_eq!(body_rx.recv().await, Some(RenderFrame::End));
         assert!(
             client.inner.render_streams.is_empty(),
             "chunk_end must unregister the stream"
@@ -1354,17 +1428,17 @@ mod tests {
     #[tokio::test]
     async fn drain_render_streams_terminates_bodies_on_disconnect() {
         let (client, _write_rx) = test_client_with_write_channel();
-        let (tx, mut rx) = mpsc::unbounded_channel::<Option<Bytes>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<RenderFrame>();
         client.inner.render_streams.insert("req-d".into(), tx);
         drain_render_streams(&client.inner);
-        assert_eq!(rx.recv().await, Some(None));
+        assert_eq!(rx.recv().await, Some(RenderFrame::End));
         assert!(client.inner.render_streams.is_empty());
     }
 
     #[tokio::test]
     async fn send_render_close_unregisters_and_sends_cancel_frame() {
         let (client, mut write_rx) = test_client_with_write_channel();
-        let (tx, _rx) = mpsc::unbounded_channel::<Option<Bytes>>();
+        let (tx, _rx) = mpsc::unbounded_channel::<RenderFrame>();
         client.inner.render_streams.insert("req-c".into(), tx);
         client.send_render_close("req-c");
         assert!(client.inner.render_streams.is_empty());

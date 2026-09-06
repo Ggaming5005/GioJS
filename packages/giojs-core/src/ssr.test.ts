@@ -384,6 +384,57 @@ describe('streaming SSR', () => {
   });
 });
 
+// ─── PPR (shell='cache') ──────────────────────────────────────────────────────
+
+describe('PPR shell caching', () => {
+  const streamingExtras = { streaming: true };
+
+  it("shell='cache' with revalidate streams with pprShell and a mark boundary", async () => {
+    const routes = makeRoute('/', { shell: 'cache', revalidate: 60 });
+    const result = await renderRoute(
+      makeRequest('/'), routes, noLayouts, undefined, undefined, undefined, streamingExtras,
+    );
+    const streamed = expectStream(result);
+    expect(streamed.head.pprShell).toBe(true);
+    expect(streamed.head.streaming).toBe(true);
+    expect(streamed.head.cacheable).toBe(true);
+    expect(streamed.head.cacheMaxAge).toBe(60);
+    expect(streamed.shellBoundary).toBe('mark');
+  });
+
+  it("shell='cache' without revalidate falls back to plain streaming", async () => {
+    const routes = makeRoute('/', { shell: 'cache' });
+    const result = await renderRoute(
+      makeRequest('/'), routes, noLayouts, undefined, undefined, undefined, streamingExtras,
+    );
+    const streamed = expectStream(result);
+    expect(streamed.head.pprShell).toBeUndefined();
+    expect(streamed.head.cacheable).toBe(false);
+    expect(streamed.shellBoundary).toBeUndefined();
+  });
+
+  it('skipShell requests stream with a discard boundary and an uncacheable head', async () => {
+    const routes = makeRoute('/', { shell: 'cache', revalidate: 60 });
+    const req = { ...makeRequest('/'), skipShell: true };
+    const result = await renderRoute(
+      req, routes, noLayouts, undefined, undefined, undefined, streamingExtras,
+    );
+    const streamed = expectStream(result);
+    expect(streamed.shellBoundary).toBe('discard');
+    expect(streamed.head.pprShell).toBeUndefined();
+    expect(streamed.head.cacheable).toBe(false);
+    expect(streamed.head.cacheMaxAge).toBe(0);
+  });
+
+  it("shell='cache' stays buffered without the streaming opt-in (static export)", async () => {
+    const routes = makeRoute('/', { shell: 'cache', revalidate: 60 });
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+    expect('type' in result).toBe(false);
+    expect('body' in result && result.body).toContain('page content');
+    expect('cacheMaxAge' in result && result.cacheMaxAge).toBe(60);
+  });
+});
+
 // ─── route.ts method handlers ─────────────────────────────────────────────────
 
 import type { HandlerEntry, RouteHandlerFn } from './router.ts';

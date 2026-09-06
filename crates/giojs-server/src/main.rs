@@ -4,6 +4,18 @@
 //! (hit/stale/miss), coalesced IPC renders to the Node SSR worker, and final
 //! HTML composition (critical CSS + fonts + deployment script) baked once at
 //! cache-put time so hits serve stored bytes without per-request work.
+//!
+//! PPR (`export const shell = 'cache'`): the miss render streams normally but
+//! Node marks the pre-Suspense shell boundary (shell_end); the raw shell
+//! bytes are captured, composed through the same stream injector the client
+//! saw, and cached as a `ppr_shell` entry. A hit serves those shell bytes
+//! instantly, then a skipShell IPC render appends the per-request hole
+//! chunks. The shell must be deterministic - identical tree structure and
+//! bytes for every visitor (the same contract as any cacheable page), because
+//! React's Suspense replacement scripts target boundary IDs by tree position
+//! and the cached shell and a later holes render come from different render
+//! passes. The HOLES render runs with the requester's own cookies - a shared
+//! shell with personalized holes is the point.
 
 mod config;
 mod dev_codeframe;
@@ -42,7 +54,7 @@ use giojs_prefetch::{PrefetchBudgets, PrefetchConfig};
 use giojs_ratelimit::{RateLimitResult, RateLimitRule, RateLimiter};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoConnBuilder;
-use ipc::{IpcClient, IpcRequest, IpcSendResult};
+use ipc::{IpcClient, IpcRequest, IpcSendResult, RenderFrame};
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
@@ -61,6 +73,10 @@ use ws_registry::WsRegistry;
 
 /// Upper bound on the on-disk page cache. Oldest entries are evicted past this.
 const DEFAULT_DISK_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Cap on buffered PPR shell bytes while waiting for shell_end. Past it the
+/// capture is abandoned (the page still streams, it just is not cached).
+const MAX_PPR_SHELL_BYTES: usize = 4 * 1024 * 1024;
 
 /// A rendered page shared between concurrent cache-miss requests for the same key.
 struct RenderedPage {
@@ -1033,6 +1049,51 @@ async fn dynamic_handler(
 
     // ── Cache lookup ──────────────────────────────────────────────────────────
     match state.cache.get(&cache_key, &deployment_id).await {
+        // PPR shell entries never serve alone: the shell goes out instantly
+        // and a skipShell render (with this requester's cookies) streams the
+        // holes behind it. Stale shells follow SWR like any other entry.
+        Some((entry, cache_status)) if entry.ppr_shell => {
+            let mut holes_req =
+                build_ipc_request(&method, &path, &query_str, &req, &deployment_id, &locale);
+            holes_req.skip_shell = true;
+            let (cache_label, metrics_tier) = match cache_status {
+                CacheStatus::Hit => ("ppr; shell=hit".to_string(), "hit"),
+                CacheStatus::Stale => {
+                    spawn_revalidation(
+                        state.clone(),
+                        cache_key.clone(),
+                        build_ipc_request(
+                            &method,
+                            &path,
+                            &query_str,
+                            &req,
+                            &deployment_id,
+                            &locale,
+                        ),
+                        default_locale.clone(),
+                    );
+                    (
+                        format!(
+                            "ppr; shell=stale; age={}; revalidating",
+                            entry_age_secs(&entry)
+                        ),
+                        "stale",
+                    )
+                }
+            };
+            return respond_ppr_hit(
+                &state,
+                &method,
+                &path,
+                entry,
+                holes_req,
+                &cache_label,
+                metrics_tier,
+                encoding,
+                &locale,
+                start,
+            );
+        }
         Some((entry, CacheStatus::Hit)) => {
             let status = entry.status;
             let ttl_secs = entry.max_age_secs.saturating_sub(entry_age_secs(&entry));
@@ -1166,6 +1227,7 @@ async fn dynamic_handler(
                         body_base64: false,
                         deployment_id: deployment_id.clone(),
                         locale,
+                        skip_shell: false,
                     };
                     let ipc_start = std::time::Instant::now();
                     match state.ipc.send_request(ipc_req).await {
@@ -1200,6 +1262,7 @@ async fn dynamic_handler(
                                 deployment_id: deployment_id.clone(),
                                 composed,
                                 tags: resp.cache_tags.clone(),
+                                ppr_shell: false,
                             };
                             if let Err(e) = state.cache.put(&cache_key, entry).await {
                                 warn!(path = %path, error = %e, "cache write failed");
@@ -1317,7 +1380,7 @@ async fn dynamic_handler(
                     body_rx,
                     &deployment_id,
                     &default_locale,
-                    &font_snippets,
+                    &cache_key,
                     encoding,
                     &locale,
                     start,
@@ -1433,6 +1496,7 @@ async fn render_uncoalesced(
         body_base64,
         deployment_id: deployment_id.to_string(),
         locale: locale.to_string(),
+        skip_shell: false,
     };
     let ipc_start = std::time::Instant::now();
     match state.ipc.send_request(ipc_req).await {
@@ -1476,7 +1540,7 @@ async fn render_uncoalesced(
                 body_rx,
                 deployment_id,
                 default_locale,
-                font_snippets,
+                cache_key,
                 encoding,
                 locale,
                 start,
@@ -1536,6 +1600,7 @@ async fn respond_from_render(
             deployment_id: deployment_id.to_string(),
             composed,
             tags: resp.cache_tags.clone(),
+            ppr_shell: false,
         };
         if let Err(e) = state.cache.put(cache_key, entry).await {
             warn!(path = %path, error = %e, "cache write failed");
@@ -1643,21 +1708,50 @@ fn respond_sse(
 #[derive(Debug, Clone, Copy)]
 struct StreamedBody;
 
+/// Head snippets spliced into streamed HTML (font preloads + deployment
+/// script). Shared by live stream injection and PPR shell composition so a
+/// cached shell matches the bytes the miss client was served.
+fn stream_head_snippets(state: &AppState, deployment_id: &str, default_locale: &str) -> String {
+    let mut head_snippets =
+        String::with_capacity(state.font_snippets.iter().map(|s| s.len()).sum::<usize>() + 128);
+    for snippet in state.font_snippets.iter() {
+        head_snippets.push_str(snippet);
+    }
+    head_snippets.push_str(&format!(
+        r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
+    ));
+    head_snippets
+}
+
+/// The `lang` attribute a streamed document needs, or None for the default
+/// locale (mirrors the buffered path's i18n_middleware injection).
+fn stream_lang(state: &AppState, locale: &str) -> Option<String> {
+    state
+        .i18n
+        .as_ref()
+        .filter(|cfg| !locale.is_empty() && locale != cfg.default_locale)
+        .map(|_| locale.to_string())
+}
+
 /// Build the streaming response for a chunked SSR render (protocol v3).
 /// Head snippets (fonts + deployment script) and the dev overlay are spliced
 /// into the stream by a StreamInjector. Critical-CSS extraction is skipped:
 /// it needs the full document, and streamed responses are uncacheable, so the
 /// per-request extraction cost would buy nothing.
+///
+/// A `pprShell` render additionally captures its raw shell bytes; when the
+/// shell_end frame arrives, the shell is composed and stored as a `ppr_shell`
+/// cache entry so later requests hit `respond_ppr_hit`.
 #[allow(clippy::too_many_arguments)]
 fn respond_stream(
     state: &AppState,
     method: &str,
     path: &str,
     response: ipc::IpcResponse,
-    body_rx: tokio::sync::mpsc::UnboundedReceiver<Option<Bytes>>,
+    body_rx: tokio::sync::mpsc::UnboundedReceiver<RenderFrame>,
     deployment_id: &str,
     default_locale: &str,
-    font_snippets: &[&str],
+    cache_key: &str,
     encoding: &str,
     locale: &str,
     start: std::time::Instant,
@@ -1690,27 +1784,34 @@ fn respond_stream(
         );
     }
 
-    let injector = if is_html_content_type(&response.headers) {
-        let mut head_snippets =
-            String::with_capacity(font_snippets.iter().map(|s| s.len()).sum::<usize>() + 128);
-        for snippet in font_snippets {
-            head_snippets.push_str(snippet);
-        }
-        head_snippets.push_str(&format!(
-            r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
-        ));
+    let is_html = is_html_content_type(&response.headers);
+    let lang = stream_lang(state, locale);
+    let injector = if is_html {
+        let head_snippets = stream_head_snippets(state, deployment_id, default_locale);
         let body_snippet = state
             .dev_mode
             .then(|| dev_overlay::DEV_OVERLAY_SCRIPT.to_string());
-        let lang = state
-            .i18n
-            .as_ref()
-            .filter(|cfg| !locale.is_empty() && locale != cfg.default_locale)
-            .map(|_| locale.to_string());
-        stream_inject::StreamInjector::new(head_snippets, body_snippet, lang)
+        stream_inject::StreamInjector::new(head_snippets, body_snippet, lang.clone())
     } else {
         stream_inject::StreamInjector::passthrough()
     };
+
+    let capture_shell =
+        response.ppr_shell && is_html && method == "GET" && render_is_shareable(&response);
+    let shell_capture = capture_shell.then(|| PprShellCapture {
+        raw: BytesMut::new(),
+        overflowed: false,
+        cache: state.cache.clone(),
+        cache_key: cache_key.to_string(),
+        path: path.to_string(),
+        status: response.status,
+        headers: cacheable_response_headers(&response.headers),
+        max_age_secs: response.cache_max_age,
+        deployment_id: deployment_id.to_string(),
+        tags: response.cache_tags.clone(),
+        head_snippets: stream_head_snippets(state, deployment_id, default_locale),
+        lang,
+    });
 
     let stream = RenderBodyStream {
         inner: body_rx,
@@ -1719,6 +1820,7 @@ fn respond_stream(
         injector,
         idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
         done: false,
+        shell_capture,
     };
 
     let mut builder = Response::builder().status(status_code);
@@ -1735,24 +1837,151 @@ fn respond_stream(
     let mut resp = builder
         .body(axum::body::Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-    insert_cache_status_header(&mut resp, "bypass");
+    insert_cache_status_header(
+        &mut resp,
+        if capture_shell {
+            "ppr; shell=stored"
+        } else {
+            "bypass"
+        },
+    );
     resp.extensions_mut().insert(StreamedBody);
     resp
 }
 
 // ── Streaming SSR body ────────────────────────────────────────────────────────
 
+/// Compose a raw PPR shell for caching by replaying it through the same
+/// injector used for live streams, so stored bytes match what the miss client
+/// was served (head snippets before `</head>`, optional `lang` after `<html`).
+fn compose_ppr_shell(raw: Bytes, head_snippets: String, lang: Option<String>) -> Bytes {
+    let mut injector = stream_inject::StreamInjector::new(head_snippets, None, lang);
+    let mut out = BytesMut::new();
+    if let Some(bytes) = injector.feed(raw) {
+        out.extend_from_slice(&bytes);
+    }
+    if let Some(bytes) = injector.finish() {
+        out.extend_from_slice(&bytes);
+    }
+    out.freeze()
+}
+
+/// Compose and store a PPR shell entry. One code path for the miss capture
+/// and background revalidation, so both produce identical entries.
+#[allow(clippy::too_many_arguments)]
+async fn put_ppr_shell_entry(
+    cache: &PageCache,
+    cache_key: &str,
+    path: &str,
+    raw_shell: Bytes,
+    head_snippets: String,
+    lang: Option<String>,
+    status: u16,
+    headers: HashMap<String, String>,
+    max_age_secs: u64,
+    deployment_id: String,
+    tags: Vec<String>,
+) {
+    let html = compose_ppr_shell(raw_shell, head_snippets, lang);
+    let entry = CacheEntry {
+        html,
+        status,
+        headers,
+        created_at: std::time::SystemTime::now(),
+        max_age_secs,
+        deployment_id,
+        composed: true,
+        tags,
+        ppr_shell: true,
+    };
+    if let Err(e) = cache.put(cache_key, entry).await {
+        warn!(path = %path, error = %e, "PPR shell cache write failed");
+    }
+}
+
+/// Accumulates the raw shell bytes of a PPR miss stream; when shell_end
+/// arrives the shell is composed and stored as a `ppr_shell` cache entry.
+struct PprShellCapture {
+    raw: BytesMut,
+    overflowed: bool,
+    cache: Arc<PageCache>,
+    cache_key: String,
+    path: String,
+    status: u16,
+    headers: HashMap<String, String>,
+    max_age_secs: u64,
+    deployment_id: String,
+    tags: Vec<String>,
+    head_snippets: String,
+    lang: Option<String>,
+}
+
+impl PprShellCapture {
+    fn absorb(&mut self, chunk: &Bytes) {
+        if self.overflowed {
+            return;
+        }
+        if self.raw.len() + chunk.len() > MAX_PPR_SHELL_BYTES {
+            warn!(path = %self.path, "PPR shell exceeds the capture cap - not caching this render");
+            self.overflowed = true;
+            self.raw = BytesMut::new();
+            return;
+        }
+        self.raw.extend_from_slice(chunk);
+    }
+
+    /// shell_end observed: compose and store off the response's poll path.
+    fn store(self) {
+        if self.overflowed {
+            return;
+        }
+        let PprShellCapture {
+            raw,
+            cache,
+            cache_key,
+            path,
+            status,
+            headers,
+            max_age_secs,
+            deployment_id,
+            tags,
+            head_snippets,
+            lang,
+            ..
+        } = self;
+        tokio::spawn(async move {
+            put_ppr_shell_entry(
+                &cache,
+                &cache_key,
+                &path,
+                raw.freeze(),
+                head_snippets,
+                lang,
+                status,
+                headers,
+                max_age_secs,
+                deployment_id,
+                tags,
+            )
+            .await;
+        });
+    }
+}
+
 /// Chunked HTML body fed by the IPC reader loop. The head frame already
 /// consumed the request timeout budget; from here on an idle gap between
 /// chunks longer than the same budget ends the body (headers are sent, so
 /// truncation is the only possible remedy).
 struct RenderBodyStream {
-    inner: tokio::sync::mpsc::UnboundedReceiver<Option<Bytes>>,
+    inner: tokio::sync::mpsc::UnboundedReceiver<RenderFrame>,
     req_id: String,
     ipc: Arc<IpcClient>,
     injector: stream_inject::StreamInjector,
     idle: Pin<Box<tokio::time::Sleep>>,
     done: bool,
+    /// Set on PPR miss renders; a stream ending without shell_end drops the
+    /// capture unstored, so an aborted render can never cache a torn shell.
+    shell_capture: Option<PprShellCapture>,
 }
 
 impl Drop for RenderBodyStream {
@@ -1775,16 +2004,27 @@ impl Stream for RenderBodyStream {
         }
         loop {
             match this.inner.poll_recv(cx) {
-                Poll::Ready(Some(Some(bytes))) => {
+                Poll::Ready(Some(RenderFrame::Chunk(bytes))) => {
                     this.idle
                         .as_mut()
                         .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    if let Some(capture) = this.shell_capture.as_mut() {
+                        capture.absorb(&bytes);
+                    }
                     // Injector still buffering (head scan): poll for more.
                     if let Some(out) = this.injector.feed(bytes) {
                         return Poll::Ready(Some(Ok(out)));
                     }
                 }
-                Poll::Ready(Some(None)) | Poll::Ready(None) => {
+                Poll::Ready(Some(RenderFrame::ShellEnd)) => {
+                    this.idle
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    if let Some(capture) = this.shell_capture.take() {
+                        capture.store();
+                    }
+                }
+                Poll::Ready(Some(RenderFrame::End)) | Poll::Ready(None) => {
                     this.done = true;
                     return match this.injector.finish() {
                         Some(out) => Poll::Ready(Some(Ok(out))),
@@ -1804,6 +2044,148 @@ impl Stream for RenderBodyStream {
                     return Poll::Pending;
                 }
             }
+        }
+    }
+}
+
+// ── PPR shell hit ─────────────────────────────────────────────────────────────
+
+/// Serve a `ppr_shell` cache entry: the composed shell streams out
+/// immediately (the instant TTFB), then a skipShell IPC render appends the
+/// per-request Suspense holes to the same chunked body. The holes render runs
+/// WITH the requester's cookies - a shared shell with personalized holes is
+/// the point. If the holes render fails or times out, the body simply ends
+/// after the shell, whose Suspense fallbacks are exactly the degraded state.
+#[allow(clippy::too_many_arguments)]
+fn respond_ppr_hit(
+    state: &AppState,
+    method: &str,
+    path: &str,
+    entry: CacheEntry,
+    holes_req: IpcRequest,
+    cache_label: &str,
+    metrics_tier: &'static str,
+    encoding: &str,
+    locale: &str,
+    start: std::time::Instant,
+) -> Response {
+    let status_code =
+        StatusCode::from_u16(entry.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let duration_ms = start.elapsed().as_millis() as u64;
+    info!(method = %method, path = %path, status = %status_code.as_u16(), cache = %metrics_tier, encoding = %encoding, "request completed (ppr shell)");
+    state.metrics.record_request(
+        method,
+        status_code.as_u16(),
+        metrics_tier,
+        start.elapsed().as_nanos() as u64,
+    );
+    record_devtools(
+        state,
+        method,
+        path,
+        status_code.as_u16(),
+        metrics_tier,
+        encoding,
+        locale,
+        duration_ms,
+        false,
+    );
+
+    let (hole_tx, hole_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+    tokio::spawn(feed_ppr_holes(
+        state.ipc.clone(),
+        holes_req,
+        hole_tx,
+        path.to_string(),
+    ));
+
+    let stream = PprHitBodyStream {
+        shell: Some(entry.html),
+        inner: hole_rx,
+    };
+
+    let mut builder = Response::builder().status(status_code);
+    for (name, value) in &entry.headers {
+        // The stored length covers only the shell; the body is chunked.
+        if name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        if let Ok(header_value) = HeaderValue::from_str(value) {
+            builder = builder.header(name.as_str(), header_value);
+        }
+    }
+    let mut resp = builder
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    insert_cache_status_header(&mut resp, cache_label);
+    resp.extensions_mut().insert(StreamedBody);
+    resp
+}
+
+/// Background feeder for a PPR hit's holes: runs the skipShell render and
+/// forwards its chunks. Any failure or idle-gap timeout just closes the
+/// channel, ending the body after the shell.
+async fn feed_ppr_holes(
+    ipc: Arc<IpcClient>,
+    holes_req: IpcRequest,
+    tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
+    path: String,
+) {
+    match ipc.send_request(holes_req).await {
+        Ok(IpcSendResult::RenderStream {
+            response,
+            mut body_rx,
+        }) => loop {
+            match tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT, body_rx.recv()).await {
+                Ok(Some(RenderFrame::Chunk(bytes))) => {
+                    if tx.send(bytes).is_err() {
+                        // Client went away mid-holes: stop the render.
+                        ipc.send_render_close(&response.id);
+                        return;
+                    }
+                }
+                Ok(Some(RenderFrame::ShellEnd)) => {}
+                Ok(Some(RenderFrame::End)) | Ok(None) => return,
+                Err(_) => {
+                    warn!(path = %path, "PPR holes render idle-gap timeout - body ends after the shell");
+                    ipc.send_render_close(&response.id);
+                    return;
+                }
+            }
+        },
+        Ok(IpcSendResult::Response(_)) => {
+            warn!(path = %path, "PPR holes render came back buffered - body ends after the shell");
+        }
+        Ok(IpcSendResult::SseStream { response, .. }) => {
+            ipc.send_sse_close(&response.id);
+            warn!(path = %path, "PPR holes render opened an SSE stream - body ends after the shell");
+        }
+        Err(e) => {
+            warn!(path = %path, error = %e, "PPR holes render failed - body ends after the shell");
+        }
+    }
+}
+
+/// Body of a PPR cache hit: the cached shell first, then hole chunks fed by
+/// the background skipShell render. The channel closing (holes done, failed,
+/// or timed out) ends the body - the shell's fallbacks remain visible.
+struct PprHitBodyStream {
+    shell: Option<Bytes>,
+    inner: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
+}
+
+impl Stream for PprHitBodyStream {
+    type Item = Result<Bytes, std::convert::Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if let Some(shell) = this.shell.take() {
+            return Poll::Ready(Some(Ok(shell)));
+        }
+        match this.inner.poll_recv(cx) {
+            Poll::Ready(Some(bytes)) => Poll::Ready(Some(Ok(bytes))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -2436,6 +2818,7 @@ fn build_ipc_request(
         body_base64: false,
         deployment_id: deployment_id.to_string(),
         locale: locale.to_string(),
+        skip_shell: false,
     }
 }
 
@@ -2740,6 +3123,8 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
     // every visitor.
     req.headers.remove("cookie");
     req.headers.remove("authorization");
+    let locale = req.locale.clone();
+    let req_path = req.path.clone();
     tokio::spawn(async move {
         match state.ipc.send_request(req).await {
             Ok(IpcSendResult::Response(resp)) if render_is_shareable(&resp) => {
@@ -2761,16 +3146,76 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                     deployment_id,
                     composed,
                     tags: resp.cache_tags,
+                    ppr_shell: false,
                 };
                 if let Err(e) = state.cache.put(&key, entry).await {
                     warn!(key = %key, error = %e, "background revalidation cache write failed");
                 }
+            }
+            // PPR pages refresh in ppr streaming mode: collect the raw shell
+            // up to shell_end, stop the holes render, and store the shell
+            // exactly like the miss path does.
+            Ok(IpcSendResult::RenderStream { response, body_rx }) if response.ppr_shell => {
+                let raw_shell = collect_ppr_shell(body_rx).await;
+                state.ipc.send_render_close(&response.id);
+                match raw_shell {
+                    Some(raw) if render_is_shareable(&response) => {
+                        let deployment_id = state.ipc.deployment_id().to_string();
+                        let head_snippets =
+                            stream_head_snippets(&state, &deployment_id, &default_locale);
+                        let lang = stream_lang(&state, &locale);
+                        put_ppr_shell_entry(
+                            &state.cache,
+                            &key,
+                            &req_path,
+                            raw,
+                            head_snippets,
+                            lang,
+                            response.status,
+                            cacheable_response_headers(&response.headers),
+                            response.cache_max_age,
+                            deployment_id,
+                            response.cache_tags,
+                        )
+                        .await;
+                    }
+                    _ => {
+                        warn!(key = %key, "PPR revalidation ended before shell_end - keeping the stale shell");
+                    }
+                }
+            }
+            // A non-ppr stream during revalidation is unexpected; make sure
+            // Node stops rendering into a receiver nobody reads.
+            Ok(IpcSendResult::RenderStream { response, .. }) => {
+                state.ipc.send_render_close(&response.id);
             }
             Ok(_) => {} // not shareable or SSE - don't update
             Err(e) => warn!(key = %key, error = %e, "background revalidation IPC error"),
         }
         state.revalidating.remove(&key);
     });
+}
+
+/// Drain a PPR revalidation stream up to shell_end, returning the raw shell
+/// bytes. None when the stream ends, times out, or overflows the cap before
+/// the boundary - the stale entry then stays in place.
+async fn collect_ppr_shell(
+    mut body_rx: tokio::sync::mpsc::UnboundedReceiver<RenderFrame>,
+) -> Option<Bytes> {
+    let mut raw = BytesMut::new();
+    loop {
+        match tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT, body_rx.recv()).await {
+            Ok(Some(RenderFrame::Chunk(bytes))) => {
+                if raw.len() + bytes.len() > MAX_PPR_SHELL_BYTES {
+                    return None;
+                }
+                raw.extend_from_slice(&bytes);
+            }
+            Ok(Some(RenderFrame::ShellEnd)) => return Some(raw.freeze()),
+            Ok(Some(RenderFrame::End)) | Ok(None) => return None,
+            Err(_) => return None,
+        }
+    }
 }
 
 async fn shutdown_signal() {
@@ -3055,6 +3500,7 @@ mod tests {
             deployment_id: "dep-1".to_string(),
             composed,
             tags: Vec::new(),
+            ppr_shell: false,
         }
     }
 
@@ -3341,6 +3787,7 @@ mod tests {
             cache_tags: Vec::new(),
             body_base64: false,
             streaming: false,
+            ppr_shell: false,
         }
     }
 
@@ -3397,7 +3844,7 @@ mod tests {
 
     fn render_body_stream(
         client: IpcClient,
-        rx: tokio::sync::mpsc::UnboundedReceiver<Option<Bytes>>,
+        rx: tokio::sync::mpsc::UnboundedReceiver<RenderFrame>,
         injector: stream_inject::StreamInjector,
     ) -> RenderBodyStream {
         RenderBodyStream {
@@ -3407,6 +3854,7 @@ mod tests {
             injector,
             idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
             done: false,
+            shell_capture: None,
         }
     }
 
@@ -3414,14 +3862,15 @@ mod tests {
     async fn render_body_stream_injects_and_ends_on_chunk_end() {
         use tokio_stream::StreamExt as _;
         let (client, _write_rx) = ipc::test_client_with_write_channel();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Option<Bytes>>();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
         let injector = stream_inject::StreamInjector::new("<script>D</script>".into(), None, None);
         let mut stream = render_body_stream(client, rx, injector);
 
-        tx.send(Some(Bytes::from("<html><head></he"))).unwrap();
-        tx.send(Some(Bytes::from("ad><body>hi</body></html>")))
+        tx.send(RenderFrame::Chunk(Bytes::from("<html><head></he")))
             .unwrap();
-        tx.send(None).unwrap();
+        tx.send(RenderFrame::Chunk(Bytes::from("ad><body>hi</body></html>")))
+            .unwrap();
+        tx.send(RenderFrame::End).unwrap();
 
         let mut body = Vec::new();
         while let Some(Ok(bytes)) = stream.next().await {
@@ -3437,11 +3886,12 @@ mod tests {
     async fn render_body_stream_idle_gap_timeout_truncates_and_cancels() {
         use tokio_stream::StreamExt as _;
         let (client, mut write_rx) = ipc::test_client_with_write_channel();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Option<Bytes>>();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
         let mut stream =
             render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
 
-        tx.send(Some(Bytes::from("<p>shell</p>"))).unwrap();
+        tx.send(RenderFrame::Chunk(Bytes::from("<p>shell</p>")))
+            .unwrap();
         let first = stream.next().await.expect("first chunk").expect("ok");
         assert_eq!(&first[..], b"<p>shell</p>");
 
@@ -3456,13 +3906,198 @@ mod tests {
     #[tokio::test]
     async fn dropping_render_body_stream_midway_cancels_the_render() {
         let (client, mut write_rx) = ipc::test_client_with_write_channel();
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<Option<Bytes>>();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
         let stream = render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
         drop(stream);
         let frame = write_rx.recv().await.expect("cancel frame sent on drop");
         let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
         assert_eq!(value["type"], "cancel");
         assert_eq!(value["id"], "req-stream");
+    }
+
+    // ── PPR shell capture and hit body ────────────────────────────────────────
+
+    #[test]
+    fn compose_ppr_shell_splices_head_snippets_and_lang() {
+        let raw = Bytes::from("<html><head></head><body><p>SHELL</p>");
+        let out = compose_ppr_shell(raw, "<script>D</script>".into(), Some("fr".into()));
+        assert_eq!(
+            &out[..],
+            br#"<html lang="fr"><head><script>D</script></head><body><p>SHELL</p>"#
+        );
+    }
+
+    fn shell_capture_with(cache: Arc<PageCache>, cache_key: &str) -> PprShellCapture {
+        PprShellCapture {
+            raw: BytesMut::new(),
+            overflowed: false,
+            cache,
+            cache_key: cache_key.to_string(),
+            path: "/ppr".into(),
+            status: 200,
+            headers: HashMap::from([("content-type".into(), "text/html; charset=utf-8".into())]),
+            max_age_secs: 60,
+            deployment_id: "dep-1".into(),
+            tags: Vec::new(),
+            head_snippets: "<script>D</script>".into(),
+            lang: None,
+        }
+    }
+
+    fn temp_cache(name: &str) -> (Arc<PageCache>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("giojs-{name}-{}", std::process::id()));
+        let cache = Arc::new(PageCache::new(CacheConfig {
+            memory_max_entries: NonZeroUsize::new(10).unwrap(),
+            disk_dir: dir.clone(),
+            swr_multiplier: 10,
+            disk_max_bytes: 0,
+        }));
+        (cache, dir)
+    }
+
+    #[tokio::test]
+    async fn shell_end_stores_a_composed_ppr_entry_while_holes_keep_streaming() {
+        use tokio_stream::StreamExt as _;
+        let (cache, dir) = temp_cache("ppr-capture");
+        let (client, _write_rx) = ipc::test_client_with_write_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
+        let injector = stream_inject::StreamInjector::new("<script>D</script>".into(), None, None);
+        let mut stream = render_body_stream(client, rx, injector);
+        stream.shell_capture = Some(shell_capture_with(cache.clone(), "ppr-key"));
+
+        tx.send(RenderFrame::Chunk(Bytes::from(
+            "<html><head></head><body><p>SHELL</p>",
+        )))
+        .unwrap();
+        tx.send(RenderFrame::ShellEnd).unwrap();
+        tx.send(RenderFrame::Chunk(Bytes::from("<p>HOLE</p></body></html>")))
+            .unwrap();
+        tx.send(RenderFrame::End).unwrap();
+
+        let mut body = Vec::new();
+        while let Some(Ok(bytes)) = stream.next().await {
+            body.extend_from_slice(&bytes);
+        }
+        let served = String::from_utf8(body).unwrap();
+        assert!(served.contains("SHELL") && served.contains("HOLE"));
+
+        // The put is spawned on shell_end; poll briefly for it to land.
+        let mut entry = None;
+        for _ in 0..100 {
+            if let Some((found, CacheStatus::Hit)) = cache.get("ppr-key", "dep-1").await {
+                entry = Some(found);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let entry = entry.expect("shell entry stored after shell_end");
+        assert!(entry.ppr_shell);
+        assert!(entry.composed);
+        let html = std::str::from_utf8(&entry.html).unwrap();
+        assert!(html.contains("SHELL"), "shell content cached");
+        assert!(html.contains("<script>D</script></head>"), "shell composed");
+        assert!(!html.contains("HOLE"), "hole content must not be cached");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn stream_ending_without_shell_end_stores_nothing() {
+        use tokio_stream::StreamExt as _;
+        let (cache, dir) = temp_cache("ppr-abort");
+        let (client, _write_rx) = ipc::test_client_with_write_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
+        let mut stream =
+            render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
+        stream.shell_capture = Some(shell_capture_with(cache.clone(), "ppr-torn"));
+
+        tx.send(RenderFrame::Chunk(Bytes::from("<p>partial")))
+            .unwrap();
+        tx.send(RenderFrame::End).unwrap();
+        while stream.next().await.is_some() {}
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            cache.get("ppr-torn", "dep-1").await.is_none(),
+            "a stream aborted before shell_end must never cache a torn shell"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn collect_ppr_shell_returns_bytes_up_to_shell_end() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
+        tx.send(RenderFrame::Chunk(Bytes::from("<p>a</p>")))
+            .unwrap();
+        tx.send(RenderFrame::Chunk(Bytes::from("<p>b</p>")))
+            .unwrap();
+        tx.send(RenderFrame::ShellEnd).unwrap();
+        tx.send(RenderFrame::Chunk(Bytes::from("<p>hole</p>")))
+            .unwrap();
+        let shell = collect_ppr_shell(rx).await.expect("shell collected");
+        assert_eq!(&shell[..], b"<p>a</p><p>b</p>");
+    }
+
+    #[tokio::test]
+    async fn collect_ppr_shell_without_boundary_returns_none() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
+        tx.send(RenderFrame::Chunk(Bytes::from("<p>a</p>")))
+            .unwrap();
+        tx.send(RenderFrame::End).unwrap();
+        assert!(collect_ppr_shell(rx).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ppr_hit_body_yields_shell_then_holes_then_ends() {
+        use tokio_stream::StreamExt as _;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+        let mut stream = PprHitBodyStream {
+            shell: Some(Bytes::from("<p>shell</p>")),
+            inner: rx,
+        };
+        tx.send(Bytes::from("<p>hole</p>")).unwrap();
+        drop(tx);
+        let mut body = Vec::new();
+        while let Some(Ok(bytes)) = stream.next().await {
+            body.extend_from_slice(&bytes);
+        }
+        assert_eq!(body, b"<p>shell</p><p>hole</p>");
+    }
+
+    #[tokio::test]
+    async fn ppr_hit_serves_shell_only_when_holes_render_fails() {
+        use tokio_stream::StreamExt as _;
+        // Dropped write channel: send_request fails fast, the feeder closes
+        // the channel, and the body ends cleanly after the shell.
+        let (client, write_rx) = ipc::test_client_with_write_channel();
+        drop(write_rx);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+        let holes_req = IpcRequest {
+            id: "req-holes".into(),
+            method: "GET".into(),
+            path: "/ppr".into(),
+            params: HashMap::new(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+            body_base64: false,
+            deployment_id: "dep-test".into(),
+            locale: String::new(),
+            skip_shell: true,
+        };
+        tokio::spawn(feed_ppr_holes(
+            Arc::new(client),
+            holes_req,
+            tx,
+            "/ppr".into(),
+        ));
+        let mut stream = PprHitBodyStream {
+            shell: Some(Bytes::from("<p>shell</p>")),
+            inner: rx,
+        };
+        let mut body = Vec::new();
+        while let Some(Ok(bytes)) = stream.next().await {
+            body.extend_from_slice(&bytes);
+        }
+        assert_eq!(body, b"<p>shell</p>", "failed holes must not hang the body");
     }
 
     // ── TLS error paths ───────────────────────────────────────────────────────

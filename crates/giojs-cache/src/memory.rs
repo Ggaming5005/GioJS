@@ -72,6 +72,7 @@ mod tests {
             deployment_id: "test-deploy".to_string(),
             composed: false,
             tags: Vec::new(),
+            ppr_shell: false,
         }
     }
 

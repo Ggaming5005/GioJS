@@ -63,6 +63,11 @@ export interface PageModule {
     ctx: GsspContext,
   ) => Promise<Record<string, unknown> | RedirectResult>;
   revalidate?: number | false;
+  /**
+   * PPR opt-in: 'cache' streams the render, caches the pre-Suspense shell,
+   * and re-renders only the holes per request. Requires `revalidate`.
+   */
+  shell?: 'cache';
   dynamic?: 'force-dynamic' | 'force-static' | 'auto';
   /** SSE route handler - return a GioEventStream to switch to streaming mode. */
   GET?: (req: GioRequest) => GioEventStream;

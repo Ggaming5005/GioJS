@@ -70,6 +70,12 @@ describe('validateIPCRequest', () => {
     expect(validateIPCRequest({ ...validFrame(), bodyBase64: 'yes' })).toBeNull();
   });
 
+  it('accepts the skipShell flag and defaults it to false', () => {
+    expect(validateIPCRequest(validFrame())?.skipShell).toBe(false);
+    expect(validateIPCRequest({ ...validFrame(), skipShell: true })?.skipShell).toBe(true);
+    expect(validateIPCRequest({ ...validFrame(), skipShell: 'yes' })).toBeNull();
+  });
+
   it.each(['id', 'method', 'path', 'params', 'query', 'headers'])(
     'rejects a frame missing required field %s',
     (field) => {
@@ -278,6 +284,7 @@ function renderResult(
   stream: ReadableStream<Uint8Array>,
   prefix = '',
   suffix = '',
+  shellBoundary?: 'mark' | 'discard',
 ): StreamRenderResult {
   return {
     type: 'stream',
@@ -288,7 +295,23 @@ function renderResult(
     stream,
     prefix,
     suffix,
+    ...(shellBoundary !== undefined ? { shellBoundary } : {}),
   };
+}
+
+/** Shell chunk enqueued immediately; the "hole" chunk lands after a timer,
+ *  exactly like React holding a Suspense boundary open. */
+function suspenseLikeStream(shell: string, hole: string, delayMs = 20): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(controller): void {
+      controller.enqueue(encoder.encode(shell));
+      setTimeout(() => {
+        controller.enqueue(encoder.encode(hole));
+        controller.close();
+      }, delayMs);
+    },
+  });
 }
 
 describe('pumpRenderStream', () => {
@@ -346,6 +369,58 @@ describe('pumpRenderStream', () => {
     await pumpRenderStream(sink, 'r1', renderResult(stream, 'PRE'));
     expect(sink.frames()).toEqual([]);
     expect(cancelled).toBe(true);
+  });
+});
+
+describe('pumpRenderStream PPR shell boundary', () => {
+  it("'mark' emits shell_end between the shell flush and the hole chunks", async () => {
+    const sink = makeStreamSink();
+    const stream = suspenseLikeStream('<div>shell</div>', '<div>hole</div>');
+    await pumpRenderStream(sink, 'r1', renderResult(stream, 'PRE', 'SUF', 'mark'));
+    const frames = sink.frames();
+    expect(frames.map(f => f['type'])).toEqual([
+      'chunk', 'chunk', 'shell_end', 'chunk', 'chunk', 'chunk_end',
+    ]);
+    const beforeBoundary = frames
+      .slice(0, frames.findIndex(f => f['type'] === 'shell_end'))
+      .map(f => f['data'])
+      .join('');
+    expect(beforeBoundary).toBe('PRE<div>shell</div>');
+    const afterBoundary = frames
+      .slice(frames.findIndex(f => f['type'] === 'shell_end') + 1)
+      .filter(f => f['type'] === 'chunk')
+      .map(f => f['data'])
+      .join('');
+    expect(afterBoundary).toBe('<div>hole</div>SUF');
+  });
+
+  it("'discard' drops the prefix and shell bytes and forwards only the holes", async () => {
+    const sink = makeStreamSink();
+    const stream = suspenseLikeStream('<div>shell</div>', '<div>hole</div>');
+    await pumpRenderStream(sink, 'r1', renderResult(stream, 'PRE', 'SUF', 'discard'));
+    const frames = sink.frames();
+    expect(frames.some(f => f['type'] === 'shell_end')).toBe(false);
+    const body = frames.filter(f => f['type'] === 'chunk').map(f => f['data']).join('');
+    expect(body).toBe('<div>hole</div>SUF');
+    expect(frames[frames.length - 1]?.['type']).toBe('chunk_end');
+  });
+
+  it("'mark' still emits shell_end when the whole page flushes with the shell", async () => {
+    const sink = makeStreamSink();
+    const encoder = new TextEncoder();
+    const stream = byteStream([encoder.encode('<div>all-shell</div>')]);
+    await pumpRenderStream(sink, 'r1', renderResult(stream, '', 'SUF', 'mark'));
+    const frames = sink.frames();
+    const types = frames.map(f => f['type']);
+    expect(types).toContain('shell_end');
+    expect(types.indexOf('shell_end')).toBeLessThan(types.indexOf('chunk_end'));
+  });
+
+  it('plain streams never emit shell_end', async () => {
+    const sink = makeStreamSink();
+    const stream = suspenseLikeStream('<p>a</p>', '<p>b</p>');
+    await pumpRenderStream(sink, 'r1', renderResult(stream));
+    expect(sink.frames().some(f => f['type'] === 'shell_end')).toBe(false);
   });
 });
 

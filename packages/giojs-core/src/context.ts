@@ -17,6 +17,12 @@ export interface IPCRequest {
   bodyBase64: boolean;
   deploymentId: string;
   locale: string;
+  /**
+   * PPR holes render (additive, protocol stays v3): render the page fully but
+   * forward only the chunks after the shell boundary - the shell bytes are
+   * discarded because Rust already served them from the cache.
+   */
+  skipShell?: boolean;
 }
 
 export interface IPCResponse {
@@ -45,6 +51,11 @@ export interface IPCResponse {
    * empty and 1..n chunk frames follow, terminated by chunk_end.
    */
   streaming?: boolean;
+  /**
+   * PPR (shell='cache'): this streamed render marks its shell boundary with a
+   * shell_end frame; Rust caches everything before it as the static shell.
+   */
+  pprShell?: boolean;
 }
 
 export interface IPCError {
@@ -108,5 +119,7 @@ export interface SseCloseMsg { type: 'sse_close'; id: string; }
 export interface CancelMsg { type: 'cancel'; id: string; }
 /** Streaming SSR body chunk (protocol v3). `data` is always UTF-8 HTML text. */
 export interface ChunkMsg { type: 'chunk'; id: string; data: string; }
+/** PPR: everything sent before this frame is the cacheable shell. */
+export interface ShellEndMsg { type: 'shell_end'; id: string; }
 /** Terminates a streamed body. `aborted` marks a render error mid-stream. */
 export interface ChunkEndMsg { type: 'chunk_end'; id: string; aborted?: boolean; }

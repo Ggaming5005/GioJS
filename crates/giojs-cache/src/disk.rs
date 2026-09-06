@@ -31,6 +31,10 @@ struct DiskEntry {
     /// Defaults to empty for entries written before tags existed.
     #[serde(default)]
     tags: Vec<String>,
+    /// Defaults to false so entries written before PPR existed are served as
+    /// complete pages, never mistaken for a shell awaiting holes.
+    #[serde(default)]
+    ppr_shell: bool,
 }
 
 impl From<&CacheEntry> for DiskEntry {
@@ -49,6 +53,7 @@ impl From<&CacheEntry> for DiskEntry {
             deployment_id: e.deployment_id.clone(),
             composed: e.composed,
             tags: e.tags.clone(),
+            ppr_shell: e.ppr_shell,
         }
     }
 }
@@ -65,6 +70,7 @@ impl From<DiskEntry> for CacheEntry {
             deployment_id: d.deployment_id,
             composed: d.composed,
             tags: d.tags,
+            ppr_shell: d.ppr_shell,
         }
     }
 }
@@ -203,6 +209,7 @@ mod tests {
             deployment_id: "d".into(),
             composed: false,
             tags: Vec::new(),
+            ppr_shell: false,
         }
     }
 
@@ -212,6 +219,16 @@ mod tests {
         let disk_entry: DiskEntry = serde_json::from_str(json).unwrap();
         let entry = CacheEntry::from(disk_entry);
         assert!(!entry.composed);
+        assert!(!entry.ppr_shell, "pre-PPR entries must read as full pages");
+    }
+
+    #[test]
+    fn ppr_shell_flag_survives_serde_roundtrip() {
+        let mut entry = entry_of_size(16);
+        entry.ppr_shell = true;
+        let json = serde_json::to_string(&DiskEntry::from(&entry)).unwrap();
+        let restored = CacheEntry::from(serde_json::from_str::<DiskEntry>(&json).unwrap());
+        assert!(restored.ppr_shell);
     }
 
     #[test]

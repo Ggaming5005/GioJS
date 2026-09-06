@@ -43,6 +43,10 @@ pub struct CacheEntry {
     /// tag-based revalidation endpoint can invalidate by tag later without a
     /// disk-format migration.
     pub tags: Vec<String>,
+    /// True when `html` is only the static shell of a PPR page (everything
+    /// React flushed before the first Suspense boundary). A hit must append a
+    /// per-request holes render instead of serving the entry as a full page.
+    pub ppr_shell: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +205,7 @@ mod tests {
             deployment_id: "deploy-1".to_string(),
             composed: false,
             tags: Vec::new(),
+            ppr_shell: false,
         }
     }
 
@@ -304,6 +309,17 @@ mod tests {
         let (got, status) = cache.get("key-composed", "deploy-1").await.unwrap();
         assert_eq!(status, CacheStatus::Hit);
         assert!(got.composed);
+    }
+
+    #[tokio::test]
+    async fn ppr_shell_flag_round_trips_through_cache() {
+        let cache = cache_with_swr(10);
+        let mut entry = make_entry(3600, 0);
+        entry.ppr_shell = true;
+        cache.put("key-ppr", entry).await.unwrap();
+        let (got, status) = cache.get("key-ppr", "deploy-1").await.unwrap();
+        assert_eq!(status, CacheStatus::Hit);
+        assert!(got.ppr_shell);
     }
 
     #[tokio::test]

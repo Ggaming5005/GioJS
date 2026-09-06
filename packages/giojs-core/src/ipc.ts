@@ -42,6 +42,8 @@ const VERSION = '0.1.0';
  * mismatch so a stale binary can never silently drive a newer worker.
  * Mirrors IPC_PROTOCOL_VERSION in giojs-server/src/ipc.rs.
  * v3 added streaming SSR responses (`streaming: true` head + chunk frames).
+ * The PPR fields (shell_end frames, `pprShell`, `skipShell`) are additive
+ * within v3 - both sides default them off.
  */
 export const IPC_PROTOCOL_VERSION = 3;
 
@@ -349,12 +351,29 @@ export interface StreamFrameSink extends FrameSink {
   destroyed: boolean;
 }
 
+const SHELL_FLUSHED: unique symbol = Symbol('shell-flushed');
+
+// A macrotask tick loses to reads of already-enqueued shell bytes (those
+// settle in microtasks) but beats the first hole read, which waits on
+// Suspense content - that is the shell boundary.
+function shellFlushTick(): Promise<typeof SHELL_FLUSHED> {
+  return new Promise(resolve => setImmediate(() => resolve(SHELL_FLUSHED)));
+}
+
 /**
  * Pump a streaming render's body as chunk frames, then chunk_end. Chunk
  * frames are never dropped under backpressure (unlike SSE) - the HTML must
  * arrive complete - so writes rely on socket buffering; a destroyed socket
  * stops the pump. Chunk data is always UTF-8 text: React's output is UTF-8
  * and the TextDecoder carries split multi-byte sequences across boundaries.
+ *
+ * PPR: React resolves renderToReadableStream at shell-ready and flushes the
+ * complete shell on the first pull, so everything readable before a macrotask
+ * tick is the shell. shellBoundary 'mark' emits a shell_end frame there;
+ * 'discard' drops everything before it (prefix included) and forwards only
+ * the hole chunks. Both passes detect the boundary identically, so a cached
+ * shell and a later holes render concatenate without gaps or overlaps as long
+ * as the shell renders deterministically (the PPR contract).
  */
 export async function pumpRenderStream(
   socket: StreamFrameSink,
@@ -363,25 +382,43 @@ export async function pumpRenderStream(
 ): Promise<void> {
   const decoder = new TextDecoder();
   const reader = render.stream.getReader();
+  const boundary = render.shellBoundary;
+  let inShell = boundary !== undefined;
   try {
     if (socket.destroyed) {
       await reader.cancel();
       return;
     }
-    if (render.prefix !== '') {
+    if (render.prefix !== '' && boundary !== 'discard') {
       writeFrame(socket, { type: 'chunk', id: reqId, data: render.prefix });
     }
+    let pending = reader.read();
     while (true) {
-      const { done, value } = await reader.read();
+      if (inShell) {
+        const raced = await Promise.race([pending, shellFlushTick()]);
+        if (raced === SHELL_FLUSHED) {
+          inShell = false;
+          if (boundary === 'mark') {
+            writeFrame(socket, { type: 'shell_end', id: reqId });
+          }
+        }
+      }
+      const { done, value } = await pending;
       if (done) break;
+      pending = reader.read();
       if (socket.destroyed) {
         await reader.cancel();
         return;
       }
       const data = decoder.decode(value, { stream: true });
-      if (data !== '') {
+      if (data !== '' && !(inShell && boundary === 'discard')) {
         writeFrame(socket, { type: 'chunk', id: reqId, data });
       }
+    }
+    // A page whose whole output flushed with the shell still marks the
+    // boundary, so Rust stores the shell (its holes render is just empty).
+    if (inShell && boundary === 'mark') {
+      writeFrame(socket, { type: 'shell_end', id: reqId });
     }
     const closing = decoder.decode() + render.suffix;
     if (closing !== '') {
@@ -425,6 +462,9 @@ export function validateIPCRequest(msg: Record<string, unknown>): IPCRequest | n
   const bodyBase64 = msg['bodyBase64'];
   if (bodyBase64 !== undefined && typeof bodyBase64 !== 'boolean') return null;
 
+  const skipShell = msg['skipShell'];
+  if (skipShell !== undefined && typeof skipShell !== 'boolean') return null;
+
   return {
     id: msg['id'],
     method: msg['method'],
@@ -436,6 +476,7 @@ export function validateIPCRequest(msg: Record<string, unknown>): IPCRequest | n
     bodyBase64: bodyBase64 ?? false,
     deploymentId: typeof msg['deploymentId'] === 'string' ? msg['deploymentId'] : '',
     locale: typeof msg['locale'] === 'string' ? msg['locale'] : '',
+    skipShell: skipShell ?? false,
   };
 }
 

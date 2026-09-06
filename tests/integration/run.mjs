@@ -290,6 +290,69 @@ async function main() {
       assert.equal(await res.text(), '');
     });
 
+    await test('PPR: first request streams the full page and stores the shell', async () => {
+      const res = await fetch(`${BASE}/ppr`, {
+        headers: { 'accept-encoding': 'identity', cookie: 'who=alice' },
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-gio-cache'), 'ppr; shell=stored');
+      const html = await res.text();
+      assert.match(html, /PPR_FIXTURE_SHELL/);
+      assert.match(html, /PPR_FIXTURE_HOLE who=alice/, 'miss body must include the resolved hole');
+    });
+
+    await test('PPR: cached shell arrives instantly while holes stream personalized', async () => {
+      // The shell cache put is spawned when shell_end passes through the
+      // first response; give it a beat to land before asserting a hit.
+      await sleep(250);
+      const started = Date.now();
+      const res = await fetch(`${BASE}/ppr`, {
+        headers: { 'accept-encoding': 'identity', cookie: 'who=bob' },
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-gio-cache'), 'ppr; shell=hit');
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let html = '';
+      let firstChunkAt = null;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (firstChunkAt === null) firstChunkAt = Date.now();
+        html += decoder.decode(value, { stream: true });
+      }
+      html += decoder.decode();
+      const firstMs = firstChunkAt - started;
+      const totalMs = Date.now() - started;
+      assert.ok(firstMs < 500, `cached shell must beat the 600ms hole gap (took ${firstMs}ms)`);
+      assert.ok(totalMs >= 500, `total must include the streamed hole (took ${totalMs}ms)`);
+      assert.match(html, /PPR_FIXTURE_SHELL/);
+      assert.match(html, /PPR_FIXTURE_FALLBACK/, 'cached shell carries the Suspense fallback');
+      assert.match(html, /PPR_FIXTURE_HOLE who=bob/, 'hole must carry the second user cookie');
+      assert.doesNotMatch(
+        html,
+        /PPR_FIXTURE_HOLE who=alice/,
+        'first user hole content must never come out of the shell cache',
+      );
+    });
+
+    await test('PPR: shell and holes concatenate into one complete document', async () => {
+      const res = await fetch(`${BASE}/ppr`, {
+        headers: { 'accept-encoding': 'identity', cookie: 'who=carol' },
+      });
+      assert.equal(res.headers.get('x-gio-cache'), 'ppr; shell=hit');
+      const html = await res.text();
+      const shellPos = html.indexOf('PPR_FIXTURE_SHELL');
+      const holePos = html.indexOf('PPR_FIXTURE_HOLE who=carol');
+      assert.ok(shellPos !== -1, 'shell content present');
+      assert.ok(holePos !== -1, 'hole content present');
+      assert.ok(shellPos < holePos, 'shell content precedes hole content');
+      // The stored shell is composed: Rust-injected head lands inside <head>.
+      const deployPos = html.indexOf('__GIO_DEPLOYMENT_ID__');
+      assert.ok(deployPos !== -1 && deployPos < html.indexOf('</head>'));
+      assert.match(html, /<\/html>/, 'holes render must close the document');
+    });
+
     await test('X-Gio-Cache labels bypass and static tiers', async () => {
       const personalized = await fetch(`${BASE}/whoami`, { headers: { cookie: 'session=x' } });
       assert.equal(personalized.headers.get('x-gio-cache'), 'bypass');
