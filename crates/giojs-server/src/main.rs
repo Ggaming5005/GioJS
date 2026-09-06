@@ -77,6 +77,8 @@ const DEFAULT_DISK_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 /// Cap on buffered PPR shell bytes while waiting for shell_end. Past it the
 /// capture is abandoned (the page still streams, it just is not cached).
 const MAX_PPR_SHELL_BYTES: usize = 4 * 1024 * 1024;
+/// Upper bound on waiting for in-flight connections after the shutdown signal.
+const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// A rendered page shared between concurrent cache-miss requests for the same key.
 struct RenderedPage {
@@ -3331,7 +3333,20 @@ async fn serve_connections(
         }
     }
 
-    while join_set.join_next().await.is_some() {}
+    // Bounded drain: idle keep-alive connections have no reason to close on
+    // our schedule, and a graceful shutdown that can wait forever is not
+    // graceful - it strands launchers and supervisors (systemd would
+    // eventually SIGKILL; our own exit must not depend on peers hanging up).
+    let drain = async {
+        while join_set.join_next().await.is_some() {}
+    };
+    if tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, drain).await.is_err() {
+        warn!(
+            remaining = join_set.len(),
+            "shutdown drain timed out - aborting remaining connections"
+        );
+        join_set.abort_all();
+    }
     Ok(())
 }
 
