@@ -26,18 +26,24 @@ importers:
   packages/giojs:
     dependencies:
       '@gio.js/core':
-        specifier: 0.1.0-beta.4
-        version: 0.1.0-beta.4
+        specifier: 0.1.0-beta.6
+        version: link:../giojs-core
     optionalDependencies:
       '@gio.js/server-darwin-arm64':
-        specifier: 0.1.0-beta.1
-        version: 0.1.0-beta.1
+        specifier: 0.1.0-beta.6
+        version: link:../../platform/giojs-darwin-arm64
+      '@gio.js/server-darwin-x64':
+        specifier: 0.1.0-beta.6
+        version: link:../../platform/giojs-darwin-x64
       '@gio.js/server-linux-x64':
-        specifier: 0.1.0-beta.1
-        version: 0.1.0-beta.1
+        specifier: 0.1.0-beta.6
+        version: link:../../platform/giojs-linux-x64
+      '@gio.js/server-linux-x64-musl':
+        specifier: 0.1.0-beta.6
+        version: link:../../platform/giojs-linux-x64-musl
       '@gio.js/server-win32-x64':
-        specifier: 0.1.0-beta.1
-        version: 0.1.0-beta.1
+        specifier: 0.1.0-beta.6
+        version: link:../../platform/giojs-win32-x64
 
   packages/giojs-cli:
     devDependencies:
@@ -105,6 +111,18 @@ importers:
       vitest:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@22.19.19)(jsdom@25.0.1)
+
+  platform/giojs-darwin-arm64: {}
+
+  platform/giojs-darwin-x64: {}
+
+  platform/giojs-linux-arm64: {}
+
+  platform/giojs-linux-x64: {}
+
+  platform/giojs-linux-x64-musl: {}
+
+  platform/giojs-win32-x64: {}
 
 packages:
 
@@ -586,24 +604,6 @@ packages:
   '@esbuild/win32-x64@0.28.0':
     resolution: {integrity: sha512-pEl1bO9mfAmIC+tW5btTmrKaujg3zGtUmWNdCw/xs70FBjwAL3o9OEKNHvNmnyylD6ubxUERiEhdsL0xBQ9efw==}
     engines: {node: '>=18'}
-    cpu: [x64]
-    os: [win32]
-
-  '@gio.js/core@0.1.0-beta.4':
-    resolution: {integrity: sha512-4kdEkFf3GaupCof3wPdXxs7pe1lLpHdr7VB71QAOPMq8WO2HXkLRBUTBEIv++Kcnfqv9rQcNr4D0fkWE3+NRmA==}
-
-  '@gio.js/server-darwin-arm64@0.1.0-beta.1':
-    resolution: {integrity: sha512-quYCNB3VsoDLHW5iu68gAYNn0O3IDWknwTScn/Lgk5QNtrgFrfkZJRB07UKfGSNHUsMq3lLD7a9iiRLNX/Srdg==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@gio.js/server-linux-x64@0.1.0-beta.1':
-    resolution: {integrity: sha512-qrWwW8q8DmuXdAQB7hqsBeNWyxLyfC6ITRelrudthe8ho3JTll9d3HinLNnHANiu2LKvfn0hHNfHKVB7HL1Syg==}
-    cpu: [x64]
-    os: [linux]
-
-  '@gio.js/server-win32-x64@0.1.0-beta.1':
-    resolution: {integrity: sha512-Bu20sA0lzyIW57gc7+dGI9TrqysgYFXOHVehFhTvNLNf+exZLWAuke+SESL+kq4htL/QWuCt6sdrILPiRyZpEw==}
     cpu: [x64]
     os: [win32]
 
@@ -1463,21 +1463,6 @@ snapshots:
     optional: true
 
   '@esbuild/win32-x64@0.28.0':
-    optional: true
-
-  '@gio.js/core@0.1.0-beta.4':
-    dependencies:
-      react: 19.2.6
-      react-dom: 19.2.6(react@19.2.6)
-      tsx: 4.22.0
-
-  '@gio.js/server-darwin-arm64@0.1.0-beta.1':
-    optional: true
-
-  '@gio.js/server-linux-x64@0.1.0-beta.1':
-    optional: true
-
-  '@gio.js/server-win32-x64@0.1.0-beta.1':
     optional: true
 
   '@jridgewell/sourcemap-codec@1.5.5': {}

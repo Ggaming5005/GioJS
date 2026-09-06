@@ -338,7 +338,7 @@ pub(crate) mod b64 {
         }
         let chunk_count = bytes.len() / 4;
         let mut out = Vec::with_capacity(chunk_count * 3);
-        for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        for (index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
             let is_last = index + 1 == chunk_count;
             if chunk[0] == b'=' || chunk[1] == b'=' {
                 return Err(Base64Error::MisplacedPadding);
