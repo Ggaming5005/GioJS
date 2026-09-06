@@ -99,7 +99,7 @@ function swapContent(html: string): void {
 async function fetchPageHtml(href: string): Promise<string | null> {
   const deployId = getDeploymentId();
   const fetchHeaders: Record<string, string> = { Accept: 'text/html' };
-  if (deployId) fetchHeaders['x-gio-deployment-id'] = deployId;
+  if (deployId) fetchHeaders['x-deployment-id'] = deployId;
   const res = await fetch(href, { headers: fetchHeaders });
   if (isHardReloadResponse(res)) {
     return null;
