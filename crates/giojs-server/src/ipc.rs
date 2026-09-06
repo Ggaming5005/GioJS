@@ -444,12 +444,6 @@ async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> anyhow::Result<B
     Ok(Bytes::from(payload))
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 // ── Deployment ID ────────────────────────────────────────────────────────────
 
 fn generate_deployment_id() -> String {
@@ -737,6 +731,8 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                             let code = val["code"].as_str().unwrap_or("INTERNAL");
                             let status = if code == "NOT_FOUND" { 404u16 } else { 500u16 };
                             let msg = val["message"].as_str().unwrap_or("Internal Server Error");
+                            // stack is only present on dev frames (ssr.ts strips it in prod)
+                            let stack = val.get("stack").and_then(|v| v.as_str());
                             error!("Node render error [{code}]: {msg}");
                             IpcResponse {
                                 id: id.clone(),
@@ -746,7 +742,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                     "text/html; charset=utf-8".into(),
                                 )]
                                 .into(),
-                                body: format!("<h1>{status}</h1><pre>{}</pre>", html_escape(msg)),
+                                body: crate::dev_overlay::error_page_html(status, msg, stack),
                                 cacheable: false,
                                 cache_max_age: 0,
                                 swr_window_secs: 0,

@@ -10,3 +10,5 @@ export { useWebSocket } from './hooks/useWebSocket.js';
 export type { UseWebSocketResult } from './hooks/useWebSocket.js';
 export { useLocale } from './hooks/useLocale.js';
 export { LocaleLink } from './LocaleLink.js';
+export { href } from './typed-href.js';
+export type { GioRegisteredRoutes, RouteParamsOf } from './typed-href.js';

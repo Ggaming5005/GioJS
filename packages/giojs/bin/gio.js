@@ -11,6 +11,12 @@ if (process.argv[2] === 'export') {
   runStaticExport();
 }
 
+// `gio bench` runs the zero-dependency load generator. bench.mjs is ESM, so
+// it runs as a child node process to keep this entrypoint CJS.
+if (process.argv[2] === 'bench') {
+  runBench(process.argv.slice(3));
+}
+
 // `gio cache explain <url>` requests the URL and decodes the X-Gio-Cache
 // header the server stamps on every response - one cache, one owner, and
 // this is how you see what it did.
@@ -18,6 +24,11 @@ if (process.argv[2] === 'cache' && process.argv[3] === 'explain') {
   runCacheExplain(process.argv[4]);
 } else {
   runRustServer();
+}
+
+function runBench(args) {
+  const result = spawnSync(process.execPath, [join(__dirname, 'bench.mjs'), ...args], { stdio: 'inherit' });
+  process.exit(result.status == null ? 1 : result.status);
 }
 
 function runCacheExplain(target) {

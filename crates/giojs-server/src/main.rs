@@ -6,6 +6,7 @@
 //! cache-put time so hits serve stored bytes without per-request work.
 
 mod config;
+mod dev_codeframe;
 mod dev_overlay;
 mod devtools;
 mod ipc;
@@ -174,6 +175,7 @@ struct AppState {
     rate_limiter: Option<Arc<RateLimiter>>,
     i18n: Option<Arc<config::I18nConfig>>,
     devtools: Arc<devtools::DevtoolsState>,
+    project_root: Arc<PathBuf>,
 }
 
 #[tokio::main]
@@ -389,6 +391,7 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter,
         i18n,
         devtools: devtools_state,
+        project_root: Arc::new(project_root.clone()),
     };
 
     if !dev_mode
@@ -467,7 +470,12 @@ async fn main() -> anyhow::Result<()> {
         app = app
             .route("/_gio/devtools", get(devtools_handler))
             .route("/_gio/devtools/state", get(devtools_state_handler))
-            .route("/_gio/devtools/stream", get(devtools_stream_handler));
+            .route("/_gio/devtools/stream", get(devtools_stream_handler))
+            .route("/_gio/devtools/codeframe", get(devtools_codeframe_handler))
+            .route(
+                "/_gio/devtools/open-in-editor",
+                get(devtools_open_editor_handler).post(devtools_open_editor_handler),
+            );
     }
 
     let app = app
@@ -901,9 +909,7 @@ async fn dynamic_handler(
     match state.cache.get(&cache_key, &deployment_id).await {
         Some((entry, CacheStatus::Hit)) => {
             let status = entry.status;
-            let ttl_secs = entry
-                .max_age_secs
-                .saturating_sub(entry_age_secs(&entry));
+            let ttl_secs = entry.max_age_secs.saturating_sub(entry_age_secs(&entry));
             let duration_ms = start.elapsed().as_millis() as u64;
             info!(method = %method, path = %path, status = %status, cache = "hit", encoding = %encoding, prefetch = %prefetch_status, "request completed");
             let mut resp = build_response_from_entry(
@@ -954,10 +960,7 @@ async fn dynamic_handler(
                 dev_mode,
             )
             .await;
-            insert_cache_status_header(
-                &mut resp,
-                &format!("stale; age={age_secs}; revalidating"),
-            );
+            insert_cache_status_header(&mut resp, &format!("stale; age={age_secs}; revalidating"));
             state.metrics.record_request(
                 &method,
                 status,
@@ -1500,7 +1503,24 @@ fn respond_ipc_error(
         duration_ms,
         true,
     );
-    let mut resp = if timeout {
+    let mut resp = if state.dev_mode {
+        let message = if timeout {
+            "SSR worker timed out: the render did not finish within the IPC deadline"
+        } else {
+            "SSR worker unavailable: the render request failed at the IPC layer"
+        };
+        let page = dev_overlay::error_page_html(status, message, None);
+        let body = inject_before(
+            Bytes::from(page),
+            b"</body>",
+            &[dev_overlay::DEV_OVERLAY_SCRIPT],
+        );
+        Response::builder()
+            .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(axum::body::Body::from(body))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    } else if timeout {
         (StatusCode::GATEWAY_TIMEOUT, "504 Gateway Timeout").into_response()
     } else {
         (
@@ -2197,6 +2217,139 @@ async fn devtools_stream_handler(State(state): State<AppState>) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+#[derive(serde::Deserialize)]
+struct SourceLocationQuery {
+    file: String,
+    line: usize,
+}
+
+fn devtools_json_response(status: StatusCode, body: String) -> Response {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| status.into_response())
+}
+
+fn codeframe_error_response(err: dev_codeframe::CodeframeError) -> Response {
+    use dev_codeframe::CodeframeError;
+    let status = match err {
+        CodeframeError::OutsideRoot => StatusCode::FORBIDDEN,
+        CodeframeError::NotFound => StatusCode::NOT_FOUND,
+        CodeframeError::InvalidPath
+        | CodeframeError::NotSourceFile
+        | CodeframeError::LineOutOfRange { .. }
+        | CodeframeError::TooLarge => StatusCode::BAD_REQUEST,
+        CodeframeError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    devtools_json_response(
+        status,
+        serde_json::json!({ "error": err.to_string() }).to_string(),
+    )
+}
+
+async fn devtools_codeframe_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<SourceLocationQuery>,
+) -> Response {
+    let source_path = match dev_codeframe::validate_project_path(&state.project_root, &query.file) {
+        Ok(path) => path,
+        Err(e) => return codeframe_error_response(e),
+    };
+    match tokio::fs::metadata(&source_path).await {
+        Ok(meta) if meta.len() > dev_codeframe::MAX_SOURCE_FILE_BYTES => {
+            return codeframe_error_response(dev_codeframe::CodeframeError::TooLarge)
+        }
+        Ok(_) => {}
+        Err(e) => return codeframe_error_response(dev_codeframe::CodeframeError::Io(e)),
+    }
+    let source = match tokio::fs::read_to_string(&source_path).await {
+        Ok(contents) => contents,
+        Err(e) => return codeframe_error_response(dev_codeframe::CodeframeError::Io(e)),
+    };
+    match dev_codeframe::extract_codeframe(&source, query.line) {
+        Ok(lines) => devtools_json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "file": dev_codeframe::display_path(&source_path),
+                "line": query.line,
+                "lines": lines,
+            })
+            .to_string(),
+        ),
+        Err(e) => codeframe_error_response(e),
+    }
+}
+
+async fn devtools_open_editor_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<SourceLocationQuery>,
+) -> Response {
+    let source_path = match dev_codeframe::validate_project_path(&state.project_root, &query.file) {
+        Ok(path) => path,
+        Err(e) => return codeframe_error_response(e),
+    };
+    let editor_spec = ["GIO_EDITOR", "VISUAL", "EDITOR"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| "code".to_string());
+    let editor_file = dev_codeframe::display_path(&source_path);
+    let Some((program, args)) =
+        dev_codeframe::editor_command(&editor_spec, &editor_file, query.line.max(1))
+    else {
+        return devtools_json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"empty editor command"}"#.to_string(),
+        );
+    };
+    if spawn_editor_detached(&program, &args) {
+        info!(editor = %program, file = %editor_file, line = query.line, "opened file in editor");
+        devtools_json_response(StatusCode::OK, r#"{"ok":true}"#.to_string())
+    } else {
+        devtools_json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"editor launch failed"}"#.to_string(),
+        )
+    }
+}
+
+/// Launch the editor detached: null stdio, child handle dropped so the
+/// request never waits on it. On Windows `code` resolves to code.cmd, which
+/// CreateProcess cannot exec directly, so a `cmd /C` fallback is attempted.
+fn spawn_editor_detached(program: &str, args: &[String]) -> bool {
+    fn detached(mut command: tokio::process::Command) -> tokio::process::Command {
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        command
+    }
+
+    let mut direct = detached(tokio::process::Command::new(program));
+    direct.args(args);
+    match direct.spawn() {
+        Ok(_child_kept_running) => true,
+        Err(direct_err) => {
+            #[cfg(windows)]
+            {
+                let mut shell = detached(tokio::process::Command::new("cmd"));
+                shell.arg("/C").arg(program).args(args);
+                if shell.spawn().is_ok() {
+                    return true;
+                }
+            }
+            warn!(error = %direct_err, editor = %program, "open-in-editor spawn failed");
+            false
+        }
+    }
+}
+
 fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2488,6 +2641,25 @@ mod tests {
             overlay_pos < body_close_pos,
             "overlay must appear before </body>"
         );
+    }
+
+    #[test]
+    fn ssr_error_page_gets_overlay_and_payload_in_dev() {
+        let page = dev_overlay::error_page_html(
+            500,
+            "boom",
+            Some("Error: boom\n    at Page (C:\\proj\\app\\page.tsx:3:9)"),
+        );
+        let result = inject_into_html(Bytes::from(page), &[], true);
+        let s = std::str::from_utf8(&result).unwrap();
+        let payload_pos = s
+            .find("__GIO_SSR_ERROR__")
+            .expect("SSR error payload missing");
+        let overlay_pos = s
+            .find("__gio_dev_overlay_script")
+            .expect("overlay script missing");
+        // Payload script must run before the overlay script reads it.
+        assert!(payload_pos < overlay_pos);
     }
 
     // ── constant-time compare ─────────────────────────────────────────────────

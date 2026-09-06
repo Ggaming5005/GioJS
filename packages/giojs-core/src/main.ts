@@ -18,6 +18,7 @@ import { discoverRouteModules } from './ws-router.ts';
 import { createWsIpcServer } from './ws-ipc.ts';
 import { loadGioConfig } from './config-loader.ts';
 import { NodePluginRegistry } from './plugin.ts';
+import { writeRouteTypes } from './typed-routes.ts';
 import { logger } from './logger.ts';
 
 export async function runServer(): Promise<void> {
@@ -76,6 +77,18 @@ export async function runServer(): Promise<void> {
     ws: [...wsHandlers.keys()],
     http: [...handlers.keys()],
   });
+
+  // Best-effort: typed routes improve DX but must never block boot.
+  try {
+    const wrote = await writeRouteTypes(dirname(appDir), [...routes.keys(), ...handlers.keys()]);
+    if (wrote) {
+      logger.info('route types written', { path: '.gio/routes.d.ts' });
+    }
+  } catch (typeGenError: unknown) {
+    logger.warn('route type generation failed', {
+      error: typeGenError instanceof Error ? typeGenError.message : String(typeGenError),
+    });
+  }
 
   const specialPages = await discoverSpecialPages(appDir);
 
