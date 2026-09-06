@@ -2,6 +2,83 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.1.0-beta.6 (2026-09-06)
+
+Emergency release: **beta.5 was broken on npm for every new user.**
+`@gio.js/react@0.1.0-beta.5` was published with no `dist/` (the release
+workflow never ran a build before `npm publish`) and `create-giojs@0.1.0-beta.5`
+shipped without its bin targets, so `npm create giojs@latest` failed outright.
+
+### Release integrity
+
+- The release workflow now installs and builds `@gio.js/react` and
+  `create-giojs` before publishing, and a new tarball gate
+  (`scripts/check-tarballs.mjs`) refuses to publish any package whose
+  `main`/`types`/`bin`/`exports` targets (or platform binary) are missing
+  from the tarball - the exact failure beta.5 shipped with.
+- Tag pushes now run the full test matrix (Rust tests + clippy, Node suites,
+  the Rust↔Node integration harness on Linux and Windows) before anything
+  is published.
+- `latest` promotion covers the platform binary packages; three of them had
+  been serving beta.1 binaries via `latest` since May.
+- Dropped the `@gio.js/server-linux-arm64` optionalDependency - that package
+  was never published (its build is deferred), so every install logged a 404.
+- `@gio.js/core` no longer ships its test files.
+
+### Security
+
+- **Cache poisoning via background revalidation.** The stale-while-revalidate
+  refresh stored responses without the shareable check the miss path enforces
+  and rendered with the triggering client's `cookie`/`authorization` headers -
+  a personalized page could be cached under the shared key and served to every
+  visitor. Revalidation now uses the same shareable predicate and strips
+  credentials.
+- **Image optimizer SSRF.** The remote-source allowlist parsed URLs by string
+  splitting, so `https://169.254.169.254?x=.cloudinary.com` passed a
+  `**.cloudinary.com` pattern while the fetch went to the metadata IP (same
+  trick with `#` and `@`). Sources are now WHATWG-parsed once, wildcard
+  patterns match only real domains (IP literals need an exact entry), the
+  validated URL is exactly the fetched URL, and the previously-ignored
+  `remote_patterns.pathname` restriction is enforced.
+- A throwing WebSocket/SSE user handler can no longer crash the whole SSR
+  worker; decode limits (10k px / 256 MB) stop a tiny crafted image from
+  allocating gigabytes; `/_gio/image` now honors `[[rate_limits]]` rules;
+  cached responses drop `set-cookie` and hop-by-hop headers; font-family
+  values are sanitized before hitting the filesystem or generated CSS.
+
+### Fixed
+
+- **A restart no longer throws away the disk cache.** Deployment IDs were
+  time-derived, so an identical build got a fresh ID every boot and the
+  persisted cache became dead weight (with dead entries still polluting the
+  memory LRU). IDs are now content-derived, `GIO_DEPLOYMENT_ID` can pin one
+  across pods, and mismatched entries are deleted instead of re-promoted.
+- Stale revalidations are coalesced (one background render per key, not one
+  per request); SSE streams are terminated instead of leaking/hanging when
+  the worker respawns; version-skew detection actually fires for soft
+  navigations (it required a `sec-fetch-mode` value `fetch()` can never
+  send); binary `route.ts` responses cross the IPC boundary byte-for-byte
+  (`bodyBase64`, protocol v2) instead of being UTF-8-mangled; `useLocale` no
+  longer causes hydration mismatches; a page module's unrelated `GET` export
+  no longer runs its side effects on every render; plus a batch of smaller
+  fixes (IPv6 rate-limit key collisions, prefetch-budget underflow, router
+  param-name aliasing, SSE header injection, soft-nav response races,
+  bounded IPC write buffering, supervisor write timeout).
+
+### Added
+
+- `import { GioEventStream } from '@gio.js/core'` now works: the package has
+  a real public entrypoint (previously its `main` booted a second server
+  inside the worker and exported nothing).
+- `/_gio/health` reports `deploymentId`, `nodeReady` (false during worker
+  respawn), `cacheEntries`, and `uptimeSecs`.
+- `<GioLink prefetch="viewport">` is implemented (IntersectionObserver).
+- The docs site serves `llms.txt` + `llms-full.txt`, scaffolds include an
+  `AGENTS.md`, and the entire documentation was audited against the source:
+  the gio.toml reference now matches the parser exactly, and every fictional
+  feature (`gio build`, Redis cache sharing, `PORT`, `[compression]`,
+  `[[redirects]]`) is gone from the docs.
+
 ## 0.1.0-beta.5 (2026-07-26)
 
 ### Added
