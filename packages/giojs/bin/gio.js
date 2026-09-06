@@ -11,7 +11,51 @@ if (process.argv[2] === 'export') {
   runStaticExport();
 }
 
-const { path } = require('./find-binary');
+// `gio cache explain <url>` requests the URL and decodes the X-Gio-Cache
+// header the server stamps on every response - one cache, one owner, and
+// this is how you see what it did.
+if (process.argv[2] === 'cache' && process.argv[3] === 'explain') {
+  runCacheExplain(process.argv[4]);
+} else {
+  runRustServer();
+}
+
+function runCacheExplain(target) {
+  if (!target) {
+    console.error('usage: gio cache explain <url-or-path>   (e.g. gio cache explain /posts/1)');
+    process.exit(1);
+  }
+  const url = target.startsWith('/') ? `http://localhost:3000${target}` : target;
+
+  const EXPLANATIONS = {
+    hit: 'Served from the Rust page cache without touching Node. "ttl" is the\n    seconds until this entry goes stale.',
+    stale: 'Served instantly from the cache past its TTL while ONE background\n    render refreshes the entry (stale-while-revalidate). "age" is seconds\n    since the entry was rendered.',
+    'miss; stored': 'Rendered by the Node worker and stored in the cache - the next\n    request for this key is a hit. Pages opt in via `export const revalidate`.',
+    bypass: 'Rendered by the Node worker and NOT cached: the page did not declare\n    `revalidate`, the request was not GET/HEAD, the response varies per user,\n    or it set per-request headers.',
+    static: 'Served directly by the Rust static file layer (public/ assets,\n    hashed chunks, fonts) - never touches the cache or Node.',
+  };
+
+  (async () => {
+    let res;
+    try {
+      res = await fetch(url, { redirect: 'manual' });
+    } catch (err) {
+      console.error(`gio: could not reach ${url} - is the server running? (${err.cause?.code ?? err.message})`);
+      process.exit(1);
+    }
+    const value = res.headers.get('x-gio-cache');
+    console.log(`GET ${url}`);
+    console.log(`  status       ${res.status}`);
+    console.log(`  x-gio-cache  ${value ?? '(absent)'}`);
+    if (value === null) {
+      console.log('  → No cache header. Either this is an internal /_gio endpoint or the\n    server predates X-Gio-Cache (upgrade @gio.js/server).');
+    } else {
+      const key = value.startsWith('hit') ? 'hit' : value.startsWith('stale') ? 'stale' : value;
+      console.log(`  → ${EXPLANATIONS[key] ?? value}`);
+    }
+    process.exit(0);
+  })();
+}
 
 function runStaticExport() {
   let coreDir;
@@ -56,13 +100,16 @@ function findNodeScript() {
   return null;
 }
 
-const env = Object.assign({}, process.env);
-const nodeScript = findNodeScript();
-if (nodeScript) env.GIO_NODE_SCRIPT = nodeScript;
+function runRustServer() {
+  const { path } = require('./find-binary');
+  const env = Object.assign({}, process.env);
+  const nodeScript = findNodeScript();
+  if (nodeScript) env.GIO_NODE_SCRIPT = nodeScript;
 
-try {
-  execFileSync(path, process.argv.slice(2), { stdio: 'inherit', env });
-} catch (err) {
-  if (err.status != null) process.exit(err.status);
-  throw err;
+  try {
+    execFileSync(path, process.argv.slice(2), { stdio: 'inherit', env });
+  } catch (err) {
+    if (err.status != null) process.exit(err.status);
+    throw err;
+  }
 }

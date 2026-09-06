@@ -231,11 +231,23 @@ async function main() {
     });
 
     await test('cacheable pages are served from cache on the second hit', async () => {
-      const first = await (await fetch(`${BASE}/cached`)).text();
-      const second = await (await fetch(`${BASE}/cached`)).text();
+      const firstRes = await fetch(`${BASE}/cached`);
+      const first = await firstRes.text();
+      const secondRes = await fetch(`${BASE}/cached`);
+      const second = await secondRes.text();
       assert.match(first, /INTEGRATION_FIXTURE_CACHED/);
       // rendered_at is baked at render time; identical bodies = cache hit.
       assert.equal(first, second);
+      // X-Gio-Cache narrates the tier transitions.
+      assert.match(firstRes.headers.get('x-gio-cache') ?? '', /^miss; stored$/);
+      assert.match(secondRes.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/);
+    });
+
+    await test('X-Gio-Cache labels bypass and static tiers', async () => {
+      const personalized = await fetch(`${BASE}/whoami`, { headers: { cookie: 'session=x' } });
+      assert.equal(personalized.headers.get('x-gio-cache'), 'bypass');
+      const asset = await fetch(`${BASE}/_next/static/chunks/nonexistent.js`);
+      assert.equal(asset.headers.get('x-gio-cache'), 'static');
     });
 
     await test('killing the Node worker mid-flight recovers within seconds', async () => {

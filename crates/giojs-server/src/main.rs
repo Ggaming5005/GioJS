@@ -90,6 +90,38 @@ fn render_is_shareable(resp: &ipc::IpcResponse) -> bool {
     resp.cacheable && resp.cache_max_age > 0 && resp.vary.is_empty()
 }
 
+/// One cache, one owner, one header: X-Gio-Cache says which tier answered
+/// (`hit`/`stale`/`miss`/`bypass`/`static`) and why, so cache behavior is
+/// observable from any curl instead of reverse-engineered.
+fn insert_cache_status_header(resp: &mut Response, value: &str) {
+    if let Ok(header_value) = HeaderValue::from_str(value) {
+        resp.headers_mut()
+            .insert(HeaderName::from_static("x-gio-cache"), header_value);
+    }
+}
+
+fn entry_age_secs(entry: &CacheEntry) -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(entry.created_at)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Stamps `X-Gio-Cache: static` on responses the dynamic pipeline never saw
+/// (public/ assets, chunks, fonts). Internal /_gio endpoints and protocol
+/// upgrades stay unstamped.
+async fn cache_status_stamp_middleware(req: Request, next: Next) -> Response {
+    let internal = req.uri().path().starts_with("/_gio/");
+    let mut resp = next.run(req).await;
+    if !internal
+        && resp.status() != StatusCode::SWITCHING_PROTOCOLS
+        && !resp.headers().contains_key("x-gio-cache")
+    {
+        insert_cache_status_header(&mut resp, "static");
+    }
+    resp
+}
+
 /// Headers that must never be stored in the shared cache: set-cookie is
 /// per-user (replaying it would hand one visitor's session to every cache
 /// hit), the rest are hop-by-hop and describe the original connection.
@@ -459,6 +491,7 @@ async fn main() -> anyhow::Result<()> {
             state.clone(),
             i18n_middleware,
         ))
+        .layer(axum::middleware::from_fn(cache_status_stamp_middleware))
         // Compression is added last so it is the outermost response transform:
         // it must run after i18n injects <html lang>, otherwise it compresses
         // the body first and the lang injection silently no-ops.
@@ -868,9 +901,12 @@ async fn dynamic_handler(
     match state.cache.get(&cache_key, &deployment_id).await {
         Some((entry, CacheStatus::Hit)) => {
             let status = entry.status;
+            let ttl_secs = entry
+                .max_age_secs
+                .saturating_sub(entry_age_secs(&entry));
             let duration_ms = start.elapsed().as_millis() as u64;
             info!(method = %method, path = %path, status = %status, cache = "hit", encoding = %encoding, prefetch = %prefetch_status, "request completed");
-            let resp = build_response_from_entry(
+            let mut resp = build_response_from_entry(
                 entry,
                 &deployment_id,
                 &default_locale,
@@ -880,6 +916,7 @@ async fn dynamic_handler(
                 dev_mode,
             )
             .await;
+            insert_cache_status_header(&mut resp, &format!("hit; ttl={ttl_secs}"));
             state
                 .metrics
                 .record_request(&method, status, "hit", start.elapsed().as_nanos() as u64);
@@ -898,6 +935,7 @@ async fn dynamic_handler(
         }
         Some((entry, CacheStatus::Stale)) => {
             let status = entry.status;
+            let age_secs = entry_age_secs(&entry);
             let duration_ms = start.elapsed().as_millis() as u64;
             spawn_revalidation(
                 state.clone(),
@@ -906,7 +944,7 @@ async fn dynamic_handler(
                 default_locale.clone(),
             );
             info!(method = %method, path = %path, status = %status, cache = "stale", encoding = %encoding, prefetch = %prefetch_status, "request completed");
-            let resp = build_response_from_entry(
+            let mut resp = build_response_from_entry(
                 entry,
                 &deployment_id,
                 &default_locale,
@@ -916,6 +954,10 @@ async fn dynamic_handler(
                 dev_mode,
             )
             .await;
+            insert_cache_status_header(
+                &mut resp,
+                &format!("stale; age={age_secs}; revalidating"),
+            );
             state.metrics.record_request(
                 &method,
                 status,
@@ -1073,7 +1115,7 @@ async fn dynamic_handler(
                 StatusCode::from_u16(page.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let duration_ms = start.elapsed().as_millis() as u64;
             info!(method = %method, path = %path, status = %status_code.as_u16(), cache = "miss", encoding = %encoding, prefetch = %prefetch_status, "request completed");
-            let resp_out = build_html_response(
+            let mut resp_out = build_html_response(
                 page.status,
                 &page.headers,
                 page.body.clone(),
@@ -1086,6 +1128,7 @@ async fn dynamic_handler(
                 &state.css_config,
                 dev_mode,
             );
+            insert_cache_status_header(&mut resp_out, "miss; stored");
             state.metrics.record_request(
                 &method,
                 status_code.as_u16(),
@@ -1344,7 +1387,7 @@ async fn respond_from_render(
         StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let duration_ms = start.elapsed().as_millis() as u64;
     info!(method = %method, path = %path, status = %status_code.as_u16(), cache = "miss", encoding = %encoding, prefetch = %prefetch_status, "request completed");
-    let resp_out = build_html_response(
+    let mut resp_out = build_html_response(
         resp.status,
         &resp.headers,
         body,
@@ -1356,6 +1399,10 @@ async fn respond_from_render(
         &state.css_cache,
         &state.css_config,
         state.dev_mode,
+    );
+    insert_cache_status_header(
+        &mut resp_out,
+        if will_cache { "miss; stored" } else { "bypass" },
     );
     state.metrics.record_request(
         method,
@@ -1413,6 +1460,7 @@ fn respond_sse(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
+        .header("x-gio-cache", "bypass")
         .header("connection", "keep-alive");
     for (k, v) in &response.headers {
         if k != "content-type" {
@@ -1452,7 +1500,7 @@ fn respond_ipc_error(
         duration_ms,
         true,
     );
-    if timeout {
+    let mut resp = if timeout {
         (StatusCode::GATEWAY_TIMEOUT, "504 Gateway Timeout").into_response()
     } else {
         (
@@ -1460,7 +1508,9 @@ fn respond_ipc_error(
             "500 Internal Server Error",
         )
             .into_response()
-    }
+    };
+    insert_cache_status_header(&mut resp, "bypass");
+    resp
 }
 
 // ── SSE streaming body ────────────────────────────────────────────────────────
