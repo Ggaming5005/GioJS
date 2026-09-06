@@ -29,11 +29,10 @@ sudo cp -r . /var/www/my-app/
 sudo chown -R www-data:www-data /var/www/my-app
 ```
 
-Run the build on the server or copy the pre-built `.gio/` directory:
+Install the Node dependencies - there is no build step (routes and client bundles are built at server startup):
 ```bash
 cd /var/www/my-app
 npm ci --omit=dev
-gio build   # or copy .gio/ from CI
 ```
 
 ## 3. Create the systemd unit
@@ -60,8 +59,7 @@ StandardError=journal
 SyslogIdentifier=my-app
 
 Environment=NODE_ENV=production
-Environment=PORT=3000
-# Environment=GIO_CACHE_REDIS_URL=redis://localhost:6379
+# The listen port comes from the [server] section of gio.toml (default 3000)
 
 # Harden the service
 NoNewPrivileges=true
@@ -140,6 +138,6 @@ sudo nginx -t && sudo systemctl reload nginx
 # Deploy new binary/code
 sudo systemctl stop my-app
 sudo cp giojs-server /usr/local/bin/
-sudo cp -r .gio/ /var/www/my-app/.gio/
+sudo cp -r app/ public/ gio.toml /var/www/my-app/
 sudo systemctl start my-app
 ```

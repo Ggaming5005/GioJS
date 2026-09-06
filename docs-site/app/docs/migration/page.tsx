@@ -38,7 +38,7 @@ export default function MigrationPage(): React.JSX.Element {
           <tr>
             <td>Image component</td>
             <td><code>import Image from 'next/image'</code></td>
-            <td><code>{'import { GioImage } from \'giojs/react\''}</code></td>
+            <td><code>{'import { GioImage } from \'@gio.js/react\''}</code></td>
           </tr>
           <tr>
             <td>Image JSX</td>
@@ -48,7 +48,7 @@ export default function MigrationPage(): React.JSX.Element {
           <tr>
             <td>Link component</td>
             <td><code>import Link from 'next/link'</code></td>
-            <td><code>{'import { GioLink } from \'giojs/react\''}</code></td>
+            <td><code>{'import { GioLink } from \'@gio.js/react\''}</code></td>
           </tr>
           <tr>
             <td>Link JSX</td>
@@ -58,7 +58,7 @@ export default function MigrationPage(): React.JSX.Element {
           <tr>
             <td>Navigation hooks</td>
             <td><code>from 'next/navigation'</code></td>
-            <td><code>from 'giojs/navigation'</code></td>
+            <td>TODO comment added - no GioJS equivalent yet, import left intact</td>
           </tr>
           <tr>
             <td>Font imports</td>
@@ -71,8 +71,11 @@ export default function MigrationPage(): React.JSX.Element {
       <h2>Migrating next.config.js</h2>
       <CodeBlock lang="bash" code={`npx gio-migrate --config next.config.js`} />
       <p>
-        This generates <code>gio.toml</code> with your <code>images.remotePatterns</code>,
-        redirects, and rewrites converted. A <code>migration-report.md</code> lists anything
+        This generates <code>gio.toml</code> with your <code>images.remotePatterns</code>{' '}
+        converted to <code>[[images.remote_patterns]]</code> sections. Redirects and rewrites
+        are not supported by GioJS yet - they are written into <code>gio.toml</code> as
+        comments so nothing is silently ignored; handle them in your reverse proxy or in{' '}
+        <code>getServerSideProps</code>. A <code>migration-report.md</code> lists anything
         that needs manual attention (custom webpack config, headers, experimental flags).
       </p>
 
@@ -83,8 +86,14 @@ export default function MigrationPage(): React.JSX.Element {
           <code>[[fonts]]</code> section instead of importing from <code>next/font</code>
         </li>
         <li>
-          <strong>Middleware</strong> - GioJS compiles middleware rules to Rust at build time.
-          Define rules in <code>middleware.ts</code> and run <code>gio build</code>
+          <strong>Middleware</strong> - not yet supported. For request interception, write a
+          Node plugin (<code>GioNodePlugin</code> with an <code>onRequest</code> hook)
+          registered in <code>gio.config.ts</code>
+        </li>
+        <li>
+          <strong>next/navigation hooks</strong> - flagged with a TODO comment. Use{' '}
+          <code>GioLink</code> for links and the browser location/history APIs for imperative
+          navigation
         </li>
         <li>
           <strong>Route Handlers</strong> (<code>route.ts</code>) - supported, no changes needed
@@ -96,7 +105,7 @@ export default function MigrationPage(): React.JSX.Element {
       </ul>
 
       <div className="callout">
-        After running the codemod, run <code>npx gio build</code> and check for type errors.
+        After running the codemod, run <code>tsc --noEmit</code> and check for type errors.
         The codemod is conservative - it only transforms patterns it can identify with certainty.
       </div>
     </>

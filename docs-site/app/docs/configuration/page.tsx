@@ -20,40 +20,57 @@ router = "app"          # "app" | "pages"
 [server]
 host = "0.0.0.0"        # bind address
 port = 3000
+http2 = true            # HTTP/2 support
+max_body_bytes = 2097152  # request body limit (2 MiB)
 
 [server.tls]
 enabled = false         # set true to terminate TLS in GioJS directly
-cert = "/path/to/cert.pem"
-key  = "/path/to/key.pem"
+cert_path = "/path/to/cert.pem"
+key_path  = "/path/to/key.pem"
 
-[cache]
-memory_mb = 128         # in-process LRU size
+[[fonts]]               # self-hosted fonts, repeat per font file
+family = "Inter"
+url    = "/fonts/inter.woff2"
+weight = 400            # default 400
+style  = "normal"       # default "normal"
 
-[cache.redis]
-enabled = false
-url     = "redis://localhost:6379"
-prefix  = "gio:prod:"
+[images]
+allowed_widths = [16, 32, 48, 64, 96, 128, 256, 384, 640, 750, 828, 1080, 1200, 1920, 2048, 3840]
+quality = 75            # 1-100
+disk_max_bytes = 536870912    # on-disk image cache cap (512 MiB)
+max_remote_bytes = 20971520   # max fetched remote source size (20 MiB)
 
-[compression]
-enabled = true          # brotli + gzip negotiation
+[[images.remote_patterns]]
+protocol = "https"      # default "https"
+hostname = "images.example.com"
+pathname = "/photos/*"  # optional; exact match, or prefix with trailing *
+
+[css]
+enabled = true          # CSS pipeline
+minify = true
+critical_extraction = true
+
+[websocket]
+enabled = true
+max_connections = 1000
+ping_interval_secs = 30
+
+[[rate_limits]]         # repeat per path rule; /_gio/image honors these too
+path = "/api/*"
+per_ip = 100            # requests per window (default 100)
+window_seconds = 60     # default 60
+burst = 20              # default 20
+key_header = "x-api-key"  # optional: key on a header value instead of IP
+
+[i18n]
+locales = ["en", "de"]  # empty = i18n disabled
+default_locale = "en"
+detect_from = ["path", "accept-language", "cookie"]
 
 [metrics]
-enabled = false         # expose /_gio/metrics (Prometheus); off by default
+enabled = false         # expose /_gio/metrics (Prometheus); off when this section is absent
 token = ""              # require "Authorization: Bearer <token>" when set
-ip_allowlist = []       # restrict by client IP, e.g. ["10.0.0.5"]
-
-[[images.remotePatterns]]
-hostname = "images.example.com"
-protocol = "https"
-
-[[redirects]]
-source      = "/old-path"
-destination = "/new-path"
-permanent   = true
-
-[[rewrites]]
-source      = "/api/:path*"
-destination = "http://internal-api/:path*"`} />
+ip_allowlist = []       # restrict by client IP, e.g. ["10.0.0.5"]`} />
 
       <h2>Health &amp; metrics</h2>
       <p>
@@ -68,7 +85,7 @@ destination = "http://internal-api/:path*"`} />
           <tr>
             <td><code>/_gio/health</code></td>
             <td>always on</td>
-            <td>Liveness probe - returns <code>200</code> once the server and the Node SSR worker are ready. Point your load balancer or container healthcheck here.</td>
+            <td>Liveness probe - always returns <code>200</code> with a JSON body: <code>{'{'}status, http2, tls, deploymentId, nodeReady, cacheEntries, uptimeSecs{'}'}</code>. <code>nodeReady</code> is <code>false</code> while the Node SSR worker is respawning (cached and static content still serves) - readiness probes should check that field.</td>
           </tr>
           <tr>
             <td><code>/_gio/metrics</code></td>
@@ -91,24 +108,29 @@ ip_allowlist = ["10.0.0.5", "10.0.0.6"]   # only allow these client IPs`} />
 curl -H "Authorization: Bearer a-long-random-secret" \\
   http://localhost:3000/_gio/metrics`} />
       <div className="callout">
-        With <code>enabled = true</code> but no <code>token</code> or
-        <code>ip_allowlist</code>, GioJS logs a warning at startup -
-        unauthenticated metrics are fine on localhost but should never face the
-        public internet.
+        In production (<code>NODE_ENV</code> not <code>development</code>), GioJS
+        logs a warning at startup when neither <code>token</code> nor
+        <code>ip_allowlist</code> is set - unauthenticated metrics are fine on
+        localhost but should never face the public internet.
       </div>
 
       <h2>Environment variables</h2>
-      <p>Environment variables override <code>gio.toml</code> at runtime:</p>
+      <p>
+        A few runtime knobs live in the environment rather than
+        <code>gio.toml</code> (the listen host and port are configured in
+        <code>[server]</code>, not via env):
+      </p>
       <table>
         <thead>
           <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>PORT</code></td><td>HTTP listen port</td><td>3000</td></tr>
-          <tr><td><code>NODE_ENV</code></td><td>Runtime mode</td><td>development</td></tr>
-          <tr><td><code>GIO_CACHE_REDIS_URL</code></td><td>Redis connection URL</td><td>unset</td></tr>
-          <tr><td><code>GIO_SOCKET_PATH</code></td><td>IPC socket path (Linux/macOS)</td><td>/tmp/giojs.sock</td></tr>
-          <tr><td><code>RUST_LOG</code></td><td>Rust log level (info/debug/trace)</td><td>info</td></tr>
+          <tr><td><code>GIO_APP_DIR</code></td><td>Path to the <code>app/</code> directory; <code>gio.toml</code> is loaded from its parent</td><td>app</td></tr>
+          <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the build content)</td><td>content-derived</td></tr>
+          <tr><td><code>GIO_SOCKET_PATH</code></td><td>Rust-to-Node IPC path; the server passes the resolved value to the Node worker</td><td><code>.gio/ipc.sock</code> (Unix), unique named pipe (Windows)</td></tr>
+          <tr><td><code>GIO_SITE_URL</code></td><td>Absolute base URL for <code>sitemap.xml</code> during <code>gio export</code></td><td>unset</td></tr>
+          <tr><td><code>NODE_ENV</code></td><td><code>development</code> enables dev mode (file watcher, dev endpoints)</td><td>unset</td></tr>
+          <tr><td><code>RUST_LOG</code></td><td>Rust log filter (info/debug/trace)</td><td>info</td></tr>
         </tbody>
       </table>
 

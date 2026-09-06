@@ -1,5 +1,4 @@
 import React from 'react';
-import { CodeBlock } from '../../../components/CodeBlock.tsx';
 
 export const revalidate = false;
 
@@ -8,14 +7,19 @@ export default function Page(): React.JSX.Element {
     <>
       <div className="docs-eyebrow">Architecture</div>
       <h1>Caching Layers</h1>
-      <p className="page-subtitle">In-process LRU, disk tier, and optional Redis for multi-instance.</p>
-      <p>The page cache is layered: a bounded in-memory LRU (L1), an optional disk tier (L2), and an optional Redis backend (L3) for sharing cache across instances.</p>
-      <CodeBlock lang="toml" code={`[cache]
-memory_mb = 128
-
-[cache.redis]
-enabled = true
-url = "redis://localhost:6379"`} />
+      <p className="page-subtitle">In-process LRU over a persistent disk tier, per instance.</p>
+      <p>
+        The page cache is layered: a bounded in-memory LRU (L1, 1000 entries) over an on-disk
+        tier (L2) that persists entries across restarts. Lookups check memory first, then disk;
+        all writes go to memory immediately and to disk in a background task. The disk tier is
+        bounded, with the oldest files evicted past the limit.
+      </p>
+      <p>
+        The architecture includes a storage-backend seam (L3) where a shared cluster-wide tier
+        could slot in, but no shared backend ships yet - the cache is per-instance. For
+        multi-instance deployments, set <code>GIO_DEPLOYMENT_ID</code> to the same value on
+        every instance so their caches agree on the deployment ID.
+      </p>
     </>
   );
 }

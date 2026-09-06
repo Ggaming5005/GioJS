@@ -36,7 +36,7 @@ export async function POST(req: GioRequest) {
       <h2>What you can return</h2>
       <ul>
         <li>Any JSON-serializable value - sent as <code>application/json</code> with status 200.</li>
-        <li>A web-standard <code>Response</code> - its status, headers, and body pass through.</li>
+        <li>A web-standard <code>Response</code> - its status, headers, and body pass through. Binary bodies (images, files) are supported.</li>
         <li><code>null</code> / <code>undefined</code> - 204 No Content.</li>
         <li>A <code>GioEventStream</code> (GET only) - switches the connection to SSE.</li>
       </ul>

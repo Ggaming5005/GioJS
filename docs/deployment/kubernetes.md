@@ -1,6 +1,8 @@
 # Kubernetes Deployment
 
-Recommended for multi-instance deployments behind a load balancer. Use Redis for shared ISR cache across pods.
+Recommended for multi-instance deployments behind a load balancer.
+
+Each pod keeps its own page cache (memory + disk) - there is no shared cache across pods yet; cross-instance cache coherence is on the roadmap. Set `GIO_DEPLOYMENT_ID` to the same value on every pod of a release so caches and version-skew detection stay consistent across the fleet.
 
 ## Why GioJS is stable in Kubernetes
 
@@ -28,17 +30,6 @@ data:
     [server]
     host = "0.0.0.0"
     port = 3000
-
-    [cache]
-    memory_mb = 50
-
-    [cache.redis]
-    enabled = true
-    url = "redis://redis:6379"
-    prefix = "gio:prod:"
-
-    [compression]
-    enabled = true
 ```
 
 ---
@@ -70,15 +61,17 @@ spec:
           env:
             - name: NODE_ENV
               value: production
-            - name: GIO_CACHE_REDIS_URL
-              valueFrom:
-                secretKeyRef:
-                  name: app-secrets
-                  key: redis-url
+            # Set per release from CI (e.g. the git SHA) - identical on
+            # every pod, so caches and skew detection agree fleet-wide.
+            - name: GIO_DEPLOYMENT_ID
+              value: "v1.1.0"
           volumeMounts:
             - name: config
               mountPath: /app/gio.toml
               subPath: gio.toml
+          # /_gio/health always returns 200 (cached and static content still
+          # serves while the Node worker respawns); the JSON body's nodeReady
+          # field reports SSR worker state if you need a stricter probe.
           readinessProbe:
             httpGet:
               path: /_gio/health
@@ -149,61 +142,6 @@ spec:
 
 ---
 
-## Redis StatefulSet
-
-```yaml
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: redis
-spec:
-  serviceName: redis
-  replicas: 1
-  selector:
-    matchLabels:
-      app: redis
-  template:
-    metadata:
-      labels:
-        app: redis
-    spec:
-      containers:
-        - name: redis
-          image: redis:7-alpine
-          ports:
-            - containerPort: 6379
-          volumeMounts:
-            - name: redis-data
-              mountPath: /data
-          readinessProbe:
-            exec:
-              command: ["redis-cli", "ping"]
-            initialDelaySeconds: 5
-            periodSeconds: 5
-  volumeClaimTemplates:
-    - metadata:
-        name: redis-data
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        resources:
-          requests:
-            storage: 1Gi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis
-spec:
-  selector:
-    app: redis
-  ports:
-    - port: 6379
-      targetPort: 6379
-  clusterIP: None
-```
-
----
-
 ## Horizontal Pod Autoscaler
 
 ```yaml
@@ -229,23 +167,12 @@ spec:
 
 ---
 
-## Secrets
-
-```bash
-# Create Redis URL secret
-kubectl create secret generic app-secrets \
-  --from-literal=redis-url='redis://redis:6379'
-```
-
----
-
 ## Deploy
 
 ```bash
 kubectl apply -f configmap.yaml
 kubectl apply -f deployment.yaml
 kubectl apply -f service.yaml
-kubectl apply -f redis.yaml
 kubectl apply -f hpa.yaml
 
 # Watch rollout
@@ -262,8 +189,9 @@ kubectl logs -l app=my-app -f
 docker build -t my-app:v1.2.0 .
 docker push my-app:v1.2.0
 
-# Update the deployment (GioJS version skew protection handles in-flight requests)
+# Update the deployment (bump GIO_DEPLOYMENT_ID for the new release too)
 kubectl set image deployment/my-app giojs=my-app:v1.2.0
+kubectl set env deployment/my-app GIO_DEPLOYMENT_ID=v1.2.0
 kubectl rollout status deployment/my-app
 ```
 

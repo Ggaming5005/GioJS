@@ -11,24 +11,23 @@ interface Example {
 
 const EXAMPLES: Example[] = [
   {
-    title: 'Blog',
-    description: 'A static blog with dynamic post pages. Demonstrates revalidate=false for the post listing and revalidate=3600 for individual posts fetched from a CMS.',
+    title: 'Basic app (examples/basic-app)',
+    description: 'A small app-router app touring the core features: pages, a dynamic route, an SSE endpoint, and a WebSocket endpoint, with a gio.toml exercising rate limits, i18n, and fonts.',
     features: [
-      'Static home page with revalidate = false',
-      'Dynamic /posts/[slug] with revalidate = 3600',
-      'getServerSideProps fetching from a headless CMS',
-      'GioImage for optimized post cover images',
+      'Home page with a hydrated useState counter',
+      'Static /about page and dynamic /posts/[id] page',
+      '/ticker route.ts streaming Server-Sent Events via GioEventStream',
+      '/chat route.ts exporting a wsHandler WebSocket echo handler',
+      'gio.toml with [websocket], [[rate_limits]], [i18n], and [[fonts]] sections',
     ],
   },
   {
-    title: 'E-commerce product catalog',
-    description: 'Product listing with search, category filters, and individual product pages. Uses Redis for shared cache across multiple instances.',
+    title: 'Auth demo (examples/auth-demo)',
+    description: 'Demonstrates the GioNodePlugin interface: an onRequest hook protects /admin/* routes by checking for a session=valid cookie and returning 403 Forbidden otherwise.',
     features: [
-      'Category pages cached for 5 minutes',
-      'Product pages cached for 1 hour',
-      'Search results never cached (force-dynamic)',
-      'GioLink for client-side navigation between categories',
-      'Redis multi-instance cache sharing',
+      'gio.config.ts registering the auth plugin via the plugins array',
+      'Plugin onRequest hook that short-circuits with a 403 response',
+      'Protected /admin/dashboard page reachable only with the session cookie',
     ],
   },
   {

@@ -203,7 +203,13 @@ All notable changes to this project will be documented in this file.
   logic-free entrypoint; new test suites for IPC framing/validation (18) and
   WS IPC (21) - core suite now 57 tests.
 
-## 0.1.0-beta.3 (2026-06-02)
+## 0.1.0-beta.4 (2026-06-13)
+
+Packaging and clean-install fixes following beta.3, found by testing the
+published packages end-to-end: `tsx` promoted to a runtime dependency,
+corrected package file lists, and template fixes.
+
+## 0.1.0-beta.3 (2026-06-13)
 
 - **Static export** now auto-generates `robots.txt` and a full `sitemap.xml`
   (absolute URLs from `GIO_SITE_URL`) - every static build is SEO-ready.

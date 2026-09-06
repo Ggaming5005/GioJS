@@ -15,7 +15,7 @@ inspection at the edge, custom route namespaces) that benefits from running befo
 ### `GioNodePlugin`
 
 ```typescript
-import type { GioNodePlugin } from 'giojs-core/src/plugin.ts';
+import type { GioNodePlugin } from '@gio.js/core';
 
 export interface GioNodePlugin {
   name: string;     // unique plugin identifier
@@ -34,6 +34,10 @@ export interface GioNodePlugin {
   onShutdown?: () => Promise<void>;
 }
 ```
+
+`IPCRequest`/`IPCResponse` are the wire shapes shown for reference - they are not separately
+exported from `@gio.js/core`. Annotate your plugin object as `GioNodePlugin` and the hook
+parameters and return types are inferred.
 
 **Hook behaviour:**
 
@@ -57,11 +61,10 @@ Create a `gio.config.ts` file in your project root (next to `gio.toml`):
 ```typescript
 // gio.config.ts
 import { myPlugin } from 'my-giojs-plugin';
-import type { GioConfig } from 'giojs-core/src/config-loader.ts';
 
 export default {
   plugins: [myPlugin],
-} satisfies GioConfig;
+};
 ```
 
 `gio.config.ts` is **optional** - if absent, the server starts with no plugins.
@@ -70,18 +73,17 @@ export default {
 
 ## Auth Plugin Example
 
-The `giojs-auth-example` package shows a minimal auth plugin that protects `/admin/*` routes:
+The in-repo `packages/giojs-auth-example` package shows a minimal auth plugin that protects
+`/admin/*` routes. Written against the published package, it looks like this:
 
 ```typescript
-// packages/giojs-auth-example/src/index.ts
-import type { GioNodePlugin } from 'giojs-core/src/plugin.ts';
-import type { IPCRequest, IPCResponse } from 'giojs-core/src/context.ts';
+import type { GioNodePlugin } from '@gio.js/core';
 
 export const authPlugin: GioNodePlugin = {
   name: 'giojs-auth-example',
   version: '0.1.0',
 
-  async onRequest(req: IPCRequest): Promise<IPCRequest | IPCResponse> {
+  async onRequest(req) {
     if (!req.path.startsWith('/admin')) return req;  // not a protected route
     const cookie = req.headers['cookie'] ?? '';
     if (cookie.includes('session=valid')) return req;  // authenticated

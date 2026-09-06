@@ -18,15 +18,15 @@ const OPTIONS: DeploymentOption[] = [
   },
   {
     title: 'Docker',
-    description: 'Multi-stage Dockerfile keeps the final image small (~80MB) by building Rust and Node separately. Includes a docker-compose.yml with optional Redis for shared caching.',
+    description: 'Multi-stage Dockerfile keeps the final image small (~80MB) by building Rust and Node separately.',
     guide: '/docs/deployment#docker',
     when: 'Containerized, single instance or scaling',
   },
   {
     title: 'Kubernetes',
-    description: 'Deployment, Service, Ingress, HPA, and Redis StatefulSet YAMLs. Uses readinessProbe on /_gio/health and scales on CPU utilization.',
+    description: 'Deployment, Service, Ingress, and HPA YAMLs. Uses a readinessProbe on /_gio/health and scales on CPU utilization.',
     guide: '/docs/deployment#kubernetes',
-    when: 'Kubernetes, multi-instance with shared Redis cache',
+    when: 'Kubernetes, multi-instance behind a load balancer',
   },
   {
     title: 'Windows NSSM',
@@ -47,7 +47,7 @@ export default function DeploymentPage(): React.JSX.Element {
 
       <h2>Before deploying</h2>
       <ol>
-        <li>Run <code>gio build</code> to produce <code>.gio/manifest.json</code> and compiled assets</li>
+        <li>Typecheck your app with <code>tsc --noEmit</code> - there is no separate build step; the server compiles and scans routes at startup</li>
         <li>Ensure Node.js 20+ is installed on the target host</li>
         <li>Place the <code>giojs-server</code> binary and your app directory on the host</li>
         <li>Set <code>NODE_ENV=production</code></li>
@@ -81,29 +81,34 @@ export default function DeploymentPage(): React.JSX.Element {
 
       <h2>Health check</h2>
       <p>
-        <code>/_gio/health</code> returns JSON and is always available. Use it for readiness
-        probes, load balancer health checks, and uptime monitors:
+        <code>/_gio/health</code> returns JSON and always answers 200 - cached and static
+        content keeps serving even while the Node worker is respawning, during which{' '}
+        <code>nodeReady</code> is <code>false</code>. Readiness probes should read that field.
+        Use it for readiness probes, load balancer health checks, and uptime monitors:
       </p>
       <pre>
         <code>{`{
   "status": "ok",
+  "http2": true,
+  "tls": false,
   "deploymentId": "abc12345",
   "nodeReady": true,
-  "cacheSize": "12MB",
-  "uptime": 3600
+  "cacheEntries": 42,
+  "uptimeSecs": 3600
 }`}</code>
       </pre>
 
-      <h2>Multi-instance caching</h2>
+      <h2>Multi-instance deployments</h2>
       <p>
-        When running multiple instances (Kubernetes, multiple VMs), configure Redis so all
-        instances share a single ISR cache:
+        The page cache is per-instance (in-memory LRU plus a local disk tier) - there is no
+        shared cache backend yet. When running multiple instances (Kubernetes, multiple VMs),
+        set <code>GIO_DEPLOYMENT_ID</code> to the same value on every instance so they agree
+        on the deployment ID. By default the ID is derived from the app&apos;s content, so
+        identical builds already agree - pinning it explicitly protects you when pods roll
+        out at different times:
       </p>
       <pre>
-        <code>{`[cache.redis]
-enabled = true
-url     = "redis://redis:6379"
-prefix  = "gio:prod:"`}</code>
+        <code>{`GIO_DEPLOYMENT_ID=release-2026-09-06`}</code>
       </pre>
     </>
   );

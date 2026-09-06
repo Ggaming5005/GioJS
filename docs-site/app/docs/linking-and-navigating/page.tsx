@@ -9,7 +9,7 @@ export default function Page(): React.JSX.Element {
       <div className="docs-eyebrow">Building Your App</div>
       <h1>Linking & Navigating</h1>
       <p className="page-subtitle">Client-side navigation with hover-intent prefetch and view transitions.</p>
-      <p>Use GioLink for internal navigation. It prefetches on hover intent and swaps content without a full reload.</p>
+      <p>Use GioLink for internal navigation. It prefetches on hover intent by default and swaps content without a full reload. Set <code>prefetch=&quot;viewport&quot;</code> to instead prefetch once when the link scrolls into view (via IntersectionObserver), or <code>prefetch={'{false}'}</code> to disable prefetching.</p>
       <CodeBlock lang="tsx" code={`import { GioLink } from '@gio.js/react';
 
 <GioLink href="/about">About</GioLink>

@@ -16,10 +16,10 @@ Run GioJS as a Windows Service using NSSM (Non-Sucking Service Manager). The ser
 New-Item -ItemType Directory -Force -Path C:\apps\my-app
 Copy-Item -Recurse .\* C:\apps\my-app\
 
-# Install Node dependencies and build
+# Install Node dependencies - there is no build step (routes and client
+# bundles are built at server startup)
 Set-Location C:\apps\my-app
 npm ci --omit=dev
-gio build
 ```
 
 ## 2. Install the Windows service
@@ -38,10 +38,9 @@ nssm install $SvcName $Binary
 # Set the working directory
 nssm set $SvcName AppDirectory $AppDir
 
-# Environment variables
+# Environment variables (the listen port comes from gio.toml [server])
 nssm set $SvcName AppEnvironmentExtra `
-    "NODE_ENV=production" `
-    "PORT=3000"
+    "NODE_ENV=production"
 
 # Restart on failure
 nssm set $SvcName AppThrottle 5000
@@ -123,21 +122,18 @@ Set-Location C:\apps\my-app
 # git pull  OR  robocopy \\deploy-share\my-app . /MIR
 
 npm ci --omit=dev
-gio build
 
 Start-Service MyGioApp
 ```
 
-## Redis (optional - multi-instance)
+## Multiple nodes
 
-For deployments with multiple Windows Server nodes sharing a cache:
+Each node keeps its own page cache (memory + disk) - there is no shared cache across nodes yet; cross-instance cache coherence is on the roadmap. When running the same build on several nodes behind a load balancer, set `GIO_DEPLOYMENT_ID` to the same value on every node so caches and version-skew detection agree:
 
 ```powershell
-# Add Redis URL to NSSM environment
 nssm set MyGioApp AppEnvironmentExtra `
     "NODE_ENV=production" `
-    "PORT=3000" `
-    "GIO_CACHE_REDIS_URL=redis://cache-server:6379"
+    "GIO_DEPLOYMENT_ID=release-abc123"
 Restart-Service MyGioApp
 ```
 

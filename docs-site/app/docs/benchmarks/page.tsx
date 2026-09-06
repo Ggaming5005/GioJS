@@ -14,12 +14,13 @@ export default function BenchmarksPage(): React.JSX.Element {
 
       <h2>Memory stability - GioJS vs Next.js 15</h2>
       <p>
-        Methodology: 50 concurrent connections, 60 seconds, 3 runs each.
-        RSS sampled every 5 seconds. Median across runs.
-      </p>
-      <p>
-        Workload: a realistic blog app (8 static pages, 1 dynamic page) running on the
-        same Linux VM (4 vCPU, 8 GB RAM).
+        <em>
+          The table below shows illustrative, projected figures - not measurements. It
+          sketches the expected pattern; run the benchmark scripts in{' '}
+          <code>benchmarks/memory-stability/</code> on your own hardware for real numbers
+          (the harness uses 50 concurrent connections, 60 seconds, 3 runs per server,
+          RSS sampled every 5 seconds, medians across runs).
+        </em>
       </p>
       <table className="bench-table">
         <thead>
@@ -40,12 +41,8 @@ export default function BenchmarksPage(): React.JSX.Element {
         </tbody>
       </table>
       <p>
-        <em>
-          Note: The numbers above are representative of the pattern seen in testing.
-          Run <code>benchmarks/memory-stability/run-benchmark.ps1</code> (Windows) or
-          the bash equivalent on your own hardware for authoritative numbers.
-          See <code>benchmarks/memory-stability.md</code> for the full methodology.
-        </em>
+        See <code>benchmarks/memory-stability.md</code> for the full methodology and for
+        the table the harness populates with measured results.
       </p>
 
       <h2>Why GioJS stays flat</h2>
@@ -62,9 +59,10 @@ export default function BenchmarksPage(): React.JSX.Element {
 
       <h2>Throughput</h2>
       <p>
-        Cache-hit throughput (static pages) is bounded by Rust I/O, not Node. On a 4-core
-        VM, GioJS serves ~40,000 cached requests/second at p99 {'<'} 1ms.
-        Next.js on the same hardware: ~8,000 req/s with p99 ~12ms.
+        Cache-hit throughput (static pages) is bounded by Rust I/O, not Node. The figures
+        sometimes quoted for this class of architecture (tens of thousands of cached
+        requests/second at sub-millisecond p99) are projections, not GioJS measurements -
+        benchmark on your own hardware before relying on specific numbers.
       </p>
       <p>
         For dynamic pages (cache misses), throughput is similar - both are bounded by React
@@ -79,7 +77,7 @@ export default function BenchmarksPage(): React.JSX.Element {
         <li><code>run-benchmark.ps1</code> - Windows PowerShell script</li>
         <li><code>run-benchmark.sh</code> - Linux/macOS bash script</li>
         <li><code>collect.js</code> - parses raw samples, computes medians, writes the markdown table</li>
-        <li><code>baseline-nextjs/</code> - the Next.js 15 app used as a baseline</li>
+        <li><code>next-baseline/</code> - the Next.js 15 app used as a baseline</li>
       </ul>
     </>
   );

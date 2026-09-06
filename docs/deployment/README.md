@@ -8,7 +8,7 @@ GioJS ships as two processes: the `giojs-server` Rust binary (handles HTTP, rout
 |-----------|---------------------|
 | Linux VPS or bare metal, long-running service | [Linux systemd](linux-systemd.md) |
 | Containerized, single instance or scaling | [Docker](docker.md) |
-| Kubernetes, multi-instance with shared cache | [Kubernetes](kubernetes.md) |
+| Kubernetes, multi-instance behind a load balancer | [Kubernetes](kubernetes.md) |
 | Windows Server host | [Windows NSSM](windows-nssm.md) |
 
 ## Memory advantage
@@ -19,19 +19,27 @@ See `benchmarks/memory-stability.md` for measured numbers comparing GioJS vs sel
 
 ## Before deploying
 
-1. Run `gio build` to produce `.gio/manifest.json` and the compiled static assets
-2. Ensure Node 20+ is installed on the target host
-3. Place the `giojs-server` binary and your app directory on the host
-4. Set `NODE_ENV=production`
+1. Ensure Node 20+ is installed on the target host
+2. Place the `giojs-server` binary and your app directory on the host
+3. Set `NODE_ENV=production`
+
+There is no build step for server apps - route discovery and client bundles happen at server startup. Static sites are pre-rendered with `gio export` instead and need no server at all.
+
+The HTTP port is not an environment variable - it comes from the `[server]` section of `gio.toml` (default `3000`).
 
 ## Common environment variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `NODE_ENV` | Set to `production` for production | `development` |
-| `PORT` | Server port | `3000` |
-| `GIO_SOCKET_PATH` | Unix socket path (Linux/macOS only) | `/tmp/giojs.sock` |
-| `GIO_CACHE_REDIS_URL` | Redis URL for multi-instance cache | unset |
+| `NODE_ENV` | Set to `production` for production | production behavior unless set to `development` |
+| `GIO_APP_DIR` | Path to the `app/` directory | `app` |
+| `GIO_DEPLOYMENT_ID` | Pin the deployment ID (otherwise content-derived from the build) | unset |
+| `GIO_SOCKET_PATH` | IPC socket path (Unix socket; named pipe on Windows) | `.gio/ipc.sock` |
+| `RUST_LOG` | Rust log filter (`info`, `debug`, `trace`) | `info` |
+
+## Multi-instance deployments
+
+Each instance keeps its own page cache (memory + disk) - there is no shared/distributed cache yet; cross-instance cache coherence is on the roadmap. To keep caches and version-skew detection consistent across instances of the same build, set `GIO_DEPLOYMENT_ID` to the same value (e.g. the release SHA) on every instance.
 
 ## Health check
 
@@ -40,9 +48,13 @@ See `benchmarks/memory-stability.md` for measured numbers comparing GioJS vs sel
 ```json
 {
   "status": "ok",
+  "http2": true,
+  "tls": false,
   "deploymentId": "abc12345",
   "nodeReady": true,
-  "cacheSize": "12MB",
-  "uptime": 3600
+  "cacheEntries": 42,
+  "uptimeSecs": 3600
 }
 ```
+
+It always returns `200` - cached and static content still serves while the Node worker respawns, so probe logic that needs the SSR worker should read the `nodeReady` field (`false` during a worker respawn) rather than the status code.
