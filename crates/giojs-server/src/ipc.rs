@@ -21,6 +21,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
+use crate::rules::{MiddlewareRules, RuleSet};
+
 type BoxReader = Box<dyn AsyncRead + Unpin + Send>;
 type BoxWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
@@ -199,6 +201,9 @@ struct IpcClientInner {
     /// Refreshed from the READY frame on every (re)connect. Sync RwLock:
     /// read by sync devtools code, never held across an await.
     route_manifest: std::sync::RwLock<Vec<RouteInfo>>,
+    /// middleware.ts rules from the READY frame, compiled at (re)connect time
+    /// so dev-watch edits apply after the automatic worker restart.
+    worker_rules: std::sync::RwLock<Arc<RuleSet>>,
     /// Dev-watch: asks the supervisor to kill and respawn the worker.
     restart_tx: mpsc::Sender<()>,
     /// Bumped by the supervisor each time the connection is (re)established;
@@ -235,7 +240,7 @@ impl IpcClient {
 
         let deployment_id = generate_deployment_id();
 
-        let (reader, writer, route_manifest) = match connect_and_handshake(
+        let connection = match connect_and_handshake(
             &worker.ipc_path,
             &deployment_id,
             &worker.token,
@@ -249,6 +254,12 @@ impl IpcClient {
                 return Err(e);
             }
         };
+        let WorkerConnection {
+            reader,
+            writer,
+            route_manifest,
+            worker_rules,
+        } = connection;
 
         let (write_tx, write_rx) = mpsc::channel::<Bytes>(256);
         let (restart_tx, restart_rx) = mpsc::channel::<()>(1);
@@ -261,6 +272,7 @@ impl IpcClient {
                 write_tx,
                 deployment_id,
                 route_manifest: std::sync::RwLock::new(route_manifest),
+                worker_rules: std::sync::RwLock::new(Arc::new(worker_rules)),
                 restart_tx,
                 generation,
                 connected: std::sync::atomic::AtomicBool::new(true),
@@ -380,6 +392,16 @@ impl IpcClient {
     pub fn route_manifest(&self) -> Vec<RouteInfo> {
         self.inner
             .route_manifest
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Compiled middleware.ts rules from the current worker connection.
+    /// Arc clone only - the set itself is compiled once per (re)connect.
+    pub fn worker_rules(&self) -> Arc<RuleSet> {
+        self.inner
+            .worker_rules
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
@@ -605,9 +627,36 @@ async fn connect_transport(path: &str) -> anyhow::Result<(BoxReader, BoxWriter)>
     Ok((Box::new(r), Box::new(w)))
 }
 
+/// A live worker connection plus everything the READY frame delivered.
+struct WorkerConnection {
+    reader: BoxReader,
+    writer: BoxWriter,
+    route_manifest: Vec<RouteInfo>,
+    worker_rules: RuleSet,
+}
+
+/// Compile the optional `middleware` field of a READY frame. Absent or
+/// malformed rules yield an empty set (with a warning) - a rules problem must
+/// never block the handshake. Old workers that do not send the field simply
+/// contribute no rules; the field is not part of the protocol version.
+fn parse_ready_middleware(ready: &serde_json::Value) -> RuleSet {
+    let raw = match ready.get("middleware") {
+        None => MiddlewareRules::default(),
+        Some(value) => match serde_json::from_value::<MiddlewareRules>(value.clone()) {
+            Ok(rules) => rules,
+            Err(e) => {
+                warn!(error = %e, "READY middleware field malformed - ignoring worker rules");
+                MiddlewareRules::default()
+            }
+        },
+    };
+    RuleSet::compile(&raw)
+}
+
 /// Connect to the worker's socket and run the authenticated READY/ACK
 /// handshake, retrying up to `attempts` times (Node may still be booting).
-/// Returns the connection plus the route manifest from the READY frame.
+/// Returns the connection plus the route manifest and middleware rules from
+/// the READY frame.
 ///
 /// A READY carrying a wrong token proof fails immediately without retrying:
 /// something else owns that endpoint, and handing it requests would let a
@@ -617,7 +666,7 @@ async fn connect_and_handshake(
     deployment_id: &str,
     token: &str,
     attempts: usize,
-) -> anyhow::Result<(BoxReader, BoxWriter, Vec<RouteInfo>)> {
+) -> anyhow::Result<WorkerConnection> {
     let expected_ready_proof = handshake_proof(token, "ready");
     let ack_proof = handshake_proof(token, "ack");
 
@@ -664,6 +713,7 @@ async fn connect_and_handshake(
             .get("routes")
             .and_then(|r| serde_json::from_value::<Vec<RouteInfo>>(r.clone()).ok())
             .unwrap_or_default();
+        let worker_rules = parse_ready_middleware(&ready);
         let ack = serde_json::to_vec(&serde_json::json!({
             "type": "ack",
             "deploymentId": deployment_id,
@@ -676,7 +726,12 @@ async fn connect_and_handshake(
                     ready["version"],
                     route_manifest.len()
                 );
-                return Ok((reader, writer, route_manifest));
+                return Ok(WorkerConnection {
+                    reader,
+                    writer,
+                    route_manifest,
+                    worker_rules,
+                });
             }
             Err(e) => {
                 last_err = Some(e);
@@ -928,7 +983,7 @@ async fn ipc_supervisor(
         // Between rounds, requests queued for the dead connection are failed
         // fast with 503 instead of sitting until their 30s timeout.
         let mut backoff_ms = 250u64;
-        let (new_reader, new_writer, routes) = loop {
+        let connection = loop {
             let child_dead = child.try_wait().map(|s| s.is_some()).unwrap_or(true);
             if child_dead {
                 match worker.spawn() {
@@ -962,12 +1017,16 @@ async fn ipc_supervisor(
             backoff_ms = (backoff_ms * 2).min(RESPAWN_BACKOFF_MAX_MS);
         };
 
-        reader = new_reader;
-        writer = new_writer;
+        reader = connection.reader;
+        writer = connection.writer;
         *inner
             .route_manifest
             .write()
-            .unwrap_or_else(|e| e.into_inner()) = routes;
+            .unwrap_or_else(|e| e.into_inner()) = connection.route_manifest;
+        *inner
+            .worker_rules
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(connection.worker_rules);
         inner
             .connected
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1067,6 +1126,7 @@ mod tests {
                 write_tx,
                 deployment_id: "dep-test".into(),
                 route_manifest: std::sync::RwLock::new(Vec::new()),
+                worker_rules: std::sync::RwLock::new(Arc::new(RuleSet::default())),
                 restart_tx: mpsc::channel(1).0,
                 generation: tokio::sync::watch::channel(1u64).0,
                 connected: std::sync::atomic::AtomicBool::new(true),
@@ -1162,6 +1222,7 @@ mod tests {
                 "protocol": IPC_PROTOCOL_VERSION,
                 "token": handshake_proof(&token_server, "ready"),
                 "routes": [{"pattern": "/posts/:id", "hasWsHandler": false}],
+                "middleware": {"redirects": [{"from": "/old", "to": "/new"}]},
             }))
             .unwrap();
             write_frame(&mut writer, &ready).await.unwrap();
@@ -1171,12 +1232,57 @@ mod tests {
             assert_eq!(ack["deploymentId"], "dep-1");
         });
 
-        let (_r, _w, routes) = connect_and_handshake(&pipe, "dep-1", &token, 3)
+        let connection = connect_and_handshake(&pipe, "dep-1", &token, 3)
             .await
             .expect("handshake must succeed with matching token");
-        assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].pattern, "/posts/:id");
+        assert_eq!(connection.route_manifest.len(), 1);
+        assert_eq!(connection.route_manifest[0].pattern, "/posts/:id");
+        assert!(matches!(
+            connection.worker_rules.apply("/old", None),
+            crate::rules::RuleOutcome::Redirect { .. }
+        ));
         server_task.await.unwrap();
+    }
+
+    #[test]
+    fn ready_without_middleware_field_yields_empty_rules() {
+        let ready = serde_json::json!({ "type": "ready", "version": "test" });
+        let rules = parse_ready_middleware(&ready);
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn ready_middleware_rules_are_compiled() {
+        let ready = serde_json::json!({
+            "type": "ready",
+            "middleware": {
+                "redirects": [{"from": "/old-home", "to": "/", "status": 301}],
+                "guards": [{"path": "/admin", "requireCookie": "session", "redirectTo": "/"}],
+            },
+        });
+        let rules = parse_ready_middleware(&ready);
+        assert!(matches!(
+            rules.apply("/old-home", None),
+            crate::rules::RuleOutcome::Redirect { status, .. } if status.as_u16() == 301
+        ));
+        assert!(matches!(
+            rules.apply("/admin", None),
+            crate::rules::RuleOutcome::Redirect { .. }
+        ));
+        assert!(matches!(
+            rules.apply("/admin", Some("session=x")),
+            crate::rules::RuleOutcome::None
+        ));
+    }
+
+    #[test]
+    fn malformed_ready_middleware_is_ignored_not_fatal() {
+        let ready = serde_json::json!({
+            "type": "ready",
+            "middleware": {"redirects": "not-an-array"},
+        });
+        let rules = parse_ready_middleware(&ready);
+        assert!(rules.is_empty());
     }
 
     #[cfg(windows)]

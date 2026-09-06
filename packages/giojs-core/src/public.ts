@@ -9,3 +9,11 @@ export { GioEventStream, isGioEventStream } from './sse.ts';
 export type { SseStream, SseCleanupFn } from './sse.ts';
 export type { GioRequest, GioSocket } from './context.ts';
 export type { GioNodePlugin } from './plugin.ts';
+export { defineMiddleware } from './middleware.ts';
+export type {
+  MiddlewareRules,
+  MiddlewareRedirect,
+  MiddlewareRewrite,
+  MiddlewareHeaderRule,
+  MiddlewareGuard,
+} from './middleware.ts';

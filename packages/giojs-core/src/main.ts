@@ -17,6 +17,7 @@ import { createIPCServer } from './ipc.ts';
 import { discoverRouteModules } from './ws-router.ts';
 import { createWsIpcServer } from './ws-ipc.ts';
 import { loadGioConfig } from './config-loader.ts';
+import { loadMiddlewareRules } from './middleware-loader.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import { writeRouteTypes } from './typed-routes.ts';
 import { logger } from './logger.ts';
@@ -92,6 +93,10 @@ export async function runServer(): Promise<void> {
 
   const specialPages = await discoverSpecialPages(appDir);
 
+  // Declarative rules from middleware.ts at the project root; delivered to
+  // Rust in the READY frame and enforced there, before routing.
+  const middlewareRules = await loadMiddlewareRules(dirname(appDir));
+
   // Bundle the hydration entries before accepting requests. buildClientBundles
   // never throws: routes whose bundle fails render server-only.
   const clientScripts = await buildClientBundles({
@@ -101,9 +106,14 @@ export async function runServer(): Promise<void> {
     dev: process.env.NODE_ENV !== 'production',
   });
 
-  createIPCServer(routes, layouts, wsHandlers, nodePluginRegistry, clientScripts, {
-    handlers,
-    specialPages,
-  });
+  createIPCServer(
+    routes,
+    layouts,
+    wsHandlers,
+    nodePluginRegistry,
+    clientScripts,
+    { handlers, specialPages },
+    middlewareRules,
+  );
   createWsIpcServer(wsHandlers);
 }

@@ -53,6 +53,27 @@ pub struct GioConfig {
     pub i18n: I18nConfig,
     #[serde(default)]
     pub metrics: MetricsConfig,
+    #[serde(default)]
+    pub redirects: Vec<crate::rules::RedirectRule>,
+    #[serde(default)]
+    pub rewrites: Vec<crate::rules::RewriteRule>,
+    #[serde(default)]
+    pub headers: Vec<crate::rules::HeaderRule>,
+    #[serde(default)]
+    pub guards: Vec<crate::rules::GuardRule>,
+}
+
+impl GioConfig {
+    /// The `[[redirects]]` / `[[rewrites]]` / `[[headers]]` / `[[guards]]`
+    /// sections bundled into the raw shape `rules::RuleSet::compile` takes.
+    pub fn middleware_rules(&self) -> crate::rules::MiddlewareRules {
+        crate::rules::MiddlewareRules {
+            redirects: self.redirects.clone(),
+            rewrites: self.rewrites.clone(),
+            headers: self.headers.clone(),
+            guards: self.guards.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -360,6 +381,72 @@ mod tests {
         let config = result.unwrap();
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 4321);
+    }
+
+    #[test]
+    fn rule_sections_parse_from_toml() {
+        let path = unique_temp_path("rules.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[redirects]]
+from   = "/moved"
+to     = "/cached"
+status = 301
+
+[[redirects]]
+from = "/blog/:slug"
+to   = "/posts/:slug"
+
+[[rewrites]]
+from = "/alias"
+to   = "/cached"
+
+[[headers]]
+path = "/docs/*rest"
+[headers.headers]
+x-frame-options = "DENY"
+
+[[guards]]
+path           = "/admin"
+require_cookie = "session"
+redirect_to    = "/"
+"#,
+        )
+        .unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let config = result.unwrap();
+        assert_eq!(config.redirects.len(), 2);
+        assert_eq!(config.redirects[0].status, 301);
+        assert_eq!(
+            config.redirects[1].status, 302,
+            "status must default to 302"
+        );
+        assert_eq!(config.rewrites.len(), 1);
+        assert_eq!(config.headers.len(), 1);
+        assert_eq!(
+            config.headers[0]
+                .headers
+                .get("x-frame-options")
+                .map(String::as_str),
+            Some("DENY")
+        );
+        assert_eq!(config.guards.len(), 1);
+        assert_eq!(config.guards[0].require_cookie, "session");
+        let bundle = config.middleware_rules();
+        assert_eq!(bundle.redirects.len(), 2);
+        assert_eq!(bundle.guards.len(), 1);
+    }
+
+    #[test]
+    fn missing_rule_sections_default_to_empty() {
+        let path = unique_temp_path("no_rules.toml");
+        let config = GioConfig::load_from_path(&path).unwrap();
+        assert!(config.redirects.is_empty());
+        assert!(config.rewrites.is_empty());
+        assert!(config.headers.is_empty());
+        assert!(config.guards.is_empty());
     }
 
     #[test]

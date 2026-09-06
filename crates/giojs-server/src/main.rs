@@ -11,6 +11,7 @@ mod dev_overlay;
 mod devtools;
 mod ipc;
 mod metrics;
+mod rules;
 mod ws;
 mod ws_ipc;
 mod ws_registry;
@@ -173,6 +174,9 @@ struct AppState {
     ws_registry: Arc<WsRegistry>,
     ws_config: config::WebsocketConfig,
     rate_limiter: Option<Arc<RateLimiter>>,
+    /// gio.toml rules, compiled once at startup. Worker (middleware.ts) rules
+    /// live on the IpcClient and refresh on every worker (re)connect.
+    static_rules: Arc<rules::RuleSet>,
     i18n: Option<Arc<config::I18nConfig>>,
     devtools: Arc<devtools::DevtoolsState>,
     project_root: Arc<PathBuf>,
@@ -346,6 +350,17 @@ async fn main() -> anyhow::Result<()> {
         Some(rl)
     };
 
+    let static_rules = Arc::new(rules::RuleSet::compile(&cfg.middleware_rules()));
+    if !static_rules.is_empty() {
+        info!(
+            redirects = cfg.redirects.len(),
+            rewrites = cfg.rewrites.len(),
+            headers = cfg.headers.len(),
+            guards = cfg.guards.len(),
+            "gio.toml middleware rules loaded"
+        );
+    }
+
     let i18n = if cfg.i18n.locales.is_empty() {
         None
     } else {
@@ -389,6 +404,7 @@ async fn main() -> anyhow::Result<()> {
         ws_registry,
         ws_config,
         rate_limiter,
+        static_rules,
         i18n,
         devtools: devtools_state,
         project_root: Arc::new(project_root.clone()),
@@ -486,6 +502,14 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             prefetch_budget_middleware,
+        ))
+        // Rules sit between rate limiting (outer) and everything
+        // content-related: a flood of guarded/redirected paths still burns
+        // rate-limit budget, while rewrites land before prefetch accounting,
+        // routing, and cache-key computation.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rules_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -717,6 +741,103 @@ async fn rate_limit_middleware(
                 .header("x-ratelimit-remaining", "0")
                 .body(axum::body::Body::from(r#"{"error":"rate limit exceeded"}"#))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+    }
+}
+
+/// Declarative middleware rules (gio.toml + worker middleware.ts), executed
+/// in Rust before routing so no request can bypass them. Order per request:
+/// guards, redirects, rewrites - static rules before worker rules in each
+/// phase (see rules.rs). Redirects short-circuit with the original query
+/// preserved; rewrites mutate the request URI in place so routing and the
+/// cache key both see the rewritten path. Header rules match the requested
+/// (pre-rewrite) path and are stamped on the response. `/_gio/*` is exempt.
+async fn rules_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    if req.uri().path().starts_with("/_gio/") {
+        return next.run(req).await;
+    }
+    let worker_rules = state.ipc.worker_rules();
+    let static_rules = state.static_rules.as_ref();
+    if static_rules.is_empty() && worker_rules.is_empty() {
+        return next.run(req).await;
+    }
+
+    let outcome = {
+        let path = req.uri().path();
+        let cookie_header = req
+            .headers()
+            .get(header::COOKIE)
+            .and_then(|value| value.to_str().ok());
+        if worker_rules.is_empty() {
+            static_rules.apply(path, cookie_header)
+        } else if static_rules.is_empty() {
+            worker_rules.apply(path, cookie_header)
+        } else {
+            rules::apply_merged(static_rules, &worker_rules, path, cookie_header)
+        }
+    };
+
+    match outcome {
+        rules::RuleOutcome::Redirect { location, status } => {
+            let location = rules::with_query(location, req.uri().query());
+            if let Some(resp) = rule_redirect_response(&location, status) {
+                info!(
+                    method = %req.method(),
+                    path = %req.uri().path(),
+                    status = %status.as_u16(),
+                    location = %location,
+                    cache = "bypass",
+                    "request completed (rule redirect)"
+                );
+                return resp;
+            }
+            warn!(location = %location, "rule redirect target is not a valid Location header - rule skipped");
+        }
+        rules::RuleOutcome::Rewrite { new_path } => rewrite_request_uri(&mut req, new_path),
+        rules::RuleOutcome::None => {}
+    }
+
+    // Header rules match the path the client requested, captured before the
+    // rewrite (if any) replaced the URI. Allocates only when header rules exist.
+    let stamped_path = if static_rules.has_header_rules() || worker_rules.has_header_rules() {
+        Some(req.uri().path().to_string())
+    } else {
+        None
+    };
+    let mut resp = next.run(req).await;
+    if let Some(path) = stamped_path {
+        for (name, value) in state
+            .static_rules
+            .response_headers(&path)
+            .into_iter()
+            .chain(worker_rules.response_headers(&path))
+        {
+            resp.headers_mut().insert(name, value);
+        }
+    }
+    resp
+}
+
+/// Build the redirect response for a rule match. Returns `None` when the
+/// location cannot be a header value (compile-time validation covers rule
+/// targets, but captured path segments travel into the Location verbatim).
+fn rule_redirect_response(location: &str, status: StatusCode) -> Option<Response> {
+    let location_value = HeaderValue::from_str(location).ok()?;
+    let mut resp = status.into_response();
+    resp.headers_mut().insert(header::LOCATION, location_value);
+    // Stamped here so cache_status_stamp_middleware doesn't label it "static".
+    insert_cache_status_header(&mut resp, "bypass");
+    Some(resp)
+}
+
+/// Swap the request path for the rewrite target, keeping the query verbatim,
+/// so routing and cache-key computation downstream see the rewritten path.
+fn rewrite_request_uri(req: &mut Request, new_path: String) {
+    let path_and_query = rules::with_query(new_path, req.uri().query());
+    match path_and_query.parse::<axum::http::Uri>() {
+        Ok(new_uri) => *req.uri_mut() = new_uri,
+        Err(e) => {
+            warn!(target = %path_and_query, error = %e, "rewrite target is not a valid URI - rule skipped")
         }
     }
 }
@@ -2839,6 +2960,44 @@ mod tests {
             "entry repopulated during the kill window must not survive the restart"
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── middleware rules plumbing ─────────────────────────────────────────────
+
+    #[test]
+    fn rule_redirect_response_carries_location_status_and_bypass_stamp() {
+        let resp = rule_redirect_response("/cached?a=1", StatusCode::MOVED_PERMANENTLY)
+            .expect("valid location must build a response");
+        assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/cached?a=1");
+        assert_eq!(resp.headers().get("x-gio-cache").unwrap(), "bypass");
+    }
+
+    #[test]
+    fn rule_redirect_response_rejects_invalid_location_instead_of_panicking() {
+        assert!(rule_redirect_response("/bad\nlocation", StatusCode::FOUND).is_none());
+    }
+
+    #[test]
+    fn rewrite_swaps_path_and_preserves_query() {
+        let mut req = Request::builder()
+            .uri("/alias?tab=all&x=%20y")
+            .body(Body::empty())
+            .unwrap();
+        rewrite_request_uri(&mut req, "/cached".to_string());
+        assert_eq!(req.uri().path(), "/cached");
+        assert_eq!(req.uri().query(), Some("tab=all&x=%20y"));
+    }
+
+    #[test]
+    fn rewrite_without_query_keeps_bare_path() {
+        let mut req = Request::builder()
+            .uri("/alias")
+            .body(Body::empty())
+            .unwrap();
+        rewrite_request_uri(&mut req, "/cached".to_string());
+        assert_eq!(req.uri().path(), "/cached");
+        assert_eq!(req.uri().query(), None);
     }
 
     // ── query decoding ────────────────────────────────────────────────────────

@@ -85,7 +85,7 @@ async function linkFixtureDeps(targetDir = fixtureDir) {
 async function copyFixtureForDev() {
   const devDir = join(repoRoot, 'tests', 'integration', '.dev-fixture');
   await rm(devDir, { recursive: true, force: true });
-  for (const item of ['app', 'gio.toml', 'gio.config.ts', 'package.json']) {
+  for (const item of ['app', 'gio.toml', 'gio.config.ts', 'middleware.ts', 'package.json']) {
     await cp(join(fixtureDir, item), join(devDir, item), { recursive: true });
   }
   await linkFixtureDeps(devDir);
@@ -248,6 +248,48 @@ async function main() {
       assert.equal(personalized.headers.get('x-gio-cache'), 'bypass');
       const asset = await fetch(`${BASE}/_next/static/chunks/nonexistent.js`);
       assert.equal(asset.headers.get('x-gio-cache'), 'static');
+    });
+
+    await test('gio.toml [[redirects]] issue the configured status with Location', async () => {
+      const res = await fetch(`${BASE}/moved`, { redirect: 'manual' });
+      assert.equal(res.status, 301);
+      assert.equal(res.headers.get('location'), '/cached');
+      assert.equal(res.headers.get('x-gio-cache'), 'bypass');
+    });
+
+    await test('middleware.ts redirects execute in Rust before routing', async () => {
+      const res = await fetch(`${BASE}/old-home`, { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), '/');
+      assert.equal(res.headers.get('x-gio-cache'), 'bypass');
+    });
+
+    await test('middleware.ts rewrites serve the target content under the requested URL', async () => {
+      const res = await fetch(`${BASE}/alias`, { redirect: 'manual' });
+      assert.equal(res.status, 200);
+      assert.match(await res.text(), /INTEGRATION_FIXTURE_CACHED/);
+    });
+
+    await test('guards redirect without the cookie and pass with it', async () => {
+      const blocked = await fetch(`${BASE}/admin`, { redirect: 'manual' });
+      assert.equal(blocked.status, 302);
+      assert.equal(blocked.headers.get('location'), '/');
+      const allowed = await fetch(`${BASE}/admin`, {
+        headers: { cookie: 'a=1; session=int-test' },
+      });
+      assert.equal(allowed.status, 200);
+      assert.match(await allowed.text(), /INTEGRATION_FIXTURE_ADMIN/);
+    });
+
+    await test('query strings survive rule redirects verbatim', async () => {
+      const res = await fetch(`${BASE}/moved?a=1&b=two`, { redirect: 'manual' });
+      assert.equal(res.status, 301);
+      assert.equal(res.headers.get('location'), '/cached?a=1&b=two');
+    });
+
+    await test('header rules stamp responses for matching paths', async () => {
+      const res = await fetch(`${BASE}/cached`);
+      assert.equal(res.headers.get('x-fixture-header'), 'from-middleware');
     });
 
     await test('killing the Node worker mid-flight recovers within seconds', async () => {

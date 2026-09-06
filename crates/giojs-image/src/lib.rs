@@ -247,8 +247,7 @@ impl ImageHandler {
     fn validate_remote(&self, src: &str) -> Result<Url, ImageError> {
         // WHATWG parsing, not string splitting: `?`, `#`, `@`, and userinfo
         // tricks must resolve to the same host reqwest will actually fetch.
-        let parsed =
-            Url::parse(src).map_err(|_| ImageError::SourceNotAllowed(src.to_string()))?;
+        let parsed = Url::parse(src).map_err(|_| ImageError::SourceNotAllowed(src.to_string()))?;
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
             return Err(ImageError::SourceNotAllowed(src.to_string()));
         }
@@ -363,7 +362,9 @@ mod tests {
     #[test]
     fn ip_literal_never_matches_wildcard_pattern() {
         let handler = handler_with_patterns(vec![pattern("https", "**.10.0.0.1", None)]);
-        let err = handler.validate_remote("https://10.0.0.1/x.png").unwrap_err();
+        let err = handler
+            .validate_remote("https://10.0.0.1/x.png")
+            .unwrap_err();
         assert!(matches!(err, ImageError::SourceNotAllowed(_)));
     }
 

@@ -5,3 +5,8 @@ name = "integration-fixture"
 host  = "127.0.0.1"
 port  = 39517
 http2 = false
+
+[[redirects]]
+from   = "/moved"
+to     = "/cached"
+status = 301
