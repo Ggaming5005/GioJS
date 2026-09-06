@@ -447,20 +447,22 @@ async function devWatchPhase() {
       await waitFor('watch-triggered restart to serve the edit', async () => {
         const html = await (await fetch(`${BASE}/`)).text();
         return html.includes('WATCH_UPDATED_HOME');
-      }, 30_000);
+        // CI Windows runners are 2-core and cold: worker respawn (tsx boot +
+        // esbuild bundling) can far exceed local timings.
+      }, 90_000);
       // The watcher fires on a debounce; wait for its log line and the
       // completed worker restart rather than asserting immediately.
       await waitFor('watch restart logged', () =>
         Promise.resolve(/dev watch: change detected/.test(log)), 15_000);
       await waitFor('worker restart completed', () =>
-        Promise.resolve(/dev watch: worker restarted/.test(log)), 30_000);
+        Promise.resolve(/dev watch: worker restarted/.test(log)), 90_000);
     });
 
     await test('dev watch: the page cache is cleared so cached routes update too', async () => {
       await waitFor('cached route to serve fresh content', async () => {
         const html = await (await fetch(`${BASE}/cached`)).text();
         return html.includes('WATCH_UPDATED_CACHED');
-      }, 15_000);
+      }, 30_000);
     });
   } catch (err) {
     console.error('\nintegration (dev watch): FAILED');

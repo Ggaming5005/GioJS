@@ -22,7 +22,7 @@ const RELEASES: Release[] = [
     date: 'September 6, 2026',
     tag: 'latest',
     summary:
-      'Repaired npm publishing (beta.5 shipped broken packages), cache-poisoning and SSRF fixes, and a developer-experience wave: Rust-executed middleware rules, typed routes, cache observability, gio bench, and a smarter dev overlay.',
+      'Repaired npm publishing (beta.5 shipped broken packages), cache-poisoning and SSRF fixes, and a developer-experience wave: Rust-executed middleware rules, streaming SSR, typed routes, cache observability, gio bench, and a smarter dev overlay.',
     groups: [
       {
         title: 'Release integrity & security',
@@ -36,6 +36,7 @@ const RELEASES: Release[] = [
         title: 'Developer experience',
         items: [
           'Middleware: declarative redirects, rewrites, response headers, and cookie guards from gio.toml and/or middleware.ts (defineMiddleware), with :param / *rest patterns and substitution - compiled and executed in Rust before routing, so no request header can bypass them.',
+          "Streaming SSR: personalized (uncacheable) pages flush React's shell as soon as it renders and stream Suspense content in the same response, instead of buffering the full document - cacheable pages keep the buffered path and serve from cache at memory speed.",
           "Typed routes: .gio/routes.d.ts is generated from your app/ directory at boot, and href('/posts/:id', { id }) autocompletes and typechecks with zero annotations.",
           'Cache observability: every response carries X-Gio-Cache (hit / stale / miss / bypass / static with ttl and age details), and gio cache explain <url> decodes it in plain English.',
           'gio bench: a zero-dependency load generator reporting req/s, p50/p90/p99/max latency, and the X-Gio-Cache label of what it measured - single URL or --suite table mode.',

@@ -111,6 +111,17 @@ shipped without its bin targets, so `npm create giojs@latest` failed outright.
   latency, non-200s, errors, bytes/s, and the last response's `X-Gio-Cache`
   value so cache-hit and cache-miss runs are self-labeling. Methodology for
   honest cross-framework comparisons documented in `benchmarks/README.md`.
+- **Streaming SSR.** Personalized (uncacheable) pages now stream React's
+  output to the browser as it renders (IPC protocol v3 `chunk` frames):
+  the shell flushes as soon as React produces it and Suspense content
+  follows in the same response, instead of buffering the full document in
+  the worker. Rust splices its head/body injections (fonts, deployment
+  script, `lang`, dev overlay) into the stream with chunk-boundary-safe
+  scanning, enforces an idle-gap timeout between chunks, and aborts the
+  React render when the client disconnects. Cacheable pages keep the
+  buffered path - they are cached once and served at memory speed
+  afterwards. Integration-verified: first bytes of a Suspense page arrive
+  in under 500 ms while the complete document takes 800 ms+.
 - **Dev overlay codeframes + open-in-editor.** The dev error overlay now
   shows a codeframe (failing line ± 4 lines of context) for the topmost
   project frame of SSR and browser errors, and every `file:line` in the
