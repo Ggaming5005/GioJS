@@ -230,12 +230,23 @@ jobs:
           for dir in platform/*/; do
             pkgs="$pkgs $(node -p "require('./$dir/package.json').name")"
           done
+          # Freshly published versions can lag registry reads by up to a
+          # minute; retry instead of silently skipping (beta.6 shipped with
+          # latest still on beta.5 because of exactly this race).
           for pkg in $pkgs; do
-            if npm view "$pkg@$ver" version >/dev/null 2>&1; then
-              npm dist-tag add "$pkg@$ver" latest
-              echo "$pkg@$ver -> latest"
-            else
-              echo "skip: $pkg@$ver not on npm"
+            promoted=false
+            for attempt in 1 2 3 4 5 6; do
+              if npm view "$pkg@$ver" version >/dev/null 2>&1; then
+                npm dist-tag add "$pkg@$ver" latest
+                echo "$pkg@$ver -> latest"
+                promoted=true
+                break
+              fi
+              echo "  $pkg@$ver not visible yet (attempt $attempt) - waiting"
+              sleep 10
+            done
+            if [ "$promoted" = false ]; then
+              echo "skip: $pkg@$ver never became visible - promote manually via promote-latest.yml"
             fi
           done
         env:
