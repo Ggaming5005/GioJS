@@ -49,3 +49,6 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # Node worker (kill_on_drop alone misses TerminateProcess on the parent).
 [target.'cfg(windows)'.dependencies]
 win32job = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -34,7 +34,7 @@ The HTTP port is not an environment variable - it comes from the `[server]` sect
 | `NODE_ENV` | Set to `production` for production | production behavior unless set to `development` |
 | `GIO_APP_DIR` | Path to the `app/` directory | `app` |
 | `GIO_DEPLOYMENT_ID` | Pin the deployment ID (otherwise content-derived from the build) | unset |
-| `GIO_SOCKET_PATH` | IPC socket path (Unix socket; named pipe on Windows) | `.gio/ipc.sock` |
+| `GIO_SOCKET_PATH` | IPC socket path (Unix socket; named pipe on Windows) | per-instance `.gio/ipc-<pid>-<rand>.sock` |
 | `RUST_LOG` | Rust log filter (`info`, `debug`, `trace`) | `info` |
 
 ## Multi-instance deployments

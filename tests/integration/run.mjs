@@ -483,3 +483,7 @@ if (process.exitCode !== 1) {
   await devWatchPhase();
 }
 console.log(`\nintegration: ${passed} passed${process.exitCode === 1 ? ', with FAILURES' : ''}`);
+// Any stray handle (an orphaned worker holding a stdio pipe) must never keep
+// the harness alive after the verdict is printed - CI burned 30 minutes on
+// exactly that.
+process.exit(process.exitCode ?? 0);

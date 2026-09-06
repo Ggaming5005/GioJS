@@ -128,7 +128,7 @@ Each container keeps its own page cache (memory + disk). There is no shared cach
 | `NODE_ENV` | Runtime mode (`development` enables dev mode) | production behavior |
 | `GIO_APP_DIR` | Path to the `app/` directory | `app` |
 | `GIO_DEPLOYMENT_ID` | Pin the deployment ID across replicas | content-derived from the build |
-| `GIO_SOCKET_PATH` | IPC socket path | `.gio/ipc.sock` |
+| `GIO_SOCKET_PATH` | IPC socket path | per-instance `.gio/ipc-<pid>-<rand>.sock` |
 | `RUST_LOG` | Rust log level (`info`, `debug`, `trace`) | `info` |
 
 ## .dockerignore

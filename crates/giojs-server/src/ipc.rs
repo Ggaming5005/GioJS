@@ -69,22 +69,64 @@ impl IpcPaths {
             std::process::id(),
             &uuid::Uuid::new_v4().simple().to_string()[..8]
         );
+        // Unix paths are per-instance too: a fixed name lets an orphaned
+        // worker from a previous instance squat the socket with a stale
+        // token, permanently blocking every later server start.
         let http = std::env::var("GIO_SOCKET_PATH").unwrap_or_else(|_| {
             if cfg!(windows) {
                 format!(r"\\.\pipe\giojs-{suffix}")
             } else {
-                ".gio/ipc.sock".to_string()
+                remove_stale_sockets();
+                format!(".gio/ipc-{suffix}.sock")
             }
         });
         let ws = std::env::var("GIO_WS_SOCKET_PATH").unwrap_or_else(|_| {
             if cfg!(windows) {
                 format!(r"\\.\pipe\giojs-ws-{suffix}")
             } else {
-                ".gio/ws.sock".to_string()
+                format!(".gio/ws-{suffix}.sock")
             }
         });
         IpcPaths { http, ws }
     }
+}
+
+/// Best-effort unlink of socket files left by previous instances (crash or
+/// hard kill never removes them). Only files matching the per-instance
+/// naming are touched; a concurrently running sibling instance keeps its
+/// live connections either way (unlink only removes the name).
+fn remove_stale_sockets() {
+    let Ok(entries) = std::fs::read_dir(".gio") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if (name.starts_with("ipc-") || name.starts_with("ws-")) && name.ends_with(".sock") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Kill the worker and its entire process tree. Windows relies on the Job
+/// Object (KILL_ON_JOB_CLOSE). On Unix the worker runs in its own process
+/// group (`spawn_node_tsx` sets `process_group(0)`) and SIGKILL cannot be
+/// forwarded by the tsx wrapper - killing only the direct child leaves the
+/// runtime grandchild alive, squatting the IPC socket with a stale token.
+/// `spawned_pid` is the pid captured at spawn time: after the child exits,
+/// `child.id()` is `None` but the group (and any orphans in it) may live on.
+async fn kill_worker_tree(child: &mut tokio::process::Child, spawned_pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = spawned_pid.or_else(|| child.id()) {
+        // SAFETY: kill(2) with a negative pgid is a plain syscall carrying no
+        // pointers; a dead or reused group id only yields ESRCH/EPERM.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = spawned_pid;
+    let _ = child.kill().await;
 }
 
 /// Random per-instance secret shared with the worker via its environment.
@@ -253,7 +295,8 @@ impl IpcClient {
             token: token.to_string(),
         };
         let mut child = worker.spawn()?;
-        info!("Node process spawned (pid {:?})", child.id());
+        let spawned_pid = child.id();
+        info!("Node process spawned (pid {:?})", spawned_pid);
 
         let deployment_id = generate_deployment_id();
 
@@ -267,7 +310,7 @@ impl IpcClient {
         {
             Ok(conn) => conn,
             Err(e) => {
-                let _ = child.kill().await;
+                kill_worker_tree(&mut child, spawned_pid).await;
                 return Err(e);
             }
         };
@@ -615,8 +658,8 @@ fn spawn_node_tsx(
     tracing::debug!("tsx cli.mjs: {cli_mjs}");
     tracing::debug!("NODE_PATH: {node_path}");
 
-    let child = Command::new("node")
-        .arg(&cli_mjs)
+    let mut cmd = Command::new("node");
+    cmd.arg(&cli_mjs)
         .arg(node_script)
         .env("NODE_PATH", node_path)
         .env("GIO_SOCKET_PATH", ipc_path)
@@ -626,8 +669,12 @@ fn spawn_node_tsx(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         // Reap the worker when the supervisor drops it (panic/unwind paths).
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    // Own process group so kill_worker_tree can take the tsx wrapper AND its
+    // runtime child together (SIGKILL is never forwarded by the wrapper).
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let child = cmd.spawn()?;
 
     #[cfg(windows)]
     assign_to_job(&child);
@@ -1004,6 +1051,9 @@ async fn ipc_supervisor(
     mut restart_rx: mpsc::Receiver<()>,
     inner: Arc<IpcClientInner>,
 ) {
+    // Remembered across exits: child.id() is None once the wrapper is gone,
+    // but its process group (and any orphaned runtime child) may live on.
+    let mut worker_pid = child.id();
     loop {
         let mut reader_task = tokio::spawn(run_reader_loop(reader, inner.clone()));
 
@@ -1013,6 +1063,8 @@ async fn ipc_supervisor(
                 status = child.wait() => {
                     error!(status = ?status, "Node worker exited");
                     reader_task.abort();
+                    // The wrapper is gone but its runtime child may not be.
+                    kill_worker_tree(&mut child, worker_pid).await;
                     break ServeEnd::ChildExit;
                 }
                 // Dev-watch requested a restart: kill the worker and let the
@@ -1020,7 +1072,7 @@ async fn ipc_supervisor(
                 _ = restart_rx.recv() => {
                     info!("worker restart requested (dev watch)");
                     reader_task.abort();
-                    let _ = child.kill().await;
+                    kill_worker_tree(&mut child, worker_pid).await;
                     break ServeEnd::ChildExit;
                 }
                 frame_opt = write_rx.recv() => {
@@ -1044,7 +1096,7 @@ async fn ipc_supervisor(
         };
 
         if matches!(serve_end, ServeEnd::Shutdown) {
-            let _ = child.kill().await;
+            kill_worker_tree(&mut child, worker_pid).await;
             return;
         }
 
@@ -1065,7 +1117,8 @@ async fn ipc_supervisor(
                 match worker.spawn() {
                     Ok(new_child) => {
                         child = new_child;
-                        info!("Node worker respawned (pid {:?})", child.id());
+                        worker_pid = child.id();
+                        info!("Node worker respawned (pid {:?})", worker_pid);
                     }
                     Err(e) => error!(error = %e, "Node worker respawn failed"),
                 }
@@ -1083,11 +1136,11 @@ async fn ipc_supervisor(
                     warn!(error = %e, "IPC recovery round failed - killing worker and retrying");
                     // A worker that is alive but not completing the handshake
                     // is wedged; kill it so the next round starts fresh.
-                    let _ = child.kill().await;
+                    kill_worker_tree(&mut child, worker_pid).await;
                 }
             }
             if fail_queued_writes(&mut write_rx, &inner, Duration::from_millis(backoff_ms)).await {
-                let _ = child.kill().await;
+                kill_worker_tree(&mut child, worker_pid).await;
                 return;
             }
             backoff_ms = (backoff_ms * 2).min(RESPAWN_BACKOFF_MAX_MS);
