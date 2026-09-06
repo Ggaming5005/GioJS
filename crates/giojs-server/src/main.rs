@@ -95,6 +95,7 @@ struct AppState {
     ipc: Arc<IpcClient>,
     cache: Arc<PageCache>,
     coalesce: Arc<SingleFlight<CoalescedRender>>,
+    revalidating: Arc<dashmap::DashSet<String>>,
     prefetch: Arc<PrefetchBudgets>,
     font_snippets: Arc<Vec<String>>,
     image: Arc<giojs_image::ImageHandler>,
@@ -309,6 +310,7 @@ async fn main() -> anyhow::Result<()> {
         ipc: Arc::new(ipc),
         cache,
         coalesce: Arc::new(SingleFlight::new()),
+        revalidating: Arc::new(dashmap::DashSet::new()),
         prefetch,
         font_snippets: Arc::new(font_snippets),
         image: image_handler,
@@ -531,9 +533,9 @@ async fn version_skew_middleware(
 }
 
 fn check_version_skew(req: &Request, server_id: &str) -> Option<Response> {
-    if !is_navigate(req) {
-        return None;
-    }
+    // Only the GioJS client runtime sends x-deployment-id (soft navigations
+    // and prefetches), so its presence IS the navigate signal. fetch() cannot
+    // set sec-fetch-mode: navigate - gating on it made skew detection dead.
     let client_id = req
         .headers()
         .get("x-deployment-id")
@@ -553,14 +555,6 @@ fn check_version_skew(req: &Request, server_id: &str) -> Option<Response> {
         HeaderValue::from_static("hard-reload"),
     );
     Some(resp)
-}
-
-fn is_navigate(req: &Request) -> bool {
-    req.headers()
-        .get("sec-fetch-mode")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "navigate")
-        .unwrap_or(false)
 }
 
 async fn prefetch_budget_middleware(
@@ -591,8 +585,10 @@ async fn rate_limit_middleware(
 ) -> Response {
     let path = req.uri().path().to_string();
 
-    // Internal GioJS routes are never rate-limited
-    if path.starts_with("/_gio/") {
+    // Internal GioJS routes are never rate-limited - except the image
+    // optimizer, the most CPU-expensive endpoint in the system, which
+    // honors operator [[rate_limits]] rules like any app route.
+    if path.starts_with("/_gio/") && path != "/_gio/image" {
         return next.run(req).await;
     }
 
@@ -980,7 +976,7 @@ async fn dynamic_handler(
                             }
                             let (body, composed) = compose_for_cache(
                                 &state,
-                                Bytes::from(resp.body),
+                                ipc::decode_body(resp.body, resp.body_base64),
                                 &resp.headers,
                                 &deployment_id,
                                 &default_locale,
@@ -1275,14 +1271,14 @@ async fn respond_from_render(
     let (body, composed) = if will_cache {
         compose_for_cache(
             state,
-            Bytes::from(resp.body),
+            ipc::decode_body(resp.body, resp.body_base64),
             &resp.headers,
             deployment_id,
             default_locale,
         )
         .await
     } else {
-        (Bytes::from(resp.body), false)
+        (ipc::decode_body(resp.body, resp.body_base64), false)
     };
     if will_cache {
         let entry = CacheEntry {
@@ -2094,14 +2090,26 @@ fn record_devtools(
     });
 }
 
-fn spawn_revalidation(state: AppState, key: String, req: IpcRequest, default_locale: String) {
+fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default_locale: String) {
+    // One background refresh per key: until the fresh entry is put, every
+    // request in the SWR window classifies as Stale and would spawn its own
+    // identical render - a stampede on the single Node worker.
+    if !state.revalidating.insert(key.clone()) {
+        return;
+    }
+    // The refresh render must be the shared, anonymous variant: the entry it
+    // replaces is keyed without credentials, so rendering with the triggering
+    // client's cookie/authorization would cache their personalized page for
+    // every visitor.
+    req.headers.remove("cookie");
+    req.headers.remove("authorization");
     tokio::spawn(async move {
         match state.ipc.send_request(req).await {
-            Ok(IpcSendResult::Response(resp)) if resp.cacheable && resp.cache_max_age > 0 => {
+            Ok(IpcSendResult::Response(resp)) if render_is_shareable(&resp) => {
                 let deployment_id = state.ipc.deployment_id().to_string();
                 let (html, composed) = compose_for_cache(
                     &state,
-                    Bytes::from(resp.body),
+                    ipc::decode_body(resp.body, resp.body_base64),
                     &resp.headers,
                     &deployment_id,
                     &default_locale,
@@ -2121,9 +2129,10 @@ fn spawn_revalidation(state: AppState, key: String, req: IpcRequest, default_loc
                     warn!(key = %key, error = %e, "background revalidation cache write failed");
                 }
             }
-            Ok(_) => {} // not cacheable or SSE - don't update
+            Ok(_) => {} // not shareable or SSE - don't update
             Err(e) => warn!(key = %key, error = %e, "background revalidation IPC error"),
         }
+        state.revalidating.remove(&key);
     });
 }
 
@@ -2483,8 +2492,9 @@ mod tests {
 
     #[test]
     fn version_skew_mismatch_returns_409() {
+        // No sec-fetch-mode: fetch() cannot set it, so soft-nav requests
+        // arrive without it and must still be checked.
         let req = Request::builder()
-            .header("sec-fetch-mode", "navigate")
             .header("x-deployment-id", "old_id")
             .body(Body::empty())
             .unwrap();
@@ -2495,17 +2505,13 @@ mod tests {
 
     #[test]
     fn version_skew_absent_id_passes() {
-        let req = Request::builder()
-            .header("sec-fetch-mode", "navigate")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().body(Body::empty()).unwrap();
         assert!(check_version_skew(&req, "server_id").is_none());
     }
 
     #[test]
     fn version_skew_matching_id_passes() {
         let req = Request::builder()
-            .header("sec-fetch-mode", "navigate")
             .header("x-deployment-id", "same_id")
             .body(Body::empty())
             .unwrap();
@@ -2513,13 +2519,17 @@ mod tests {
     }
 
     #[test]
-    fn version_skew_non_navigate_passes() {
+    fn version_skew_fires_for_cors_mode_fetches() {
+        // Regression: soft navigations and prefetches are fetch() calls, so
+        // the browser stamps sec-fetch-mode: cors. Gating on "navigate" made
+        // skew detection unreachable for the only requests that send the id.
         let req = Request::builder()
             .header("sec-fetch-mode", "cors")
             .header("x-deployment-id", "old_id")
             .body(Body::empty())
             .unwrap();
-        assert!(check_version_skew(&req, "new_id").is_none());
+        let resp = check_version_skew(&req, "new_id").unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 
     // ── request body forwarding ───────────────────────────────────────────────
@@ -2577,6 +2587,7 @@ mod tests {
             deployment_id: String::new(),
             vary: Vec::new(),
             cache_tags: Vec::new(),
+            body_base64: false,
         }
     }
 

@@ -31,7 +31,7 @@ const MAX_IPC_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// echoes it in READY and a mismatch refuses the handshake (a beta-N binary
 /// silently driving a beta-M worker is how protocol drift corrupts renders).
 /// Mirrors IPC_PROTOCOL_VERSION in packages/giojs-core/src/ipc.ts.
-const IPC_PROTOCOL_VERSION: u64 = 1;
+const IPC_PROTOCOL_VERSION: u64 = 2;
 
 /// Startup budget: Node + tsx can take several seconds to boot.
 const STARTUP_CONNECT_ATTEMPTS: usize = 60;
@@ -158,6 +158,26 @@ pub struct IpcResponse {
     /// Tags for tag-based cache invalidation; stored with the cache entry.
     #[serde(rename = "cacheTags", default)]
     pub cache_tags: Vec<String>,
+    /// True when `body` is base64 (a route handler returned a binary
+    /// Response). Mirrors the request-side flag of the same name.
+    #[serde(rename = "bodyBase64", default)]
+    pub body_base64: bool,
+}
+
+/// Materialize a response body: base64-decoded when the worker flagged it
+/// binary, UTF-8 passthrough otherwise. Invalid base64 yields an empty body
+/// (and a warning) rather than mangled output.
+pub fn decode_body(body: String, body_base64: bool) -> bytes::Bytes {
+    if !body_base64 {
+        return bytes::Bytes::from(body);
+    }
+    match crate::ws_ipc::b64::decode(&body) {
+        Ok(raw) => bytes::Bytes::from(raw),
+        Err(e) => {
+            error!(error = %e, "IPC response flagged bodyBase64 but body is not valid base64");
+            bytes::Bytes::new()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -306,6 +326,10 @@ impl IpcClient {
 
     /// Notify Node that the SSE client disconnected so it can run cleanup.
     pub fn send_sse_close(&self, req_id: &str) {
+        // The Node-side sse_done reply normally removes the registry entry,
+        // but a respawned worker knows nothing about this stream id - remove
+        // it here so entries can never outlive their client across respawns.
+        self.inner.sse_streams.remove(req_id);
         send_cancel_like_frame(&self.inner, "sse_close", req_id);
     }
 }
@@ -399,14 +423,18 @@ fn html_escape(s: &str) -> String {
 
 fn generate_deployment_id() -> String {
     use sha2::{Digest, Sha256};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    // Content-derived, never time-derived: a restart of the same build must
+    // keep the same ID or the entire persisted disk cache becomes dead weight
+    // (and every pod in a multi-instance deployment would disagree).
+    // GIO_DEPLOYMENT_ID lets deploy pipelines pin one ID across pods.
+    if let Ok(id) = std::env::var("GIO_DEPLOYMENT_ID") {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() {
+            return trimmed.chars().take(64).collect();
+        }
+    }
     let manifest = std::fs::read(".gio/manifest.json").unwrap_or_default();
     let mut h = Sha256::new();
-    h.update(secs.to_be_bytes());
     h.update(&manifest);
     // 16 hex chars (64 bits) - human-readable, collision-resistant for deployment tracking
     h.finalize()
@@ -694,6 +722,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                 cache_max_age: 0,
                                 swr_window_secs: 0,
                                 deployment_id: String::new(),
+                                body_base64: false,
                                 vary: Vec::new(),
                                 cache_tags: Vec::new(),
                             }
@@ -770,6 +799,7 @@ fn unavailable_response(id: &str) -> IpcResponse {
         deployment_id: String::new(),
         vary: Vec::new(),
         cache_tags: Vec::new(),
+        body_base64: false,
     }
 }
 
@@ -779,6 +809,18 @@ fn drain_pending_with_503(inner: &IpcClientInner) {
     for id in ids {
         if let Some((_, tx)) = inner.pending.remove(&id) {
             let _ = tx.send(IpcSendResult::Response(unavailable_response(&id)));
+        }
+    }
+}
+
+/// Terminate every in-flight SSE stream. The worker that was feeding them is
+/// gone and the respawned one knows nothing about their ids: without this,
+/// clients hang on silent connections and the registry grows across respawns.
+fn drain_sse_streams(inner: &IpcClientInner) {
+    let ids: Vec<String> = inner.sse_streams.iter().map(|e| e.key().clone()).collect();
+    for id in ids {
+        if let Some((_, tx)) = inner.sse_streams.remove(&id) {
+            let _ = tx.send(None);
         }
     }
 }
@@ -850,6 +892,7 @@ async fn ipc_supervisor(
         }
 
         drain_pending_with_503(&inner);
+        drain_sse_streams(&inner);
 
         // Recovery loop: respawn the worker if it is dead, then reconnect.
         // Between rounds, requests queued for the dead connection are failed
