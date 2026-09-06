@@ -33,7 +33,12 @@ const MAX_IPC_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// echoes it in READY and a mismatch refuses the handshake (a beta-N binary
 /// silently driving a beta-M worker is how protocol drift corrupts renders).
 /// Mirrors IPC_PROTOCOL_VERSION in packages/giojs-core/src/ipc.ts.
-const IPC_PROTOCOL_VERSION: u64 = 2;
+/// v3 added streaming SSR responses (`streaming: true` head + chunk frames).
+const IPC_PROTOCOL_VERSION: u64 = 3;
+
+/// Budget for a full buffered response, for a streaming head frame, and for
+/// the idle gap between chunks of a streaming body.
+pub const IPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Startup budget: Node + tsx can take several seconds to boot.
 const STARTUP_CONNECT_ATTEMPTS: usize = 60;
@@ -111,10 +116,15 @@ pub struct RouteInfo {
     pub has_ws_handler: bool,
 }
 
-/// Result of an IPC send - either a normal response or an SSE stream.
+/// Result of an IPC send - a buffered response, an SSE stream, or a
+/// streaming SSR render (head response plus chunked HTML body).
 pub enum IpcSendResult {
     Response(IpcResponse),
     SseStream {
+        response: IpcResponse,
+        body_rx: mpsc::UnboundedReceiver<Option<Bytes>>,
+    },
+    RenderStream {
         response: IpcResponse,
         body_rx: mpsc::UnboundedReceiver<Option<Bytes>>,
     },
@@ -168,6 +178,10 @@ pub struct IpcResponse {
     /// Response). Mirrors the request-side flag of the same name.
     #[serde(rename = "bodyBase64", default)]
     pub body_base64: bool,
+    /// Protocol v3: this response is the head of a streamed render - `body`
+    /// is empty and chunk frames follow, terminated by chunk_end.
+    #[serde(default)]
+    pub streaming: bool,
 }
 
 /// Materialize a response body: base64-decoded when the worker flagged it
@@ -195,6 +209,9 @@ struct IpcClientInner {
     pending: DashMap<String, oneshot::Sender<IpcSendResult>>,
     /// Channels for active SSE streams: req_id → sender of Option<Bytes> chunks
     sse_streams: DashMap<String, mpsc::UnboundedSender<Option<Bytes>>>,
+    /// Channels for active streaming SSR bodies: req_id → chunk sender.
+    /// None terminates the stream (chunk_end, clean or aborted alike).
+    render_streams: DashMap<String, mpsc::UnboundedSender<Option<Bytes>>>,
     /// Send encoded frames to the background writer task
     write_tx: mpsc::Sender<Bytes>,
     deployment_id: String,
@@ -269,6 +286,7 @@ impl IpcClient {
             inner: Arc::new(IpcClientInner {
                 pending: DashMap::new(),
                 sse_streams: DashMap::new(),
+                render_streams: DashMap::new(),
                 write_tx,
                 deployment_id,
                 route_manifest: std::sync::RwLock::new(route_manifest),
@@ -323,7 +341,7 @@ impl IpcClient {
             anyhow::bail!("IPC writer closed");
         }
 
-        match timeout(Duration::from_secs(30), rx).await {
+        match timeout(IPC_RESPONSE_TIMEOUT, rx).await {
             Ok(Ok(result)) => {
                 cancel_guard.armed = false;
                 Ok(result)
@@ -350,6 +368,13 @@ impl IpcClient {
         // it here so entries can never outlive their client across respawns.
         self.inner.sse_streams.remove(req_id);
         send_cancel_like_frame(&self.inner, "sse_close", req_id);
+    }
+
+    /// Terminate a streaming render whose Rust-side body was dropped (client
+    /// disconnect or idle timeout) so Node aborts the React render.
+    pub fn send_render_close(&self, req_id: &str) {
+        self.inner.render_streams.remove(req_id);
+        send_cancel_like_frame(&self.inner, "cancel", req_id);
     }
 }
 
@@ -771,10 +796,25 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                 }
                                 continue;
                             }
-                            // Reserved for streaming SSR (protocol v2+): a
-                            // v1 server must skip it, not mis-parse it.
+                            // ── Streaming SSR chunk / end (protocol v3) ──
                             Some("chunk") => {
-                                warn!("IPC chunk frame received - streaming responses are not supported by this server version");
+                                let id = val["id"].as_str().unwrap_or("");
+                                let data = val["data"].as_str().unwrap_or("");
+                                if let Some(tx) = inner.render_streams.get(id) {
+                                    let _ = tx.send(Some(Bytes::from(data.to_owned())));
+                                }
+                                continue;
+                            }
+                            Some("chunk_end") => {
+                                let id = val["id"].as_str().unwrap_or("").to_string();
+                                if val["aborted"].as_bool().unwrap_or(false) {
+                                    // Headers are already sent - ending the
+                                    // body early is all a stream can do.
+                                    warn!(id = %id, "streaming render aborted mid-stream - body truncated");
+                                }
+                                if let Some((_, tx)) = inner.render_streams.remove(&id) {
+                                    let _ = tx.send(None);
+                                }
                                 continue;
                             }
                             _ => {}
@@ -805,6 +845,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                 body_base64: false,
                                 vary: Vec::new(),
                                 cache_tags: Vec::new(),
+                                streaming: false,
                             }
                         } else {
                             match serde_json::from_value::<IpcResponse>(val) {
@@ -825,11 +866,13 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                         let resp_id = resp.id.clone();
 
                         // Claim the pending waiter first. If it is gone (request already
-                        // timed out), do not register an SSE stream - that would leak the
-                        // sender in `sse_streams` forever. Tell Node to clean up instead.
+                        // timed out), do not register a stream - that would leak the
+                        // sender forever. Tell Node to clean up instead.
                         let Some((_, pending_tx)) = inner.pending.remove(&resp_id) else {
                             if is_sse {
                                 send_sse_close_frame(&inner, &resp_id);
+                            } else if resp.streaming {
+                                send_cancel_like_frame(&inner, "cancel", &resp_id);
                             }
                             continue;
                         };
@@ -841,14 +884,29 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                 response: resp,
                                 body_rx: rx,
                             }
+                        } else if resp.streaming {
+                            let (tx, rx) = mpsc::unbounded_channel::<Option<Bytes>>();
+                            inner.render_streams.insert(resp_id.clone(), tx);
+                            IpcSendResult::RenderStream {
+                                response: resp,
+                                body_rx: rx,
+                            }
                         } else {
                             IpcSendResult::Response(resp)
                         };
 
-                        // Receiver dropped between remove and send: undo SSE registration.
-                        if let Err(IpcSendResult::SseStream { .. }) = pending_tx.send(result) {
-                            inner.sse_streams.remove(&resp_id);
-                            send_sse_close_frame(&inner, &resp_id);
+                        // Receiver dropped between remove and send: undo the
+                        // stream registration and tell Node to stop.
+                        match pending_tx.send(result) {
+                            Ok(()) | Err(IpcSendResult::Response(_)) => {}
+                            Err(IpcSendResult::SseStream { .. }) => {
+                                inner.sse_streams.remove(&resp_id);
+                                send_sse_close_frame(&inner, &resp_id);
+                            }
+                            Err(IpcSendResult::RenderStream { .. }) => {
+                                inner.render_streams.remove(&resp_id);
+                                send_cancel_like_frame(&inner, "cancel", &resp_id);
+                            }
                         }
                     }
                     Err(e) => error!("IPC JSON error: {e}"),
@@ -880,6 +938,7 @@ fn unavailable_response(id: &str) -> IpcResponse {
         vary: Vec::new(),
         cache_tags: Vec::new(),
         body_base64: false,
+        streaming: false,
     }
 }
 
@@ -900,6 +959,22 @@ fn drain_sse_streams(inner: &IpcClientInner) {
     let ids: Vec<String> = inner.sse_streams.iter().map(|e| e.key().clone()).collect();
     for id in ids {
         if let Some((_, tx)) = inner.sse_streams.remove(&id) {
+            let _ = tx.send(None);
+        }
+    }
+}
+
+/// Terminate every in-flight streaming SSR body on disconnect, for the same
+/// reason as `drain_sse_streams`: the respawned worker will never send the
+/// chunk_end these streams are waiting for.
+fn drain_render_streams(inner: &IpcClientInner) {
+    let ids: Vec<String> = inner
+        .render_streams
+        .iter()
+        .map(|e| e.key().clone())
+        .collect();
+    for id in ids {
+        if let Some((_, tx)) = inner.render_streams.remove(&id) {
             let _ = tx.send(None);
         }
     }
@@ -978,6 +1053,7 @@ async fn ipc_supervisor(
             .store(false, std::sync::atomic::Ordering::Relaxed);
         drain_pending_with_503(&inner);
         drain_sse_streams(&inner);
+        drain_render_streams(&inner);
 
         // Recovery loop: respawn the worker if it is dead, then reconnect.
         // Between rounds, requests queued for the dead connection are failed
@@ -1069,6 +1145,28 @@ async fn fail_queued_writes(
     }
 }
 
+/// Test-only IpcClient wired to an in-memory write channel, so main.rs tests
+/// can exercise streaming body plumbing without a real worker.
+#[cfg(test)]
+pub fn test_client_with_write_channel() -> (IpcClient, mpsc::Receiver<Bytes>) {
+    let (write_tx, write_rx) = mpsc::channel::<Bytes>(64);
+    let client = IpcClient {
+        inner: Arc::new(IpcClientInner {
+            pending: DashMap::new(),
+            sse_streams: DashMap::new(),
+            render_streams: DashMap::new(),
+            write_tx,
+            deployment_id: "dep-test".into(),
+            route_manifest: std::sync::RwLock::new(Vec::new()),
+            worker_rules: std::sync::RwLock::new(Arc::new(RuleSet::default())),
+            restart_tx: mpsc::channel(1).0,
+            generation: tokio::sync::watch::channel(1u64).0,
+            connected: std::sync::atomic::AtomicBool::new(true),
+        }),
+    };
+    (client, write_rx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1117,21 +1215,8 @@ mod tests {
 
     #[tokio::test]
     async fn send_request_write_failure_removes_pending_entry() {
-        let (write_tx, write_rx) = mpsc::channel::<Bytes>(1);
+        let (client, write_rx) = test_client_with_write_channel();
         drop(write_rx);
-        let client = IpcClient {
-            inner: Arc::new(IpcClientInner {
-                pending: DashMap::new(),
-                sse_streams: DashMap::new(),
-                write_tx,
-                deployment_id: "dep-test".into(),
-                route_manifest: std::sync::RwLock::new(Vec::new()),
-                worker_rules: std::sync::RwLock::new(Arc::new(RuleSet::default())),
-                restart_tx: mpsc::channel(1).0,
-                generation: tokio::sync::watch::channel(1u64).0,
-                connected: std::sync::atomic::AtomicBool::new(true),
-            }),
-        };
         let req = IpcRequest {
             id: "req-1".into(),
             method: "GET".into(),
@@ -1150,6 +1235,90 @@ mod tests {
             client.inner.pending.is_empty(),
             "failed send must not leak its pending waiter"
         );
+    }
+
+    #[test]
+    fn ipc_response_streaming_flag_defaults_false_and_parses_true() {
+        let plain: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"x","cacheable":false,"cacheMaxAge":0}"#,
+        )
+        .expect("valid response frame");
+        assert!(!plain.streaming);
+        let head: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"","cacheable":false,"cacheMaxAge":0,"streaming":true}"#,
+        )
+        .expect("valid streaming head frame");
+        assert!(head.streaming);
+    }
+
+    #[tokio::test]
+    async fn reader_loop_delivers_streaming_head_chunks_and_end() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client, _write_rx) = test_client_with_write_channel();
+        let (tx, rx) = oneshot::channel();
+        client.inner.pending.insert("req-s".into(), tx);
+        let (read_half, _keep_write_open) = tokio::io::split(server_io);
+        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), client.inner.clone()));
+
+        let (_r, mut node_writer) = tokio::io::split(client_io);
+        let head = serde_json::json!({
+            "id": "req-s", "status": 200,
+            "headers": {"content-type": "text/html; charset=utf-8"},
+            "body": "", "cacheable": false, "cacheMaxAge": 0, "streaming": true,
+        });
+        write_frame(&mut node_writer, &serde_json::to_vec(&head).unwrap())
+            .await
+            .unwrap();
+        let IpcSendResult::RenderStream {
+            response,
+            mut body_rx,
+        } = rx.await.unwrap()
+        else {
+            panic!("streaming head must resolve to RenderStream");
+        };
+        assert!(response.streaming);
+        assert!(response.body.is_empty());
+
+        write_frame(
+            &mut node_writer,
+            br#"{"type":"chunk","id":"req-s","data":"<p>hi</p>"}"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(body_rx.recv().await, Some(Some(Bytes::from("<p>hi</p>"))));
+
+        write_frame(&mut node_writer, br#"{"type":"chunk_end","id":"req-s"}"#)
+            .await
+            .unwrap();
+        assert_eq!(body_rx.recv().await, Some(None));
+        assert!(
+            client.inner.render_streams.is_empty(),
+            "chunk_end must unregister the stream"
+        );
+        reader_task.abort();
+    }
+
+    #[tokio::test]
+    async fn drain_render_streams_terminates_bodies_on_disconnect() {
+        let (client, _write_rx) = test_client_with_write_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Option<Bytes>>();
+        client.inner.render_streams.insert("req-d".into(), tx);
+        drain_render_streams(&client.inner);
+        assert_eq!(rx.recv().await, Some(None));
+        assert!(client.inner.render_streams.is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_render_close_unregisters_and_sends_cancel_frame() {
+        let (client, mut write_rx) = test_client_with_write_channel();
+        let (tx, _rx) = mpsc::unbounded_channel::<Option<Bytes>>();
+        client.inner.render_streams.insert("req-c".into(), tx);
+        client.send_render_close("req-c");
+        assert!(client.inner.render_streams.is_empty());
+        let frame = write_rx.recv().await.expect("cancel frame queued");
+        let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(value["type"], "cancel");
+        assert_eq!(value["id"], "req-c");
     }
 
     #[test]

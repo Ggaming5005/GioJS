@@ -12,7 +12,12 @@ import { createHash } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import type { IPCRequest, IPCOutbound, IPCError } from './context.ts';
 import type { RouteModule, LayoutEntry } from './router.ts';
-import { renderRoute, type RenderExtras, type SseRouteResult } from './ssr.ts';
+import {
+  renderRoute,
+  type RenderExtras,
+  type SseRouteResult,
+  type StreamRenderResult,
+} from './ssr.ts';
 import type { SseStream } from './sse.ts';
 import type { WsHandlerFn } from './ws-router.ts';
 import type { NodePluginRegistry } from './plugin.ts';
@@ -36,8 +41,9 @@ const VERSION = '0.1.0';
  * Wire-format version, echoed in READY. Rust refuses the handshake on
  * mismatch so a stale binary can never silently drive a newer worker.
  * Mirrors IPC_PROTOCOL_VERSION in giojs-server/src/ipc.rs.
+ * v3 added streaming SSR responses (`streaming: true` head + chunk frames).
  */
-export const IPC_PROTOCOL_VERSION = 2;
+export const IPC_PROTOCOL_VERSION = 3;
 
 export const MAX_IPC_MESSAGE_SIZE = 64 * 1024 * 1024;
 
@@ -74,6 +80,9 @@ export function createIPCServer(
     pattern,
     hasWsHandler: wsHandlers.has(pattern),
   }));
+
+  // Live IPC serving opts into streaming; static export never comes through here.
+  const renderExtras: RenderExtras = { ...extras, streaming: true };
 
   const server = net.createServer(socket => {
     logger.info('rust connected', { pipe: PIPE_PATH });
@@ -194,7 +203,17 @@ export function createIPCServer(
       activeRenders.set(req.id, abort);
       let routeResult;
       try {
-        routeResult = await renderRoute(req, routes, layouts, registry, abort.signal, clientScripts, extras);
+        routeResult = await renderRoute(req, routes, layouts, registry, abort.signal, clientScripts, renderExtras);
+
+        if (isStreamRenderResult(routeResult)) {
+          // Head first: Rust registers the chunk stream under this id before
+          // any chunk frame can arrive (frames are processed in order). The
+          // abort entry stays registered while pumping so a cancel frame
+          // mid-stream aborts the React render and stops the pump.
+          writeFrame(socket, routeResult.head);
+          await pumpRenderStream(socket, req.id, routeResult);
+          return;
+        }
       } finally {
         activeRenders.delete(req.id);
       }
@@ -315,8 +334,71 @@ export function createIPCServer(
   return server;
 }
 
-function isSseResult(result: IPCOutbound | SseRouteResult): result is SseRouteResult {
+type RouteResult = IPCOutbound | SseRouteResult | StreamRenderResult;
+
+function isSseResult(result: RouteResult): result is SseRouteResult {
   return 'type' in result && result.type === 'sse';
+}
+
+function isStreamRenderResult(result: RouteResult): result is StreamRenderResult {
+  return 'type' in result && result.type === 'stream';
+}
+
+/** Socket subset needed by the render-stream pump (testable without a pipe). */
+export interface StreamFrameSink extends FrameSink {
+  destroyed: boolean;
+}
+
+/**
+ * Pump a streaming render's body as chunk frames, then chunk_end. Chunk
+ * frames are never dropped under backpressure (unlike SSE) - the HTML must
+ * arrive complete - so writes rely on socket buffering; a destroyed socket
+ * stops the pump. Chunk data is always UTF-8 text: React's output is UTF-8
+ * and the TextDecoder carries split multi-byte sequences across boundaries.
+ */
+export async function pumpRenderStream(
+  socket: StreamFrameSink,
+  reqId: string,
+  render: StreamRenderResult,
+): Promise<void> {
+  const decoder = new TextDecoder();
+  const reader = render.stream.getReader();
+  try {
+    if (socket.destroyed) {
+      await reader.cancel();
+      return;
+    }
+    if (render.prefix !== '') {
+      writeFrame(socket, { type: 'chunk', id: reqId, data: render.prefix });
+    }
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (socket.destroyed) {
+        await reader.cancel();
+        return;
+      }
+      const data = decoder.decode(value, { stream: true });
+      if (data !== '') {
+        writeFrame(socket, { type: 'chunk', id: reqId, data });
+      }
+    }
+    const closing = decoder.decode() + render.suffix;
+    if (closing !== '') {
+      writeFrame(socket, { type: 'chunk', id: reqId, data: closing });
+    }
+    writeFrame(socket, { type: 'chunk_end', id: reqId });
+  } catch (streamError) {
+    // Render error (or abort) mid-stream: headers already went out, so the
+    // only possible signal is ending the body early.
+    logger.error('streaming render failed mid-stream', {
+      id: reqId,
+      error: streamError instanceof Error ? streamError.message : String(streamError),
+    });
+    if (!socket.destroyed) {
+      writeFrame(socket, { type: 'chunk_end', id: reqId, aborted: true });
+    }
+  }
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {

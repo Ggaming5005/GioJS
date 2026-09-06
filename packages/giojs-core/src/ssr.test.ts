@@ -8,7 +8,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import React from 'react';
-import { renderRoute, serializeEnvelope } from './ssr.ts';
+import { renderRoute, serializeEnvelope, type StreamRenderResult } from './ssr.ts';
+import { NodePluginRegistry } from './plugin.ts';
 import type { IPCRequest } from './context.ts';
 import type { RouteModule, LayoutEntry, PageModule, LayoutModule } from './router.ts';
 
@@ -272,6 +273,114 @@ describe('hydration envelope', () => {
     const circular: Record<string, unknown> = {};
     circular['self'] = circular;
     expect(serializeEnvelope({ props: circular, path: '/', pattern: '/', entry: '' })).toBeNull();
+  });
+});
+
+// ─── streaming SSR ────────────────────────────────────────────────────────────
+
+async function readStreamToString(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let out = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out += decoder.decode(value, { stream: true });
+  }
+  return out + decoder.decode();
+}
+
+function expectStream(result: Awaited<ReturnType<typeof renderRoute>>): StreamRenderResult {
+  if ('type' in result && result.type === 'stream') return result;
+  throw new Error(`expected a stream result, got ${JSON.stringify(result).slice(0, 200)}`);
+}
+
+describe('streaming SSR', () => {
+  const streamingExtras = { streaming: true };
+
+  it('streams uncacheable page renders when streaming is enabled', async () => {
+    const routes = makeRoute('/');
+    const result = await renderRoute(
+      makeRequest('/'), routes, noLayouts, undefined, undefined, undefined, streamingExtras,
+    );
+    const streamed = expectStream(result);
+    expect(streamed.head.streaming).toBe(true);
+    expect(streamed.head.body).toBe('');
+    expect(streamed.head.status).toBe(200);
+    expect(streamed.head.cacheable).toBe(false);
+    expect(streamed.head.headers['content-type']).toContain('text/html');
+    const html = streamed.prefix + (await readStreamToString(streamed.stream)) + streamed.suffix;
+    expect(html).toContain('<!DOCTYPE');
+    expect(html).toContain('page content');
+    expect(html).toContain('id="__gio"');
+    expect(html).toContain('</html>');
+  });
+
+  it('keeps cacheable pages on the buffered path', async () => {
+    const routes = makeRoute('/', { revalidate: 60 });
+    const result = await renderRoute(
+      makeRequest('/'), routes, noLayouts, undefined, undefined, undefined, streamingExtras,
+    );
+    expect('type' in result).toBe(false);
+    expect('body' in result && result.body).toContain('page content');
+    expect('cacheMaxAge' in result && result.cacheMaxAge).toBe(60);
+  });
+
+  it('keeps rendering buffered without the streaming opt-in', async () => {
+    const routes = makeRoute('/');
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+    expect('type' in result).toBe(false);
+    expect('body' in result && result.body).toContain('page content');
+  });
+
+  it('keeps HEAD requests buffered', async () => {
+    const routes = makeRoute('/');
+    const req = { ...makeRequest('/'), method: 'HEAD' };
+    const result = await renderRoute(
+      req, routes, noLayouts, undefined, undefined, undefined, streamingExtras,
+    );
+    expect('type' in result).toBe(false);
+    expect('status' in result && result.status).toBe(200);
+  });
+
+  it('keeps rendering buffered when a plugin registered onResponse', async () => {
+    const registry = new NodePluginRegistry();
+    registry.register({
+      name: 'test', version: '0.0.0',
+      onResponse: async (_req, res) => ({ ...res, headers: { ...res.headers, 'x-seen': '1' } }),
+    });
+    const routes = makeRoute('/');
+    const result = await renderRoute(
+      makeRequest('/'), routes, noLayouts, registry, undefined, undefined, streamingExtras,
+    );
+    expect('type' in result).toBe(false);
+    expect('headers' in result && result.headers['x-seen']).toBe('1');
+  });
+
+  it('streams without the document wrapper when a root layout provides the shell', async () => {
+    const routes = makeRoute('/');
+    const layouts = new Map<string, LayoutEntry>([
+      ['/', {
+        filePath: '/fake/layout.tsx',
+        urlPrefix: '/',
+        load: async () => ({
+          default: function RootLayout({ children }: { children?: React.ReactNode }) {
+            return React.createElement('html', null,
+              React.createElement('head', null),
+              React.createElement('body', null, children));
+          },
+        }),
+      }],
+    ]);
+    const result = await renderRoute(
+      makeRequest('/'), routes, layouts, undefined, undefined, undefined, streamingExtras,
+    );
+    const streamed = expectStream(result);
+    expect(streamed.prefix).toBe('');
+    expect(streamed.suffix).toBe('');
+    const html = await readStreamToString(streamed.stream);
+    expect(html).toContain('<html');
+    expect(html).toContain('page content');
   });
 });
 

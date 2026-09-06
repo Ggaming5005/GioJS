@@ -28,12 +28,30 @@ export interface SseRouteResult {
   stream: GioEventStream;
 }
 
+/**
+ * Streaming render (protocol v3): the head response goes out immediately
+ * after React's shell is ready; the caller pumps `stream` as chunk frames.
+ * `prefix`/`suffix` carry the document shell when no root layout provides one.
+ */
+export interface StreamRenderResult {
+  type: 'stream';
+  head: IPCResponse;
+  stream: ReadableStream<Uint8Array>;
+  prefix: string;
+  suffix: string;
+}
+
 /** Optional render inputs beyond pages/layouts. */
 export interface RenderExtras {
   /** route.ts method handlers (API routes + SSE). */
   handlers?: Map<string, HandlerEntry>;
   /** app/not-found.* and app/error.* */
   specialPages?: SpecialPages;
+  /**
+   * Allow streaming (chunked) responses for non-shareable page renders.
+   * Only the IPC server sets this - static export keeps the buffered path.
+   */
+  streaming?: boolean;
 }
 
 const DEV = process.env.NODE_ENV !== 'production';
@@ -176,11 +194,14 @@ const OBSERVER_SCRIPT = `<script>(function(){var o=new IntersectionObserver(func
  */
 export const BUILTIN_404_HTML = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>404 - Page not found</title><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0a09;color:#e7e5e4;font-family:system-ui,-apple-system,sans-serif}main{text-align:center;padding:2rem}p.code{font-family:ui-monospace,monospace;font-size:.8rem;letter-spacing:.2em;opacity:.55;margin:0 0 .6rem}h1{font-size:2rem;margin:0 0 .6rem;font-weight:650}p.hint{opacity:.7;margin:0 0 1.5rem}a{color:#0b0a09;background:#e7e5e4;text-decoration:none;padding:.55rem 1.1rem;border-radius:999px;font-weight:600;font-size:.9rem}</style></head><body><main><p class="code">HTTP 404</p><h1>Page not found</h1><p class="hint">This page doesn't exist or was moved.</p><a href="/">Go home</a></main></body></html>`;
 
+// The #__gio boundary and bootstrap module scripts are rendered by React
+// (they must exist identically in the client element tree), so this shell
+// only supplies the document skeleton a missing root layout would provide.
+const DOCUMENT_PREFIX = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>';
+const DOCUMENT_SUFFIX = `${OBSERVER_SCRIPT}</body></html>`;
+
 function wrapWithDocument(inner: string): string {
-  // The #__gio boundary and bootstrap module scripts are rendered by React
-  // (they must exist identically in the client element tree), so this shell
-  // only supplies the document skeleton a missing root layout would provide.
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${inner}${OBSERVER_SCRIPT}</body></html>`;
+  return `${DOCUMENT_PREFIX}${inner}${DOCUMENT_SUFFIX}`;
 }
 
 /**
@@ -247,7 +268,7 @@ export async function renderRoute(
   /** Route pattern → hydration entry script URL from the client build. */
   clientScripts?: Map<string, string>,
   extras?: RenderExtras,
-): Promise<IPCOutbound | SseRouteResult> {
+): Promise<IPCOutbound | SseRouteResult | StreamRenderResult> {
   if (registry !== undefined && !registry.isEmpty) {
     const intercepted = await registry.interceptRequest(req);
     if (isPluginResponse(intercepted)) {
@@ -410,6 +431,40 @@ export async function renderRoute(
       });
     }
 
+    let cacheable = pageModule.revalidate !== undefined;
+    if (gsspHeaders !== null && cacheable) {
+      // Response headers from gSSP are per-request (set-cookie above all);
+      // caching them would replay one user's headers to everyone.
+      logger.warn('getServerSideProps returned headers - page made uncacheable', {
+        path: req.path,
+      });
+      cacheable = false;
+    }
+    // revalidate=false means "cache forever"; false??0 would coerce to 0 so check explicitly.
+    const cacheMaxAge = !cacheable
+      ? 0
+      : pageModule.revalidate === false
+        ? 31536000
+        : (pageModule.revalidate ?? 0);
+    const responseHeaders = {
+      'content-type': 'text/html; charset=utf-8',
+      ...(gsspHeaders ?? {}),
+    };
+
+    // Streaming applies only to non-shareable renders (mirrors Rust's
+    // render_is_shareable; page renders never set vary): shareable pages stay
+    // buffered so they land in the shared cache, everything rendered
+    // per-request streams for TTFB. HEAD stays buffered, and onResponse
+    // plugins need the full body.
+    const shareable = cacheable && cacheMaxAge > 0;
+    const shouldStream =
+      extras?.streaming === true &&
+      !shareable &&
+      req.method === 'GET' &&
+      process.env.GIO_EXPORT !== '1' &&
+      (registry === undefined || !registry.hasResponseInterceptors);
+
+    // Resolves once React's shell is ready; Suspense content streams later.
     const stream = await renderToReadableStream(element, {
       bootstrapModules: envelopeJson !== null && entryScript !== undefined ? [entryScript] : [],
       // Cancelled requests (client disconnect / Rust timeout) abort the React
@@ -423,34 +478,37 @@ export async function renderRoute(
       },
     });
 
+    if (shouldStream) {
+      return {
+        type: 'stream',
+        head: {
+          id: req.id,
+          status: 200,
+          headers: responseHeaders,
+          body: '',
+          cacheable,
+          cacheMaxAge,
+          streaming: true,
+        },
+        stream,
+        prefix: rootLayoutEntry !== undefined ? '' : DOCUMENT_PREFIX,
+        suffix: rootLayoutEntry !== undefined ? '' : DOCUMENT_SUFFIX,
+      };
+    }
+
     await stream.allReady;
     const html = await streamToString(stream);
 
     // Root layout provides <html>/<body>, so skip the document wrapper.
     const body = rootLayoutEntry !== undefined ? html : wrapWithDocument(html);
 
-    let cacheable = pageModule.revalidate !== undefined;
-    if (gsspHeaders !== null && cacheable) {
-      // Response headers from gSSP are per-request (set-cookie above all);
-      // caching them would replay one user's headers to everyone.
-      logger.warn('getServerSideProps returned headers - page made uncacheable', {
-        path: req.path,
-      });
-      cacheable = false;
-    }
-
     const ssrResponse: IPCOutbound = {
       id: req.id,
       status: 200,
-      headers: { 'content-type': 'text/html; charset=utf-8', ...(gsspHeaders ?? {}) },
+      headers: responseHeaders,
       body,
       cacheable,
-      // revalidate=false means "cache forever"; false??0 would coerce to 0 so check explicitly.
-      cacheMaxAge: !cacheable
-        ? 0
-        : pageModule.revalidate === false
-          ? 31536000
-          : (pageModule.revalidate ?? 0),
+      cacheMaxAge,
     };
 
     if (registry !== undefined && !registry.isEmpty && isIPCResponse(ssrResponse)) {

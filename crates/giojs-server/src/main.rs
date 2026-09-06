@@ -12,6 +12,7 @@ mod devtools;
 mod ipc;
 mod metrics;
 mod rules;
+mod stream_inject;
 mod ws;
 mod ws_ipc;
 mod ws_registry;
@@ -43,6 +44,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as AutoConnBuilder;
 use ipc::{IpcClient, IpcRequest, IpcSendResult};
 use std::convert::Infallible;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::Stream;
@@ -888,7 +890,10 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
             .and_then(|v| v.to_str().ok())
             .map(|ct| ct.starts_with("text/html"))
             .unwrap_or(false);
-        if is_html {
+        // Streamed bodies must not be buffered here; their lang attribute is
+        // spliced by the StreamInjector instead.
+        let is_streamed = response.extensions().get::<StreamedBody>().is_some();
+        if is_html && !is_streamed {
             let (resp_parts, resp_body) = response.into_parts();
             match axum::body::to_bytes(resp_body, 16 * 1024 * 1024).await {
                 Ok(bytes) => {
@@ -1207,13 +1212,17 @@ async fn dynamic_handler(
                                 composed,
                             }))
                         }
-                        // SSE is per-connection: the leader keeps its stream,
-                        // followers open their own.
-                        Ok(sse @ IpcSendResult::SseStream { .. }) => {
+                        // Streams are per-connection (SSE and streaming SSR
+                        // alike): the leader keeps its stream, followers open
+                        // their own.
+                        Ok(
+                            stream @ (IpcSendResult::SseStream { .. }
+                            | IpcSendResult::RenderStream { .. }),
+                        ) => {
                             state
                                 .metrics
                                 .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
-                            *slot.lock().await = Some(sse);
+                            *slot.lock().await = Some(stream);
                             CoalescedRender::Private
                         }
                         Err(e) => {
@@ -1299,6 +1308,19 @@ async fn dynamic_handler(
                 }
                 Some(IpcSendResult::SseStream { response, body_rx }) => respond_sse(
                     &state, &method, &path, response, body_rx, encoding, &locale, start,
+                ),
+                Some(IpcSendResult::RenderStream { response, body_rx }) => respond_stream(
+                    &state,
+                    &method,
+                    &path,
+                    response,
+                    body_rx,
+                    &deployment_id,
+                    &default_locale,
+                    &font_snippets,
+                    encoding,
+                    &locale,
+                    start,
                 ),
                 // Follower of a private render: render fresh with our own headers.
                 None => {
@@ -1440,6 +1462,24 @@ async fn render_uncoalesced(
                 .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
             respond_sse(
                 state, method, path, response, body_rx, encoding, locale, start,
+            )
+        }
+        Ok(IpcSendResult::RenderStream { response, body_rx }) => {
+            state
+                .metrics
+                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+            respond_stream(
+                state,
+                method,
+                path,
+                response,
+                body_rx,
+                deployment_id,
+                default_locale,
+                font_snippets,
+                encoding,
+                locale,
+                start,
             )
         }
         Err(e) => {
@@ -1596,6 +1636,176 @@ fn respond_sse(
     builder
         .body(axum::body::Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Response-extension marker: the body is a live SSR chunk stream. Downstream
+/// body-buffering transforms (i18n lang injection) must skip it.
+#[derive(Debug, Clone, Copy)]
+struct StreamedBody;
+
+/// Build the streaming response for a chunked SSR render (protocol v3).
+/// Head snippets (fonts + deployment script) and the dev overlay are spliced
+/// into the stream by a StreamInjector. Critical-CSS extraction is skipped:
+/// it needs the full document, and streamed responses are uncacheable, so the
+/// per-request extraction cost would buy nothing.
+#[allow(clippy::too_many_arguments)]
+fn respond_stream(
+    state: &AppState,
+    method: &str,
+    path: &str,
+    response: ipc::IpcResponse,
+    body_rx: tokio::sync::mpsc::UnboundedReceiver<Option<Bytes>>,
+    deployment_id: &str,
+    default_locale: &str,
+    font_snippets: &[&str],
+    encoding: &str,
+    locale: &str,
+    start: std::time::Instant,
+) -> Response {
+    let status_code =
+        StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let duration_ms = start.elapsed().as_millis() as u64;
+    info!(method = %method, path = %path, status = %status_code.as_u16(), cache = "stream", encoding = %encoding, "request completed (streaming)");
+    state.metrics.record_request(
+        method,
+        status_code.as_u16(),
+        "stream",
+        start.elapsed().as_nanos() as u64,
+    );
+    record_devtools(
+        state,
+        method,
+        path,
+        status_code.as_u16(),
+        "stream",
+        encoding,
+        locale,
+        duration_ms,
+        true,
+    );
+    if state.dev_mode {
+        state.devtools.update_route_mode(
+            path,
+            devtools::infer_render_mode(response.cacheable, response.cache_max_age),
+        );
+    }
+
+    let injector = if is_html_content_type(&response.headers) {
+        let mut head_snippets =
+            String::with_capacity(font_snippets.iter().map(|s| s.len()).sum::<usize>() + 128);
+        for snippet in font_snippets {
+            head_snippets.push_str(snippet);
+        }
+        head_snippets.push_str(&format!(
+            r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
+        ));
+        let body_snippet = state
+            .dev_mode
+            .then(|| dev_overlay::DEV_OVERLAY_SCRIPT.to_string());
+        let lang = state
+            .i18n
+            .as_ref()
+            .filter(|cfg| !locale.is_empty() && locale != cfg.default_locale)
+            .map(|_| locale.to_string());
+        stream_inject::StreamInjector::new(head_snippets, body_snippet, lang)
+    } else {
+        stream_inject::StreamInjector::passthrough()
+    };
+
+    let stream = RenderBodyStream {
+        inner: body_rx,
+        req_id: response.id.clone(),
+        ipc: state.ipc.clone(),
+        injector,
+        idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
+        done: false,
+    };
+
+    let mut builder = Response::builder().status(status_code);
+    for (name, value) in &response.headers {
+        // A streamed body has no known length; a stale content-length would
+        // corrupt framing.
+        if name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        if let Ok(header_value) = HeaderValue::from_str(value) {
+            builder = builder.header(name.as_str(), header_value);
+        }
+    }
+    let mut resp = builder
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    insert_cache_status_header(&mut resp, "bypass");
+    resp.extensions_mut().insert(StreamedBody);
+    resp
+}
+
+// ── Streaming SSR body ────────────────────────────────────────────────────────
+
+/// Chunked HTML body fed by the IPC reader loop. The head frame already
+/// consumed the request timeout budget; from here on an idle gap between
+/// chunks longer than the same budget ends the body (headers are sent, so
+/// truncation is the only possible remedy).
+struct RenderBodyStream {
+    inner: tokio::sync::mpsc::UnboundedReceiver<Option<Bytes>>,
+    req_id: String,
+    ipc: Arc<IpcClient>,
+    injector: stream_inject::StreamInjector,
+    idle: Pin<Box<tokio::time::Sleep>>,
+    done: bool,
+}
+
+impl Drop for RenderBodyStream {
+    fn drop(&mut self) {
+        // Client disconnected mid-stream: tell Node to abort the render.
+        // Completed streams were already unregistered by chunk_end.
+        if !self.done {
+            self.ipc.send_render_close(&self.req_id);
+        }
+    }
+}
+
+impl Stream for RenderBodyStream {
+    type Item = Result<Bytes, std::convert::Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.done {
+            return Poll::Ready(None);
+        }
+        loop {
+            match this.inner.poll_recv(cx) {
+                Poll::Ready(Some(Some(bytes))) => {
+                    this.idle
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    // Injector still buffering (head scan): poll for more.
+                    if let Some(out) = this.injector.feed(bytes) {
+                        return Poll::Ready(Some(Ok(out)));
+                    }
+                }
+                Poll::Ready(Some(None)) | Poll::Ready(None) => {
+                    this.done = true;
+                    return match this.injector.finish() {
+                        Some(out) => Poll::Ready(Some(Ok(out))),
+                        None => Poll::Ready(None),
+                    };
+                }
+                Poll::Pending => {
+                    if this.idle.as_mut().poll(cx).is_ready() {
+                        warn!(id = %this.req_id, "streaming render idle-gap timeout - truncating body");
+                        this.done = true;
+                        this.ipc.send_render_close(&this.req_id);
+                        return match this.injector.finish() {
+                            Some(out) => Poll::Ready(Some(Ok(out))),
+                            None => Poll::Ready(None),
+                        };
+                    }
+                    return Poll::Pending;
+                }
+            }
+        }
+    }
 }
 
 /// Build the error response for a failed IPC render and record it.
@@ -1769,7 +1979,13 @@ fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
         warn!(error = %e, app_dir = %app_dir, "dev watch: cannot watch app dir");
         return;
     }
-    for config_name in ["gio.toml", "gio.config.ts", "gio.config.js"] {
+    for config_name in [
+        "gio.toml",
+        "gio.config.ts",
+        "gio.config.js",
+        "middleware.ts",
+        "middleware.js",
+    ] {
         let config_path = project_root.join(config_name);
         if config_path.exists() {
             let _ = watcher.watch(&config_path, notify::RecursiveMode::NonRecursive);
@@ -3124,6 +3340,7 @@ mod tests {
             vary: Vec::new(),
             cache_tags: Vec::new(),
             body_base64: false,
+            streaming: false,
         }
     }
 
@@ -3174,6 +3391,78 @@ mod tests {
             build_coalesce_key("cachekey", &bearer_a),
             build_coalesce_key("cachekey", &bearer_b)
         );
+    }
+
+    // ── streaming SSR body ────────────────────────────────────────────────────
+
+    fn render_body_stream(
+        client: IpcClient,
+        rx: tokio::sync::mpsc::UnboundedReceiver<Option<Bytes>>,
+        injector: stream_inject::StreamInjector,
+    ) -> RenderBodyStream {
+        RenderBodyStream {
+            inner: rx,
+            req_id: "req-stream".into(),
+            ipc: Arc::new(client),
+            injector,
+            idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
+            done: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn render_body_stream_injects_and_ends_on_chunk_end() {
+        use tokio_stream::StreamExt as _;
+        let (client, _write_rx) = ipc::test_client_with_write_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Option<Bytes>>();
+        let injector = stream_inject::StreamInjector::new("<script>D</script>".into(), None, None);
+        let mut stream = render_body_stream(client, rx, injector);
+
+        tx.send(Some(Bytes::from("<html><head></he"))).unwrap();
+        tx.send(Some(Bytes::from("ad><body>hi</body></html>")))
+            .unwrap();
+        tx.send(None).unwrap();
+
+        let mut body = Vec::new();
+        while let Some(Ok(bytes)) = stream.next().await {
+            body.extend_from_slice(&bytes);
+        }
+        assert_eq!(
+            body,
+            b"<html><head><script>D</script></head><body>hi</body></html>"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn render_body_stream_idle_gap_timeout_truncates_and_cancels() {
+        use tokio_stream::StreamExt as _;
+        let (client, mut write_rx) = ipc::test_client_with_write_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Option<Bytes>>();
+        let mut stream =
+            render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
+
+        tx.send(Some(Bytes::from("<p>shell</p>"))).unwrap();
+        let first = stream.next().await.expect("first chunk").expect("ok");
+        assert_eq!(&first[..], b"<p>shell</p>");
+
+        // No further chunks: paused time auto-advances past the idle deadline
+        // and the body must end instead of hanging forever.
+        assert!(stream.next().await.is_none());
+        let frame = write_rx.recv().await.expect("cancel frame sent to Node");
+        let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(value["type"], "cancel");
+    }
+
+    #[tokio::test]
+    async fn dropping_render_body_stream_midway_cancels_the_render() {
+        let (client, mut write_rx) = ipc::test_client_with_write_channel();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<Option<Bytes>>();
+        let stream = render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
+        drop(stream);
+        let frame = write_rx.recv().await.expect("cancel frame sent on drop");
+        let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(value["type"], "cancel");
+        assert_eq!(value["id"], "req-stream");
     }
 
     // ── TLS error paths ───────────────────────────────────────────────────────

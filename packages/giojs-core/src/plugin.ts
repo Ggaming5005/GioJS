@@ -43,6 +43,14 @@ export class NodePluginRegistry {
     return this.plugins.length === 0;
   }
 
+  /**
+   * onResponse hooks must see the full buffered body, so their presence
+   * disables streaming SSR for page renders.
+   */
+  get hasResponseInterceptors(): boolean {
+    return this.plugins.some(plugin => plugin.onResponse !== undefined);
+  }
+
   async runStartup(): Promise<void> {
     for (const plugin of this.plugins) {
       await plugin.onStartup?.();

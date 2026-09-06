@@ -12,10 +12,13 @@ import {
   handshakeProof,
   formatSseEvent,
   makeDroppableFrameWriter,
+  pumpRenderStream,
   MAX_IPC_MESSAGE_SIZE,
   MAX_BUFFERED_FRAME_BYTES,
   type FrameSink,
+  type StreamFrameSink,
 } from './ipc.ts';
+import type { StreamRenderResult } from './ssr.ts';
 
 function validFrame(): Record<string, unknown> {
   return {
@@ -233,6 +236,116 @@ describe('makeDroppableFrameWriter', () => {
     const write = makeDroppableFrameWriter(sink);
     sink.writableLength = MAX_BUFFERED_FRAME_BYTES;
     expect(write({ type: 'sse_chunk', id: 'r1', data: 'boundary' })).toBe(true);
+  });
+});
+
+interface CollectingSink extends StreamFrameSink {
+  frames(): Record<string, unknown>[];
+}
+
+function makeStreamSink(destroyed = false): CollectingSink {
+  const written: Buffer[] = [];
+  return {
+    destroyed,
+    writableLength: 0,
+    write(data: Buffer): boolean {
+      written.push(data);
+      return true;
+    },
+    frames(): Record<string, unknown>[] {
+      let wire = Buffer.concat(written);
+      const out: Record<string, unknown>[] = [];
+      while (wire.length >= 4) {
+        const len = wire.readUInt32BE(0);
+        out.push(JSON.parse(wire.subarray(4, 4 + len).toString('utf8')) as Record<string, unknown>);
+        wire = wire.subarray(4 + len);
+      }
+      return out;
+    },
+  };
+}
+
+function byteStream(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller): void {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
+  });
+}
+
+function renderResult(
+  stream: ReadableStream<Uint8Array>,
+  prefix = '',
+  suffix = '',
+): StreamRenderResult {
+  return {
+    type: 'stream',
+    head: {
+      id: 'r1', status: 200, headers: {}, body: '',
+      cacheable: false, cacheMaxAge: 0, streaming: true,
+    },
+    stream,
+    prefix,
+    suffix,
+  };
+}
+
+describe('pumpRenderStream', () => {
+  const encoder = new TextEncoder();
+
+  it('sends prefix, chunks, suffix, then chunk_end', async () => {
+    const sink = makeStreamSink();
+    const stream = byteStream([encoder.encode('<p>a</p>'), encoder.encode('<p>b</p>')]);
+    await pumpRenderStream(sink, 'r1', renderResult(stream, 'PRE', 'SUF'));
+    const frames = sink.frames();
+    expect(frames.map(f => f['type'])).toEqual(['chunk', 'chunk', 'chunk', 'chunk', 'chunk_end']);
+    expect(frames.every(f => f['id'] === 'r1')).toBe(true);
+    const body = frames.filter(f => f['type'] === 'chunk').map(f => f['data']).join('');
+    expect(body).toBe('PRE<p>a</p><p>b</p>SUF');
+    expect(frames[frames.length - 1]?.['aborted']).toBeUndefined();
+  });
+
+  it('carries split multi-byte UTF-8 sequences across chunk boundaries', async () => {
+    const bytes = encoder.encode('<p>héllo 🎉</p>');
+    // Split inside the é and inside the emoji: each frame must still be
+    // valid UTF-8 and the concatenation lossless.
+    const stream = byteStream([bytes.subarray(0, 5), bytes.subarray(5, 12), bytes.subarray(12)]);
+    const sink = makeStreamSink();
+    await pumpRenderStream(sink, 'r1', renderResult(stream));
+    const body = sink.frames().filter(f => f['type'] === 'chunk').map(f => f['data']).join('');
+    expect(body).toBe('<p>héllo 🎉</p>');
+  });
+
+  it('sends chunk_end aborted when the stream errors mid-render', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller): void {
+        controller.enqueue(new TextEncoder().encode('<p>shell</p>'));
+        controller.error(new Error('render exploded'));
+      },
+    });
+    const sink = makeStreamSink();
+    await pumpRenderStream(sink, 'r1', renderResult(stream));
+    const frames = sink.frames();
+    const last = frames[frames.length - 1];
+    expect(last?.['type']).toBe('chunk_end');
+    expect(last?.['aborted']).toBe(true);
+  });
+
+  it('stops pumping and cancels the reader when the socket is destroyed', async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller): void {
+        controller.enqueue(new TextEncoder().encode('never sent'));
+      },
+      cancel(): void {
+        cancelled = true;
+      },
+    });
+    const sink = makeStreamSink(true);
+    await pumpRenderStream(sink, 'r1', renderResult(stream, 'PRE'));
+    expect(sink.frames()).toEqual([]);
+    expect(cancelled).toBe(true);
   });
 });
 

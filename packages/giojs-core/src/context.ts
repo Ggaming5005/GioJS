@@ -40,6 +40,11 @@ export interface IPCResponse {
    * Mirrors the request-side flag of the same name.
    */
   bodyBase64?: boolean;
+  /**
+   * Protocol v3: this response is the head of a streamed render - `body` is
+   * empty and 1..n chunk frames follow, terminated by chunk_end.
+   */
+  streaming?: boolean;
 }
 
 export interface IPCError {
@@ -101,5 +106,7 @@ export interface SseCloseMsg { type: 'sse_close'; id: string; }
 
 /** Rust → Node: abort an in-flight render (client disconnected or timed out). */
 export interface CancelMsg { type: 'cancel'; id: string; }
-/** Reserved for streaming SSR (protocol v2+). Not emitted or consumed in v1. */
+/** Streaming SSR body chunk (protocol v3). `data` is always UTF-8 HTML text. */
 export interface ChunkMsg { type: 'chunk'; id: string; data: string; }
+/** Terminates a streamed body. `aborted` marks a render error mid-stream. */
+export interface ChunkEndMsg { type: 'chunk_end'; id: string; aborted?: boolean; }

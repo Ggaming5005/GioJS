@@ -243,6 +243,53 @@ async function main() {
       assert.match(secondRes.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/);
     });
 
+    await test('streaming SSR: first bytes arrive before suspended content resolves', async () => {
+      // accept-encoding: identity keeps the compression layer from buffering
+      // chunks, so the timing below measures the server, not the encoder.
+      const started = Date.now();
+      const res = await fetch(`${BASE}/slow`, { headers: { 'accept-encoding': 'identity' } });
+      assert.equal(res.status, 200);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let html = '';
+      let firstChunkAt = null;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (firstChunkAt === null) firstChunkAt = Date.now();
+        html += decoder.decode(value, { stream: true });
+      }
+      html += decoder.decode();
+      const firstMs = firstChunkAt - started;
+      const totalMs = Date.now() - started;
+      assert.ok(firstMs < 500, `first chunk must beat the 800ms suspense gap (took ${firstMs}ms)`);
+      assert.ok(totalMs >= 700, `total must include the suspended chunk (took ${totalMs}ms)`);
+      assert.match(html, /SLOW_FIXTURE_SHELL/);
+      assert.match(html, /SLOW_FIXTURE_LATE_CONTENT/, 'late Suspense content must complete the body');
+    });
+
+    await test('streamed responses keep the envelope, injected head, and bypass label', async () => {
+      const res = await fetch(`${BASE}/slow`, { headers: { 'accept-encoding': 'identity' } });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-gio-cache'), 'bypass');
+      const html = await res.text();
+      assert.match(html, /id="__gio"/);
+      assert.match(html, /id="__gio_props"/);
+      // Rust-side injection must land inside the stream, before </head>.
+      const deployPos = html.indexOf('__GIO_DEPLOYMENT_ID__');
+      const headClosePos = html.indexOf('</head>');
+      assert.ok(deployPos !== -1, 'deployment script injected into streamed HTML');
+      assert.ok(deployPos < headClosePos, 'deployment script must sit inside <head>');
+      assert.match(html, /<\/html>/);
+    });
+
+    await test('HEAD requests to streaming pages stay on the buffered path', async () => {
+      const res = await fetch(`${BASE}/slow`, { method: 'HEAD' });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-gio-cache'), 'bypass');
+      assert.equal(await res.text(), '');
+    });
+
     await test('X-Gio-Cache labels bypass and static tiers', async () => {
       const personalized = await fetch(`${BASE}/whoami`, { headers: { cookie: 'session=x' } });
       assert.equal(personalized.headers.get('x-gio-cache'), 'bypass');
