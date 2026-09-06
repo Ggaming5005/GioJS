@@ -130,6 +130,10 @@ impl PageCache {
         let entry = self.backend.get(key).await?;
 
         if entry.deployment_id != deployment_id {
+            // Dead entry from a previous deployment: delete it so it stops
+            // occupying an LRU slot and disk space and being re-read on every
+            // touch of this key.
+            self.backend.remove(key).await;
             return None;
         }
 
@@ -213,6 +217,17 @@ mod tests {
     async fn miss_on_empty_cache() {
         let cache = cache_with_swr(10);
         assert!(cache.get("nonexistent", "deploy-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn deployment_mismatch_is_a_miss_and_evicts_the_dead_entry() {
+        let cache = cache_with_swr(10);
+        cache.put("key-old-deploy", make_entry(3600, 0)).await.unwrap();
+
+        assert!(cache.get("key-old-deploy", "deploy-2").await.is_none());
+        // The dead entry must be gone, not silently occupying an LRU slot -
+        // even a lookup with the original deployment ID now misses.
+        assert!(cache.get("key-old-deploy", "deploy-1").await.is_none());
     }
 
     #[tokio::test]

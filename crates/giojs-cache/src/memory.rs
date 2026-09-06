@@ -36,6 +36,11 @@ impl MemoryLayer {
         guard.put(key, entry);
     }
 
+    pub(crate) fn remove(&self, key: &str) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.pop(key);
+    }
+
     pub(crate) fn clear(&self) {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.clear();

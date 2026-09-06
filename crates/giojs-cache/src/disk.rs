@@ -101,6 +101,16 @@ impl DiskLayer {
         });
     }
 
+    /// Remove one entry's file. Best-effort.
+    pub(crate) async fn remove(&self, key: &str) {
+        let path = self.path_for(key);
+        if let Err(e) = tokio::fs::remove_file(&path).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(key = %key, error = %e, "disk cache remove failed");
+            }
+        }
+    }
+
     /// Remove every cache file. Best-effort (dev-mode invalidation).
     pub(crate) async fn clear_all(&self) {
         let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {

@@ -23,6 +23,8 @@ pub trait CacheBackend: Send + Sync {
         key: &str,
         entry: CacheEntry,
     ) -> impl Future<Output = Result<(), CacheError>> + Send;
+    /// Remove one entry from every layer (e.g. it belongs to a dead deployment).
+    fn remove(&self, key: &str) -> impl Future<Output = ()> + Send;
     /// (entry_count, total_html_bytes) for observability.
     fn stats(&self) -> (usize, usize);
     fn evict_disk(&self) -> impl Future<Output = ()> + Send;
@@ -65,6 +67,11 @@ impl CacheBackend for LocalBackend {
         self.disk.write_background(key.to_string(), &entry);
         self.memory.put(key.to_string(), entry);
         Ok(())
+    }
+
+    async fn remove(&self, key: &str) {
+        self.memory.remove(key);
+        self.disk.remove(key).await;
     }
 
     fn stats(&self) -> (usize, usize) {
