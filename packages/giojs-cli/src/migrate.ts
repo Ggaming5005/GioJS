@@ -92,7 +92,7 @@ export function transformSource(source: string): { output: string; transforms: s
       ...(needsGioImage ? ['GioImage'] : []),
       ...(needsGioLink ? ['GioLink'] : []),
     ].join(', ');
-    const gioImport = `import { ${components} } from 'giojs/react';\n`;
+    const gioImport = `import { ${components} } from '@gio.js/react';\n`;
 
     // Insert after the last import statement
     const lastImportMatch = [...text.matchAll(/^import\b[^\n]+\n/gm)].pop();
@@ -127,11 +127,14 @@ export function transformSource(source: string): { output: string; transforms: s
     if (linkCount > 0) transforms.push(`<Link /> → <GioLink /> ×${linkCount}`);
   }
 
-  // 6. next/navigation → giojs/navigation
-  const navPattern = /from\s+['"]next\/navigation['"]/g;
+  // 6. next/navigation has no GioJS equivalent yet - flag it, don't rewrite
+  const navPattern = /^(import\s+[^\n]+from\s+['"]next\/navigation['"][^\n]*)/m;
   if (navPattern.test(text)) {
-    text = text.replace(/from\s+(['"])next\/navigation\1/g, "from 'giojs/navigation'");
-    transforms.push('next/navigation → giojs/navigation');
+    text = text.replace(
+      navPattern,
+      '// TODO(gio-migrate): next/navigation has no GioJS equivalent yet - use <GioLink> for links and location/history APIs for imperative navigation\n$1'
+    );
+    transforms.push('next/navigation → flagged (no GioJS equivalent)');
   }
 
   // 7. next/font → TODO comment (leave import intact)

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "cross-env NODE_ENV=development giojs-server",
-    "build": "giojs build",
+    "build": "node -e \"console.log('GioJS server apps have no build step: routes and client bundles are built at server startup.')\"",
     "start": "giojs-server"
   },
   "dependencies": {

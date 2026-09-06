@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "cross-env NODE_ENV=development giojs-server",
-    "build": "giojs build",
+    "build": "tsc --noEmit",
     "start": "giojs-server"
   },
   "dependencies": {

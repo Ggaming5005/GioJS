@@ -144,15 +144,6 @@ function buildToml(config: ExtractedConfig): string {
     'port = 3000',
     'http2 = true',
     '',
-    '[cache]',
-    'memory_mb = 50',
-    '',
-    '[compression]',
-    'enabled = true',
-    '',
-    '[prefetch]',
-    'strategy = "hover"',
-    '',
   ];
 
   if (config.remotePatterns.length > 0) {
@@ -160,7 +151,7 @@ function buildToml(config: ExtractedConfig): string {
     lines.push('quality = 75');
     lines.push('');
     for (const p of config.remotePatterns) {
-      lines.push('[[images.remotePatterns]]');
+      lines.push('[[images.remote_patterns]]');
       if (p.protocol) lines.push(`protocol = "${p.protocol}"`);
       lines.push(`hostname = "${p.hostname}"`);
       if (p.pathname) lines.push(`pathname = "${p.pathname}"`);
@@ -168,18 +159,17 @@ function buildToml(config: ExtractedConfig): string {
     }
   }
 
-  for (const r of config.redirects) {
-    lines.push('[[redirects]]');
-    lines.push(`from = "${r.source}"`);
-    lines.push(`to = "${r.destination}"`);
-    lines.push(`status = ${r.permanent === true ? 301 : 302}`);
-    lines.push('');
-  }
-
-  for (const r of config.rewrites) {
-    lines.push('[[rewrites]]');
-    lines.push(`from = "${r.source}"`);
-    lines.push(`to = "${r.destination}"`);
+  // GioJS has no redirects/rewrites config yet - emit them commented out so
+  // nothing in the generated file is silently ignored by the server.
+  if (config.redirects.length > 0 || config.rewrites.length > 0) {
+    lines.push('# redirects/rewrites are not supported by GioJS yet.');
+    lines.push('# Handle them in your reverse proxy (Caddy/nginx) or in getServerSideProps.');
+    for (const r of config.redirects) {
+      lines.push(`# redirect: ${r.source} -> ${r.destination} (${r.permanent === true ? 301 : 302})`);
+    }
+    for (const r of config.rewrites) {
+      lines.push(`# rewrite: ${r.source} -> ${r.destination}`);
+    }
     lines.push('');
   }
 
@@ -203,11 +193,20 @@ function buildReport(
     '',
     '| Setting | Count |',
     '|---------|-------|',
-    `| \`images.remotePatterns\` | ${config.remotePatterns.length} |`,
-    `| \`redirects\` | ${config.redirects.length} |`,
-    `| \`rewrites\` | ${config.rewrites.length} |`,
+    `| \`images.remotePatterns\` → \`[[images.remote_patterns]]\` | ${config.remotePatterns.length} |`,
     '',
   ];
+
+  if (config.redirects.length > 0 || config.rewrites.length > 0) {
+    lines.push('## Not supported by GioJS yet');
+    lines.push('');
+    lines.push(
+      `${config.redirects.length} redirect(s) and ${config.rewrites.length} rewrite(s) were found ` +
+      'but GioJS has no redirects/rewrites config. They are listed as comments in gio.toml - ' +
+      'handle them in your reverse proxy or in `getServerSideProps` redirects.'
+    );
+    lines.push('');
+  }
 
   if (config.unrecognized.length > 0) {
     lines.push('## Manual migration required');
@@ -223,7 +222,7 @@ function buildReport(
   lines.push('## Notes');
   lines.push('');
   lines.push('- `next/font` declarations must be moved to `[[fonts]]` in `gio.toml`');
-  lines.push('- `headers()` is handled via `[security]` in gio.toml (security headers are injected automatically)');
+  lines.push('- `headers()` has no gio.toml equivalent yet - set custom headers from `getServerSideProps` (`{ props, headers }`) or your reverse proxy');
   lines.push('- Custom webpack config has no equivalent - GioJS uses SWC for compilation');
   lines.push('- `experimental.*` flags have no equivalent in GioJS v0.1');
 
