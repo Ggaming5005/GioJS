@@ -1,4 +1,10 @@
-use crate::trie::{RouteId, TrieNode};
+//! giojs-router/src/matcher.rs
+//!
+//! Depth-first trie walk with per-segment precedence literal > dynamic >
+//! catch-all. Captured values are collected positionally and zipped with the
+//! matched route's own param names by the caller.
+
+use crate::trie::{RouteEntry, RouteId, TrieNode};
 use std::collections::HashMap;
 
 pub struct RouteMatch {
@@ -6,15 +12,16 @@ pub struct RouteMatch {
     pub params: HashMap<String, String>,
 }
 
-/// Walk the trie, matching each path segment left-to-right.
-/// Precedence per segment: literal > dynamic (:param) > catch-all (*).
+/// Walk the trie, matching each path segment left-to-right. Pushes one entry
+/// onto `captured` per dynamic hop (or catch-all remainder), popping on
+/// backtrack, so on success `captured` aligns with the route's param_names.
 pub fn match_node<'a>(
     node: &'a TrieNode,
     segments: &[&str],
-    params: &mut HashMap<String, String>,
-) -> Option<&'a RouteId> {
+    captured: &mut Vec<String>,
+) -> Option<&'a RouteEntry> {
     if segments.is_empty() {
-        return node.route_id.as_ref();
+        return node.route.as_ref();
     }
 
     let seg = segments[0];
@@ -22,27 +29,25 @@ pub fn match_node<'a>(
 
     // 1. Literal match (highest precedence)
     if let Some(child) = node.children.get(seg) {
-        if let Some(id) = match_node(child, rest, params) {
-            return Some(id);
+        if let Some(entry) = match_node(child, rest, captured) {
+            return Some(entry);
         }
     }
 
     // 2. Dynamic segment (:param)
     if let Some(child) = &node.dynamic_child {
-        let name = child.param_name.as_deref().unwrap_or("_");
-        params.insert(name.to_string(), seg.to_string());
-        if let Some(id) = match_node(child, rest, params) {
-            return Some(id);
+        captured.push(seg.to_string());
+        if let Some(entry) = match_node(child, rest, captured) {
+            return Some(entry);
         }
-        params.remove(name);
+        captured.pop();
     }
 
     // 3. Catch-all (*name consumes remaining segments)
     if let Some(child) = &node.catchall_child {
-        if let Some(ref id) = child.route_id {
-            let name = child.catchall_name.as_deref().unwrap_or("_");
-            params.insert(name.to_string(), segments.join("/"));
-            return Some(id);
+        if let Some(ref entry) = child.route {
+            captured.push(segments.join("/"));
+            return Some(entry);
         }
     }
 

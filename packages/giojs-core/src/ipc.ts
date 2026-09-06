@@ -41,6 +41,15 @@ export const IPC_PROTOCOL_VERSION = 2;
 export const MAX_IPC_MESSAGE_SIZE = 64 * 1024 * 1024;
 
 /**
+ * Unflushed-socket cap for droppable data frames (SSE chunks, WS payloads).
+ * A fast producer against a slow reader drops frames past this point instead
+ * of buffering unboundedly in Node memory.
+ */
+export const MAX_BUFFERED_FRAME_BYTES = 8 * 1024 * 1024;
+
+const DROP_WARN_INTERVAL_MS = 5_000;
+
+/**
  * Derived handshake proof: sha256(`${token}:${role}`) hex. Each direction
  * sends a role-specific derivation ("ready" from Node, "ack"/"ws" from Rust)
  * instead of the raw token, so a fake endpoint that captures one proof cannot
@@ -79,6 +88,7 @@ export function createIPCServer(
     let ackReceived = false;
     const activeSseCleanups = new Map<string, () => void>();
     const activeRenders = new Map<string, AbortController>();
+    const writeDroppableFrame = makeDroppableFrameWriter(socket);
 
     async function processFrame(data: Buffer): Promise<void> {
       let msg: Record<string, unknown>;
@@ -205,11 +215,7 @@ export function createIPCServer(
 
       const sseStream: SseStream = {
         send(data: unknown, event?: string, id?: string): void {
-          let chunk = '';
-          if (id !== undefined) chunk += `id: ${id}\n`;
-          if (event !== undefined) chunk += `event: ${event}\n`;
-          chunk += `data: ${JSON.stringify(data)}\n\n`;
-          writeFrame(socket, { type: 'sse_chunk', id: req.id, data: chunk });
+          writeDroppableFrame({ type: 'sse_chunk', id: req.id, data: formatSseEvent(data, event, id) });
         },
         close(): void {
           writeFrame(socket, { type: 'sse_done', id: req.id });
@@ -346,13 +352,58 @@ export function validateIPCRequest(msg: Record<string, unknown>): IPCRequest | n
   };
 }
 
+/** Structural socket subset, so frame writers are testable without a real socket. */
+export interface FrameSink {
+  writableLength: number;
+  write(data: Buffer): boolean;
+}
+
 /** Write a length-prefixed JSON frame: [4-byte big-endian uint32][JSON bytes] */
-function writeFrame(socket: net.Socket, payload: unknown): void {
+export function writeFrame(socket: FrameSink, payload: unknown): void {
   const json = Buffer.from(JSON.stringify(payload), 'utf8');
   const header = Buffer.allocUnsafe(4);
   header.writeUInt32BE(json.byteLength, 0);
   socket.write(header);
   socket.write(json);
+}
+
+/**
+ * Returns a writer for droppable data frames only (SSE chunks, WS payloads).
+ * While the socket's unflushed buffer exceeds MAX_BUFFERED_FRAME_BYTES the
+ * frame is dropped with a rate-limited warning instead of buffering without
+ * bound against a slow reader. Control frames and HTTP responses must go
+ * through `writeFrame` directly - they are never dropped.
+ */
+export function makeDroppableFrameWriter(socket: FrameSink): (payload: unknown) => boolean {
+  let lastDropWarnAt = 0;
+  return function writeDroppableFrame(payload: unknown): boolean {
+    if (socket.writableLength > MAX_BUFFERED_FRAME_BYTES) {
+      const now = Date.now();
+      if (now - lastDropWarnAt >= DROP_WARN_INTERVAL_MS) {
+        lastDropWarnAt = now;
+        logger.warn('ipc write buffer full - dropping data frame', {
+          bufferedBytes: socket.writableLength,
+          maxBufferedBytes: MAX_BUFFERED_FRAME_BYTES,
+        });
+      }
+      return false;
+    }
+    writeFrame(socket, payload);
+    return true;
+  };
+}
+
+/**
+ * Build one SSE event in wire format. CR/LF are stripped from the id and
+ * event fields - embedded newlines would otherwise inject extra fields into
+ * the event stream. The data line is JSON, which never spans lines.
+ */
+export function formatSseEvent(data: unknown, event?: string, id?: string): string {
+  let chunk = '';
+  if (id !== undefined) chunk += `id: ${id.replace(/[\r\n]/g, '')}\n`;
+  if (event !== undefined) chunk += `event: ${event.replace(/[\r\n]/g, '')}\n`;
+  chunk += `data: ${JSON.stringify(data)}\n\n`;
+  return chunk;
 }
 
 export interface FrameHandlerOptions {

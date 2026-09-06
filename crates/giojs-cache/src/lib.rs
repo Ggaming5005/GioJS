@@ -222,7 +222,10 @@ mod tests {
     #[tokio::test]
     async fn deployment_mismatch_is_a_miss_and_evicts_the_dead_entry() {
         let cache = cache_with_swr(10);
-        cache.put("key-old-deploy", make_entry(3600, 0)).await.unwrap();
+        cache
+            .put("key-old-deploy", make_entry(3600, 0))
+            .await
+            .unwrap();
 
         assert!(cache.get("key-old-deploy", "deploy-2").await.is_none());
         // The dead entry must be gone, not silently occupying an LRU slot -

@@ -97,11 +97,7 @@ impl Metrics {
     pub fn record_request(&self, method: &str, status: u16, cache: &str, duration_ns: u64) {
         // Method is client-controlled (extension methods), so this map is bounded too.
         let key = format!("{method}\x00{status}\x00{cache}");
-        increment_bounded(
-            &self.requests_total,
-            key,
-            "_other\x00_other\x00_other",
-        );
+        increment_bounded(&self.requests_total, key, "_other\x00_other\x00_other");
         observe_histogram(
             &self.request_duration_buckets,
             &self.request_duration_sum_ns,
@@ -138,11 +134,7 @@ impl Metrics {
 
     pub fn record_ratelimit_rejected(&self, path: &str, rule: &str) {
         let key = format!("{path}\x00{rule}");
-        increment_bounded(
-            &self.ratelimit_rejected_total,
-            key,
-            "_other\x00_other",
-        );
+        increment_bounded(&self.ratelimit_rejected_total, key, "_other\x00_other");
     }
 
     /// Render all metrics in Prometheus text format (version 0.0.4).

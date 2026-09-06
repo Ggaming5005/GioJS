@@ -337,6 +337,13 @@ export async function renderRoute(
           cacheMaxAge: 0,
         };
       }
+      if (!isRecord(result)) {
+        throw new Error(
+          `getServerSideProps for route "${match.module.urlPattern}" must return an object - ` +
+            `{ props: {...} }, flat props, or { redirect: {...} } - but returned ` +
+            `${result === null ? 'null' : typeof result}`,
+        );
+      }
       // Support both { props: {...} } (Next.js convention) and flat { key: value }.
       // Response headers ({ props, headers }) are honored only alongside a
       // props key, so flat objects that happen to contain `headers` still work.

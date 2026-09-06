@@ -111,14 +111,18 @@ impl DiskLayer {
         }
     }
 
-    /// Remove every cache file. Best-effort (dev-mode invalidation).
+    /// Remove every cache file, including `.tmp` files orphaned by a crash
+    /// between temp-write and rename. Best-effort (dev-mode invalidation).
     pub(crate) async fn clear_all(&self) {
         let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
             return;
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "json") {
+            if path
+                .extension()
+                .is_some_and(|ext| ext == "json" || ext == "tmp")
+            {
                 if let Err(e) = tokio::fs::remove_file(&path).await {
                     warn!(path = %path.display(), error = %e, "disk cache clear failed");
                 }
@@ -237,6 +241,30 @@ mod tests {
 
         let restored = layer.get("composed").await.expect("entry should exist");
         assert!(restored.composed);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn clear_all_removes_orphaned_tmp_files() {
+        let dir = std::env::temp_dir().join(format!("giojs-disk-clear-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let layer = DiskLayer::new(dir.clone());
+
+        write_entry(&layer.path_for("live"), &DiskEntry::from(&entry_of_size(8)))
+            .await
+            .unwrap();
+        // Same shape write_entry uses, as if a crash landed before the rename.
+        let orphan = dir.join("live.123.456.tmp");
+        tokio::fs::write(&orphan, b"partial").await.unwrap();
+
+        layer.clear_all().await;
+
+        assert!(
+            layer.get("live").await.is_none(),
+            "json entry must be cleared"
+        );
+        assert!(!orphan.exists(), "orphaned tmp file must be cleared");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

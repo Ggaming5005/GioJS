@@ -15,11 +15,23 @@ import {
   createWsIpcServer,
   decodeBinaryPayload,
   encodeBinaryPayload,
+  isDroppableWsFrame,
   makeWsFrameHandler,
   validateWsInbound,
   wsAuthIsValid,
 } from './ws-ipc.ts';
 import { handshakeProof } from './ipc.ts';
+
+describe('isDroppableWsFrame', () => {
+  it('marks payload frames droppable under backpressure', () => {
+    expect(isDroppableWsFrame({ type: 'ws_send', connId: 'c1', data: 'x', isBinary: false })).toBe(true);
+    expect(isDroppableWsFrame({ type: 'ws_broadcast', routeId: 'r1', data: 'x' })).toBe(true);
+  });
+
+  it('never marks the ws_close control frame droppable', () => {
+    expect(isDroppableWsFrame({ type: 'ws_close', connId: 'c1', code: 1000, reason: '' })).toBe(false);
+  });
+});
 
 describe('wsAuthIsValid', () => {
   it('accepts a ws_auth frame carrying the ws-role proof', () => {

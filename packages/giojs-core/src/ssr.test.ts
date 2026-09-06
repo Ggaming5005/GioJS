@@ -122,6 +122,30 @@ describe('getServerSideProps props extraction', () => {
     expect('body' in result && result.body).toContain('hello');
   });
 
+  it('a gSSP returning undefined yields a RENDER_ERROR naming the contract, not an opaque TypeError', async () => {
+    const routes = makeRoute('/posts/:id', {
+      getServerSideProps: async () =>
+        undefined as unknown as Record<string, unknown>,
+    });
+    const result = await renderRoute(makeRequest('/posts/7'), routes, noLayouts);
+    expect('error' in result && result.error).toBe(true);
+    expect('code' in result && result.code).toBe('RENDER_ERROR');
+    const message = 'message' in result ? result.message : '';
+    expect(message).toContain('getServerSideProps');
+    expect(message).toContain('/posts/:id');
+    expect(message).toContain('undefined');
+    expect(message).not.toContain('Cannot read properties');
+  });
+
+  it('a gSSP returning null yields the same contract error naming null', async () => {
+    const routes = makeRoute('/', {
+      getServerSideProps: async () => null as unknown as Record<string, unknown>,
+    });
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+    expect('code' in result && result.code).toBe('RENDER_ERROR');
+    expect('message' in result && result.message).toContain('null');
+  });
+
   it('passes flat result directly when no props wrapper present', async () => {
     const routes = makeRoute('/', {
       getServerSideProps: async () => ({ title: 'flat' }),

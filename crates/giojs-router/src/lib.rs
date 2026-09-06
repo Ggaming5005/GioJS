@@ -1,12 +1,16 @@
+//! giojs-router/src/lib.rs
+//!
+//! Radix trie router. Segments are split on '/' and walked depth-first.
+//! Literals beat dynamic beats catch-all at every node level. Param names are
+//! stored per registered route, so overlapping patterns keep their own names.
+
 mod matcher;
 mod trie;
 
 pub use trie::RouteId;
 
 use matcher::{match_node, split_path, RouteMatch};
-use trie::TrieNode;
-
-use std::collections::HashMap;
+use trie::{RouteEntry, TrieNode};
 
 pub struct Router {
     root: TrieNode,
@@ -20,17 +24,27 @@ impl Router {
     }
 
     /// Register a route pattern like `/posts/:id` or `/docs/*path`.
+    /// A catch-all must be the final segment; patterns with segments after a
+    /// catch-all are unreachable and are logged and ignored.
     pub fn add_route(&mut self, pattern: &str, route_id: RouteId) {
         let segments = split_path(pattern);
-        insert_node(&mut self.root, &segments, route_id);
+        if let Some(position) = segments.iter().position(|s| s.starts_with('*')) {
+            if position != segments.len() - 1 {
+                tracing::warn!(pattern, "catch-all must be the last segment; route ignored");
+                return;
+            }
+        }
+        let mut param_names = Vec::new();
+        insert_node(&mut self.root, &segments, route_id, &mut param_names);
     }
 
     pub fn match_route(&self, path: &str) -> Option<RouteMatch> {
         let segments = split_path(path);
-        let mut params = HashMap::new();
-        let route_id = match_node(&self.root, &segments, &mut params)?;
+        let mut captured = Vec::new();
+        let entry = match_node(&self.root, &segments, &mut captured)?;
+        let params = entry.param_names.iter().cloned().zip(captured).collect();
         Some(RouteMatch {
-            route_id: clone_route_id(route_id),
+            route_id: clone_route_id(&entry.route_id),
             params,
         })
     }
@@ -52,9 +66,17 @@ fn clone_route_id(id: &RouteId) -> RouteId {
     }
 }
 
-fn insert_node(node: &mut TrieNode, segments: &[&str], route_id: RouteId) {
+fn insert_node(
+    node: &mut TrieNode,
+    segments: &[&str],
+    route_id: RouteId,
+    param_names: &mut Vec<String>,
+) {
     if segments.is_empty() {
-        node.route_id = Some(route_id);
+        node.route = Some(RouteEntry {
+            route_id,
+            param_names: std::mem::take(param_names),
+        });
         return;
     }
 
@@ -62,27 +84,19 @@ fn insert_node(node: &mut TrieNode, segments: &[&str], route_id: RouteId) {
     let rest = &segments[1..];
 
     if let Some(name) = seg.strip_prefix('*') {
-        // Catch-all segment
-        let child = node.catchall_child.get_or_insert_with(|| {
-            Box::new(TrieNode {
-                catchall_name: Some(name.to_string()),
-                ..Default::default()
-            })
-        });
-        insert_node(child, rest, route_id);
+        // Catch-all segment (add_route guarantees it is last)
+        param_names.push(name.to_string());
+        let child = node.catchall_child.get_or_insert_with(Box::default);
+        insert_node(child, rest, route_id, param_names);
     } else if let Some(name) = seg.strip_prefix(':') {
         // Dynamic segment
-        let child = node.dynamic_child.get_or_insert_with(|| {
-            Box::new(TrieNode {
-                param_name: Some(name.to_string()),
-                ..Default::default()
-            })
-        });
-        insert_node(child, rest, route_id);
+        param_names.push(name.to_string());
+        let child = node.dynamic_child.get_or_insert_with(Box::default);
+        insert_node(child, rest, route_id, param_names);
     } else {
         // Literal segment
         let child = node.children.entry(seg.to_string()).or_default();
-        insert_node(child, rest, route_id);
+        insert_node(child, rest, route_id, param_names);
     }
 }
 
@@ -151,6 +165,37 @@ mod tests {
     fn no_match_returns_none() {
         let r = Router::new();
         assert!(r.match_route("/anything").is_none());
+    }
+
+    #[test]
+    fn overlapping_dynamic_routes_keep_their_own_param_names() {
+        let mut r = Router::new();
+        r.add_route("/shop/:category/items", dyn_id("items"));
+        r.add_route("/shop/:slug/reviews", dyn_id("reviews"));
+
+        let m = r.match_route("/shop/books/items").unwrap();
+        assert!(matches!(m.route_id, RouteId::Dynamic(ref s) if s == "items"));
+        assert_eq!(m.params["category"], "books");
+        assert!(!m.params.contains_key("slug"));
+
+        let m = r.match_route("/shop/books/reviews").unwrap();
+        assert!(matches!(m.route_id, RouteId::Dynamic(ref s) if s == "reviews"));
+        assert_eq!(m.params["slug"], "books");
+        assert!(!m.params.contains_key("category"));
+    }
+
+    #[test]
+    fn catchall_with_trailing_segments_is_rejected() {
+        let mut r = Router::new();
+        r.add_route("/docs/*path/extra", dyn_id("unreachable"));
+
+        assert!(r.match_route("/docs/a/extra").is_none());
+        assert!(r.match_route("/docs/a").is_none());
+
+        // A valid catch-all registered afterwards still works.
+        r.add_route("/docs/*path", dyn_id("docs"));
+        let m = r.match_route("/docs/a/b").unwrap();
+        assert_eq!(m.params["path"], "a/b");
     }
 
     #[test]

@@ -66,7 +66,14 @@ pub struct RateLimiter {
 // ── RateLimiter impl ──────────────────────────────────────────────────────────
 
 impl RateLimiter {
-    pub fn new(rules: Vec<RateLimitRule>) -> Self {
+    pub fn new(mut rules: Vec<RateLimitRule>) -> Self {
+        // The server lowercases incoming header names; normalize once here so
+        // a mixed-case key_header from gio.toml still matches.
+        for rule in &mut rules {
+            if let Some(header_name) = rule.key_header.as_mut() {
+                *header_name = header_name.to_ascii_lowercase();
+            }
+        }
         Self {
             store: Arc::new(RateLimitStore::new()),
             rules,
@@ -147,7 +154,9 @@ impl RateLimiter {
         rule: &RateLimitRule,
         headers: &HashMap<String, String>,
     ) -> String {
-        let ip_key = format!("{rule_index}:{ip}");
+        // '|' cannot appear in an IP (IPv6 Display contains ':'), so the
+        // header value being the final field makes every key unambiguous.
+        let ip_key = format!("{rule_index}|{ip}");
         let Some(header_name) = rule.key_header.as_deref() else {
             return ip_key;
         };
@@ -155,7 +164,7 @@ impl RateLimiter {
             return ip_key;
         };
         let compound_key = format!(
-            "{rule_index}:{ip}:{}",
+            "{rule_index}|{ip}|{}",
             bounded_prefix(value, MAX_KEY_HEADER_VALUE_BYTES)
         );
         if self.store.contains(&compound_key)
@@ -400,6 +409,58 @@ mod tests {
         ));
         assert!(matches!(
             rl.check("/api/data", LOCAL, &empty_headers()),
+            RateLimitResult::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn ipv6_ip_and_crafted_header_cannot_collide_with_another_client() {
+        // With ':' as the key delimiter, (ip="::1", header="2:3") and
+        // (ip="::1:2", header="3") both produced "0:::1:2:3". The '|'
+        // delimiter keeps their buckets separate.
+        let rl = make_limiter(vec![keyed_rule(1, 3600)]);
+        let attacker: IpAddr = "::1".parse().unwrap();
+        let victim: IpAddr = "::1:2".parse().unwrap();
+
+        assert!(matches!(
+            rl.check("/api/data", attacker, &api_key_headers("2:3")),
+            RateLimitResult::Allowed { .. }
+        ));
+        assert!(matches!(
+            rl.check("/api/data", attacker, &api_key_headers("2:3")),
+            RateLimitResult::Rejected { .. }
+        ));
+
+        // Victim is a different (ip, header) pair - must have its own bucket.
+        assert!(matches!(
+            rl.check("/api/data", victim, &api_key_headers("3")),
+            RateLimitResult::Allowed { .. }
+        ));
+    }
+
+    #[test]
+    fn mixed_case_key_header_config_still_keys_by_header() {
+        let rule = RateLimitRule {
+            path_pattern: "/api/*".to_string(),
+            per_ip: 1,
+            window_seconds: 3600,
+            burst: 0,
+            key_header: Some("X-Api-Key".to_string()),
+        };
+        let rl = make_limiter(vec![rule]);
+
+        // Distinct header values get distinct buckets; a case-sensitive lookup
+        // would collapse both onto the per-IP bucket and reject the second.
+        assert!(matches!(
+            rl.check("/api/data", LOCAL, &api_key_headers("key-one")),
+            RateLimitResult::Allowed { .. }
+        ));
+        assert!(matches!(
+            rl.check("/api/data", LOCAL, &api_key_headers("key-two")),
+            RateLimitResult::Allowed { .. }
+        ));
+        assert!(matches!(
+            rl.check("/api/data", LOCAL, &api_key_headers("key-one")),
             RateLimitResult::Rejected { .. }
         ));
     }

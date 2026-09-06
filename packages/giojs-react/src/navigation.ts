@@ -110,21 +110,41 @@ async function fetchPageHtml(href: string): Promise<string | null> {
 async function applyWithTransition(
   html: string,
   transition: TransitionPreset | false,
+  seq: number,
 ): Promise<void> {
   if (transition !== false && typeof document.startViewTransition === 'function') {
     document.documentElement.setAttribute('data-gio-transition', transition);
-    const vt = document.startViewTransition(() => swapContent(html));
+    // The transition callback runs a frame later - re-check the sequence so a
+    // navigation superseded in that window never swaps stale content in.
+    const vt = document.startViewTransition(() => {
+      if (isCurrentNavigation(seq)) swapContent(html);
+    });
     await vt.finished;
     document.documentElement.removeAttribute('data-gio-transition');
-  } else {
+  } else if (isCurrentNavigation(seq)) {
     swapContent(html);
   }
+}
+
+// Monotonic navigation sequence: each navigateTo/popstate claims the next
+// number, and only the holder of the latest number may swap content or touch
+// history. A slow response finishing after a newer navigation is discarded.
+let navigationSeq = 0;
+
+function beginNavigation(): number {
+  navigationSeq += 1;
+  return navigationSeq;
+}
+
+function isCurrentNavigation(seq: number): boolean {
+  return seq === navigationSeq;
 }
 
 export async function navigateTo(
   href: string,
   transition: TransitionPreset | false,
 ): Promise<void> {
+  const seq = beginNavigation();
   // Use completed prefetch if available; '' sentinel means still in-flight.
   const cached = prefetchCache.get(href);
   let html: string;
@@ -133,6 +153,7 @@ export async function navigateTo(
     html = cached;
   } else {
     const fetched = await fetchPageHtml(href);
+    if (!isCurrentNavigation(seq)) return;
     if (fetched === null) {
       // Deployment changed - navigate to the new URL with a fresh load.
       window.location.href = href;
@@ -141,7 +162,8 @@ export async function navigateTo(
     html = fetched;
   }
 
-  await applyWithTransition(html, transition);
+  await applyWithTransition(html, transition, seq);
+  if (!isCurrentNavigation(seq)) return;
   history.pushState({ gio: true }, '', href);
 }
 
@@ -153,15 +175,19 @@ export function initPopstateHandler(): void {
   popstateRegistered = true;
 
   window.addEventListener('popstate', () => {
+    const seq = beginNavigation();
     const path = window.location.pathname + window.location.search;
     fetchPageHtml(path)
       .then(html => {
+        if (!isCurrentNavigation(seq)) return;
         if (html === null) {
           window.location.reload();
           return;
         }
         swapContent(html);
       })
-      .catch(() => window.location.reload());
+      .catch(() => {
+        if (isCurrentNavigation(seq)) window.location.reload();
+      });
   });
 }

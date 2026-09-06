@@ -258,9 +258,7 @@ async fn read_ws_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> anyhow::Resul
     reader.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > MAX_WS_IPC_FRAME_BYTES {
-        anyhow::bail!(
-            "WS IPC frame length {len} exceeds max {MAX_WS_IPC_FRAME_BYTES}"
-        );
+        anyhow::bail!("WS IPC frame length {len} exceeds max {MAX_WS_IPC_FRAME_BYTES}");
     }
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload).await?;
@@ -298,8 +296,7 @@ async fn connect_ws_transport(
 pub(crate) mod b64 {
     use thiserror::Error;
 
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     #[derive(Debug, Error)]
     pub(crate) enum Base64Error {

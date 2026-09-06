@@ -10,7 +10,11 @@ import {
   validateIPCRequest,
   makeFrameHandler,
   handshakeProof,
+  formatSseEvent,
+  makeDroppableFrameWriter,
   MAX_IPC_MESSAGE_SIZE,
+  MAX_BUFFERED_FRAME_BYTES,
+  type FrameSink,
 } from './ipc.ts';
 
 function validFrame(): Record<string, unknown> {
@@ -169,6 +173,66 @@ describe('makeFrameHandler frame reassembly', () => {
     header.writeUInt32BE(MAX_IPC_MESSAGE_SIZE + 1, 0);
     handler(header);
     expect(oversizedLength).toBe(MAX_IPC_MESSAGE_SIZE + 1);
+  });
+});
+
+describe('formatSseEvent', () => {
+  it('formats id, event, and JSON data lines', () => {
+    expect(formatSseEvent({ n: 1 }, 'tick', '42')).toBe('id: 42\nevent: tick\ndata: {"n":1}\n\n');
+  });
+
+  it('omits id and event lines when not provided', () => {
+    expect(formatSseEvent('hi')).toBe('data: "hi"\n\n');
+  });
+
+  it('strips CR/LF from id and event so they cannot inject extra SSE fields', () => {
+    const chunk = formatSseEvent('x', 'tick\nevent: forged', '1\r\ndata: injected');
+    expect(chunk).toBe('id: 1data: injected\nevent: tickevent: forged\ndata: "x"\n\n');
+    expect(chunk.split('\n').filter(line => line.startsWith('data:'))).toHaveLength(1);
+    expect(chunk.split('\n').filter(line => line.startsWith('event:'))).toHaveLength(1);
+  });
+});
+
+function makeSink(): FrameSink & { written: Buffer[] } {
+  const written: Buffer[] = [];
+  return {
+    written,
+    writableLength: 0,
+    write(data: Buffer): boolean {
+      written.push(data);
+      return true;
+    },
+  };
+}
+
+describe('makeDroppableFrameWriter', () => {
+  it('writes frames while the socket buffer is below the cap', () => {
+    const sink = makeSink();
+    const write = makeDroppableFrameWriter(sink);
+    expect(write({ type: 'sse_chunk', id: 'r1', data: 'data: 1\n\n' })).toBe(true);
+    // Header + JSON payload
+    expect(sink.written).toHaveLength(2);
+  });
+
+  it('drops frames while the buffer exceeds the cap and resumes after drain', () => {
+    const sink = makeSink();
+    const write = makeDroppableFrameWriter(sink);
+
+    sink.writableLength = MAX_BUFFERED_FRAME_BYTES + 1;
+    expect(write({ type: 'sse_chunk', id: 'r1', data: 'dropped' })).toBe(false);
+    expect(write({ type: 'sse_chunk', id: 'r1', data: 'dropped too' })).toBe(false);
+    expect(sink.written).toHaveLength(0);
+
+    sink.writableLength = 0;
+    expect(write({ type: 'sse_chunk', id: 'r1', data: 'kept' })).toBe(true);
+    expect(sink.written).toHaveLength(2);
+  });
+
+  it('allows a buffer exactly at the cap', () => {
+    const sink = makeSink();
+    const write = makeDroppableFrameWriter(sink);
+    sink.writableLength = MAX_BUFFERED_FRAME_BYTES;
+    expect(write({ type: 'sse_chunk', id: 'r1', data: 'boundary' })).toBe(true);
   });
 });
 

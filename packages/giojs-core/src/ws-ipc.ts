@@ -11,7 +11,7 @@ import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Buffer } from 'node:buffer';
-import { handshakeProof } from './ipc.ts';
+import { handshakeProof, writeFrame, makeDroppableFrameWriter } from './ipc.ts';
 import { logger } from './logger.ts';
 import type { WsInbound, WsOutbound, GioSocket } from './context.ts';
 
@@ -169,6 +169,11 @@ function wsSocketPath(): string {
  * The first frame on every WS IPC connection must pass this gate (when a
  * token is configured) before any other message is processed.
  */
+/** Payload frames may be dropped under backpressure; ws_close never is. */
+export function isDroppableWsFrame(msg: WsOutbound): boolean {
+  return msg.type === 'ws_send' || msg.type === 'ws_broadcast';
+}
+
 export function wsAuthIsValid(parsed: unknown, token: string): boolean {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
   const msg = parsed as Record<string, unknown>;
@@ -181,12 +186,16 @@ export function createWsIpcServer(wsHandlers: Map<string, WsHandlerFn>): net.Ser
     const activeSockets = new Map<string, GioSocketImpl>();
     let authed = WS_IPC_TOKEN === '';
 
-    function writeFrame(msg: WsOutbound): void {
-      const json = Buffer.from(JSON.stringify(msg), 'utf8');
-      const header = Buffer.allocUnsafe(4);
-      header.writeUInt32BE(json.byteLength, 0);
-      socket.write(header);
-      socket.write(json);
+    const writeDroppableFrame = makeDroppableFrameWriter(socket);
+
+    // ws_close is a control frame and is never dropped; payload frames may be
+    // dropped under backpressure to keep a slow reader from buffering unboundedly.
+    function writeOutbound(msg: WsOutbound): void {
+      if (isDroppableWsFrame(msg)) {
+        writeDroppableFrame(msg);
+        return;
+      }
+      writeFrame(socket, msg);
     }
 
     const handler = makeWsFrameHandler(
@@ -216,7 +225,7 @@ export function createWsIpcServer(wsHandlers: Map<string, WsHandlerFn>): net.Ser
         }
 
         if (msg.type === 'ws_connect') {
-          const gioSocket = new GioSocketImpl(msg.connId, msg.routeId, writeFrame);
+          const gioSocket = new GioSocketImpl(msg.connId, msg.routeId, writeOutbound);
           activeSockets.set(msg.connId, gioSocket);
           const wsHandler = wsHandlers.get(msg.routeId);
           if (wsHandler !== undefined) {

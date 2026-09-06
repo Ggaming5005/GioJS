@@ -39,6 +39,10 @@ const STARTUP_CONNECT_ATTEMPTS: usize = 60;
 const RECONNECT_ATTEMPTS: usize = 4;
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
 const RESPAWN_BACKOFF_MAX_MS: u64 = 30_000;
+/// Bound on a single supervisor write: a wedged-but-alive worker that stops
+/// reading would otherwise block the select loop forever, starving the
+/// child-exit and restart arms.
+const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Per-instance IPC endpoint paths. On Windows the pipe namespace is global,
 /// so the names carry a per-process random suffix to avoid collisions between
@@ -384,7 +388,9 @@ impl IpcClient {
     /// True while the IPC connection to the Node worker is live. False during
     /// respawn/reconnect windows - cached and static content still serves.
     pub fn worker_ready(&self) -> bool {
-        self.inner.connected.load(std::sync::atomic::Ordering::Relaxed)
+        self.inner
+            .connected
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn sse_stream_count(&self) -> usize {
@@ -406,6 +412,22 @@ async fn write_frame<W: AsyncWriteExt + Unpin>(
     writer.write_all(&buf).await?;
     writer.flush().await?;
     Ok(())
+}
+
+/// `write_frame` with a deadline: a stalled write means the worker stopped
+/// reading, which callers must treat as a lost connection.
+async fn write_frame_bounded<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    payload: &[u8],
+    deadline: Duration,
+) -> anyhow::Result<()> {
+    match timeout(deadline, write_frame(writer, payload)).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "IPC write timed out after {}ms - worker stopped reading",
+            deadline.as_millis()
+        ),
+    }
 }
 
 /// Read one length-prefixed frame. Rejects frames whose declared length
@@ -633,9 +655,7 @@ async fn connect_and_handshake(
         };
         let proof = ready["token"].as_str().unwrap_or("");
         if proof != expected_ready_proof {
-            anyhow::bail!(
-                "IPC endpoint at {path} failed token verification - refusing to use it"
-            );
+            anyhow::bail!("IPC endpoint at {path} failed token verification - refusing to use it");
         }
         let worker_protocol = ready["protocol"].as_u64();
         if worker_protocol != Some(IPC_PROTOCOL_VERSION) {
@@ -884,7 +904,9 @@ async fn ipc_supervisor(
                             break ServeEnd::Shutdown;
                         }
                         Some(bytes) => {
-                            if let Err(e) = write_frame(&mut writer, &bytes).await {
+                            if let Err(e) =
+                                write_frame_bounded(&mut writer, &bytes, IPC_WRITE_TIMEOUT).await
+                            {
                                 error!("IPC write error: {e}");
                                 reader_task.abort();
                                 break ServeEnd::ConnLost;
@@ -1008,6 +1030,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_write_times_out_when_peer_stops_reading() {
+        // 16-byte pipe with a live peer that never reads: the frame cannot
+        // flush, so only the deadline can end the write.
+        let (mut client, _server) = tokio::io::duplex(16);
+        let payload = vec![0u8; 1024];
+        let err = match write_frame_bounded(&mut client, &payload, Duration::from_millis(50)).await
+        {
+            Ok(()) => panic!("write into a full pipe must time out"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("timed out"), "got: {err}");
+    }
+
+    #[tokio::test]
     async fn read_frame_roundtrips_with_write_frame() {
         let (mut client, mut server) = tokio::io::duplex(1024);
         write_frame(&mut client, b"hello").await.unwrap();
@@ -1065,7 +1101,11 @@ mod tests {
         let ready = handshake_proof("secret", "ready");
         let ack = handshake_proof("secret", "ack");
         assert_ne!(ready, ack, "roles must derive distinct proofs");
-        assert_eq!(ready, handshake_proof("secret", "ready"), "must be deterministic");
+        assert_eq!(
+            ready,
+            handshake_proof("secret", "ready"),
+            "must be deterministic"
+        );
         assert_ne!(
             ready,
             handshake_proof("other", "ready"),

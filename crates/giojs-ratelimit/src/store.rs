@@ -1,7 +1,7 @@
 //! store.rs
 //!
 //! Per-key bucket storage. DashMap provides lock-free concurrent access.
-//! Keys are "{rule_index}:{client_ip}" or "{rule_index}:{client_ip}:{header_value}".
+//! Keys are "{rule_index}|{client_ip}" or "{rule_index}|{client_ip}|{header_value}".
 //! A per-group distinct-key counter caps how many header-value buckets one IP
 //! can create. Call `evict_idle` from a background task to bound memory growth.
 

@@ -90,6 +90,35 @@ fn render_is_shareable(resp: &ipc::IpcResponse) -> bool {
     resp.cacheable && resp.cache_max_age > 0 && resp.vary.is_empty()
 }
 
+/// Headers that must never be stored in the shared cache: set-cookie is
+/// per-user (replaying it would hand one visitor's session to every cache
+/// hit), the rest are hop-by-hop and describe the original connection.
+const NONCACHEABLE_RESPONSE_HEADERS: [&str; 9] = [
+    "set-cookie",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+/// Copy of a render's headers safe to replay from the cache. Every
+/// `CacheEntry` must be built through this - never from raw response headers.
+fn cacheable_response_headers(headers: &HashMap<String, String>) -> HashMap<String, String> {
+    headers
+        .iter()
+        .filter(|(name, _)| {
+            !NONCACHEABLE_RESPONSE_HEADERS
+                .iter()
+                .any(|blocked| name.eq_ignore_ascii_case(blocked))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
 #[derive(Clone)]
 struct AppState {
     ipc: Arc<IpcClient>,
@@ -801,14 +830,14 @@ async fn dynamic_handler(
     if method != "GET" && method != "HEAD" {
         let query = parse_query(&query_str);
         let headers = extract_headers(&req);
-        let (body, body_base64) =
-            match read_request_body(req.into_body(), state.max_body_bytes).await {
-                BodyReadOutcome::Read(body, body_base64) => (body, body_base64),
-                BodyReadOutcome::TooLarge => {
-                    return (StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large")
-                        .into_response();
-                }
-            };
+        let (body, body_base64) = match read_request_body(req.into_body(), state.max_body_bytes)
+            .await
+        {
+            BodyReadOutcome::Read(body, body_base64) => (body, body_base64),
+            BodyReadOutcome::TooLarge => {
+                return (StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large").into_response();
+            }
+        };
         if dev_mode {
             state
                 .devtools
@@ -849,7 +878,8 @@ async fn dynamic_handler(
                 &state.css_cache,
                 &state.css_config,
                 dev_mode,
-            );
+            )
+            .await;
             state
                 .metrics
                 .record_request(&method, status, "hit", start.elapsed().as_nanos() as u64);
@@ -884,7 +914,8 @@ async fn dynamic_handler(
                 &state.css_cache,
                 &state.css_config,
                 dev_mode,
-            );
+            )
+            .await;
             state.metrics.record_request(
                 &method,
                 status,
@@ -992,7 +1023,7 @@ async fn dynamic_handler(
                             let entry = CacheEntry {
                                 html: body.clone(),
                                 status: resp.status,
-                                headers: resp.headers.clone(),
+                                headers: cacheable_response_headers(&resp.headers),
                                 created_at: std::time::SystemTime::now(),
                                 max_age_secs: resp.cache_max_age,
                                 deployment_id: deployment_id.clone(),
@@ -1099,9 +1130,9 @@ async fn dynamic_handler(
                     )
                     .await
                 }
-                Some(IpcSendResult::SseStream { response, body_rx }) => {
-                    respond_sse(&state, &method, &path, response, body_rx, encoding, &locale, start)
-                }
+                Some(IpcSendResult::SseStream { response, body_rx }) => respond_sse(
+                    &state, &method, &path, response, body_rx, encoding, &locale, start,
+                ),
                 // Follower of a private render: render fresh with our own headers.
                 None => {
                     render_uncoalesced(
@@ -1150,10 +1181,9 @@ async fn read_request_body(body: axum::body::Body, limit: usize) -> BodyReadOutc
     }
     match String::from_utf8(bytes.to_vec()) {
         Ok(body) => BodyReadOutcome::Read(Some(body), false),
-        Err(not_utf8) => BodyReadOutcome::Read(
-            Some(ws_ipc::b64::encode(not_utf8.as_bytes())),
-            true,
-        ),
+        Err(not_utf8) => {
+            BodyReadOutcome::Read(Some(ws_ipc::b64::encode(not_utf8.as_bytes())), true)
+        }
     }
 }
 
@@ -1241,7 +1271,9 @@ async fn render_uncoalesced(
             state
                 .metrics
                 .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
-            respond_sse(state, method, path, response, body_rx, encoding, locale, start)
+            respond_sse(
+                state, method, path, response, body_rx, encoding, locale, start,
+            )
         }
         Err(e) => {
             state
@@ -1291,7 +1323,7 @@ async fn respond_from_render(
         let entry = CacheEntry {
             html: body.clone(),
             status: resp.status,
-            headers: resp.headers.clone(),
+            headers: cacheable_response_headers(&resp.headers),
             created_at: std::time::SystemTime::now(),
             max_age_secs: resp.cache_max_age,
             deployment_id: deployment_id.to_string(),
@@ -1525,21 +1557,20 @@ fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
     use notify::Watcher;
 
     let (fs_tx, mut fs_rx) = tokio::sync::mpsc::channel::<()>(16);
-    let mut watcher = match notify::recommended_watcher(
-        move |result: Result<notify::Event, notify::Error>| {
+    let mut watcher =
+        match notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
             if let Ok(event) = result {
                 if watch_event_is_relevant(&event) {
                     let _ = fs_tx.blocking_send(());
                 }
             }
-        },
-    ) {
-        Ok(watcher) => watcher,
-        Err(e) => {
-            warn!(error = %e, "dev watch unavailable");
-            return;
-        }
-    };
+        }) {
+            Ok(watcher) => watcher,
+            Err(e) => {
+                warn!(error = %e, "dev watch unavailable");
+                return;
+            }
+        };
     if let Err(e) = watcher.watch(
         std::path::Path::new(&app_dir),
         notify::RecursiveMode::Recursive,
@@ -1577,18 +1608,35 @@ fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
             }
             let mut generation = state.ipc.subscribe_generation();
             state.ipc.restart_worker();
-            match tokio::time::timeout(Duration::from_secs(60), generation.changed()).await {
-                Ok(Ok(())) => {
-                    let _ = state
-                        .devtools
-                        .log_tx
-                        .send("event: reload\ndata: {}\n\n".to_string());
-                    info!("dev watch: worker restarted - browsers reloading");
-                }
-                _ => warn!("dev watch: worker restart did not complete in time"),
+            if await_restart_then_reclear(&state.cache, &mut generation).await {
+                let _ = state
+                    .devtools
+                    .log_tx
+                    .send("event: reload\ndata: {}\n\n".to_string());
+                info!("dev watch: worker restarted - browsers reloading");
+            } else {
+                warn!("dev watch: worker restart did not complete in time");
             }
         }
     });
+}
+
+/// Dev watch: wait for the worker restart to complete, then clear the cache
+/// a second time. A render in flight on the old worker can land during the
+/// kill window, and the deployment id never changes across dev restarts, so
+/// that stale entry would otherwise serve until it expires. Returns false
+/// when the restart did not complete within the timeout.
+async fn await_restart_then_reclear(
+    cache: &PageCache,
+    generation: &mut tokio::sync::watch::Receiver<u64>,
+) -> bool {
+    match tokio::time::timeout(Duration::from_secs(60), generation.changed()).await {
+        Ok(Ok(())) => {
+            cache.clear().await;
+            true
+        }
+        _ => false,
+    }
 }
 
 fn watch_event_is_relevant(event: &notify::Event) -> bool {
@@ -1820,12 +1868,12 @@ fn negotiate_encoding(req: &Request) -> &'static str {
     }
 }
 
-fn build_response_from_entry(
+async fn build_response_from_entry(
     entry: CacheEntry,
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[&str],
-    css_cache: &DashMap<String, Bytes>,
+    css_cache: &Arc<DashMap<String, Bytes>>,
     css_config: &config::CssConfig,
     dev_mode: bool,
 ) -> Response {
@@ -1840,23 +1888,35 @@ fn build_response_from_entry(
             entry.html
         }
     } else {
-        // Uncomposed entry (dev mode or pre-`composed` disk format): inject per request.
+        // Uncomposed entry (dev mode or pre-`composed` disk format): inject
+        // per request, off the async thread (critical extraction is CPU-bound).
+        // Bytes clone is a refcount bump, kept only for the fallback arm.
+        let raw_html = entry.html.clone();
         let html_bytes = entry.html;
-        let script = format!(
-            r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
-        );
-        let critical_snippet = if css_config.critical_extraction {
-            extract_critical_snippet(&html_bytes, css_cache)
-        } else {
-            None
-        };
-        let mut snippets: Vec<&str> = Vec::new();
-        if let Some(ref s) = critical_snippet {
-            snippets.push(s.as_str());
+        let deployment_id = deployment_id.to_string();
+        let default_locale = default_locale.to_string();
+        let font_snippets: Vec<String> = font_snippets.iter().map(|s| (*s).to_string()).collect();
+        let css_cache = css_cache.clone();
+        let critical_extraction = css_config.critical_extraction;
+        match tokio::task::spawn_blocking(move || {
+            compose_uncomposed_entry(
+                html_bytes,
+                &deployment_id,
+                &default_locale,
+                &font_snippets,
+                &css_cache,
+                critical_extraction,
+                dev_mode,
+            )
+        })
+        .await
+        {
+            Ok(injected_html) => injected_html,
+            Err(join_err) => {
+                warn!(error = %join_err, "cached-entry injection task failed - serving raw body");
+                raw_html
+            }
         }
-        snippets.extend_from_slice(font_snippets);
-        snippets.push(script.as_str());
-        inject_into_html(html_bytes, &snippets, dev_mode)
     };
     let status = StatusCode::from_u16(entry.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder().status(status);
@@ -1868,6 +1928,36 @@ fn build_response_from_entry(
     builder
         .body(axum::body::Body::from(html))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Per-request head injection for an uncomposed cache entry. CPU-bound when
+/// critical extraction is on - async callers run this inside `spawn_blocking`.
+fn compose_uncomposed_entry(
+    html: Bytes,
+    deployment_id: &str,
+    default_locale: &str,
+    font_snippets: &[String],
+    css_cache: &DashMap<String, Bytes>,
+    critical_extraction: bool,
+    dev_mode: bool,
+) -> Bytes {
+    let script = format!(
+        r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
+    );
+    let critical_snippet = if critical_extraction {
+        extract_critical_snippet(&html, css_cache)
+    } else {
+        None
+    };
+    let mut snippets: Vec<&str> = Vec::with_capacity(font_snippets.len() + 2);
+    if let Some(ref snippet) = critical_snippet {
+        snippets.push(snippet.as_str());
+    }
+    for font_snippet in font_snippets {
+        snippets.push(font_snippet.as_str());
+    }
+    snippets.push(script.as_str());
+    inject_into_html(html, &snippets, dev_mode)
 }
 
 /// Build the final HTTP response from a rendered page. Bodies composed at
@@ -2125,7 +2215,7 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                 let entry = CacheEntry {
                     html,
                     status: resp.status,
-                    headers: resp.headers,
+                    headers: cacheable_response_headers(&resp.headers),
                     created_at: std::time::SystemTime::now(),
                     max_age_secs: resp.cache_max_age,
                     deployment_id,
@@ -2412,7 +2502,7 @@ mod tests {
     #[tokio::test]
     async fn composed_entry_is_served_without_reinjection() {
         let entry = html_entry("<html><head>BAKED</head><body></body></html>", true);
-        let css_cache = DashMap::new();
+        let css_cache = Arc::new(DashMap::new());
         let resp = build_response_from_entry(
             entry,
             "dep-1",
@@ -2421,7 +2511,8 @@ mod tests {
             &css_cache,
             &config::CssConfig::default(),
             false,
-        );
+        )
+        .await;
         let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .unwrap();
@@ -2433,7 +2524,7 @@ mod tests {
     #[tokio::test]
     async fn uncomposed_entry_falls_back_to_per_request_injection() {
         let entry = html_entry("<html><head></head><body></body></html>", false);
-        let css_cache = DashMap::new();
+        let css_cache = Arc::new(DashMap::new());
         let resp = build_response_from_entry(
             entry,
             "dep-1",
@@ -2442,7 +2533,8 @@ mod tests {
             &css_cache,
             &config::CssConfig::default(),
             false,
-        );
+        )
+        .await;
         let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .unwrap();
@@ -2453,7 +2545,7 @@ mod tests {
     #[tokio::test]
     async fn composed_entry_in_dev_mode_still_gets_overlay() {
         let entry = html_entry("<html><head>BAKED</head><body></body></html>", true);
-        let css_cache = DashMap::new();
+        let css_cache = Arc::new(DashMap::new());
         let resp = build_response_from_entry(
             entry,
             "dep-1",
@@ -2462,13 +2554,69 @@ mod tests {
             &css_cache,
             &config::CssConfig::default(),
             true,
-        );
+        )
+        .await;
         let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
         assert!(!s.contains("__GIO_DEPLOYMENT_ID__"));
         assert!(s.contains("__gio_dev_overlay_script"));
+    }
+
+    #[test]
+    fn cacheable_headers_drop_set_cookie_and_keep_content_type() {
+        let headers = HashMap::from([
+            ("set-cookie".to_string(), "session=abc".to_string()),
+            ("Set-Cookie".to_string(), "other=1".to_string()),
+            ("content-type".to_string(), "text/html".to_string()),
+            ("transfer-encoding".to_string(), "chunked".to_string()),
+            ("cache-control".to_string(), "max-age=60".to_string()),
+        ]);
+        let filtered = cacheable_response_headers(&headers);
+        assert_eq!(
+            filtered.get("content-type").map(String::as_str),
+            Some("text/html")
+        );
+        assert_eq!(
+            filtered.get("cache-control").map(String::as_str),
+            Some("max-age=60")
+        );
+        assert!(
+            !filtered
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("set-cookie")),
+            "set-cookie must never be replayed from the cache"
+        );
+        assert!(!filtered.contains_key("transfer-encoding"));
+    }
+
+    #[tokio::test]
+    async fn dev_restart_clears_entry_written_during_kill_window() {
+        let dir = std::env::temp_dir().join(format!("giojs-devreclear-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let cache = PageCache::new(CacheConfig {
+            memory_max_entries: NonZeroUsize::new(10).unwrap(),
+            disk_dir: dir.clone(),
+            swr_multiplier: 1,
+            disk_max_bytes: u64::MAX,
+        });
+        // Simulates a stale render landing after the pre-restart clear.
+        cache
+            .put("stale-key", html_entry("<html></html>", false))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (generation_tx, mut generation_rx) = tokio::sync::watch::channel(1u64);
+        generation_tx.send_modify(|generation| *generation += 1);
+
+        assert!(await_restart_then_reclear(&cache, &mut generation_rx).await);
+        assert!(
+            cache.get("stale-key", "dep-1").await.is_none(),
+            "entry repopulated during the kill window must not survive the restart"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     // ── query decoding ────────────────────────────────────────────────────────

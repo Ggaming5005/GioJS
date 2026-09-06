@@ -119,11 +119,15 @@ impl PrefetchBudgets {
     }
 
     /// Decrements the in-flight counter after the response is sent.
+    /// Saturates at zero: checked_sub inside fetch_update makes the
+    /// check-and-decrement atomic, so racing releases cannot wrap.
     pub fn release(&self, ip: IpAddr) {
         if let Some(entry) = self.budgets.get(&ip) {
-            if entry.in_flight.load(Ordering::Relaxed) > 0 {
-                entry.in_flight.fetch_sub(1, Ordering::Relaxed);
-            }
+            let _ = entry
+                .in_flight
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    count.checked_sub(1)
+                });
         }
     }
 
@@ -200,6 +204,28 @@ mod tests {
         for _ in 0..5 {
             assert!(b.try_acquire(LOCAL));
         }
+        assert!(!b.try_acquire(LOCAL));
+    }
+
+    #[test]
+    fn excess_releases_saturate_at_zero_instead_of_wrapping() {
+        let b = budget(2, 20);
+        assert!(b.try_acquire(LOCAL));
+        for _ in 0..3 {
+            b.release(LOCAL);
+        }
+
+        let in_flight = b
+            .budgets
+            .get(&LOCAL)
+            .unwrap()
+            .in_flight
+            .load(Ordering::Relaxed);
+        assert_eq!(in_flight, 0, "counter must not wrap below zero");
+
+        // A wrapped counter (usize::MAX) would block this IP forever.
+        assert!(b.try_acquire(LOCAL));
+        assert!(b.try_acquire(LOCAL));
         assert!(!b.try_acquire(LOCAL));
     }
 
