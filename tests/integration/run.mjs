@@ -519,11 +519,23 @@ async function devWatchPhase() {
         (await readFile(cachedFile, 'utf8')).replace('INTEGRATION_FIXTURE_CACHED', 'WATCH_UPDATED_CACHED'),
       );
 
+      // CI Windows runners are 2-core and cold: worker respawn (tsx boot +
+      // esbuild bundling) can far exceed local timings, and the OS watcher
+      // occasionally drops the very first change event under load - re-touch
+      // the file if nothing happened after 30s (a dead respawn still fails:
+      // re-touching cannot revive a supervisor that cannot reconnect).
+      const editDeadline = Date.now() + 90_000;
+      let retouches = 0;
       await waitFor('watch-triggered restart to serve the edit', async () => {
         const html = await (await fetch(`${BASE}/`)).text();
-        return html.includes('WATCH_UPDATED_HOME');
-        // CI Windows runners are 2-core and cold: worker respawn (tsx boot +
-        // esbuild bundling) can far exceed local timings.
+        if (html.includes('WATCH_UPDATED_HOME')) return true;
+        const elapsed = 90_000 - (editDeadline - Date.now());
+        if (elapsed > 30_000 * (retouches + 1) && retouches < 2) {
+          retouches++;
+          console.log(`  (re-touching edited file - watch event likely dropped, attempt ${retouches})`);
+          await writeFile(homeFile, await readFile(homeFile, 'utf8'));
+        }
+        return false;
       }, 90_000);
       // The watcher fires on a debounce; wait for its log line and the
       // completed worker restart rather than asserting immediately.
