@@ -1,6 +1,6 @@
 {
   "name": "@gio.js/server-linux-arm64",
-  "version": "0.1.0-beta.6",
+  "version": "0.1.0-beta.7",
   "description": "GioJS pre-built binary for Linux arm64",
   "os": [
     "linux"

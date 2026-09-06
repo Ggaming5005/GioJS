@@ -26,23 +26,23 @@ importers:
   packages/giojs:
     dependencies:
       '@gio.js/core':
-        specifier: 0.1.0-beta.6
+        specifier: 0.1.0-beta.7
         version: link:../giojs-core
     optionalDependencies:
       '@gio.js/server-darwin-arm64':
-        specifier: 0.1.0-beta.6
+        specifier: 0.1.0-beta.7
         version: link:../../platform/giojs-darwin-arm64
       '@gio.js/server-darwin-x64':
-        specifier: 0.1.0-beta.6
+        specifier: 0.1.0-beta.7
         version: link:../../platform/giojs-darwin-x64
       '@gio.js/server-linux-x64':
-        specifier: 0.1.0-beta.6
+        specifier: 0.1.0-beta.7
         version: link:../../platform/giojs-linux-x64
       '@gio.js/server-linux-x64-musl':
-        specifier: 0.1.0-beta.6
+        specifier: 0.1.0-beta.7
         version: link:../../platform/giojs-linux-x64-musl
       '@gio.js/server-win32-x64':
-        specifier: 0.1.0-beta.6
+        specifier: 0.1.0-beta.7
         version: link:../../platform/giojs-win32-x64
 
   packages/giojs-cli:

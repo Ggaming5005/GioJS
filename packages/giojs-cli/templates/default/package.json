@@ -9,8 +9,8 @@
     "start": "giojs-server"
   },
   "dependencies": {
-    "@gio.js/server": "^0.1.0-beta.6",
-    "@gio.js/react": "^0.1.0-beta.6",
+    "@gio.js/server": "^0.1.0-beta.7",
+    "@gio.js/react": "^0.1.0-beta.7",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
