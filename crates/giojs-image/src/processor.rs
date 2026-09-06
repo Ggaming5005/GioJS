@@ -8,6 +8,9 @@ use image::{DynamicImage, ImageFormat, ImageReader};
 use std::io::Cursor;
 use thiserror::Error;
 
+const MAX_SOURCE_DIMENSION: u32 = 10_000;
+const MAX_DECODE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+
 #[derive(Debug, Error)]
 pub enum ProcessorError {
     #[error("decode failed: {0}")]
@@ -81,9 +84,16 @@ pub fn process_image(
     source: Bytes,
     params: &ImageParams,
 ) -> Result<ProcessedImage, ProcessorError> {
-    let reader = ImageReader::new(Cursor::new(&source))
+    let mut reader = ImageReader::new(Cursor::new(&source))
         .with_guessed_format()
         .map_err(|e| ProcessorError::Decode(e.to_string()))?;
+    // A tiny compressed file can declare enormous dimensions; without decode
+    // limits one request can allocate gigabytes inside spawn_blocking.
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
+    limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
+    reader.limits(limits);
     let img = reader
         .decode()
         .map_err(|e| ProcessorError::Decode(e.to_string()))?;

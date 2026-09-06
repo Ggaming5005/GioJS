@@ -13,4 +13,5 @@ sha2.workspace      = true
 lru.workspace       = true
 serde.workspace     = true
 reqwest.workspace   = true
+url = "2"
 image = { version = "0.25", features = ["avif", "webp"] }

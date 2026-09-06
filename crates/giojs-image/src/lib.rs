@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{info, warn};
+use url::Url;
 
 const DEFAULT_MAX_REMOTE_BYTES: u64 = 20 * 1024 * 1024;
 const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -192,8 +193,8 @@ impl ImageHandler {
 
     async fn fetch_source(&self, src: &str) -> Result<Bytes, ImageError> {
         if src.starts_with("http://") || src.starts_with("https://") {
-            self.validate_remote(src)?;
-            return self.fetch_remote(src).await;
+            let validated = self.validate_remote(src)?;
+            return self.fetch_remote(validated).await;
         }
         let local_path = self.validate_local_path(src)?;
         tokio::fs::read(&local_path)
@@ -202,13 +203,15 @@ impl ImageHandler {
             .map_err(|_| ImageError::NotFound)
     }
 
-    async fn fetch_remote(&self, src: &str) -> Result<Bytes, ImageError> {
+    async fn fetch_remote(&self, src: Url) -> Result<Bytes, ImageError> {
         let client = self
             .http_client
             .as_ref()
             .ok_or_else(|| ImageError::FetchFailed("HTTP client unavailable".into()))?;
+        // The parsed Url from validate_remote is fetched as-is, so the host
+        // that was allowlist-checked is exactly the host reqwest connects to.
         let mut response = client
-            .get(src)
+            .get(src.clone())
             .send()
             .await
             .map_err(|e| ImageError::FetchFailed(e.to_string()))?;
@@ -241,18 +244,38 @@ impl ImageHandler {
         Ok(body.freeze())
     }
 
-    fn validate_remote(&self, src: &str) -> Result<(), ImageError> {
-        let (scheme, host) = extract_scheme_host(src)
+    fn validate_remote(&self, src: &str) -> Result<Url, ImageError> {
+        // WHATWG parsing, not string splitting: `?`, `#`, `@`, and userinfo
+        // tricks must resolve to the same host reqwest will actually fetch.
+        let parsed =
+            Url::parse(src).map_err(|_| ImageError::SourceNotAllowed(src.to_string()))?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err(ImageError::SourceNotAllowed(src.to_string()));
+        }
+        let is_domain = matches!(parsed.host(), Some(url::Host::Domain(_)));
+        let host = parsed
+            .host_str()
             .ok_or_else(|| ImageError::SourceNotAllowed(src.to_string()))?;
-        let allowed = self
-            .config
-            .remote_patterns
-            .iter()
-            .any(|p| p.protocol == scheme && hostname_matches(&p.hostname, host));
+        let allowed = self.config.remote_patterns.iter().any(|p| {
+            if p.protocol != parsed.scheme() {
+                return false;
+            }
+            // IP-literal hosts never satisfy wildcard patterns - only an
+            // exact allowlist entry can permit fetching an address directly.
+            let host_ok = if is_domain {
+                hostname_matches(&p.hostname, host)
+            } else {
+                p.hostname == host
+            };
+            host_ok
+                && p.pathname
+                    .as_deref()
+                    .is_none_or(|pattern| pathname_matches(pattern, parsed.path()))
+        });
         if !allowed {
             return Err(ImageError::SourceNotAllowed(src.to_string()));
         }
-        Ok(())
+        Ok(parsed)
     }
 
     fn validate_local_path(&self, src: &str) -> Result<PathBuf, ImageError> {
@@ -269,10 +292,11 @@ impl ImageHandler {
     }
 }
 
-fn extract_scheme_host(url: &str) -> Option<(&str, &str)> {
-    let (scheme, rest) = url.split_once("://")?;
-    let host = rest.split('/').next()?;
-    Some((scheme, host))
+fn pathname_matches(pattern: &str, path: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => path.starts_with(prefix),
+        None => path == pattern,
+    }
 }
 
 fn hostname_matches(pattern: &str, host: &str) -> bool {
@@ -289,6 +313,88 @@ fn hostname_matches(pattern: &str, host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn handler_with_patterns(patterns: Vec<RemotePattern>) -> ImageHandler {
+        ImageHandler::new(
+            ImageConfig {
+                remote_patterns: patterns,
+                ..ImageConfig::default()
+            },
+            std::env::temp_dir().join("gio_test_image_cache"),
+            std::env::temp_dir().join("gio_test_public"),
+        )
+    }
+
+    fn pattern(protocol: &str, hostname: &str, pathname: Option<&str>) -> RemotePattern {
+        RemotePattern {
+            protocol: protocol.into(),
+            hostname: hostname.into(),
+            pathname: pathname.map(String::from),
+        }
+    }
+
+    #[test]
+    fn query_string_host_smuggling_is_rejected() {
+        let handler = handler_with_patterns(vec![pattern("https", "**.cloudinary.com", None)]);
+        let err = handler
+            .validate_remote("https://169.254.169.254?x=.cloudinary.com")
+            .unwrap_err();
+        assert!(matches!(err, ImageError::SourceNotAllowed(_)));
+    }
+
+    #[test]
+    fn fragment_host_smuggling_is_rejected() {
+        let handler = handler_with_patterns(vec![pattern("https", "*.example.com", None)]);
+        let err = handler
+            .validate_remote("https://intranet#.example.com")
+            .unwrap_err();
+        assert!(matches!(err, ImageError::SourceNotAllowed(_)));
+    }
+
+    #[test]
+    fn userinfo_host_smuggling_is_rejected() {
+        let handler = handler_with_patterns(vec![pattern("https", "cdn.example.com", None)]);
+        let err = handler
+            .validate_remote("https://cdn.example.com@evil.test/img.png")
+            .unwrap_err();
+        assert!(matches!(err, ImageError::SourceNotAllowed(_)));
+    }
+
+    #[test]
+    fn ip_literal_never_matches_wildcard_pattern() {
+        let handler = handler_with_patterns(vec![pattern("https", "**.10.0.0.1", None)]);
+        let err = handler.validate_remote("https://10.0.0.1/x.png").unwrap_err();
+        assert!(matches!(err, ImageError::SourceNotAllowed(_)));
+    }
+
+    #[test]
+    fn exact_ip_allowlist_entry_is_honored() {
+        let handler = handler_with_patterns(vec![pattern("http", "10.0.0.1", None)]);
+        let validated = handler.validate_remote("http://10.0.0.1/x.png").unwrap();
+        assert_eq!(validated.host_str(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn allowlisted_domain_with_query_is_accepted() {
+        let handler = handler_with_patterns(vec![pattern("https", "**.cloudinary.com", None)]);
+        let validated = handler
+            .validate_remote("https://res.cloudinary.com/demo/image.jpg?v=2")
+            .unwrap();
+        assert_eq!(validated.host_str(), Some("res.cloudinary.com"));
+    }
+
+    #[test]
+    fn pathname_restriction_is_enforced() {
+        let handler =
+            handler_with_patterns(vec![pattern("https", "cdn.example.com", Some("/public/*"))]);
+        assert!(handler
+            .validate_remote("https://cdn.example.com/public/a.png")
+            .is_ok());
+        let err = handler
+            .validate_remote("https://cdn.example.com/private/a.png")
+            .unwrap_err();
+        assert!(matches!(err, ImageError::SourceNotAllowed(_)));
+    }
 
     #[tokio::test]
     async fn invalid_width_returns_error() {
