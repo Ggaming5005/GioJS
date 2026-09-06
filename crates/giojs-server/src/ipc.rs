@@ -1177,6 +1177,16 @@ async fn ipc_supervisor(
         let mut backoff_ms = 250u64;
         let connection = loop {
             let child_dead = child.try_wait().map(|s| s.is_some()).unwrap_or(true);
+            // A freshly respawned worker needs the full startup budget: boot
+            // (discovery + esbuild bundling) takes seconds on slow machines,
+            // and the short reconnect budget made the supervisor kill workers
+            // mid-boot and respawn them forever. The short budget is only for
+            // a live worker whose socket was lost.
+            let connect_attempts = if child_dead {
+                STARTUP_CONNECT_ATTEMPTS
+            } else {
+                RECONNECT_ATTEMPTS
+            };
             if child_dead {
                 match worker.spawn() {
                     Ok(new_child) => {
@@ -1191,7 +1201,7 @@ async fn ipc_supervisor(
                 &worker.ipc_path,
                 &inner.deployment_id,
                 &worker.token,
-                RECONNECT_ATTEMPTS,
+                connect_attempts,
             )
             .await
             {
