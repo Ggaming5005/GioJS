@@ -11,7 +11,7 @@
 import { readdir } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { tsImport } from 'tsx/esm/api';
+import { loadTsModule } from './load-ts.ts';
 import type { GioRequest } from './context.ts';
 import type { GioEventStream } from './sse.ts';
 
@@ -111,12 +111,12 @@ export async function discoverSpecialPages(appDir: string): Promise<SpecialPages
   const notFoundFile = pickByExt(fileNames, 'not-found', COMPONENT_EXTS);
   if (notFoundFile !== null) {
     const fileUrl = pathToFileURL(join(appDir, notFoundFile)).href;
-    special.notFound = () => tsImport(fileUrl, import.meta.url) as Promise<PageModule>;
+    special.notFound = () => loadTsModule<PageModule>(fileUrl);
   }
   const errorFile = pickByExt(fileNames, 'error', COMPONENT_EXTS);
   if (errorFile !== null) {
     const fileUrl = pathToFileURL(join(appDir, errorFile)).href;
-    special.error = () => tsImport(fileUrl, import.meta.url) as Promise<PageModule>;
+    special.error = () => loadTsModule<PageModule>(fileUrl);
   }
   return special;
 }
@@ -176,7 +176,7 @@ async function walkPages(
     routes.set(pattern, {
       filePath: join(dir, pageFile),
       urlPattern: pattern,
-      load: () => tsImport(fileUrl, import.meta.url) as Promise<PageModule>,
+      load: () => loadTsModule<PageModule>(fileUrl),
     });
   }
 }
@@ -210,7 +210,7 @@ async function walkLayouts(
     layouts.set(urlPrefix, {
       filePath: join(dir, layoutFile),
       urlPrefix,
-      load: () => tsImport(fileUrl, import.meta.url) as Promise<LayoutModule>,
+      load: () => loadTsModule<LayoutModule>(fileUrl),
     });
   }
 }

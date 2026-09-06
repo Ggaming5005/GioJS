@@ -9,7 +9,7 @@
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { tsImport } from 'tsx/esm/api';
+import { loadTsModule } from './load-ts.ts';
 import { sanitizeMiddlewareRules, type MiddlewareRules } from './middleware.ts';
 import { logger } from './logger.ts';
 
@@ -25,9 +25,7 @@ export async function loadMiddlewareRules(projectRoot: string): Promise<Middlewa
     }
     let mod: { default?: unknown };
     try {
-      mod = (await tsImport(pathToFileURL(middlewarePath).href, import.meta.url)) as {
-        default?: unknown;
-      };
+      mod = await loadTsModule<{ default?: unknown }>(pathToFileURL(middlewarePath).href);
     } catch (loadError) {
       logger.warn('middleware file failed to load - rules ignored', {
         path: middlewarePath,

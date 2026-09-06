@@ -5,7 +5,7 @@
  * extracts both kinds of exports: `wsHandler` for the WebSocket bridge, and
  * HTTP method handlers (GET/POST/PUT/PATCH/DELETE) for API routes and SSE.
  */
-import { tsImport } from 'tsx/esm/api';
+import { loadTsModule } from './load-ts.ts';
 import type { GioSocket } from './context.ts';
 import { HANDLER_METHODS } from './router.ts';
 import type { HandlerEntry, RouteFile, RouteHandlerFn } from './router.ts';
@@ -30,7 +30,7 @@ export async function discoverRouteModules(routeFiles: RouteFile[]): Promise<Rou
   await Promise.all(
     routeFiles.map(async ({ filePath, urlPattern }) => {
       try {
-        const mod = await tsImport(filePath, import.meta.url) as RouteFileModule;
+        const mod = await loadTsModule<RouteFileModule>(filePath);
         if (typeof mod.wsHandler === 'function') {
           wsHandlers.set(urlPattern, mod.wsHandler);
         }
