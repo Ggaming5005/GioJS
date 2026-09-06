@@ -64,6 +64,7 @@ export const NAV_GROUPS: NavGroup[] = [
     title: 'Deployment',
     items: [
       { href: '/docs/deployment', label: 'Deploying' },
+      { href: '/docs/standalone', label: 'Standalone Deploys' },
       { href: '/docs/static-export', label: 'Static Export' },
       { href: '/docs/adapters', label: 'Adapters' },
       { href: '/docs/observability', label: 'Observability' },

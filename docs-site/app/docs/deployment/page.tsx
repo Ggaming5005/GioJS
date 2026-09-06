@@ -45,6 +45,14 @@ export default function DeploymentPage(): React.JSX.Element {
         caching) and a Node.js worker (React SSR). Both start automatically.
       </p>
 
+      <p>
+        The simplest deploy is a standalone folder: <code>gio build standalone</code> packages
+        the server binary and a bundled worker into one directory that runs with{' '}
+        <code>node run.mjs</code> on any server that has only Node installed - see{' '}
+        <a href="/docs/standalone">Standalone Deploys</a>. The methods below run the app from
+        source instead, which keeps <code>npm update</code> as your upgrade path.
+      </p>
+
       <h2>Before deploying</h2>
       <ol>
         <li>Typecheck your app with <code>tsc --noEmit</code> - there is no separate build step; the server compiles and scans routes at startup</li>

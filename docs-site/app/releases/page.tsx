@@ -18,9 +18,37 @@ interface Release {
 
 const RELEASES: Release[] = [
   {
-    version: '0.1.0-beta.6',
+    version: '0.1.0-beta.7',
     date: 'September 6, 2026',
     tag: 'latest',
+    summary:
+      'Partial prerendering - cached shell, per-user Suspense holes streamed into the same response - and standalone deploys: one self-contained folder that runs on any server with only Node installed.',
+    groups: [
+      {
+        title: 'Partial prerendering (PPR)',
+        items: [
+          "export const shell = 'cache' next to revalidate splits a Suspense page: the pre-Suspense shell is cached in Rust and served instantly, while the holes re-render per request (getServerSideProps reruns with the requester's own cookies) and stream in behind it. The contract: the shell renders identically for every visitor - only Suspense content may be personalized.",
+          'Degrades gracefully - a failed holes render ends the body after the shell with the Suspense fallbacks still visible - and X-Gio-Cache reports it all: ppr; shell=stored / hit / stale.',
+        ],
+      },
+      {
+        title: 'Standalone deploys',
+        items: [
+          'gio build standalone packages the app into one folder: the Rust server binary, the whole Node side bundled to a single worker.js (React included, no tsx/esbuild at runtime), a run.mjs launcher, hydration chunks, and public/. Copy it to any server with only Node installed and run node run.mjs - no node_modules, no npm install.',
+          '--target cross-builds for any installed @gio.js/server-<platform> package: build on Windows or macOS, deploy to a Linux VPS.',
+        ],
+      },
+      {
+        title: 'Fixed',
+        items: [
+          "latest-tag promotion retries through npm registry propagation lag instead of silently skipping, and the scaffold's typecheck config was fixed (Bundler moduleResolution + @types/node).",
+        ],
+      },
+    ],
+  },
+  {
+    version: '0.1.0-beta.6',
+    date: 'September 6, 2026',
     summary:
       'Repaired npm publishing (beta.5 shipped broken packages), cache-poisoning and SSRF fixes, and a developer-experience wave: Rust-executed middleware rules, streaming SSR, typed routes, cache observability, gio bench, and a smarter dev overlay.',
     groups: [

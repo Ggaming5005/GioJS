@@ -18,7 +18,18 @@ compression, static files, image optimization. Node does exactly one thing:
 render your React. Same `app/` directory, same `getServerSideProps`, same
 file-based routing you already know.
 
-What shipped in 0.1.0-beta.6:
+What shipped this week (beta.6 + beta.7):
+
+📦 One-folder deploys — `gio build standalone` packages your whole app
+(Rust binary + one bundled worker.js + assets) into a single folder. Copy
+it to any server that has Node. `node run.mjs`. That's it. No node_modules,
+no npm install, no build toolchain on the server.
+
+🧩 Partial prerendering — add `export const shell = 'cache'` to a page
+with Suspense: the static shell serves instantly from the Rust cache while
+the dynamic holes render fresh per visitor — with *their* cookies — and
+stream into the same response. If a hole fails, the page gracefully keeps
+its fallbacks.
 
 ⚡ Streaming SSR — personalized pages flush React's shell the moment it
 renders. First bytes in <500ms while the full page takes 800ms+.
@@ -61,12 +72,11 @@ What's missing before you'd try it on a real project?
 
 ## Notes for you (not part of the post)
 
-- **Wait for PPR-lite + standalone before posting?** Both are in progress.
-  If they land cleanly you can add two more bullets — "static shell served
-  instantly from cache, dynamic holes streamed per-user (PPR)" and
-  "`gio build --standalone`: scp one file to a server and run it". The
-  standalone one is arguably the most viral single line. Alternatively post
-  now and save those for a follow-up post — two posts > one.
+- **Both PPR and standalone are now shipped and included above.** The post
+  is complete once beta.7 is published to npm (in progress). Consider
+  trimming to your taste — 6 bullets is the upper limit for LinkedIn
+  engagement; the strongest three are standalone, PPR, and the bench
+  numbers if you want it tighter.
 - **Attach a visual.** Strongest options: (1) a terminal GIF of
   `npm create giojs@latest` → `npm run dev` → page in browser, (2) a
   screenshot of `gio bench --suite` output (the table with the

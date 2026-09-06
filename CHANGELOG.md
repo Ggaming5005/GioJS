@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.1.0-beta.7 (2026-09-06)
+
+### Partial prerendering (PPR)
+
+- `export const shell = 'cache'` (next to `export const revalidate = N`) on a
+  page with Suspense boundaries splits it at the pre-Suspense boundary: the
+  shell is cached in Rust and served instantly, while the Suspense holes
+  re-render per request - `getServerSideProps` reruns with the requester's own
+  cookies - and stream into the same response behind the shell. A shared shell
+  with personalized holes.
+- The contract: the shell must render identically for every visitor (same tree
+  structure and bytes); only Suspense content may be personalized. Pages that
+  fail the shareability check (no `revalidate`, per-request headers, vary)
+  fall back to plain streaming with a warning.
+- Degrades gracefully: if the holes render fails or times out, the body ends
+  after the shell and the Suspense fallbacks stay visible. Shell captures are
+  capped at 4 MB; an aborted render never caches a torn shell.
+- `X-Gio-Cache` labels PPR responses: `ppr; shell=stored` (full render, shell
+  captured), `ppr; shell=hit` (cached shell + streamed holes),
+  `ppr; shell=stale; age=N; revalidating` (SWR refresh in the background).
+
+### Standalone deploys
+
+- `gio build standalone [--out <dir>] [--target <platform>]` packages the app
+  into one self-contained directory: the Rust `server(.exe)` binary, the
+  entire Node side bundled to a single `worker.js` (React included - `tsx` and
+  `esbuild` are build-time only and never load at runtime), a `run.mjs`
+  launcher, prebuilt hydration chunks under `static/`, `public/`, and
+  `gio.toml`.
+- Deploy = copy the folder to any server with only Node installed and run
+  `node run.mjs`. No `node_modules`, no `npm install` on the host.
+- `--target` cross-builds for any installed platform package (`linux-x64`,
+  `linux-x64-musl`, `linux-arm64`, `win32-x64`, `darwin-x64`,
+  `darwin-arm64`); a missing package fails with the exact
+  `npm i @gio.js/server-<target> --force` to run.
+- Plain `gio build` prints an explanation: normal deploys have no build step.
+- Known v1 limitation: app-level `.css` imports are not carried into the
+  bundle - serve stylesheets from `public/` instead.
+
+### Fixed
+
+- `latest`-tag promotion now retries through npm registry propagation lag
+  instead of silently skipping - the race that left beta.6's `latest` pointing
+  at beta.5 for some packages until promoted manually.
+- The scaffold's typecheck config was fixed: `moduleResolution: "Bundler"` and
+  `@types/node`, so `tsc --noEmit` passes on a fresh `npm create giojs` app.
+
 ## 0.1.0-beta.6 (2026-09-06)
 
 Emergency release: **beta.5 was broken on npm for every new user.**
