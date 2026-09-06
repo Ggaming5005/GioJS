@@ -459,10 +459,17 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let (cache_entries, _) = state.cache.stats();
     axum::Json(serde_json::json!({
         "status": "ok",
         "http2": state.http2,
         "tls": state.tls_enabled,
+        "deploymentId": state.ipc.deployment_id(),
+        // False during worker respawn windows; cached/static content still
+        // serves, so this stays a 200 - readiness probes read the field.
+        "nodeReady": state.ipc.worker_ready(),
+        "cacheEntries": cache_entries,
+        "uptimeSecs": state.devtools.uptime_secs(),
     }))
 }
 

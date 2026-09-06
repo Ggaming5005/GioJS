@@ -200,6 +200,8 @@ struct IpcClientInner {
     /// Bumped by the supervisor each time the connection is (re)established;
     /// watchers await a change to know a restart completed.
     generation: tokio::sync::watch::Sender<u64>,
+    /// True while the worker connection is live (health/readiness signal).
+    connected: std::sync::atomic::AtomicBool,
 }
 
 /// Everything needed to (re)spawn the Node worker with the right environment.
@@ -257,6 +259,7 @@ impl IpcClient {
                 route_manifest: std::sync::RwLock::new(route_manifest),
                 restart_tx,
                 generation,
+                connected: std::sync::atomic::AtomicBool::new(true),
             }),
         };
 
@@ -376,6 +379,12 @@ impl IpcClient {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// True while the IPC connection to the Node worker is live. False during
+    /// respawn/reconnect windows - cached and static content still serves.
+    pub fn worker_ready(&self) -> bool {
+        self.inner.connected.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn sse_stream_count(&self) -> usize {
@@ -891,6 +900,9 @@ async fn ipc_supervisor(
             return;
         }
 
+        inner
+            .connected
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         drain_pending_with_503(&inner);
         drain_sse_streams(&inner);
 
@@ -938,6 +950,9 @@ async fn ipc_supervisor(
             .route_manifest
             .write()
             .unwrap_or_else(|e| e.into_inner()) = routes;
+        inner
+            .connected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         inner.generation.send_modify(|generation| *generation += 1);
         info!("IPC connection restored");
     }
@@ -1022,6 +1037,7 @@ mod tests {
                 route_manifest: std::sync::RwLock::new(Vec::new()),
                 restart_tx: mpsc::channel(1).0,
                 generation: tokio::sync::watch::channel(1u64).0,
+                connected: std::sync::atomic::AtomicBool::new(true),
             }),
         };
         let req = IpcRequest {

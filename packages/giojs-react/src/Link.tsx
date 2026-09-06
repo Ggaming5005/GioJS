@@ -1,8 +1,10 @@
 /**
  * packages/giojs-react/src/Link.tsx
  *
- * Client-side navigation link with hover-intent prefetch and optional view transitions.
- * Hover prefetch fires ~50ms before click, avoiding the "60 links = 60 requests" problem.
+ * Client-side navigation link with hover-intent or viewport prefetch and
+ * optional view transitions. Hover prefetch fires ~50ms before click, avoiding
+ * the "60 links = 60 requests" problem; viewport prefetch fires once when the
+ * link scrolls into view (server-side prefetch budgets bound the fan-out).
  * When `transition` is set, uses document.startViewTransition + DOMParser swap instead of
  * document.write so CSS and <html> attributes survive across the animation.
  * Modified clicks, non-left buttons, target/download links, and non-relative
@@ -65,6 +67,26 @@ function isClientNavigableHref(href: string): boolean {
   return href.startsWith('/') && !href.startsWith('//');
 }
 
+/** Fetch a page into the prefetch cache; '' marks an in-flight request. */
+function prefetchHref(href: string): void {
+  if (prefetchCache.has(href) || !isClientNavigableHref(href)) return;
+  prefetchCache.set(href, '');
+  const fetchHeaders: Record<string, string> = { Purpose: 'prefetch', 'Sec-Purpose': 'prefetch' };
+  const id = getDeploymentId();
+  if (id) fetchHeaders['x-deployment-id'] = id;
+  fetch(href, { headers: fetchHeaders })
+    .then((r) => {
+      if (isHardReloadResponse(r)) {
+        prefetchCache.delete(href);
+        handleHardReload();
+        return undefined;
+      }
+      return r.text();
+    })
+    .then((html) => { if (html) prefetchCache.set(href, html); })
+    .catch(() => prefetchCache.delete(href));
+}
+
 export function GioLink({
   href,
   prefetch = 'hover',
@@ -75,24 +97,27 @@ export function GioLink({
   download,
   'aria-current': ariaCurrent,
 }: GioLinkProps): React.JSX.Element {
-  function handleMouseEnter(): void {
-    if (prefetch !== 'hover' || prefetchCache.has(href)) return;
-    if (!isClientNavigableHref(href)) return;
-    prefetchCache.set(href, '');
-    const fetchHeaders: Record<string, string> = { Purpose: 'prefetch', 'Sec-Purpose': 'prefetch' };
-    const id = getDeploymentId();
-    if (id) fetchHeaders['x-deployment-id'] = id;
-    fetch(href, { headers: fetchHeaders })
-      .then((r) => {
-        if (isHardReloadResponse(r)) {
-          prefetchCache.delete(href);
-          handleHardReload();
-          return undefined;
+  const anchorRef = React.useRef<HTMLAnchorElement>(null);
+
+  React.useEffect(() => {
+    if (prefetch !== 'viewport') return undefined;
+    const anchor = anchorRef.current;
+    if (anchor === null || typeof IntersectionObserver === 'undefined') return undefined;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          prefetchHref(href);
+          observer.disconnect();
         }
-        return r.text();
-      })
-      .then((html) => { if (html) prefetchCache.set(href, html); })
-      .catch(() => prefetchCache.delete(href));
+      }
+    });
+    observer.observe(anchor);
+    return () => observer.disconnect();
+  }, [prefetch, href]);
+
+  function handleMouseEnter(): void {
+    if (prefetch !== 'hover') return;
+    prefetchHref(href);
   }
 
   function handleClick(e: React.MouseEvent<HTMLAnchorElement>): void {
@@ -116,6 +141,7 @@ export function GioLink({
         <style href="gio-transitions" precedence="default">{TRANSITIONS_CSS}</style>
       )}
       <a
+        ref={anchorRef}
         href={href}
         className={className}
         target={target}
