@@ -86,9 +86,11 @@ export default function MigrationPage(): React.JSX.Element {
           <code>[[fonts]]</code> section instead of importing from <code>next/font</code>
         </li>
         <li>
-          <strong>Middleware</strong> - not yet supported. For request interception, write a
-          Node plugin (<code>GioNodePlugin</code> with an <code>onRequest</code> hook)
-          registered in <code>gio.config.ts</code>
+          <strong>Middleware</strong> - declarative redirects, rewrites, headers, and cookie
+          guards move to <code>middleware.ts</code> (<code>defineMiddleware</code> from{' '}
+          <code>@gio.js/core</code>) or <code>gio.toml</code>, and run in the Rust layer before
+          routing - see the Middleware page. Imperative request interception belongs in a Node
+          plugin (<code>GioNodePlugin</code> with an <code>onRequest</code> hook)
         </li>
         <li>
           <strong>next/navigation hooks</strong> - flagged with a TODO comment. Use{' '}

@@ -18,9 +18,36 @@ interface Release {
 
 const RELEASES: Release[] = [
   {
+    version: '0.1.0-beta.6',
+    date: 'September 6, 2026',
+    tag: 'latest',
+    summary:
+      'Repaired npm publishing (beta.5 shipped broken packages), cache-poisoning and SSRF fixes, and a developer-experience wave: Rust-executed middleware rules, typed routes, cache observability, gio bench, and a smarter dev overlay.',
+    groups: [
+      {
+        title: 'Release integrity & security',
+        items: [
+          'Emergency npm repair: beta.5 published @gio.js/react without dist/ and create-giojs without its bin targets. The release workflow now builds before publishing, a tarball gate refuses to publish packages with missing entry points or binaries, tag pushes run the full test matrix first, and latest-tag promotion covers the platform binaries.',
+          'Security: background revalidation can no longer cache a cookie-personalized page under the shared key (cache poisoning); the image optimizer allowlist is WHATWG-parsed, closing an SSRF that reached internal IPs through crafted URLs; plus decode limits, rate-limited /_gio/image, and header sanitization fixes.',
+          'A restart no longer throws away the disk cache: deployment IDs are content-derived (pin with GIO_DEPLOYMENT_ID), so identical builds keep their cache warm.',
+        ],
+      },
+      {
+        title: 'Developer experience',
+        items: [
+          'Middleware: declarative redirects, rewrites, response headers, and cookie guards from gio.toml and/or middleware.ts (defineMiddleware), with :param / *rest patterns and substitution - compiled and executed in Rust before routing, so no request header can bypass them.',
+          "Typed routes: .gio/routes.d.ts is generated from your app/ directory at boot, and href('/posts/:id', { id }) autocompletes and typechecks with zero annotations.",
+          'Cache observability: every response carries X-Gio-Cache (hit / stale / miss / bypass / static with ttl and age details), and gio cache explain <url> decodes it in plain English.',
+          'gio bench: a zero-dependency load generator reporting req/s, p50/p90/p99/max latency, and the X-Gio-Cache label of what it measured - single URL or --suite table mode.',
+          'The dev error overlay shows codeframes for project frames, and stack file:line links open your editor (GIO_EDITOR/VISUAL/EDITOR).',
+          '/_gio/health now reports deploymentId, nodeReady, cacheEntries, and uptimeSecs; <GioLink prefetch="viewport"> prefetches when a link scrolls into view; the docs serve llms.txt and scaffolds include AGENTS.md.',
+        ],
+      },
+    ],
+  },
+  {
     version: '0.1.0-beta.5',
     date: 'July 26, 2026',
-    tag: 'latest',
     summary:
       'The big one: client-side hydration, API routes, dev watch mode, worker supervision, and a hardened Rust↔Node boundary.',
     groups: [

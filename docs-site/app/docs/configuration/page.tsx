@@ -62,6 +62,25 @@ window_seconds = 60     # default 60
 burst = 20              # default 20
 key_header = "x-api-key"  # optional: key on a header value instead of IP
 
+[[redirects]]           # evaluated in Rust before routing (see Middleware)
+from = "/old-blog/:slug"
+to = "/posts/:slug"
+status = 301            # 301/302/307/308, default 302
+
+[[rewrites]]            # serve another route without changing the URL
+from = "/latest"
+to = "/posts/newest"
+
+[[headers]]             # stamp response headers on matching paths
+path = "/api/*"
+[headers.headers]
+x-frame-options = "DENY"
+
+[[guards]]              # cookie gate: redirect when the cookie is absent
+path = "/admin/*"
+require_cookie = "session"
+redirect_to = "/login"
+
 [i18n]
 locales = ["en", "de"]  # empty = i18n disabled
 default_locale = "en"

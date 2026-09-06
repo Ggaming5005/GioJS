@@ -18,6 +18,29 @@ export default function Page(): React.JSX.Element {
       <p>Set a transition preset to animate between pages using the View Transitions API.</p>
       <CodeBlock lang="tsx" code={`<GioLink href="/about" transition="fade">About</GioLink>`} />
       <div className="callout">Prefetching is budgeted by the Rust prefetch manager, so a page full of links will not flood your server.</div>
+      <h2>Typed routes</h2>
+      <p>
+        The <code>href()</code> helper builds URLs from your route patterns with full
+        type checking. At every server start GioJS generates{' '}
+        <code>.gio/routes.d.ts</code> from the discovered routes; the file augments{' '}
+        <code>@gio.js/react</code> (its <code>GioRegisteredRoutes</code> interface, via
+        declaration merging), so patterns autocomplete and params typecheck with zero
+        annotations in your code.
+      </p>
+      <CodeBlock lang="tsx" code={`import { GioLink, href } from '@gio.js/react';
+
+// '/posts/:id' autocompletes from your app/ directory.
+// A wrong pattern or a missing/misspelled param is a type error.
+<GioLink href={href('/posts/:id', { id: post.id })}>{post.title}</GioLink>
+
+href('/about');                        // static routes take no params
+href('/docs/*rest', { rest: 'a/b' });  // catch-all keeps its slashes`} />
+      <p>
+        Param values are URL-encoded per segment (a catch-all value keeps its{' '}
+        <code>/</code> separators). Projects scaffolded by <code>create-giojs</code>{' '}
+        already include the generated file in their tsconfig; in an existing project,
+        add <code>&quot;.gio/routes.d.ts&quot;</code> to the <code>include</code> array
+        of <code>tsconfig.json</code>.</p>
     </>
   );
 }

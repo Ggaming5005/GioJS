@@ -1,4 +1,5 @@
 import React from 'react';
+import { CodeBlock } from '../../../components/CodeBlock.tsx';
 
 export const revalidate = false;
 
@@ -67,6 +68,31 @@ export default function BenchmarksPage(): React.JSX.Element {
       <p>
         For dynamic pages (cache misses), throughput is similar - both are bounded by React
         render time.
+      </p>
+
+      <h2>Load testing with gio bench</h2>
+      <p>
+        <code>gio bench</code> ships with <code>@gio.js/server</code>: a zero-dependency
+        HTTP load generator (plain <code>node:http</code>, keep-alive connections). It
+        opens N concurrent connection loops for a fixed duration and reports requests/s,
+        latency p50/p90/p99/max (nearest-rank, no sampling), non-200 count, errors, and
+        bytes/s. Warmup requests are sent but excluded from all statistics.
+      </p>
+      <CodeBlock lang="bash" code={`gio bench <url> [--connections 32] [--duration 10] [--warmup 2]
+gio bench --suite /,/posts/1 --base http://localhost:3000`} />
+      <ul>
+        <li><code>--connections</code> - concurrent keep-alive connections (default 32)</li>
+        <li><code>--duration</code> - measured seconds per target (default 10)</li>
+        <li><code>--warmup</code> - unmeasured warmup seconds (default 2)</li>
+        <li><code>--suite</code> - comma-separated paths, run sequentially and printed as an aligned table</li>
+        <li><code>--base</code> - base URL that bare paths resolve against (default <code>http://localhost:3000</code>)</li>
+      </ul>
+      <p>
+        Each result includes the <code>X-Gio-Cache</code> value of the last response, so
+        a cache-hit benchmark labels itself and cannot be silently confused with a
+        cache-miss one. See <code>benchmarks/README.md</code> in the repository for the
+        full methodology - including how to run an honest GioJS vs Next.js comparison
+        and why localhost microbenchmarks must not be read as user-facing speedups.
       </p>
 
       <h2>Running benchmarks yourself</h2>

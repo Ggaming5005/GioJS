@@ -34,8 +34,8 @@ procedure:
    invalidates the comparison.
 2. **Same app.** Port the identical pages, data, and payload sizes. A 2 kB
    page vs a 40 kB page is a payload benchmark, not a framework benchmark.
-3. **Production builds only.** `gio build && gio start` vs
-   `next build && next start`. Never benchmark either dev server.
+3. **Production mode only.** `giojs-server` (GioJS has no separate build
+   step) vs `next build && next start`. Never benchmark either dev server.
 4. **Warm up both servers** before measuring: `gio bench` does this via
    `--warmup` (default 2 s). JIT warmup and cache population happen on both
    sides before any number is recorded.

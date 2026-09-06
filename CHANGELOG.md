@@ -79,6 +79,46 @@ shipped without its bin targets, so `npm create giojs@latest` failed outright.
   feature (`gio build`, Redis cache sharing, `PORT`, `[compression]`,
   `[[redirects]]`) is gone from the docs.
 
+### Developer experience
+
+- **Middleware rules.** Declarative redirects, rewrites, response headers,
+  and cookie guards, defined in `gio.toml` (`[[redirects]]`, `[[rewrites]]`,
+  `[[headers]]`, `[[guards]]`) and/or a project-root `middleware.ts`
+  (`defineMiddleware` from `@gio.js/core`, delivered via the worker's READY
+  frame). Patterns share the routing conventions (literals, `:param`,
+  `*rest` catch-all) with named substitution into targets. Evaluated in the
+  Rust HTTP layer before routing - guards, then redirects, then rewrites,
+  first match wins, gio.toml before middleware.ts in each phase - so no
+  request reaches Node without passing them and no request header can skip
+  them. Queries are preserved verbatim; all rules are validated at load time
+  (invalid entries skipped with a warning, nothing fails at request time);
+  `/_gio/*` is exempt.
+- **Typed routes.** The worker generates `.gio/routes.d.ts` from the
+  discovered route patterns at every boot; it augments `@gio.js/react`'s
+  `GioRegisteredRoutes` via declaration merging, so the new
+  `href('/posts/:id', { id })` helper autocompletes patterns and typechecks
+  params with zero annotations. Param values are URL-encoded per segment
+  (catch-alls keep their slashes). Templates include the file in tsconfig;
+  existing projects add `".gio/routes.d.ts"` to `include`.
+- **Cache observability.** Every response is stamped with `X-Gio-Cache`:
+  `hit; ttl=<secs>`, `stale; age=<secs>; revalidating`, `miss; stored`,
+  `bypass`, or `static` (internal `/_gio` endpoints excluded). New
+  `gio cache explain <url>` fetches a URL and decodes the header into a
+  plain-English explanation of what the cache did and why.
+- **`gio bench`.** Zero-dependency HTTP load generator (plain `node:http`,
+  keep-alive): `--connections`/`--duration`/`--warmup`, single-URL or
+  `--suite` table mode with `--base`, reporting req/s, p50/p90/p99/max
+  latency, non-200s, errors, bytes/s, and the last response's `X-Gio-Cache`
+  value so cache-hit and cache-miss runs are self-labeling. Methodology for
+  honest cross-framework comparisons documented in `benchmarks/README.md`.
+- **Dev overlay codeframes + open-in-editor.** The dev error overlay now
+  shows a codeframe (failing line ± 4 lines of context) for the topmost
+  project frame of SSR and browser errors, and every `file:line` in the
+  stack click-opens the file in the editor from
+  `GIO_EDITOR`/`VISUAL`/`EDITOR` (default `code`; VS Code-family editors
+  get `-g file:line`). Both endpoints are dev-only and path-validated to
+  the project root.
+
 ## 0.1.0-beta.5 (2026-07-26)
 
 ### Added

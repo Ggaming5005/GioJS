@@ -39,6 +39,34 @@ export default function Error({ error }: { error?: { message: string } }) {
   );
 }`} />
 
+      <h2>Development error overlay</h2>
+      <p>
+        In development, SSR render errors - plus browser window errors and
+        unhandled promise rejections - open a full-screen overlay instead of a
+        bare 500. The overlay parses the stack, and for the topmost frame in
+        your project it shows a <strong>codeframe</strong>: the failing line
+        with four lines of context on each side, fetched from the dev-only{' '}
+        <code>/_gio/devtools/codeframe</code> endpoint (reads are confined to
+        source files inside the project root).
+      </p>
+      <p>
+        Every <code>file:line</code> in the stack is a link -{' '}
+        <strong>clicking it opens the file at that line in your editor</strong>{' '}
+        via <code>/_gio/devtools/open-in-editor</code>. The editor command comes
+        from the first non-empty of <code>GIO_EDITOR</code>,{' '}
+        <code>VISUAL</code>, <code>EDITOR</code>, defaulting to{' '}
+        <code>code</code>; VS Code-family editors (code, cursor, windsurf,
+        codium) get the <code>-g file:line</code> goto form, everything else a
+        plain <code>file:line</code> argument.
+      </p>
+      <CodeBlock lang="bash" code={`# examples
+GIO_EDITOR=cursor npm run dev
+GIO_EDITOR="subl -w" npm run dev`} />
+      <div className="callout">
+        The overlay, the codeframe endpoint, and open-in-editor exist only in
+        dev mode - none of it is compiled into production responses.
+      </div>
+
       <h2>Static export</h2>
       <p>
         <code>gio export</code> writes your 404 page (or the built-in default) to{' '}
