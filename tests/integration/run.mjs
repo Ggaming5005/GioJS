@@ -12,7 +12,7 @@
  *   GIO_SERVER_BIN=path/to/giojs-server node tests/integration/run.mjs
  */
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -541,9 +541,157 @@ async function devWatchPhase() {
   }
 }
 
+/**
+ * Phase 3 (standalone): `gio build standalone` against a minimal generated
+ * app, then boot the output dir with NO node_modules present and prove pages,
+ * prebuilt hydration chunks, and API routes all serve - and that tearing the
+ * launcher down leaves no orphaned worker. A generated app (not the fixture)
+ * keeps the bundle graph free of the fixture's monorepo-relative imports.
+ */
+async function standalonePhase() {
+  const binary = findServerBinary();
+  const STANDALONE_BASE = 'http://127.0.0.1:39518';
+  const workDir = await mkdtemp(join(tmpdir(), 'gio-standalone-app-'));
+  const outDir = join(workDir, 'dist-standalone');
+
+  let log = '';
+  let run = null;
+  let runGone = true;
+  let runExited = Promise.resolve();
+
+  try {
+    await mkdir(join(workDir, 'app', 'api', 'hello'), { recursive: true });
+    await writeFile(
+      join(workDir, 'app', 'page.tsx'),
+      "import React from 'react';\n\nexport default function Home() {\n  return <h1>STANDALONE_FIXTURE_HOME</h1>;\n}\n",
+    );
+    await writeFile(
+      join(workDir, 'app', 'api', 'hello', 'route.ts'),
+      "export function GET() {\n  return { ok: true, source: 'standalone' };\n}\n",
+    );
+    await writeFile(
+      join(workDir, 'gio.toml'),
+      '[app]\nname = "standalone-fixture"\n\n[server]\nhost  = "127.0.0.1"\nport  = 39518\nhttp2 = false\n',
+    );
+    await writeFile(
+      join(workDir, 'package.json'),
+      JSON.stringify({ name: 'standalone-fixture', private: true, type: 'module' }),
+    );
+    await linkFixtureDeps(workDir);
+
+    await test('standalone build produces a self-contained deploy directory', async () => {
+      const build = spawnSync(
+        process.execPath,
+        [join(repoRoot, 'packages', 'giojs', 'bin', 'standalone.mjs'), '--out', outDir],
+        {
+          cwd: workDir,
+          env: { ...process.env, GIO_STANDALONE_SERVER_BIN: binary },
+          encoding: 'utf8',
+          timeout: 180_000,
+        },
+      );
+      assert.equal(
+        build.status,
+        0,
+        `standalone build failed:\n${build.stdout ?? ''}\n${build.stderr ?? ''}`,
+      );
+      const serverName = process.platform === 'win32' ? 'server.exe' : 'server';
+      for (const item of [serverName, 'worker.js', 'run.mjs', 'gio.toml', 'package.json']) {
+        assert.ok(existsSync(join(outDir, item)), `${item} present in output`);
+      }
+      assert.ok(existsSync(join(outDir, '.gio', 'manifest.json')), 'manifest present');
+      assert.ok(!existsSync(join(outDir, 'node_modules')), 'output must not need node_modules');
+      const worker = await readFile(join(outDir, 'worker.js'), 'utf8');
+      assert.match(worker, /STANDALONE_FIXTURE_HOME/, 'page component bundled into worker.js');
+    });
+
+    // The output must be self-contained: delete the app sources and the
+    // node_modules the build used before booting it.
+    await rm(join(workDir, 'app'), { recursive: true, force: true });
+    await rm(join(workDir, 'node_modules'), { recursive: true, force: true });
+
+    run = spawn(process.execPath, [join(outDir, 'run.mjs')], {
+      cwd: outDir,
+      env: { ...process.env, RUST_LOG: 'info' },
+    });
+    run.stdout.on('data', (d) => { log += d.toString(); });
+    run.stderr.on('data', (d) => { log += d.toString(); });
+    runGone = false;
+    runExited = new Promise((r) => run.on('exit', () => { runGone = true; r(); }));
+
+    await waitFor('standalone server health', async () => {
+      const res = await fetch(`${STANDALONE_BASE}/_gio/health`);
+      return res.ok && (await res.json()).nodeReady === true;
+    }, 30_000);
+
+    await test('standalone: SSR page renders with envelope and prebuilt chunk', async () => {
+      const res = await fetch(`${STANDALONE_BASE}/`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.match(html, /STANDALONE_FIXTURE_HOME/);
+      assert.match(html, /id="__gio"/);
+      assert.match(html, /id="__gio_props"/);
+      const chunk = html.match(/\/_next\/static\/chunks\/route-index-[A-Z0-9]+\.js/)?.[0];
+      assert.ok(chunk, 'prebuilt entry chunk URL present in HTML');
+      const chunkRes = await fetch(`${STANDALONE_BASE}${chunk}`);
+      assert.equal(chunkRes.status, 200);
+      assert.match(chunkRes.headers.get('cache-control') ?? '', /immutable/);
+    });
+
+    await test('standalone: route.ts API handler responds from the bundle', async () => {
+      const res = await fetch(`${STANDALONE_BASE}/api/hello`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /application\/json/);
+      assert.deepEqual(await res.json(), { ok: true, source: 'standalone' });
+    });
+
+    await test('standalone: stopping the launcher leaves no orphaned worker', async () => {
+      const worker = [...log.matchAll(/pid Some\((\d+)\)/g)].map((m) => Number(m[1])).at(-1);
+      assert.ok(worker, 'worker pid parsed from standalone server log');
+      if (process.platform === 'win32') {
+        // child.kill() cannot reach run.mjs's signal handlers on Windows;
+        // taskkill the tree instead (the Job Object reaps the worker).
+        spawnSync('taskkill', ['/pid', String(run.pid), '/T', '/F']);
+      } else {
+        run.kill('SIGTERM');
+      }
+      await waitFor('launcher exit', () => Promise.resolve(runGone), 15_000);
+      await waitFor('standalone worker reaped', async () => {
+        try {
+          process.kill(worker, 0);
+          return false;
+        } catch {
+          return true;
+        }
+      }, 10_000);
+    });
+  } catch (err) {
+    console.error('\nintegration (standalone): FAILED');
+    console.error(err);
+    console.error('\n── standalone log tail ──');
+    console.error(log.split('\n').slice(-40).join('\n'));
+    process.exitCode = 1;
+  } finally {
+    if (run !== null && !runGone) {
+      if (process.platform === 'win32') {
+        spawnSync('taskkill', ['/pid', String(run.pid), '/T', '/F']);
+      } else {
+        // SIGTERM reaches run.mjs's forwarding handler, taking the server
+        // (and via it the worker) down with the launcher.
+        run.kill('SIGTERM');
+      }
+      await runExited;
+    }
+    await rm(workDir, { recursive: true, force: true });
+  }
+}
+
 await main();
 if (process.exitCode !== 1) {
   await devWatchPhase();
+}
+if (process.exitCode !== 1) {
+  await standalonePhase();
 }
 console.log(`\nintegration: ${passed} passed${process.exitCode === 1 ? ', with FAILURES' : ''}`);
 // Any stray handle (an orphaned worker holding a stdio pipe) must never keep

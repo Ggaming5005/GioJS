@@ -620,7 +620,22 @@ fn assign_to_job(child: &tokio::process::Child) {
     }
 }
 
-/// Spawn `node <tsx-cli.mjs> <node_script>` with the NODE_PATH that tsx needs.
+/// A prebuilt JavaScript worker (standalone deploys) runs under plain `node`
+/// with no tsx loader and no node_modules. TypeScript source workers need the
+/// tsx transform. `GIO_STANDALONE=1` forces the direct path regardless of
+/// extension.
+fn worker_runs_without_tsx(node_script: &str, standalone_env: Option<&str>) -> bool {
+    if standalone_env == Some("1") {
+        return true;
+    }
+    [".js", ".mjs", ".cjs"]
+        .iter()
+        .any(|ext| node_script.ends_with(ext))
+}
+
+/// Spawn the Node worker: `node <script>` directly for prebuilt .js/.mjs
+/// workers (standalone deploys), or `node <tsx-cli.mjs> <script>` with the
+/// NODE_PATH that tsx needs for TypeScript source workers.
 ///
 /// We invoke node + tsx's cli.mjs directly rather than the .CMD shim because
 /// cmd.exe quoting rules make it unreliable when Rust builds the command line.
@@ -633,6 +648,12 @@ fn spawn_node_tsx(
     ws_path: &str,
     token: &str,
 ) -> anyhow::Result<tokio::process::Child> {
+    if worker_runs_without_tsx(node_script, std::env::var("GIO_STANDALONE").ok().as_deref()) {
+        tracing::debug!("spawning prebuilt worker directly: node {node_script}");
+        let mut cmd = Command::new("node");
+        cmd.arg(node_script);
+        return spawn_worker_command(cmd, ipc_path, ws_path, token);
+    }
     // Find the tsx package directory: the directory that contains dist/cli.mjs
     let tsx_pkg_dir = std::env::var("GIO_TSX_PKG").unwrap_or_else(|_| {
         let candidates = ["packages/giojs-core/node_modules/tsx", "node_modules/tsx"];
@@ -683,8 +704,19 @@ fn spawn_node_tsx(
     let mut cmd = Command::new("node");
     cmd.arg(&cli_mjs)
         .arg(node_script)
-        .env("NODE_PATH", node_path)
-        .env("GIO_SOCKET_PATH", ipc_path)
+        .env("NODE_PATH", node_path);
+    spawn_worker_command(cmd, ipc_path, ws_path, token)
+}
+
+/// Environment, stdio, and orphan protection shared by both worker launch
+/// modes (tsx wrapper and direct node).
+fn spawn_worker_command(
+    mut cmd: Command,
+    ipc_path: &str,
+    ws_path: &str,
+    token: &str,
+) -> anyhow::Result<tokio::process::Child> {
+    cmd.env("GIO_SOCKET_PATH", ipc_path)
         .env("GIO_WS_SOCKET_PATH", ws_path)
         .env("GIO_IPC_TOKEN", token)
         .stdin(Stdio::null())
@@ -1473,6 +1505,27 @@ mod tests {
             handshake_proof("secret", "ready"),
             "b2c1f253f21f3cb7e2c446b50a4026ec87a8f4010a4e0c3716cd1b0d7f48be0d"
         );
+    }
+
+    #[test]
+    fn prebuilt_js_workers_skip_the_tsx_wrapper() {
+        assert!(worker_runs_without_tsx("/deploy/worker.js", None));
+        assert!(worker_runs_without_tsx(r"C:\deploy\worker.mjs", None));
+        assert!(worker_runs_without_tsx("./worker.cjs", None));
+    }
+
+    #[test]
+    fn typescript_workers_keep_the_tsx_wrapper() {
+        assert!(!worker_runs_without_tsx(
+            "packages/giojs-core/src/index.ts",
+            None
+        ));
+        assert!(!worker_runs_without_tsx("app/worker.tsx", Some("0")));
+    }
+
+    #[test]
+    fn standalone_env_forces_direct_node_launch() {
+        assert!(worker_runs_without_tsx("some/worker.ts", Some("1")));
     }
 
     #[test]

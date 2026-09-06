@@ -1,9 +1,10 @@
 /**
  * giojs-core/src/main.ts
  *
- * Server bootstrap: loads gio.config, registers node plugins, discovers
- * routes/layouts/WS handlers under app/, then starts both IPC servers
- * (HTTP bridge + WebSocket bridge) that Rust connects to.
+ * Server bootstrap for the source path: loads gio.config, registers node
+ * plugins, discovers routes/layouts/WS handlers under app/, builds client
+ * bundles, then hands the components to worker-boot.ts to start both IPC
+ * servers (HTTP bridge + WebSocket bridge) that Rust connects to.
  */
 import { dirname, join } from 'node:path';
 import {
@@ -13,56 +14,22 @@ import {
   discoverSpecialPages,
 } from './router.ts';
 import { buildClientBundles } from './client-build.ts';
-import { createIPCServer } from './ipc.ts';
 import { discoverRouteModules } from './ws-router.ts';
-import { createWsIpcServer } from './ws-ipc.ts';
 import { loadGioConfig } from './config-loader.ts';
 import { loadMiddlewareRules } from './middleware-loader.ts';
-import { NodePluginRegistry } from './plugin.ts';
 import { writeRouteTypes } from './typed-routes.ts';
+import { installProcessGuards, startPluginRegistry, startIpcServers } from './worker-boot.ts';
 import { logger } from './logger.ts';
 
 export async function runServer(): Promise<void> {
-  // Last-resort guards: log structured context before the supervisor-driven
-  // respawn instead of dying with a bare stack trace on stderr.
-  process.on('uncaughtException', (error: Error) => {
-    logger.error('uncaught exception - worker exiting for respawn', {
-      error: error.message,
-      stack: error.stack ?? '',
-    });
-    process.exit(1);
-  });
-  process.on('unhandledRejection', (reason: unknown) => {
-    logger.error('unhandled promise rejection - worker exiting for respawn', {
-      error: reason instanceof Error ? reason.message : String(reason),
-      stack: reason instanceof Error ? (reason.stack ?? '') : '',
-    });
-    process.exit(1);
-  });
+  installProcessGuards();
 
   const appDir = process.env.GIO_APP_DIR
     ? process.env.GIO_APP_DIR
     : join(process.cwd(), 'app');
 
   const gioConfig = await loadGioConfig(appDir);
-  const nodePluginRegistry = new NodePluginRegistry();
-  for (const plugin of gioConfig.plugins ?? []) {
-    nodePluginRegistry.register(plugin);
-  }
-  await nodePluginRegistry.runStartup();
-  if (!nodePluginRegistry.isEmpty) {
-    logger.info('node plugins registered');
-  }
-
-  process.on('SIGTERM', () => {
-    nodePluginRegistry.runShutdown().catch((shutdownError: unknown) => {
-      logger.error('plugin shutdown error', {
-        error: shutdownError instanceof Error ? shutdownError.message : String(shutdownError),
-      });
-    }).finally(() => {
-      process.exit(0);
-    });
-  });
+  const nodePluginRegistry = await startPluginRegistry(gioConfig.plugins ?? []);
 
   logger.info('discovering routes', { appDir });
   const [routes, layouts, routeFiles] = await Promise.all([
@@ -106,14 +73,14 @@ export async function runServer(): Promise<void> {
     dev: process.env.NODE_ENV !== 'production',
   });
 
-  createIPCServer(
+  startIpcServers({
     routes,
     layouts,
     wsHandlers,
-    nodePluginRegistry,
+    handlers,
+    specialPages,
     clientScripts,
-    { handlers, specialPages },
     middlewareRules,
-  );
-  createWsIpcServer(wsHandlers);
+    pluginRegistry: nodePluginRegistry,
+  });
 }

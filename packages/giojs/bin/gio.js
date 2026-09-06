@@ -17,6 +17,14 @@ if (process.argv[2] === 'bench') {
   runBench(process.argv.slice(3));
 }
 
+// `gio build standalone` packages the app into a self-contained deploy dir
+// (Rust binary + bundled worker.js + prebuilt chunks). standalone.mjs is ESM,
+// so it runs as a child node process like bench.mjs. Plain `gio build` only
+// explains that normal deploys need no build step.
+if (process.argv[2] === 'build') {
+  runBuild(process.argv.slice(3));
+}
+
 // `gio cache explain <url>` requests the URL and decodes the X-Gio-Cache
 // header the server stamps on every response - one cache, one owner, and
 // this is how you see what it did.
@@ -24,6 +32,23 @@ if (process.argv[2] === 'cache' && process.argv[3] === 'explain') {
   runCacheExplain(process.argv[4]);
 } else {
   runRustServer();
+}
+
+function runBuild(args) {
+  if (args[0] === 'standalone') {
+    const result = spawnSync(
+      process.execPath,
+      [join(__dirname, 'standalone.mjs'), ...args.slice(1)],
+      { stdio: 'inherit' },
+    );
+    process.exit(result.status == null ? 1 : result.status);
+  }
+  console.log('GioJS has no build step for normal deploys: `gio` starts the server,');
+  console.log('renders on demand, and caches in Rust. To package a self-contained');
+  console.log('deploy directory (one folder, runs anywhere Node is installed), use:');
+  console.log('');
+  console.log('  gio build standalone [--out <dir>] [--target <platform>]');
+  process.exit(0);
 }
 
 function runBench(args) {

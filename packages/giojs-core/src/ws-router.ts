@@ -13,7 +13,7 @@ import { logger } from './logger.ts';
 
 export type WsHandlerFn = (socket: GioSocket) => void;
 
-interface RouteFileModule {
+export interface RouteFileModule {
   wsHandler?: WsHandlerFn;
   [method: string]: unknown;
 }
@@ -21,6 +21,32 @@ interface RouteFileModule {
 export interface RouteModules {
   wsHandlers: Map<string, WsHandlerFn>;
   handlers: Map<string, HandlerEntry>;
+}
+
+/**
+ * Register a loaded route.ts module's exports: `wsHandler` into `wsHandlers`,
+ * HTTP method handlers into `handlers`. Shared by filesystem discovery and
+ * the standalone prebuilt registry.
+ */
+export function registerRouteModule(
+  mod: RouteFileModule,
+  filePath: string,
+  urlPattern: string,
+  wsHandlers: Map<string, WsHandlerFn>,
+  handlers: Map<string, HandlerEntry>,
+): void {
+  if (typeof mod.wsHandler === 'function') {
+    wsHandlers.set(urlPattern, mod.wsHandler);
+  }
+  const methods = new Map<string, RouteHandlerFn>();
+  for (const method of HANDLER_METHODS) {
+    if (typeof mod[method] === 'function') {
+      methods.set(method, mod[method] as RouteHandlerFn);
+    }
+  }
+  if (methods.size > 0) {
+    handlers.set(urlPattern, { filePath, urlPattern, methods });
+  }
 }
 
 export async function discoverRouteModules(routeFiles: RouteFile[]): Promise<RouteModules> {
@@ -31,18 +57,7 @@ export async function discoverRouteModules(routeFiles: RouteFile[]): Promise<Rou
     routeFiles.map(async ({ filePath, urlPattern }) => {
       try {
         const mod = await loadTsModule<RouteFileModule>(filePath);
-        if (typeof mod.wsHandler === 'function') {
-          wsHandlers.set(urlPattern, mod.wsHandler);
-        }
-        const methods = new Map<string, RouteHandlerFn>();
-        for (const method of HANDLER_METHODS) {
-          if (typeof mod[method] === 'function') {
-            methods.set(method, mod[method] as RouteHandlerFn);
-          }
-        }
-        if (methods.size > 0) {
-          handlers.set(urlPattern, { filePath, urlPattern, methods });
-        }
+        registerRouteModule(mod, filePath, urlPattern, wsHandlers, handlers);
       } catch (loadError) {
         logger.warn('route file failed to load, skipping its handlers', {
           filePath,
