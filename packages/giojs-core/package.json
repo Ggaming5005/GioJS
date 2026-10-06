@@ -12,6 +12,7 @@
   "exports": {
     ".": "./src/public.ts",
     "./server-only": "./src/server-only.ts",
+    "./testing": "./src/testing.ts",
     "./package.json": "./package.json"
   },
   "scripts": {
