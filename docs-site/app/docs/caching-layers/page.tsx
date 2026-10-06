@@ -29,7 +29,7 @@ export default function Page(): React.JSX.Element {
       </p>
       <ul>
         <li><code>hit; ttl=&lt;secs&gt;</code> - served from the Rust page cache without touching Node; <code>ttl</code> is the seconds until the entry goes stale</li>
-        <li><code>stale; age=&lt;secs&gt;; revalidating</code> - served instantly from the cache past its TTL while one background render refreshes the entry; <code>age</code> is seconds since it was rendered</li>
+        <li><code>stale; age=&lt;secs&gt;; revalidating</code> - served instantly from the cache past its TTL while one background render refreshes the entry; <code>age</code> is seconds since it was rendered. A refresh that answers 404 (the page called <code>notFound()</code>) evicts the entry instead</li>
         <li><code>miss; stored</code> - rendered by the Node worker and stored; the next request for this key is a hit</li>
         <li><code>bypass</code> - rendered (or redirected) but not cached: the page did not declare <code>revalidate</code>, the request was not GET/HEAD, the response varies per user, it set per-request headers, or its <code>getServerSideProps</code> read the visitor&apos;s cookies, authorization header, IP (<code>ctx.ip</code>) or the host it asked for (<code>ctx.host</code>, <code>ctx.scheme</code>)</li>
         <li><code>static</code> - served by the Rust static file layer (public/ assets at the site root or under /public/*, hashed chunks, fonts); never touches the cache or Node</li>
@@ -105,6 +105,17 @@ export async function getServerSideProps(ctx: GsspContext) {
         so each visitor hydrates with their own props. Rendering those props{' '}
         <em>outside</em> a Suspense boundary breaks the contract - the first visitor&apos;s
         values would be cached in the shell.
+      </p>
+      <p>
+        A <code>loading.tsx</code> is a Suspense boundary too, around everything below its
+        folder. On a PPR page whose content suspends, the cached shell therefore ends there:
+        it holds the layouts above the <code>loading.tsx</code> and its loading UI, and the
+        page itself streams per request as a hole. A page that renders without suspending is
+        part of the shell, and the contract applies to it. A page that throws before it
+        suspends is answered with its <code>error.tsx</code> and a 500 - a broken render is
+        never stored as a shell. Neither is a shell holding a boundary React gave up on (an
+        error inside any Suspense boundary before the shell was sent): that response still
+        streams, but nothing is cached, and the next request renders again.
       </p>
       <p>
         PPR degrades gracefully: if the holes render fails or times out, the body simply ends

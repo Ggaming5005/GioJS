@@ -1,12 +1,14 @@
 import React from 'react';
 
 /**
- * Rendered server-side with status 500 when a page render throws.
- * Receives { error: { message, digest } }. In production the message is a
- * generic "Internal Server Error"; the digest is the reference the real
- * error was logged under, so users can quote it in a report.
+ * Rendered server-side with status 500 when a page render throws, and the
+ * error boundary of every page once hydrated (an error.jsx in a nested
+ * folder takes over below it). Receives { error: { message, digest } }. In
+ * production the message is generic; the digest is the reference the real
+ * error was logged under, so users can quote it in a report. `reset` - only
+ * for errors caught in the browser - renders the page again.
  */
-export default function Error({ error }) {
+export default function Error({ error, reset }) {
   return (
     <div className="gio-status">
       <span className="gio-status__code" aria-hidden="true">500</span>
@@ -17,6 +19,9 @@ export default function Error({ error }) {
       )}
       {error?.digest !== undefined && (
         <p className="gio-status__ref">Error reference: <code>{error.digest}</code></p>
+      )}
+      {reset !== undefined && (
+        <button type="button" onClick={reset} className="gio-btn gio-btn--secondary">Try again</button>
       )}
       <a href="/" className="gio-btn gio-btn--primary">Go home</a>
     </div>

@@ -2,16 +2,18 @@
  * giojs-core/src/router.ts
  *
  * Discovers page, layout, and route files under app/, mapping them to URL
- * patterns. Each file may be authored in TypeScript or JavaScript - the
- * extension is resolved by precedence so a directory holding page.tsx and a
- * stray page.js still yields a single deterministic match.
+ * patterns, plus the per-folder not-found/error/loading files. Each file may
+ * be authored in TypeScript or JavaScript - the extension is resolved by
+ * precedence so a directory holding page.tsx and a stray page.js still
+ * yields a single deterministic match.
  *
  * Folder conventions (Next.js App Router semantics): `[id]` captures one
  * segment (`:id`), `[...slug]` one or more (`*slug`), `[[...slug]]` zero or
  * more (`*slug?`); `(group)` folders organize files without adding a URL
- * segment; `_private` folders are never routable. Layouts are keyed by their
- * app-relative directory and apply by filesystem ancestry, so a layout under
- * `[id]` or `(group)` wraps exactly the pages beneath it.
+ * segment; `_private` folders are never routable. Layouts and the
+ * not-found/error/loading files are keyed by their app-relative directory
+ * and apply by filesystem ancestry, so one under `[id]` or `(group)` covers
+ * exactly the pages beneath it.
  */
 import { readdir } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
@@ -103,11 +105,16 @@ export interface GsspContext {
   requestId?: string;
 }
 
+/** `{ notFound: true }` form of a getServerSideProps result (same as calling notFound()). */
+export interface NotFoundResult {
+  notFound: true;
+}
+
 export interface PageModule {
   default: React.ComponentType<Record<string, unknown>>;
   getServerSideProps?: (
     ctx: GsspContext,
-  ) => Promise<PropsResult | RedirectResult | Record<string, unknown>>;
+  ) => Promise<PropsResult | RedirectResult | NotFoundResult | Record<string, unknown>>;
   revalidate?: number | false;
   /**
    * PPR opt-in: 'cache' streams the render, caches the pre-Suspense shell,
@@ -234,6 +241,120 @@ export async function discoverLayouts(appDir: string): Promise<Map<string, Layou
     });
   });
   return layouts;
+}
+
+// ── per-folder segment files (not-found.*, error.*, loading.*) ───────────────
+
+export type SegmentFileKind = 'not-found' | 'error' | 'loading';
+
+export interface SegmentFileModule {
+  default: React.ComponentType<Record<string, unknown>>;
+}
+
+export interface SegmentFileEntry {
+  kind: SegmentFileKind;
+  filePath: string;
+  /** app/-relative directory holding the file, '' for app/ itself (see LayoutEntry.dir). */
+  dir: string;
+  load: () => Promise<SegmentFileModule>;
+}
+
+/** Segment files of each kind, keyed by app/-relative directory. */
+export interface SegmentFiles {
+  notFound: Map<string, SegmentFileEntry>;
+  error: Map<string, SegmentFileEntry>;
+  loading: Map<string, SegmentFileEntry>;
+}
+
+export function emptySegmentFiles(): SegmentFiles {
+  return { notFound: new Map(), error: new Map(), loading: new Map() };
+}
+
+const SEGMENT_FILE_KINDS: ReadonlyArray<[SegmentFileKind, keyof SegmentFiles]> = [
+  ['not-found', 'notFound'],
+  ['error', 'error'],
+  ['loading', 'loading'],
+];
+
+/**
+ * Walk app/ recursively and collect not-found.*, error.* and loading.* files
+ * (component extensions), keyed by app-relative directory like layouts -
+ * group and dynamic folders included, private folders never.
+ */
+export async function discoverSegmentFiles(appDir: string): Promise<SegmentFiles> {
+  const files = emptySegmentFiles();
+  await walkAppDir(appDir, ({ abs, segments, fileNames }) => {
+    const dir = segments.join('/');
+    for (const [kind, key] of SEGMENT_FILE_KINDS) {
+      const file = pickByExt(fileNames, kind, COMPONENT_EXTS);
+      if (file === null) continue;
+      const filePath = join(abs, file);
+      const fileUrl = pathToFileURL(filePath).href;
+      files[key].set(dir, {
+        kind,
+        filePath,
+        dir,
+        load: () => loadTsModule<SegmentFileModule>(fileUrl),
+      });
+    }
+  });
+  return files;
+}
+
+/** `dir` and every directory above it, outermost first: '' (app/) through `dir`. */
+export function ancestorDirs(dir: string): string[] {
+  if (dir === '') return [''];
+  const segments = dir.split('/');
+  return ['', ...segments.map((_, i) => segments.slice(0, i + 1).join('/'))];
+}
+
+/** The files of one kind at or above `dir`, nearest first (app/'s own last). */
+export function nearestSegmentFiles(
+  dir: string,
+  files: Map<string, SegmentFileEntry>,
+): SegmentFileEntry[] {
+  return ancestorDirs(dir)
+    .reverse()
+    .flatMap(ancestor => {
+      const entry = files.get(ancestor);
+      return entry !== undefined ? [entry] : [];
+    });
+}
+
+/** One folder of a page's hydrated tree (see segment-tree.ts). */
+export interface SegmentChainLevel {
+  dir: string;
+  /** Never set for app/ itself: the root layout stays server-only HTML. */
+  layout?: LayoutEntry;
+  error?: SegmentFileEntry;
+  loading?: SegmentFileEntry;
+}
+
+/**
+ * The folders from app/ down to `dir` that contribute a layout, error.* or
+ * loading.* to the tree inside the #__gio boundary, outermost first. The
+ * server render and the generated client entry both build from this, so
+ * they wrap the page identically.
+ */
+export function segmentChainForDir(
+  dir: string,
+  layouts: Map<string, LayoutEntry>,
+  segmentFiles: SegmentFiles,
+): SegmentChainLevel[] {
+  const chain: SegmentChainLevel[] = [];
+  for (const ancestor of ancestorDirs(dir)) {
+    const layout = ancestor === '' ? undefined : layouts.get(ancestor);
+    const error = segmentFiles.error.get(ancestor);
+    const loading = segmentFiles.loading.get(ancestor);
+    if (layout === undefined && error === undefined && loading === undefined) continue;
+    chain.push({
+      dir: ancestor,
+      ...(layout !== undefined ? { layout } : {}),
+      ...(error !== undefined ? { error } : {}),
+      ...(loading !== undefined ? { loading } : {}),
+    });
+  }
+  return chain;
 }
 
 /** Walk app/ recursively and collect route files, mapping them to URL patterns. */

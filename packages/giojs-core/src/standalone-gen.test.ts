@@ -20,6 +20,10 @@ function fullSpec(): StandaloneEntrySpec {
     ],
     layouts: [{ dir: '', filePath: resolve('/proj/app/layout.tsx') }],
     routeFiles: [{ pattern: '/api/notes', filePath: resolve('/proj/app/api/notes/route.ts') }],
+    segmentFiles: [
+      { kind: 'not-found', dir: 'posts/[id]', filePath: resolve('/proj/app/posts/[id]/not-found.tsx') },
+      { kind: 'loading', dir: '(shop)', filePath: resolve('/proj/app/(shop)/loading.tsx') },
+    ],
     notFoundPath: resolve('/proj/app/not-found.tsx'),
     errorPath: resolve('/proj/app/error.tsx'),
     configPath: resolve('/proj/gio.config.ts'),
@@ -61,6 +65,15 @@ describe('generateStandaloneEntry', () => {
     expect(source).toContain('"/_next/static/chunks/route-index-ABC.js"');
   });
 
+  it('wires per-folder not-found, error and loading files with their kind and folder', () => {
+    const source = generateStandaloneEntry(fullSpec());
+    expect(source).toContain('import * as gioSegment0 from ');
+    expect(source).toContain('{ kind: "not-found", dir: "posts/[id]", ');
+    expect(source).toContain('module: gioSegment0 }');
+    expect(source).toContain('{ kind: "loading", dir: "(shop)", ');
+    expect(source).toContain('module: gioSegment1 }');
+  });
+
   it('omits optional sections that were not discovered', () => {
     const source = generateStandaloneEntry({
       entryModulePath: CORE_ENTRY,
@@ -70,6 +83,7 @@ describe('generateStandaloneEntry', () => {
       clientScripts: {},
     });
     expect(source).not.toContain('specialPages');
+    expect(source).not.toContain('segmentFiles');
     expect(source).not.toContain('gioConfig');
     expect(source).not.toContain('gioMiddleware');
     expect(source).not.toContain('gioNotFound');

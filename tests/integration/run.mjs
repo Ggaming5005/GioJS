@@ -582,6 +582,87 @@ async function main() {
       ), 5_000);
     });
 
+    await test('notFound() answers 404 with the nearest not-found.* inside its folder layout', async () => {
+      for (const sku of ['gone', 'missing']) {
+        const first = await fetch(`${BASE}/catalog/${sku}`);
+        assert.equal(first.status, 404, sku);
+        const html = await first.text();
+        assert.match(html, /FIXTURE_CATALOG_NOT_FOUND/, sku);
+        assert.doesNotMatch(html, /FIXTURE_CUSTOM_404/, `${sku}: the nearest file wins over app/not-found`);
+        assert.ok(html.indexOf('FIXTURE_CATALOG_LAYOUT') !== -1, `${sku}: rendered inside the catalog layout`);
+        assert.ok(html.indexOf('FIXTURE_CATALOG_LAYOUT') < html.indexOf('FIXTURE_CATALOG_NOT_FOUND'));
+        // The page exports revalidate, but its 404 is never cached.
+        const second = await fetch(`${BASE}/catalog/${sku}`);
+        assert.equal(second.status, 404, sku);
+        await second.text();
+        assert.doesNotMatch(second.headers.get('x-gio-cache') ?? '', /hit/, `${sku}: a 404 must not be cached`);
+      }
+      const found = await fetch(`${BASE}/catalog/widget`);
+      assert.equal(found.status, 200);
+      assert.match(await found.text(), /FIXTURE_CATALOG_ITEM sku=\[widget\]/);
+      // Unmatched URLs below the folder still get app/not-found.
+      const unmatched = await fetch(`${BASE}/catalog/widget/reviews`);
+      assert.equal(unmatched.status, 404);
+      assert.match(await unmatched.text(), /FIXTURE_CUSTOM_404/);
+    });
+
+    await test('a cached page that starts answering notFound() is evicted by its revalidation', async () => {
+      const first = await fetch(`${BASE}/retired`);
+      assert.equal(first.status, 200);
+      assert.match(await first.text(), /FIXTURE_RETIRED_PAGE/);
+      const cached = await fetch(`${BASE}/retired`);
+      await cached.text();
+      assert.match(cached.headers.get('x-gio-cache') ?? '', /^hit/);
+      const retire = await fetch(`${BASE}/retired`, { method: 'POST' });
+      assert.equal(retire.status, 200);
+      await retire.text();
+      // Past max_age (1s) the stale copy goes out once more while the
+      // background refresh renders...
+      await sleep(1_100);
+      const stale = await fetch(`${BASE}/retired`);
+      assert.equal(stale.status, 200);
+      await stale.text();
+      assert.match(stale.headers.get('x-gio-cache') ?? '', /^stale; .*revalidating$/);
+      // ...and that refresh's 404 evicts it, well inside the 10s SWR window.
+      const gone = await waitFor('the retired page to answer 404', async () => {
+        const res = await fetch(`${BASE}/retired`);
+        const html = await res.text();
+        return res.status === 404 ? html : undefined;
+      }, 4_000);
+      assert.match(gone, /FIXTURE_CUSTOM_404/);
+    });
+
+    await test('a nested error.* answers a failed render with 500 and only a digest', async () => {
+      const res = await fetch(`${BASE}/dashboard/broken`);
+      assert.equal(res.status, 500);
+      const html = await res.text();
+      assert.match(html, /FIXTURE_DASHBOARD_ERROR/);
+      assert.match(html, /message=Internal Server Error/);
+      assert.doesNotMatch(html, /FIXTURE_DASHBOARD_SECRET|swordfish/, 'error message must not leak');
+      assert.ok(html.indexOf('FIXTURE_DASHBOARD_LAYOUT') !== -1, 'rendered inside the dashboard layout');
+      const digest = html.match(/ref=([0-9a-f]{12})/)?.[1];
+      assert.ok(digest, `error page must carry a digest:\n${html}`);
+      await waitFor('nested error digest in the server log', () => Promise.resolve(
+        log.split('\n').some((line) =>
+          line.includes(digest) && line.includes('FIXTURE_DASHBOARD_SECRET') && line.includes('"stack"')),
+      ), 5_000);
+    });
+
+    await test('error.* files are client error boundaries in the hydration bundles', async () => {
+      const html = await (await fetch(`${BASE}/dashboard`)).text();
+      assert.match(html, /FIXTURE_DASHBOARD_HOME/);
+      const chunk = entryChunkOf(html);
+      assert.ok(chunk, 'dashboard page has a hydration chunk');
+      // Shared by both dashboard routes, the error component lands in a
+      // shared chunk the entry imports.
+      const entry = await (await fetch(`${BASE}${chunk}`)).text();
+      const imported = await Promise.all(
+        [...entry.matchAll(/"\.\/(shared-[A-Z0-9]+\.js)"/g)].map(async ([, name]) =>
+          (await fetch(`${BASE}/_next/static/chunks/${name}`)).text()),
+      );
+      assert.match([entry, ...imported].join('\n'), /FIXTURE_DASHBOARD_ERROR/);
+    });
+
     await test('a revalidate page that reads cookies is never cached for everyone', async () => {
       const as = (who) => fetch(`${BASE}/personal`, { headers: { cookie: `who=${who}` } });
       const alice = await as('alice');
@@ -634,6 +715,28 @@ async function main() {
       assert.ok(totalMs >= 700, `total must include the suspended chunk (took ${totalMs}ms)`);
       assert.match(html, /SLOW_FIXTURE_SHELL/);
       assert.match(html, /SLOW_FIXTURE_LATE_CONTENT/, 'late Suspense content must complete the body');
+    });
+
+    await test('loading.*: the first bytes carry the loading UI while the page suspends', async () => {
+      const started = Date.now();
+      const res = await fetch(`${BASE}/feed`, { headers: { 'accept-encoding': 'identity' } });
+      assert.equal(res.status, 200);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let html = '';
+      let firstBytes = null;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        html += decoder.decode(value, { stream: true });
+        // Everything that arrived before the 800ms suspension resolved.
+        if (Date.now() - started < 500) firstBytes = html;
+      }
+      html += decoder.decode();
+      assert.ok(firstBytes !== null, `no bytes before the suspension resolved (took ${Date.now() - started}ms)`);
+      assert.match(firstBytes, /FIXTURE_FEED_LOADING/);
+      assert.doesNotMatch(firstBytes, /FIXTURE_FEED_CONTENT/);
+      assert.match(html, /FIXTURE_FEED_CONTENT/, 'the page streams in behind its loading UI');
     });
 
     await test('streamed responses keep the envelope, injected head, and bypass label', async () => {
@@ -1767,7 +1870,19 @@ async function standalonePhase() {
     );
     await writeFile(
       join(workDir, 'app', '(blog)', 'posts', '[id]', 'page.tsx'),
-      "import React from 'react';\n\nexport default function Post({ params }) {\n  return <p>{`STANDALONE_POST id=[${params.id}]`}</p>;\n}\n",
+      "import React from 'react';\n\nexport default function Post({ params }) {\n  return <p>{`STANDALONE_POST id=[${params.id}]`}</p>;\n}\n" +
+        "\nexport async function getServerSideProps(ctx) {\n" +
+        "  return ctx.params.id === 'missing' ? { notFound: true } : { props: { params: ctx.params } };\n}\n",
+    );
+    // Per-folder files travel in the registry (not-found) and the prebuilt
+    // client entries (error boundary).
+    await writeFile(
+      join(workDir, 'app', '(blog)', 'not-found.tsx'),
+      "import React from 'react';\n\nexport default function BlogNotFound() {\n  return <h1>STANDALONE_BLOG_NOT_FOUND</h1>;\n}\n",
+    );
+    await writeFile(
+      join(workDir, 'app', '(blog)', 'error.tsx'),
+      "import React from 'react';\n\nexport default function BlogError() {\n  return <h1>STANDALONE_BLOG_ERROR</h1>;\n}\n",
     );
     await writeFile(
       join(workDir, 'gio.toml'),
@@ -1872,6 +1987,18 @@ async function standalonePhase() {
       assert.ok(html.indexOf('STANDALONE_BLOG_LAYOUT') !== -1, 'the (blog) layout must apply');
       assert.ok(html.indexOf('STANDALONE_BLOG_LAYOUT') < html.indexOf('STANDALONE_POST'));
       assert.doesNotMatch(await (await fetch(`${STANDALONE_BASE}/`)).text(), /STANDALONE_BLOG_LAYOUT/);
+    });
+
+    await test('standalone: per-folder not-found and error files come from the prebuilt registry', async () => {
+      const missing = await fetch(`${STANDALONE_BASE}/posts/missing`);
+      assert.equal(missing.status, 404);
+      const html = await missing.text();
+      assert.match(html, /STANDALONE_BLOG_NOT_FOUND/);
+      assert.ok(html.indexOf('STANDALONE_BLOG_LAYOUT') < html.indexOf('STANDALONE_BLOG_NOT_FOUND'));
+      const page = await (await fetch(`${STANDALONE_BASE}/posts/7`)).text();
+      const chunk = page.match(/\/_next\/static\/chunks\/route-[^"]+?-[A-Z0-9]+\.js/)?.[0];
+      assert.ok(chunk, 'post page has a prebuilt chunk');
+      assert.match(await (await fetch(`${STANDALONE_BASE}${chunk}`)).text(), /STANDALONE_BLOG_ERROR/);
     });
 
     await test('standalone: stopping the launcher leaves no orphaned worker', async () => {

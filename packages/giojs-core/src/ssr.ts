@@ -6,6 +6,12 @@
  * the cache fields Rust reads (revalidate=false → one-year TTL, not 0).
  * Also handles GET() exports that return GioEventStream (SSE routes).
  *
+ * Failures pick the nearest per-folder file: notFound() (or a
+ * `{ notFound: true }` result) answers 404 with the nearest not-found.*, a
+ * throw answers 500 with the nearest error.* - each inside the layouts of
+ * its own folder. The same error.* and loading.* files are client error and
+ * Suspense boundaries in the hydrated tree (segment-tree.ts).
+ *
  * PPR (`export const shell = 'cache'` + `revalidate`): the render streams with
  * a shell_end frame at the pre-Suspense boundary so Rust can cache the shell;
  * skipShell requests re-render the whole page (gSSP reruns with the
@@ -27,14 +33,22 @@ import type {
   GsspContext,
   GsspResponseHeaders,
   SpecialPages,
-  PageModule,
+  SegmentFiles,
+  NotFoundResult,
 } from './router.ts';
-import { layoutsForDir } from './router.ts';
+import {
+  emptySegmentFiles,
+  layoutsForDir,
+  nearestSegmentFiles,
+  segmentChainForDir,
+} from './router.ts';
 import { GioEventStream, isGioEventStream } from './sse.ts';
 import type { NodePluginRegistry } from './plugin.ts';
 import { logger } from './logger.ts';
 import { clientBuildErrorFor } from './client-build-errors.ts';
 import { createErrorDigest, describeError, isDevMode } from './mode.ts';
+import { isNotFoundError } from './not-found.ts';
+import { buildSegmentTree, type SegmentLevel, type GioErrorProps } from './segment-tree.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -65,6 +79,12 @@ export interface StreamRenderResult {
    * part of the shell Rust caches and replays to every visitor.
    */
   envelope?: string;
+  /**
+   * 'mark' only: asked at the shell boundary. False withholds the shell_end
+   * frame, so Rust stores nothing - React reported an error by then, and a
+   * boundary it client-rendered may be part of the shell bytes.
+   */
+  keepShell?: () => boolean;
 }
 
 /** Optional render inputs beyond pages/layouts. */
@@ -74,10 +94,22 @@ export interface RenderExtras {
   /** app/not-found.* and app/error.* */
   specialPages?: SpecialPages;
   /**
+   * Per-folder not-found.*, error.* and loading.* (app/'s own included). The
+   * root files here win over `specialPages`, which only fills in when
+   * app/ has no entry.
+   */
+  segmentFiles?: SegmentFiles;
+  /**
    * Allow streaming (chunked) responses for non-shareable page renders.
    * Only the IPC server sets this - static export keeps the buffered path.
    */
   streaming?: boolean;
+  /**
+   * Static export: the page is written as HTML that never hydrates, so a
+   * Suspense boundary React handed to the browser would show its fallback
+   * forever. Any error React reported fails the render instead.
+   */
+  staticExport?: boolean;
 }
 
 /** What production responses say instead of the real error message. */
@@ -439,6 +471,11 @@ function isRedirect(result: unknown): result is RedirectResult {
   return typeof result === 'object' && result !== null && 'redirect' in result;
 }
 
+/** `{ notFound: true }` - strictly `true`, so flat props holding a notFound value still render. */
+function isNotFoundResult(result: unknown): result is NotFoundResult {
+  return isRecord(result) && result['notFound'] === true;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -572,15 +609,8 @@ export async function renderRoute(
   }
 
   if (!match) {
-    const notFound = await renderSpecialPage(req, layouts, extras?.specialPages?.notFound, {}, 404, signal);
-    return notFound ?? {
-      id: req.id,
-      status: 404,
-      headers: { 'content-type': 'text/html; charset=utf-8' },
-      body: BUILTIN_404_HTML,
-      cacheable: false,
-      cacheMaxAge: 0,
-    };
+    // Unmatched URLs belong to no folder: only app/not-found.* applies.
+    return renderNotFound(req, '', layouts, extras, signal);
   }
 
   // Pages only answer GET/HEAD; mutations belong to route.ts handlers.
@@ -626,10 +656,13 @@ export async function renderRoute(
           ...setCookiesField(extra.setCookies),
         };
       }
+      if (isNotFoundResult(result)) {
+        return renderNotFound(req, match.module.dir, layouts, extras, signal);
+      }
       if (!isRecord(result)) {
         throw new Error(
           `getServerSideProps for route "${match.module.urlPattern}" must return an object - ` +
-            `{ props: {...} }, flat props, or { redirect: {...} } - but returned ` +
+            `{ props: {...} }, flat props, { redirect: {...} } or { notFound: true } - but returned ` +
             `${result === null ? 'null' : typeof result}`,
         );
       }
@@ -656,21 +689,25 @@ export async function renderRoute(
       props = { params: match.params, searchParams: req.query };
     }
 
-    // Build the hydration boundary: page wrapped by non-root layouts inside
+    // Build the hydration boundary: page wrapped by the non-root layouts and
+    // the error/loading boundaries of its folders (segment-tree.ts) inside
     // <div id="__gio">, with the envelope script as a sibling. The client
     // bundle hydrates exactly this div; the root layout (and everything Rust
     // injects into the document later) stays server-only HTML, so post-render
     // head/body injection can never cause a hydration mismatch.
-    const applicableLayouts = layoutsForDir(match.module.dir, layouts);
-    const rootLayoutEntry = applicableLayouts.find(l => l.dir === '');
-    const innerLayouts = applicableLayouts.filter(l => l.dir !== '');
-
-    let inner: React.ReactNode = React.createElement(Component, props);
-    for (const layoutEntry of [...innerLayouts].reverse()) {
-      const layoutMod = await layoutEntry.load();
-      const Layout = layoutMod.default;
-      inner = React.createElement(Layout, { children: inner, path: req.path });
-    }
+    const rootLayoutEntry = layouts.get('');
+    // Errors React reports while rendering (onError), and the loading.*
+    // boundaries that may have caught one of them (see abortedLoadingBoundary).
+    const reported: ReportedFailure[] = [];
+    const probes: ProbeState[] = [];
+    const levels = await loadSegmentLevels(
+      match.module.dir,
+      layouts,
+      extras?.segmentFiles,
+      probes,
+      reported,
+    );
+    const inner = buildSegmentTree(React.createElement(Component, props), req.path, levels);
 
     const pattern = match.module.urlPattern;
     const entryScript =
@@ -795,12 +832,52 @@ export async function renderRoute(
         // The returned digest is what React puts in the HTML in place of the
         // message (production builds); the log line carries the details.
         const digest = createErrorDigest();
-        logger.error('ssr stream error', { path: req.path, digest, ...describeError(streamError) });
+        reported.push(new ReportedFailure(streamError, digest));
+        if (isNotFoundError(streamError)) {
+          logger.debug('notFound() during render', { path: req.path });
+        } else {
+          logger.error('ssr stream error', { path: req.path, digest, ...describeError(streamError) });
+        }
         return digest;
       },
     });
 
+    // React recovered from an error inside a Suspense boundary (the browser
+    // renders that part instead). Fine for this visitor; cached, everyone
+    // would get the fallback until the next revalidation.
+    const makeUncacheableAfterRecovery = (): void => {
+      if (!cacheable) return;
+      logger.warn('render recovered from an error in a Suspense boundary - not cached', {
+        path: req.path,
+      });
+      cacheable = false;
+      cacheMaxAge = 0;
+      shareable = false;
+    };
+
+    // The loading.* boundaries are judged as the shell completes, on both
+    // paths: everything React rendered before the shell was ready has
+    // reported by now. A boundary entered later sits below content that had
+    // already suspended - without its loading.* file the error would not
+    // have failed the shell either - so a buffered render answers exactly
+    // what the same render streamed would have.
+    const abortedBoundary = abortedLoadingBoundary(reported, probes);
+
     if (shouldStream) {
+      // A holes-only render cannot change the answer: Rust already sent the
+      // cached shell.
+      if (!skipShell) {
+        const failure = notFoundFailure(reported) ?? abortedBoundary;
+        if (failure !== null) {
+          await stream.cancel().catch(() => undefined);
+          throw failure;
+        }
+        // A boundary React already client-rendered is part of the shell (the
+        // only part of a streamed render Rust stores).
+        if (pprShell && reported.length > 0) makeUncacheableAfterRecovery();
+      }
+      // Nothing to store when the render stopped being cacheable.
+      const storeShell = pprShell && !skipShell && cacheable;
       // A skipShell response must never be cached: its body is holes-only.
       return {
         type: 'stream',
@@ -812,7 +889,7 @@ export async function renderRoute(
           cacheable: skipShell ? false : cacheable,
           cacheMaxAge: skipShell ? 0 : cacheMaxAge,
           streaming: true,
-          ...(pprShell && !skipShell ? { pprShell: true } : {}),
+          ...(storeShell ? { pprShell: true } : {}),
           ...pageCookies,
         },
         stream,
@@ -823,6 +900,9 @@ export async function renderRoute(
           : pprShell
             ? { shellBoundary: 'mark' as const }
             : {}),
+        // An error React reports between now and the shell boundary (work
+        // it picks up before the first read) can still land in the shell.
+        ...(storeShell ? { keepShell: () => reported.length === 0 } : {}),
         ...(deferEnvelope && envelopeJson !== null
           ? { envelope: envelopeScript(envelopeJson) }
           : {}),
@@ -831,6 +911,16 @@ export async function renderRoute(
 
     await stream.allReady;
     const html = await streamToString(stream);
+    // notFound() anywhere still answers 404: nothing has been sent yet.
+    const failure = notFoundFailure(reported) ?? abortedBoundary;
+    if (failure !== null) throw failure;
+    const recovered = reported[0];
+    if (recovered !== undefined) {
+      // An exported page never hydrates: the browser would never render the
+      // boundary React gave up on, and its fallback would stay forever.
+      if (extras?.staticExport === true) throw recovered;
+      makeUncacheableAfterRecovery();
+    }
     // Props can carry ctx.headers into the render itself; catch reads that
     // happened while rendering, before the response is offered to the cache.
     if (shareable && credentialsRead()) {
@@ -854,18 +944,28 @@ export async function renderRoute(
       return registry.interceptResponse(req, ssrResponse);
     }
     return ssrResponse;
-  } catch (err) {
+  } catch (thrown) {
+    // A failure React caught (and onError logged) keeps its digest.
+    const reportedFailure = thrown instanceof ReportedFailure ? thrown : null;
+    const err: unknown = reportedFailure !== null ? reportedFailure.error : thrown;
+    if (isNotFoundError(err)) {
+      return renderNotFound(req, match.module.dir, layouts, extras, signal);
+    }
     // Production responses carry only a generic message and the digest; the
     // details live in this log line under the same digest.
-    const digest = createErrorDigest();
+    const digest = reportedFailure?.digest ?? createErrorDigest();
     logger.error('ssr render failed', { path: req.path, digest, ...describeError(err) });
     const dev = isDevMode();
     const message = dev ? (err instanceof Error ? err.message : String(err)) : GENERIC_ERROR_MESSAGE;
-    const errorPage = await renderSpecialPage(
+    // The nearest error.* at or above the page's folder. One whose own
+    // folder's layout is what threw fails to render again, so the walk
+    // moves on up - an error.* never catches its own layout.
+    const errorProps: GioErrorProps = { error: { message, digest } };
+    const errorPage = await renderNearestSegmentPage(
       req,
       layouts,
-      extras?.specialPages?.error,
-      { error: { message, digest } },
+      segmentPageCandidates(match.module.dir, 'error', extras),
+      errorProps,
       500,
       signal,
     );
@@ -927,7 +1027,8 @@ function methodNotAllowed(req: IPCRequest, allowed: string[]): IPCResponse {
 /**
  * Invoke a route.ts method handler. The result contract:
  * `GioEventStream` → SSE; web `Response` → converted; null/undefined → 204;
- * anything else → JSON 200. Handler responses are never cacheable.
+ * anything else → JSON 200; notFound() → JSON 404. Handler responses are
+ * never cacheable.
  */
 async function runRouteHandler(
   req: IPCRequest,
@@ -970,6 +1071,14 @@ async function runRouteHandler(
       body: JSON.stringify(result),
     };
   } catch (err) {
+    if (isNotFoundError(err)) {
+      return {
+        ...base,
+        status: 404,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+        body: JSON.stringify({ error: 'Not Found' }),
+      };
+    }
     const digest = createErrorDigest();
     logger.error('route handler failed', {
       path: req.path,
@@ -986,32 +1095,213 @@ async function runRouteHandler(
   }
 }
 
-// ── special pages (app/not-found.*, app/error.*) ──────────────────────────────
+// ── segment boundaries (loading.*, error.*, not-found.*) ──────────────────────
+
+/** An error React reported through onError, with the digest it was logged under. */
+class ReportedFailure {
+  constructor(
+    readonly error: unknown,
+    readonly digest: string,
+  ) {}
+}
+
+/** What a loading.* boundary's probe saw during the render (segment-tree.ts). */
+interface ProbeState {
+  entered: boolean;
+  exited: boolean;
+  /** How many errors had been reported when the boundary's content started. */
+  reportedBefore: number;
+  /** How many had been reported once React moved past the boundary; null until then. */
+  reportedAfter: number | null;
+}
+
+/**
+ * Load the layouts, error.* and loading.* components of the page folder's
+ * chain (segmentChainForDir - the same chain the client entry imports),
+ * attaching a probe to every loading boundary.
+ */
+async function loadSegmentLevels(
+  dir: string,
+  layouts: Map<string, LayoutEntry>,
+  segmentFiles: SegmentFiles | undefined,
+  probes: ProbeState[],
+  reported: readonly ReportedFailure[],
+): Promise<SegmentLevel[]> {
+  const chain = segmentChainForDir(dir, layouts, segmentFiles ?? emptySegmentFiles());
+  const levels: SegmentLevel[] = [];
+  for (const level of chain) {
+    const [layoutMod, errorMod, loadingMod] = await Promise.all([
+      level.layout?.load(),
+      level.error?.load(),
+      level.loading?.load(),
+    ]);
+    const segmentLevel: SegmentLevel = {
+      layout: layoutMod?.default ?? null,
+      error: (errorMod?.default as React.ComponentType<GioErrorProps> | undefined) ?? null,
+      loading: loadingMod?.default ?? null,
+    };
+    if (loadingMod !== undefined) {
+      const state: ProbeState = {
+        entered: false,
+        exited: false,
+        reportedBefore: 0,
+        reportedAfter: null,
+      };
+      probes.push(state);
+      segmentLevel.probe = {
+        enter: () => {
+          if (state.entered) return;
+          state.entered = true;
+          state.reportedBefore = reported.length;
+        },
+        exit: () => {
+          state.exited = true;
+        },
+        after: () => {
+          state.reportedAfter ??= reported.length;
+        },
+      };
+    }
+    levels.push(segmentLevel);
+  }
+  return levels;
+}
+
+/*
+ * Failures answered like a failed shell although a Suspense boundary caught
+ * them - while nothing has been sent yet:
+ * - notFound() anywhere: the answer can still be a 404;
+ * - an error a loading.* boundary caught before its content suspended:
+ *   without the loading.* file it would have failed the shell, and adding
+ *   one must not turn that 500 into a 200.
+ * Errors in the app's own Suspense boundaries (and anything thrown after a
+ * loading.* boundary's content suspended) keep React's client-rendering
+ * fallback.
+ */
+
+/** The first notFound() call React reported, if any. */
+function notFoundFailure(reported: readonly ReportedFailure[]): ReportedFailure | null {
+  return reported.find(r => isNotFoundError(r.error)) ?? null;
+}
+
+/** The error that aborted a loading.* boundary's content before it suspended, if any. */
+function abortedLoadingBoundary(
+  reported: readonly ReportedFailure[],
+  probes: readonly ProbeState[],
+): ReportedFailure | null {
+  const failed = probes.find(p => p.entered && !p.exited);
+  if (failed === undefined) return null;
+  // React reports the error that aborts a boundary just before it moves on
+  // to the boundary's next sibling. Earlier reports since the content
+  // started came from Suspense boundaries inside it that recovered.
+  if (failed.reportedAfter !== null && failed.reportedAfter > failed.reportedBefore) {
+    return reported[failed.reportedAfter - 1] ?? null;
+  }
+  return reported[failed.reportedBefore] ?? reported[0] ?? null;
+}
+
+interface SegmentPageCandidate {
+  /** app/-relative folder of the file: selects the layouts it renders in. */
+  dir: string;
+  load: () => Promise<{ default: React.ComponentType<Record<string, unknown>> }>;
+}
+
+/**
+ * The not-found.* or error.* files that may answer for a page in `dir`,
+ * nearest first. app/'s own comes from `segmentFiles`, or from
+ * `specialPages` for callers that only discovered the root files.
+ */
+function segmentPageCandidates(
+  dir: string,
+  kind: 'notFound' | 'error',
+  extras: RenderExtras | undefined,
+): SegmentPageCandidate[] {
+  const files = extras?.segmentFiles?.[kind];
+  const candidates: SegmentPageCandidate[] =
+    files !== undefined ? nearestSegmentFiles(dir, files) : [];
+  const rootFallback = extras?.specialPages?.[kind];
+  if (rootFallback !== undefined && !candidates.some(c => c.dir === '')) {
+    candidates.push({ dir: '', load: rootFallback });
+  }
+  return candidates;
+}
+
+/**
+ * 404 for a page in `dir`: the nearest not-found.* at or above it, inside
+ * the layouts of that file's folder, else the built-in page. Never cached:
+ * a 404 can depend on anything getServerSideProps read (credentials
+ * included), and a cached 404 would also outlive the content appearing.
+ */
+async function renderNotFound(
+  req: IPCRequest,
+  dir: string,
+  layouts: Map<string, LayoutEntry>,
+  extras: RenderExtras | undefined,
+  signal: AbortSignal | undefined,
+): Promise<IPCResponse> {
+  const page = await renderNearestSegmentPage(
+    req,
+    layouts,
+    segmentPageCandidates(dir, 'notFound', extras),
+    {},
+    404,
+    signal,
+  );
+  return page ?? {
+    id: req.id,
+    status: 404,
+    headers: { 'content-type': 'text/html; charset=utf-8' },
+    body: BUILTIN_404_HTML,
+    cacheable: false,
+    cacheMaxAge: 0,
+  };
+}
+
+/**
+ * Render the first candidate that renders: one whose own layouts fail (or
+ * call notFound()) gives way to the next one up, the way a React error
+ * boundary passes on what it cannot handle. Null when none renders.
+ */
+async function renderNearestSegmentPage(
+  req: IPCRequest,
+  layouts: Map<string, LayoutEntry>,
+  candidates: readonly SegmentPageCandidate[],
+  props: object,
+  status: number,
+  signal?: AbortSignal,
+): Promise<IPCResponse | null> {
+  for (const candidate of candidates) {
+    const page = await renderSpecialPage(req, layouts, candidate, props, status, signal);
+    if (page !== null) return page;
+  }
+  return null;
+}
 
 /**
  * Render a special page (404/500) through the normal layout pipeline,
- * server-only (no hydration envelope). Returns null when the page is absent
- * or its render fails - callers fall back to the built-in plain response.
+ * server-only (no hydration envelope). Returns null when its render fails -
+ * callers try the next candidate, then the built-in plain response.
  */
 async function renderSpecialPage(
   req: IPCRequest,
   layouts: Map<string, LayoutEntry>,
-  load: (() => Promise<PageModule>) | undefined,
-  props: Record<string, unknown>,
+  candidate: SegmentPageCandidate,
+  props: object,
   status: number,
   signal?: AbortSignal,
 ): Promise<IPCResponse | null> {
-  if (load === undefined) return null;
   try {
-    const pageModule = await load();
+    const pageModule = await candidate.load();
     // Layouts follow the special page's own filesystem ancestry, the same rule
-    // as for pages. Special pages live at app/ root, so today that is just the
-    // root layout - never the layouts of whatever URL failed or was missing.
-    const applicableLayouts = layoutsForDir('', layouts);
+    // as for pages - never the layouts of whatever URL failed or was missing.
+    const applicableLayouts = layoutsForDir(candidate.dir, layouts);
     const rootLayoutEntry = applicableLayouts.find(l => l.dir === '');
     const innerLayouts = applicableLayouts.filter(l => l.dir !== '');
 
-    let inner: React.ReactNode = React.createElement(pageModule.default, props);
+    let inner: React.ReactNode = React.createElement(
+      pageModule.default,
+      props as Record<string, unknown>,
+    );
     for (const layoutEntry of [...innerLayouts].reverse()) {
       const layoutMod = await layoutEntry.load();
       inner = React.createElement(layoutMod.default, { children: inner, path: req.path });
@@ -1047,9 +1337,10 @@ async function renderSpecialPage(
       cacheMaxAge: 0,
     };
   } catch (specialError) {
-    logger.error('special page render failed - falling back to built-in response', {
+    logger.error('special page render failed - falling back', {
       path: req.path,
       status,
+      dir: candidate.dir === '' ? '.' : candidate.dir,
       error: specialError instanceof Error ? specialError.message : String(specialError),
     });
     return null;

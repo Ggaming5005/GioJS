@@ -3,15 +3,15 @@
  *
  * Builds the per-route client bundles that hydrate the #__gio boundary.
  * For each discovered route a small entry module is generated that imports
- * the page component plus its non-root ancestor layouts and registers
- * them with the shared client runtime. esbuild bundles all entries in one
- * pass (ESM + code splitting, content-hashed names) into
- * `.gio/build/static/chunks/`, which Rust serves at `/_next/static/chunks/`
- * with immutable caching.
+ * the page component plus the non-root layouts, error.* and loading.* files
+ * of its ancestor folders and registers them with the shared client runtime.
+ * esbuild bundles all entries in one pass (ESM + code splitting,
+ * content-hashed names) into `.gio/build/static/chunks/`, which Rust serves
+ * at `/_next/static/chunks/` with immutable caching.
  *
  * Server-only code is kept out of the bundles structurally, never by
  * rewriting source text: each generated entry imports ONLY the default export
- * of a page/layout, and every non-bare import made by a project file is
+ * of each app file, and every non-bare import made by a project file is
  * marked side-effect free. esbuild's tree-shaking then drops
  * `getServerSideProps` / `getStaticPaths` in every export form (declarations,
  * `export { x as getServerSideProps }`, `export ... from`, `export *`)
@@ -22,9 +22,10 @@
  *
  * The `server-only` guard is the loud backstop: if `@gio.js/core/server-only`
  * (or the bare `server-only` specifier) or any `*.server.*` file is still
- * live in a route's client graph after tree-shaking, that route's bundle is
- * rejected with the importing file chain. `GIO_PUBLIC_*` variables present at
- * build time are inlined; every other `process.env.X` reads as undefined.
+ * live in a route's client graph after tree-shaking - including through an
+ * error.* or loading.* file - that route's bundle is rejected with the
+ * importing file chain. `GIO_PUBLIC_*` variables present at build time are
+ * inlined; every other `process.env.X` reads as undefined.
  *
  * A route whose entry fails to build is logged and served without hydration -
  * client build errors must not take down SSR, nor cost the other routes their
@@ -42,7 +43,14 @@ import {
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { layoutsForDir, type RouteModule, type LayoutEntry } from './router.ts';
+import {
+  emptySegmentFiles,
+  segmentChainForDir,
+  type RouteModule,
+  type LayoutEntry,
+  type SegmentChainLevel,
+  type SegmentFiles,
+} from './router.ts';
 import { logger } from './logger.ts';
 import { clearClientBuildErrors, recordClientBuildError } from './client-build-errors.ts';
 
@@ -54,6 +62,8 @@ const PUBLIC_CHUNK_PATH = '/_next/static/chunks';
 export interface ClientBuildOptions {
   routes: Map<string, RouteModule>;
   layouts: Map<string, LayoutEntry>;
+  /** Per-folder error.* and loading.* (not-found.* is server-only) - see segment-tree.ts. */
+  segmentFiles?: SegmentFiles;
   /** Project root (parent of app/); `.gio/` lives here. */
   projectRoot: string;
   dev: boolean;
@@ -81,40 +91,42 @@ function importPath(p: string): string {
 }
 
 /**
- * The non-root layouts wrapping a route, outermost first - the same
- * filesystem-ancestry chain ssr.ts renders inside the #__gio boundary (the
- * root layout stays server-only HTML). The client must wrap exactly what the
- * server wrapped or hydration mismatches.
+ * Entry module for one route. `chain` is segmentChainForDir() of the route's
+ * folder - the chain ssr.ts renders inside the #__gio boundary (the root
+ * layout stays server-only HTML) - and both sides build the tree with
+ * buildSegmentTree(), so the client wraps exactly what the server wrapped
+ * or hydration mismatches.
  */
-function clientLayoutsFor(route: RouteModule, layouts: Map<string, LayoutEntry>): LayoutEntry[] {
-  return layoutsForDir(route.dir, layouts).filter(l => l.dir !== '');
-}
-
 function generateEntrySource(
   pattern: string,
   route: RouteModule,
-  layouts: LayoutEntry[],
+  chain: SegmentChainLevel[],
   runtimePath: string,
 ): string {
-  const layoutImports = layouts
-    .map((l, i) => `import Layout${i} from ${importPath(l.filePath)};`)
-    .join('\n');
-  // Wrap innermost-first so the outermost layout is the outer element,
-  // mirroring ssr.ts.
-  const wraps = layouts
-    .map((_, i) => layouts.length - 1 - i)
-    .map(idx => `  element = React.createElement(Layout${idx}, { children: element, path });`)
-    .join('\n');
+  const imports: string[] = [];
+  const levels = chain.map((level, i) => {
+    const binding = (name: string, file: { filePath: string } | undefined): string => {
+      if (file === undefined) return 'null';
+      imports.push(`import ${name}${i} from ${importPath(file.filePath)};`);
+      return `${name}${i}`;
+    };
+    const layout = binding('Layout', level.layout);
+    const error = binding('SegmentError', level.error);
+    const loading = binding('Loading', level.loading);
+    return `  { layout: ${layout}, error: ${error}, loading: ${loading} },`;
+  });
   return `import React from 'react';
-import { registerRoute } from ${importPath(runtimePath)};
+import { registerRoute, buildSegmentTree } from ${importPath(runtimePath)};
 import Page from ${importPath(route.filePath)};
-${layoutImports}
+${imports.join('\n')}
 
-registerRoute(${JSON.stringify(pattern)}, (props, path) => {
-  let element = React.createElement(Page, props);
-${wraps}
-  return element;
-});
+const levels = [
+${levels.join('\n')}
+];
+
+registerRoute(${JSON.stringify(pattern)}, (props, path) =>
+  buildSegmentTree(React.createElement(Page, props), path, levels),
+);
 `;
 }
 
@@ -415,11 +427,22 @@ function describeChain(chain: string[]): string {
     .join(' -> ');
 }
 
+/** error.* and loading.* files - client code for every page below their folder. */
+const SEGMENT_CLIENT_FILE = /(^|[\\/])(error|loading)\.(tsx|jsx|js)$/;
+
 function serverOnlyMessage(pattern: string, chain: string[]): string {
+  // chain[0] is the generated entry; chain[1] the app file that imported it.
+  const importer = chain[1];
+  const segmentHint =
+    importer !== undefined && SEGMENT_CLIENT_FILE.test(importer)
+      ? ` ${importer} is a client error/loading boundary for every page below its folder, ` +
+        'so it must be browser-safe like a page component.'
+      : '';
   return (
-    `client bundle for route "${pattern}" imports server-only code: ${describeChain(chain)}. ` +
-    'The page still server-renders but will NOT hydrate (no client JS) until this import is ' +
-    'removed from client code - keep server-only modules behind getServerSideProps or route.ts.'
+    `client bundle for route "${pattern}" imports server-only code: ${describeChain(chain)}.` +
+    `${segmentHint} The page still server-renders but will NOT hydrate (no client JS) until ` +
+    'this import is removed from client code - keep server-only modules behind ' +
+    'getServerSideProps or route.ts.'
   );
 }
 
@@ -527,7 +550,11 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
       const source = generateEntrySource(
         pattern,
         route,
-        clientLayoutsFor(route, options.layouts),
+        segmentChainForDir(
+          route.dir,
+          options.layouts,
+          options.segmentFiles ?? emptySegmentFiles(),
+        ),
         runtimePath,
       );
       await writeFile(file, source, 'utf8');

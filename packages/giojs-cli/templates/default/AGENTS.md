@@ -8,14 +8,23 @@ renders React. Full docs: https://giojs.com/llms.txt
 
 - File routing lives in `app/`: `page.tsx` (pages), `layout.tsx` (nested
   layouts), `route.ts` (API handlers exporting GET/POST/PUT/PATCH/DELETE),
-  `not-found.tsx`, `error.tsx`. Dynamic segments: `[id]`; catch-all: `[...slug]`
-  (one or more segments); optional catch-all: `[[...slug]]` (also matches the
-  parent URL). Catch-all params are one string with `/` separators (`"a/b"`).
+  `not-found.tsx`, `error.tsx`, `loading.tsx`. Dynamic segments: `[id]`;
+  catch-all: `[...slug]` (one or more segments); optional catch-all:
+  `[[...slug]]` (also matches the parent URL). Catch-all params are one string
+  with `/` separators (`"a/b"`).
   `(group)` folders add no URL segment; `_folders` are private (never routed).
   Layouts apply by folder ancestry, so a `(group)/layout.tsx` wraps only that
   group.
+- `not-found.tsx`, `error.tsx` and `loading.tsx` work in any folder; the
+  nearest one at or above a page wins. `notFound()` from `@gio.js/core` (or
+  `{ notFound: true }` from getServerSideProps) answers 404 with the nearest
+  `not-found.tsx`. `error.tsx` renders inside its folder's layout and never
+  catches that layout's own errors. `loading.tsx` is a `<Suspense>` fallback
+  for content that suspends while rendering - it does not cover
+  getServerSideProps, which runs before rendering.
 - Data fetching is `export async function getServerSideProps(ctx)` returning
-  `{ props }` (optionally `{ props, headers }` or a redirect). There are NO
+  `{ props }` (optionally `{ props, headers }`, a redirect, or
+  `{ notFound: true }`). There are NO
   React Server Components, no `use client`/`use server`, no server actions.
 - Never fetch inside a component render; never use `useEffect` for data that
   belongs in `getServerSideProps`.
@@ -31,8 +40,10 @@ renders React. Full docs: https://giojs.com/llms.txt
   `[server] trusted_proxies` in `gio.toml`. `req.host` is client-supplied -
   never a security check. `req.requestId` / `ctx.requestId` is the
   `X-Request-Id` response header, also on that request's log lines.
-- `app/error.tsx` gets `{ error: { message, digest } }`; in production the
-  message is always generic - log lookups go by `digest`.
+- `error.tsx` gets `{ error: { message, digest }, reset }`; in production the
+  message is always generic - log lookups go by `digest`. It is also a client
+  error boundary (shipped in the page bundles - no server-only imports), and
+  `reset` exists only for errors caught in the browser.
 - Components come from `@gio.js/react`: `<GioLink>` (client nav + prefetch),
   `<GioImage>` (points at the built-in `/_gio/image` optimizer — never add
   `sharp` or `next/image`). Route-handler types come from `@gio.js/core`

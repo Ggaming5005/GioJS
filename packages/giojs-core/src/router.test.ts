@@ -6,6 +6,8 @@
  * than one extension is present in a directory. Folder conventions: [id],
  * [...slug], [[...slug]], (group) and _private folders; layouts associate by
  * filesystem ancestry; two files answering the same URLs fail discovery.
+ * not-found/error/loading files are found per folder and selected nearest
+ * first by the same ancestry.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
@@ -17,6 +19,10 @@ import {
   discoverRouteFiles,
   assertNoRouteConflicts,
   layoutsForDir,
+  discoverSegmentFiles,
+  nearestSegmentFiles,
+  segmentChainForDir,
+  ancestorDirs,
 } from './router.ts';
 
 let projectRoot: string;
@@ -286,5 +292,89 @@ describe('layoutsForDir', () => {
     const layouts = await discoverLayouts(appDir);
     expect(layoutsForDir('', layouts).map(l => l.dir)).toEqual(['']);
     expect(layoutsForDir('docs/guide', new Map())).toEqual([]);
+  });
+});
+
+describe('segment files (not-found, error, loading)', () => {
+  it('discovers each kind per folder, groups and dynamic folders included, private never', async () => {
+    await touch('not-found.tsx');
+    await touch('error.tsx');
+    await touch('(shop)/error.jsx');
+    await touch('(shop)/products/[id]/not-found.tsx');
+    await touch('(shop)/products/[id]/loading.js');
+    await touch('docs/[...slug]/loading.tsx');
+    await touch('_internal/error.tsx');
+    await touch('posts/page.tsx');
+    await touch('posts/loading.ts'); // .ts is not a component extension
+    const files = await discoverSegmentFiles(appDir);
+    expect([...files.notFound.keys()].sort()).toEqual(['', '(shop)/products/[id]']);
+    expect([...files.error.keys()].sort()).toEqual(['', '(shop)']);
+    expect([...files.loading.keys()].sort()).toEqual(['(shop)/products/[id]', 'docs/[...slug]']);
+    const productLoading = files.loading.get('(shop)/products/[id]');
+    expect(productLoading?.kind).toBe('loading');
+    expect(productLoading?.filePath).toBe(join(appDir, '(shop)', 'products', '[id]', 'loading.js'));
+  });
+
+  it('prefers .tsx over .jsx over .js in one folder', async () => {
+    await touch('loading.js');
+    await touch('loading.tsx');
+    const files = await discoverSegmentFiles(appDir);
+    expect(files.loading.get('')?.filePath).toBe(join(appDir, 'loading.tsx'));
+  });
+
+  it('lists the ancestors of a folder outermost first', () => {
+    expect(ancestorDirs('')).toEqual(['']);
+    expect(ancestorDirs('(shop)/products/[id]')).toEqual([
+      '',
+      '(shop)',
+      '(shop)/products',
+      '(shop)/products/[id]',
+    ]);
+  });
+
+  it('selects the nearest file at or above a folder, across group and dynamic folders', async () => {
+    await touch('not-found.tsx');
+    await touch('(shop)/not-found.tsx');
+    await touch('(shop)/products/[id]/not-found.tsx');
+    await touch('(marketing)/about/page.tsx');
+    const files = await discoverSegmentFiles(appDir);
+    const nearest = (dir: string): string[] =>
+      nearestSegmentFiles(dir, files.notFound).map(f => f.dir);
+    expect(nearest('(shop)/products/[id]/reviews')).toEqual([
+      '(shop)/products/[id]',
+      '(shop)',
+      '',
+    ]);
+    expect(nearest('(shop)/products')).toEqual(['(shop)', '']);
+    // A sibling group's file never applies.
+    expect(nearest('(marketing)/about')).toEqual(['']);
+  });
+
+  it("builds a page's hydrated chain: layouts below app/, error and loading files at any level", async () => {
+    await touch('layout.tsx');
+    await touch('error.tsx');
+    await touch('loading.tsx');
+    await touch('(shop)/layout.tsx');
+    await touch('(shop)/products/[id]/layout.tsx');
+    await touch('(shop)/products/[id]/error.tsx');
+    await touch('(shop)/products/[id]/loading.tsx');
+    await touch('(shop)/products/[id]/not-found.tsx');
+    await touch('(shop)/products/[id]/page.tsx');
+    const [layouts, files] = await Promise.all([discoverLayouts(appDir), discoverSegmentFiles(appDir)]);
+    const chain = segmentChainForDir('(shop)/products/[id]', layouts, files);
+    expect(
+      chain.map(level => ({
+        dir: level.dir,
+        layout: level.layout !== undefined,
+        error: level.error !== undefined,
+        loading: level.loading !== undefined,
+      })),
+    ).toEqual([
+      // The root layout stays server-only HTML outside the boundary.
+      { dir: '', layout: false, error: true, loading: true },
+      { dir: '(shop)', layout: true, error: false, loading: false },
+      // (shop)/products holds nothing and is left out.
+      { dir: '(shop)/products/[id]', layout: true, error: true, loading: true },
+    ]);
   });
 });

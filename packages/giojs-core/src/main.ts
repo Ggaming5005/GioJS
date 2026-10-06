@@ -12,6 +12,7 @@ import {
   discoverLayouts,
   discoverRouteFiles,
   discoverSpecialPages,
+  discoverSegmentFiles,
   assertNoRouteConflicts,
 } from './router.ts';
 import { buildClientBundles } from './client-build.ts';
@@ -34,10 +35,11 @@ export async function runServer(): Promise<void> {
   const nodePluginRegistry = await startPluginRegistry(gioConfig.plugins ?? []);
 
   logger.info('discovering routes', { appDir });
-  const [routes, layouts, routeFiles] = await Promise.all([
+  const [routes, layouts, routeFiles, segmentFiles] = await Promise.all([
     discoverRoutes(appDir),
     discoverLayouts(appDir),
     discoverRouteFiles(appDir),
+    discoverSegmentFiles(appDir),
   ]);
   assertNoRouteConflicts(appDir, routes, routeFiles);
   logger.info('routes discovered', { count: routes.size, patterns: [...routes.keys()] });
@@ -75,6 +77,7 @@ export async function runServer(): Promise<void> {
   const clientScripts = await buildClientBundles({
     routes,
     layouts,
+    segmentFiles,
     projectRoot: dirname(appDir),
     dev: isDevMode(),
   });
@@ -85,6 +88,7 @@ export async function runServer(): Promise<void> {
     wsHandlers,
     handlers,
     specialPages,
+    segmentFiles,
     clientScripts,
     middlewareRules,
     pluginRegistry: nodePluginRegistry,

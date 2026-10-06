@@ -5,8 +5,10 @@
  * hydration envelope after the cached shell, so the entry module can run
  * before it exists - the runtime must wait for the envelope (not give up),
  * and mount as soon as it is parsed rather than after the slowest hole.
+ * Generated entries build their tree with the runtime's buildSegmentTree.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import React from 'react';
 
 const hydrateRoot = vi.fn(() => ({ render: vi.fn(), unmount: vi.fn() }));
 vi.mock('react-dom/client', () => ({ hydrateRoot, createRoot: vi.fn() }));
@@ -141,5 +143,32 @@ describe('registerRoute first load', () => {
     registerRoute('/ppr', vi.fn(() => null));
     expect(hydrateRoot).not.toHaveBeenCalled();
     expect(dom.listeners.has('DOMContentLoaded')).toBe(true);
+  });
+});
+
+describe('generated entries', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    hydrateRoot.mockClear();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('hydrate the tree the server built: buildSegmentTree comes from the runtime itself', async () => {
+    const dom = installDom('complete');
+    dom.elements.set('__gio_props', { textContent: ENVELOPE });
+    const runtime = await import('./client-runtime.ts');
+    const { buildSegmentTree, SegmentErrorBoundary } = await import('./segment-tree.ts');
+    expect(runtime.buildSegmentTree).toBe(buildSegmentTree);
+    const ErrorView = (): null => null;
+    // What a generated entry registers for a page under an error.* folder.
+    runtime.registerRoute('/ppr', (props, path) =>
+      runtime.buildSegmentTree(React.createElement('p', props), path, [{ error: ErrorView }]),
+    );
+    const hydrated = hydrateRoot.mock.calls[0] as unknown[] | undefined;
+    const element = hydrated?.[1] as React.ReactElement<{ fallback: unknown }> | undefined;
+    expect(element?.type).toBe(SegmentErrorBoundary);
+    expect(element?.props.fallback).toBe(ErrorView);
   });
 });
