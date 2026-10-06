@@ -9,6 +9,12 @@
  *
  * Cross-deploys: `--target <platform>` picks a different platform package,
  * which must be installed (`npm i @gio.js/server-<target> --force`).
+ *
+ * Env: the project's production .env files load before bundling, so
+ * GIO_PUBLIC_* values are frozen into the chunks and worker.js. The output
+ * carries no .env files; run.mjs starts the server with the deploy dir as
+ * cwd, and the server loads that dir's .env files at startup like any other
+ * `gio` run.
  */
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
@@ -35,6 +41,11 @@ const USAGE = `usage: gio build standalone [--out <dir>] [--target <platform>]
 Environment:
   GIO_APP_DIR                  app directory (default: ./app)
   GIO_STANDALONE_SERVER_BIN    explicit server binary path (overrides --target)
+
+GIO_PUBLIC_* variables (from the environment or the project's .env,
+.env.local, .env.production, .env.production.local) are inlined at build
+time; changing one needs a rebuild. Server variables are read at runtime:
+set them in the deploy environment or in .env files inside the output dir.
 `;
 
 function fail(message) {
@@ -158,8 +169,21 @@ async function main() {
   tsxApi.register();
   const coreSrc = (name) => pathToFileURL(join(coreDir, 'src', name)).href;
   const router = await import(coreSrc('router.ts'));
-  const { buildClientBundles } = await import(coreSrc('client-build.ts'));
+  const { buildClientBundles, publicEnvDefines } = await import(coreSrc('client-build.ts'));
   const { generateStandaloneEntry } = await import(coreSrc('standalone-gen.ts'));
+  const { loadEnvFiles } = await import(coreSrc('env-files.ts'));
+
+  // GIO_PUBLIC_* values are frozen in at build time (client chunks and the
+  // worker bundle alike) from the environment and the project's production
+  // .env files. Server-side variables are NOT baked in: the deployed server
+  // reads them at runtime from the environment or .env files in the deploy
+  // dir.
+  let envFiles;
+  try {
+    envFiles = loadEnvFiles(projectRoot, { mode: 'production' });
+  } catch (envError) {
+    fail(envError instanceof Error ? envError.message : String(envError));
+  }
 
   const serverBin = findServerBinary(requireFromHere, options.target);
   const serverName = extname(serverBin) === '.exe' ? 'server.exe' : 'server';
@@ -168,6 +192,9 @@ async function main() {
   console.log(`  app:    ${appDir}`);
   console.log(`  server: ${serverBin}`);
   console.log(`  out:    ${options.out}`);
+  if (envFiles.files.length > 0) {
+    console.log(`  env:    ${envFiles.files.join(', ')} (GIO_PUBLIC_* inlined at build time)`);
+  }
 
   const [routes, layouts, routeFiles] = await Promise.all([
     router.discoverRoutes(appDir),
@@ -232,6 +259,9 @@ async function main() {
         js: "import { createRequire as __gioCreateRequire } from 'node:module';\nconst require = __gioCreateRequire(import.meta.url);",
       },
       loader: { '.css': 'empty' },
+      // The same frozen GIO_PUBLIC_* values the client chunks got, so server
+      // renders match what hydrates. Everything else stays a runtime read.
+      define: publicEnvDefines(process.env),
       minify: false,
       sourcemap: false,
       logLevel: 'warning',
