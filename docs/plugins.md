@@ -50,6 +50,17 @@ parameters and return types are inferred.
 
 Plugins run in **registration order** for `onRequest`/`onResponse`/`onStartup`. `onShutdown` runs in **reverse** registration order (last-in, first-out).
 
+**Cookies:** `IPCResponse.headers` holds one value per header name, so set cookies through the
+optional `setCookies: string[]` field instead - each entry is sent as its own `Set-Cookie` header.
+Append to it in `onResponse` (`setCookies: [...(res.setCookies ?? []), 'a=1; Path=/']`) so cookies
+set by the page are kept. A response that sets cookies is never cached or shared between requests.
+
+Cookies set by the page (`getServerSideProps` headers) or a route handler `Response` arrive in
+`res.setCookies`, **not** in `res.headers['set-cookie']` - earlier releases put them in the headers
+map. A plugin that strips or rewrites cookies must work on `setCookies`: set `setCookies: []` to
+strip them, or map over it to add attributes such as `Secure`. Deleting `res.headers['set-cookie']`
+no longer removes them.
+
 **Error behaviour:** If any hook throws, the error is caught, logged to stderr, and a `500 Internal Server Error` is returned. The Node process never crashes due to a plugin error.
 
 **Caching and personalization:** the Rust page cache keys renders by method, path (locale included),

@@ -110,9 +110,11 @@ enum CoalescedRender {
 /// itself cacheable - i.e. its content is the same for every visitor. Sharing
 /// anything else leaks the leader's cookie-derived HTML across users. A
 /// non-empty `vary` also disqualifies: the cache key cannot express varied
-/// dimensions yet, so such responses stay per-request.
+/// dimensions yet, so such responses stay per-request. So does setting a
+/// cookie (e.g. from a plugin on a cacheable page): followers would receive
+/// the leader's Set-Cookie, and the cached copy could never replay it.
 fn render_is_shareable(resp: &ipc::IpcResponse) -> bool {
-    resp.cacheable && resp.cache_max_age > 0 && resp.vary.is_empty()
+    resp.cacheable && resp.cache_max_age > 0 && resp.vary.is_empty() && !sets_cookies(resp)
 }
 
 /// One cache, one owner, one header: X-Gio-Cache says which tier answered
@@ -174,6 +176,58 @@ fn cacheable_response_headers(headers: &HashMap<String, String>) -> HashMap<Stri
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
+}
+
+/// True when a worker response sets any cookie, through `setCookies` or a
+/// lone `set-cookie` entry in the single-valued headers map.
+fn sets_cookies(resp: &ipc::IpcResponse) -> bool {
+    !resp.set_cookies.is_empty()
+        || resp
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("set-cookie"))
+}
+
+/// Emit the worker's `setCookies` as one Set-Cookie header each (call after
+/// the headers map is copied in). A value already present - a worker that
+/// also put it in the headers map - is not emitted twice; invalid values
+/// (CR/LF) are dropped with a warning rather than failing the response.
+fn append_set_cookies(headers: &mut axum::http::HeaderMap, set_cookies: &[String]) {
+    for cookie in set_cookies {
+        let Ok(value) = HeaderValue::from_str(cookie) else {
+            warn!("dropping invalid set-cookie value from the worker");
+            continue;
+        };
+        append_set_cookie_once(headers, value);
+    }
+}
+
+/// Add one Set-Cookie header unless an identical value is already present.
+fn append_set_cookie_once(headers: &mut axum::http::HeaderMap, value: HeaderValue) {
+    if !headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .any(|v| v == value)
+    {
+        headers.append(header::SET_COOKIE, value);
+    }
+}
+
+/// Stamp header-rule headers (gio.toml / middleware.ts) onto a response. A
+/// rule replaces the response's own value for ordinary headers, but
+/// Set-Cookie is additive: cookies are independent, and replacing would
+/// silently drop every cookie the page or route handler set.
+fn stamp_rule_headers(
+    headers: &mut axum::http::HeaderMap,
+    rule_headers: impl IntoIterator<Item = (HeaderName, HeaderValue)>,
+) {
+    for (name, value) in rule_headers {
+        if name == header::SET_COOKIE {
+            append_set_cookie_once(headers, value);
+        } else {
+            headers.insert(name, value);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -955,7 +1009,7 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
         rules::RuleOutcome::Redirect { location, status } => {
             let location = rules::with_query(location, req.uri().query());
             if let Some(mut resp) = rule_redirect_response(&location, status) {
-                stamp_rule_headers(&mut resp, rule_headers);
+                stamp_rule_headers(resp.headers_mut(), rule_headers);
                 info!(
                     method = %req.method(),
                     path = %req.uri().path(),
@@ -973,7 +1027,7 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
     }
 
     let mut resp = next.run(req).await;
-    stamp_rule_headers(&mut resp, rule_headers);
+    stamp_rule_headers(resp.headers_mut(), rule_headers);
     resp
 }
 
@@ -990,12 +1044,6 @@ fn rule_response_headers(
     let mut collected = static_rules.response_headers(path);
     collected.extend(worker_rules.response_headers(path));
     collected
-}
-
-fn stamp_rule_headers(resp: &mut Response, rule_headers: Vec<(HeaderName, HeaderValue)>) {
-    for (name, value) in rule_headers {
-        resp.headers_mut().insert(name, value);
-    }
 }
 
 /// Build the redirect response for a rule match. Returns `None` when the
@@ -1821,6 +1869,7 @@ async fn respond_from_render(
     if state.dev_mode && resp.worker_error {
         resp_out.extensions_mut().insert(WorkerErrorPage);
     }
+    append_set_cookies(resp_out.headers_mut(), &resp.set_cookies);
     insert_cache_status_header(
         &mut resp_out,
         if will_cache { "miss; stored" } else { "bypass" },
@@ -1890,9 +1939,11 @@ fn respond_sse(
             }
         }
     }
-    builder
+    let mut resp = builder
         .body(axum::body::Body::from_stream(stream))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    append_set_cookies(resp.headers_mut(), &response.set_cookies);
+    resp
 }
 
 /// Response-extension marker: the body is a live SSR chunk stream. Downstream
@@ -2029,6 +2080,7 @@ fn respond_stream(
     let mut resp = builder
         .body(axum::body::Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    append_set_cookies(resp.headers_mut(), &response.set_cookies);
     insert_cache_status_header(
         &mut resp,
         if capture_shell {
@@ -4012,7 +4064,7 @@ mod tests {
 
         let mut resp = rule_redirect_response("/login", StatusCode::FOUND).unwrap();
         stamp_rule_headers(
-            &mut resp,
+            resp.headers_mut(),
             rule_response_headers(&static_rules, &worker_rules, "/admin"),
         );
         assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/login");
@@ -4451,6 +4503,7 @@ mod tests {
             streaming: false,
             ppr_shell: false,
             worker_error: false,
+            set_cookies: Vec::new(),
         }
     }
 
@@ -4467,6 +4520,127 @@ mod tests {
         let mut resp = ipc_response(true, 60);
         resp.vary = vec!["cookie".to_string()];
         assert!(!render_is_shareable(&resp));
+    }
+
+    #[test]
+    fn cookie_setting_renders_are_never_shareable() {
+        let mut listed = ipc_response(true, 60);
+        listed.set_cookies = vec!["session=abc; Path=/".to_string()];
+        assert!(!render_is_shareable(&listed));
+        // A plugin may still put a lone cookie in the headers map.
+        let mut mapped = ipc_response(true, 60);
+        mapped
+            .headers
+            .insert("Set-Cookie".to_string(), "session=abc".to_string());
+        assert!(!render_is_shareable(&mapped));
+    }
+
+    fn set_cookie_values(resp: &Response) -> Vec<&str> {
+        resp.headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect()
+    }
+
+    fn buffered_response(headers: &HashMap<String, String>, set_cookies: &[String]) -> Response {
+        let mut resp = build_html_response(
+            200,
+            headers,
+            Bytes::from_static(b"{}"),
+            false,
+            false,
+            "dep",
+            "en",
+            &[],
+            &DashMap::new(),
+            &config::CssConfig::default(),
+            false,
+        );
+        append_set_cookies(resp.headers_mut(), set_cookies);
+        resp
+    }
+
+    #[test]
+    fn set_cookies_become_separate_headers_verbatim() {
+        let headers = HashMap::from([("content-type".to_string(), "application/json".to_string())]);
+        // Expires dates contain commas - the reason cookies cannot be joined.
+        let cookies = vec![
+            "session=abc; Path=/; HttpOnly; Expires=Wed, 21 Oct 2026 07:28:00 GMT".to_string(),
+            "csrf=xyz; Path=/; SameSite=Strict".to_string(),
+        ];
+        let resp = buffered_response(&headers, &cookies);
+        assert_eq!(set_cookie_values(&resp), cookies);
+    }
+
+    #[test]
+    fn set_cookie_in_both_places_is_emitted_once() {
+        let headers = HashMap::from([("set-cookie".to_string(), "a=1".to_string())]);
+        let resp = buffered_response(&headers, &["a=1".to_string(), "b=2".to_string()]);
+        assert_eq!(set_cookie_values(&resp), vec!["a=1", "b=2"]);
+    }
+
+    #[test]
+    fn lone_set_cookie_in_headers_map_still_passes_through() {
+        let headers = HashMap::from([("set-cookie".to_string(), "a=1".to_string())]);
+        let resp = buffered_response(&headers, &[]);
+        assert_eq!(set_cookie_values(&resp), vec!["a=1"]);
+    }
+
+    #[test]
+    fn invalid_set_cookie_values_are_dropped_not_smuggled() {
+        let resp = buffered_response(
+            &HashMap::new(),
+            &["a=1\r\nx-injected: 1".to_string(), "b=2".to_string()],
+        );
+        assert_eq!(set_cookie_values(&resp), vec!["b=2"]);
+        assert!(resp.headers().get("x-injected").is_none());
+    }
+
+    fn header_rules(headers: &[(&str, &str)]) -> rules::RuleSet {
+        rules::RuleSet::compile(&rules::MiddlewareRules {
+            headers: vec![rules::HeaderRule {
+                path: "/account".to_string(),
+                headers: headers
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+            }],
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn set_cookie_header_rule_adds_to_worker_cookies_instead_of_replacing() {
+        let cookies = vec![
+            "session=abc; Path=/; HttpOnly".to_string(),
+            "csrf=xyz; Path=/".to_string(),
+        ];
+        let mut resp = buffered_response(&HashMap::new(), &cookies);
+        let rules = header_rules(&[("set-cookie", "consent=1; Path=/")]);
+        stamp_rule_headers(resp.headers_mut(), rules.response_headers("/account"));
+        assert_eq!(
+            set_cookie_values(&resp),
+            vec![
+                "session=abc; Path=/; HttpOnly",
+                "csrf=xyz; Path=/",
+                "consent=1; Path=/"
+            ]
+        );
+        // A rule cookie the worker already sent is not doubled.
+        let rules = header_rules(&[("set-cookie", "csrf=xyz; Path=/")]);
+        stamp_rule_headers(resp.headers_mut(), rules.response_headers("/account"));
+        assert_eq!(set_cookie_values(&resp).len(), 3);
+    }
+
+    #[test]
+    fn ordinary_header_rules_still_replace_the_response_value() {
+        let headers = HashMap::from([("x-frame-options".to_string(), "SAMEORIGIN".to_string())]);
+        let mut resp = buffered_response(&headers, &[]);
+        let rules = header_rules(&[("x-frame-options", "DENY")]);
+        stamp_rule_headers(resp.headers_mut(), rules.response_headers("/account"));
+        let values: Vec<_> = resp.headers().get_all("x-frame-options").iter().collect();
+        assert_eq!(values, vec!["DENY"]);
     }
 
     #[test]

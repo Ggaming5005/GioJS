@@ -18,5 +18,7 @@ export default defineMiddleware({
   headers: [
     { path: '/cached', headers: { 'x-fixture-header': 'from-middleware' } },
     { path: '/*rest', headers: { 'x-fixture-sitewide': 'on' } },
+    // Rule cookies join the response's own cookies instead of replacing them.
+    { path: '/rule-cookies', headers: { 'set-cookie': 'consent=1; Path=/' } },
   ],
 });

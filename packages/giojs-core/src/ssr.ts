@@ -25,6 +25,7 @@ import type {
   RedirectResult,
   HandlerEntry,
   GsspContext,
+  GsspResponseHeaders,
   SpecialPages,
   PageModule,
 } from './router.ts';
@@ -392,9 +393,61 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isStringRecord(value: unknown): value is Record<string, string> {
+/** gSSP header values: a string, or a string array for repeated headers. */
+function isHeaderRecord(value: unknown): value is GsspResponseHeaders {
   if (!isRecord(value)) return false;
-  return Object.values(value).every(v => typeof v === 'string');
+  return Object.values(value).every(
+    v => typeof v === 'string' || (Array.isArray(v) && v.every(item => typeof item === 'string')),
+  );
+}
+
+/** Response headers split for the IPC frame (see IPCResponse.setCookies). */
+export interface IpcHeaders {
+  headers: Record<string, string>;
+  setCookies: string[];
+}
+
+/**
+ * Flatten user-supplied response headers for the single-valued IPC map.
+ * Every set-cookie value travels separately in `setCookies` - cookies are
+ * not comma-joinable (Expires dates contain commas) - while other repeated
+ * headers are joined with ", " as RFC 9110 permits for list-valued fields.
+ */
+export function flattenResponseHeaders(input: GsspResponseHeaders): IpcHeaders {
+  const headers: Record<string, string> = {};
+  const setCookies: string[] = [];
+  for (const [rawName, value] of Object.entries(input)) {
+    const name = rawName.toLowerCase();
+    const values = Array.isArray(value) ? value : [value];
+    if (name === 'set-cookie') {
+      setCookies.push(...values);
+      continue;
+    }
+    if (values.length === 0) continue;
+    const joined = values.join(', ');
+    const existing = headers[name];
+    headers[name] = existing === undefined ? joined : `${existing}, ${joined}`;
+  }
+  return { headers, setCookies };
+}
+
+/**
+ * Convert a web Response's headers. Headers already joins repeated fields
+ * with ", " - except set-cookie, which forEach yields once per cookie (so a
+ * map keeps only the last); getSetCookie() returns each cookie intact.
+ */
+export function webHeadersToIpc(source: Headers): IpcHeaders {
+  const headers: Record<string, string> = {};
+  source.forEach((value, name) => {
+    const lower = name.toLowerCase();
+    if (lower !== 'set-cookie') headers[lower] = value;
+  });
+  return { headers, setCookies: source.getSetCookie() };
+}
+
+/** Spread into an IPC response: omits the field when there are no cookies. */
+function setCookiesField(setCookies: string[]): { setCookies?: string[] } {
+  return setCookies.length > 0 ? { setCookies } : {};
 }
 
 function isIPCResponse(value: IPCOutbound): value is IPCResponse {
@@ -499,20 +552,24 @@ export async function renderRoute(
     const Component = pageModule.default;
 
     let props: Record<string, unknown> = {};
-    let gsspHeaders: Record<string, string> | null = null;
+    let gsspHeaders: IpcHeaders | null = null;
     let credentialsRead = (): boolean => false;
     if (pageModule.getServerSideProps) {
       const gssp = makeGsspContext(req, match.params, credentialHeaders);
       credentialsRead = gssp.credentialsRead;
       const result = await pageModule.getServerSideProps(gssp.ctx);
       if (isRedirect(result)) {
+        const extra = isHeaderRecord(result.headers)
+          ? flattenResponseHeaders(result.headers)
+          : { headers: {}, setCookies: [] };
         return {
           id: req.id,
           status: result.redirect.permanent ? 301 : 302,
-          headers: { location: result.redirect.destination },
+          headers: { ...extra.headers, location: result.redirect.destination },
           body: '',
           cacheable: false,
           cacheMaxAge: 0,
+          ...setCookiesField(extra.setCookies),
         };
       }
       if (!isRecord(result)) {
@@ -529,8 +586,14 @@ export async function renderRoute(
       if (isRecord(nested)) {
         props = nested;
         const returnedHeaders = result['headers'];
-        if (isStringRecord(returnedHeaders) && Object.keys(returnedHeaders).length > 0) {
-          gsspHeaders = returnedHeaders;
+        if (isHeaderRecord(returnedHeaders)) {
+          // Checked after flattening: `{ 'set-cookie': [] }` (cookies set
+          // only sometimes) sends nothing, so it must not cost the page its
+          // cacheability.
+          const flat = flattenResponseHeaders(returnedHeaders);
+          if (Object.keys(flat.headers).length > 0 || flat.setCookies.length > 0) {
+            gsspHeaders = flat;
+          }
         }
       } else {
         props = result;
@@ -589,8 +652,9 @@ export async function renderRoute(
         : (pageModule.revalidate ?? 0);
     const responseHeaders = {
       'content-type': 'text/html; charset=utf-8',
-      ...(gsspHeaders ?? {}),
+      ...(gsspHeaders?.headers ?? {}),
     };
+    const pageCookies = setCookiesField(gsspHeaders?.setCookies ?? []);
 
     // Streaming applies only to non-shareable renders (mirrors Rust's
     // render_is_shareable; page renders never set vary): shareable pages stay
@@ -610,6 +674,12 @@ export async function renderRoute(
       process.env.GIO_EXPORT !== '1' &&
       (registry === undefined || !registry.hasResponseInterceptors);
     const skipShell = req.skipShell === true;
+    if (skipShell && pageCookies.setCookies !== undefined) {
+      logger.warn(
+        'getServerSideProps set cookies during a PPR holes render - the cached shell already sent its headers, so they are dropped',
+        { path: req.path },
+      );
+    }
     if (pageModule.shell === 'cache' && !shareable && !skipShell) {
       logger.warn(
         "shell='cache' requires a shareable render (revalidate set, no per-request headers) - falling back",
@@ -689,6 +759,7 @@ export async function renderRoute(
           cacheMaxAge: skipShell ? 0 : cacheMaxAge,
           streaming: true,
           ...(pprShell && !skipShell ? { pprShell: true } : {}),
+          ...pageCookies,
         },
         stream,
         prefix: rootLayoutEntry !== undefined ? '' : DOCUMENT_PREFIX,
@@ -722,6 +793,7 @@ export async function renderRoute(
       body,
       cacheable,
       cacheMaxAge,
+      ...pageCookies,
     };
 
     if (registry !== undefined && !registry.isEmpty && isIPCResponse(ssrResponse)) {
@@ -815,16 +887,14 @@ async function runRouteHandler(
       return { type: 'sse', stream: result };
     }
     if (result instanceof Response) {
-      const headers: Record<string, string> = {};
-      result.headers.forEach((value, name) => {
-        headers[name.toLowerCase()] = value;
-      });
+      const { headers, setCookies } = webHeadersToIpc(result.headers);
       headers['content-type'] ??= 'text/plain; charset=utf-8';
+      const cookies = setCookiesField(setCookies);
       // text() would lossily transcode binary payloads (images, pdfs) to
       // U+FFFD; non-UTF-8 bodies cross base64-encoded like request bodies do.
       const raw = Buffer.from(await result.arrayBuffer());
       if (isUtf8(raw)) {
-        return { ...base, status: result.status, headers, body: raw.toString('utf8') };
+        return { ...base, status: result.status, headers, body: raw.toString('utf8'), ...cookies };
       }
       return {
         ...base,
@@ -832,6 +902,7 @@ async function runRouteHandler(
         headers,
         body: raw.toString('base64'),
         bodyBase64: true,
+        ...cookies,
       };
     }
     if (result === undefined || result === null) {

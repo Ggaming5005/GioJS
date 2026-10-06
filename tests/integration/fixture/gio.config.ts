@@ -4,6 +4,10 @@
  * Test plugin giving the integration harness observable endpoints:
  *   /echo   - echoes method + forwarded body (proves body forwarding)
  *   /whoami - echoes the caller's cookie, uncacheable (proves render isolation)
+ *   /plugin-cookies - a cookie in both the headers map and setCookies plus a
+ *                     second one (proves Rust neither duplicates nor drops)
+ *   /rule-cookies - two cookies a middleware.ts header rule adds a third to
+ *   /plugin-cookies-null - setCookies: null (must not stall the request)
  */
 import type { GioConfig } from '../../../packages/giojs-core/src/config-loader.ts';
 import type { IPCRequest, IPCResponse } from '../../../packages/giojs-core/src/context.ts';
@@ -33,6 +37,21 @@ export default {
         }
         if (req.path === '/whoami') {
           return text(req.id, `cookie=${req.headers['cookie'] ?? 'none'}`);
+        }
+        if (req.path === '/plugin-cookies') {
+          const res = text(req.id, 'cookies');
+          res.headers['set-cookie'] = 'a=1; Path=/';
+          res.setCookies = ['a=1; Path=/', 'b=2; Path=/'];
+          return res;
+        }
+        if (req.path === '/rule-cookies') {
+          const res = text(req.id, 'rule cookies');
+          res.setCookies = ['session=r1; Path=/; HttpOnly', 'csrf=r2; Path=/'];
+          return res;
+        }
+        if (req.path === '/plugin-cookies-null') {
+          // A plugin "clearing" cookies with null must not fail the frame.
+          return { ...text(req.id, 'no cookies'), setCookies: null as unknown as string[] };
         }
         return req;
       },

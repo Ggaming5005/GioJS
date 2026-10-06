@@ -38,8 +38,23 @@ function pickByExt(
   return null;
 }
 
+/**
+ * Response headers a getServerSideProps result may carry. An array sends one
+ * Set-Cookie header per entry for `set-cookie`; any other header's array is
+ * joined with ", " (RFC 9110 list syntax).
+ */
+export type GsspResponseHeaders = Record<string, string | string[]>;
+
 export interface RedirectResult {
   redirect: { destination: string; permanent: boolean };
+  /** Sent with the redirect - e.g. set-cookie on a login or logout hop. */
+  headers?: GsspResponseHeaders;
+}
+
+/** `{ props, headers }` form of a getServerSideProps result. */
+export interface PropsResult {
+  props: Record<string, unknown>;
+  headers?: GsspResponseHeaders;
 }
 
 export interface RouteModule {
@@ -72,7 +87,7 @@ export interface PageModule {
   default: React.ComponentType<Record<string, unknown>>;
   getServerSideProps?: (
     ctx: GsspContext,
-  ) => Promise<Record<string, unknown> | RedirectResult>;
+  ) => Promise<PropsResult | RedirectResult | Record<string, unknown>>;
   revalidate?: number | false;
   /**
    * PPR opt-in: 'cache' streams the render, caches the pre-Suspense shell,

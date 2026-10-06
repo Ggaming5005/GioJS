@@ -44,6 +44,24 @@ export async function POST(req: GioRequest) {
   return new Response('gone', { status: 202, headers: { 'X-Reason': 'cleanup' } });
 }`} />
 
+      <h2>Setting cookies</h2>
+      <p>
+        Append one <code>Set-Cookie</code> per cookie - each is sent as its own header,
+        byte-for-byte (cookies are never comma-joined, so <code>Expires</code> dates stay
+        intact). Other repeated headers such as <code>Link</code> or{' '}
+        <code>WWW-Authenticate</code> are combined into one comma-separated value.
+      </p>
+      <CodeBlock lang="ts" code={`// app/api/login/route.ts
+import type { GioRequest } from '@gio.js/core';
+
+export async function POST(req: GioRequest) {
+  const { session, csrf } = await login(req.json());
+  const headers = new Headers({ Location: '/dashboard' });
+  headers.append('Set-Cookie', \`session=\${session}; Path=/; HttpOnly; Secure; SameSite=Lax\`);
+  headers.append('Set-Cookie', \`csrf=\${csrf}; Path=/; Secure; SameSite=Strict\`);
+  return new Response(null, { status: 303, headers });
+}`} />
+
       <h2>Server-Sent Events</h2>
       <CodeBlock lang="ts" code={`// app/ticker/route.ts
 import { GioEventStream } from '@gio.js/core';
