@@ -35,7 +35,8 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(500);
 /// must not turn into a log flood.
 const LIMIT_WARNING_INTERVAL: Duration = Duration::from_secs(10);
 /// How long an idle connection gets to finish a graceful close (HTTP/2
-/// GOAWAY) before it is dropped outright.
+/// GOAWAY) before it is dropped outright. It runs only while nothing is in
+/// flight: a stream that lands after the GOAWAY is served to the end first.
 const IDLE_CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 /// `[server]` connection limits resolved once at startup, plus the hyper
@@ -46,6 +47,8 @@ pub struct ConnSettings {
     pub tls_handshake_timeout: Option<Duration>,
     header_read_timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
+    /// IDLE_CLOSE_GRACE; a field so tests can shorten it.
+    idle_close_grace: Duration,
     keep_alive_hint: Option<HeaderValue>,
     auto: AutoConnBuilder<TokioExecutor>,
     http1: hyper::server::conn::http1::Builder,
@@ -82,6 +85,7 @@ impl ConnSettings {
             tls_handshake_timeout: server.tls_handshake_timeout(),
             header_read_timeout,
             idle_timeout,
+            idle_close_grace: IDLE_CLOSE_GRACE,
             keep_alive_hint: keep_alive_hint(header_read_timeout, idle_timeout),
             auto,
             http1,
@@ -296,6 +300,15 @@ impl ConnActivity {
             }
         }
     }
+
+    /// When a connection that began its graceful close at `closing_since` is
+    /// dropped if it still has not closed: `grace` after it last went quiet.
+    /// None while a request is in flight, so a stream accepted after the
+    /// GOAWAY is never cut.
+    fn close_deadline(&self, closing_since: Instant, grace: Duration) -> Option<Instant> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (state.in_flight == 0).then(|| state.idle_since.max(closing_since) + grace)
+    }
 }
 
 pub struct RequestGuard(Arc<ConnActivity>);
@@ -370,15 +383,8 @@ pub async fn drive<F, E>(
             Watch::FirstRequest(at) | Watch::Idle(at) => Some(at),
             Watch::Busy | Watch::Unbounded => None,
         };
-        tokio::select! {
-            result = conn.as_mut() => {
-                if let Err(e) = result {
-                    log_conn_error(e.into());
-                }
-                return;
-            }
-            _ = activity.went_idle.notified() => continue,
-            _ = sleep_until(wake_at) => {}
+        if poll_until(conn.as_mut(), activity, wake_at).await {
+            return;
         }
         // Re-read at wake time: a request may have started meanwhile.
         match activity.watch(header_read_timeout, idle_timeout) {
@@ -390,10 +396,49 @@ pub async fn drive<F, E>(
             _ => {}
         }
     }
+
     debug!("closing idle connection");
     graceful_shutdown(conn.as_mut());
-    if let Ok(Err(e)) = tokio::time::timeout(IDLE_CLOSE_GRACE, conn).await {
-        log_conn_error(e.into());
+    // h2 keeps accepting streams until the client acks the PING sent with the
+    // GOAWAY, so a request already on the wire still lands after it. Such a
+    // stream is served to the end like any other: the close grace only runs
+    // while nothing is in flight.
+    let closing_since = Instant::now();
+    loop {
+        let drop_at = activity.close_deadline(closing_since, settings.idle_close_grace);
+        if poll_until(conn.as_mut(), activity, drop_at).await {
+            return;
+        }
+        if activity
+            .close_deadline(closing_since, settings.idle_close_grace)
+            .is_some_and(|at| at <= Instant::now())
+        {
+            debug!("idle connection did not finish closing - dropping it");
+            return;
+        }
+    }
+}
+
+/// Poll `conn` until it completes (true), or until the last in-flight request
+/// ends or `wake_at` passes (false: time to re-check the deadlines).
+async fn poll_until<F, E>(
+    conn: Pin<&mut F>,
+    activity: &ConnActivity,
+    wake_at: Option<Instant>,
+) -> bool
+where
+    F: Future<Output = Result<(), E>>,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    tokio::select! {
+        result = conn => {
+            if let Err(e) = result {
+                log_conn_error(e.into());
+            }
+            true
+        }
+        _ = activity.went_idle.notified() => false,
+        _ = sleep_until(wake_at) => false,
     }
 }
 
@@ -467,6 +512,34 @@ mod tests {
         assert_eq!(activity.watch(None, None), Watch::Unbounded);
         drop(activity.begin());
         assert_eq!(activity.watch(secs(10), None), Watch::Unbounded);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_grace_runs_only_while_nothing_is_in_flight() {
+        let activity = ConnActivity::new();
+        let grace = Duration::from_secs(5);
+        drop(activity.begin());
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let closing = Instant::now();
+        assert_eq!(
+            activity.close_deadline(closing, grace),
+            Some(closing + grace),
+            "counted from the GOAWAY when the connection was already idle"
+        );
+
+        let late = activity.begin();
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(
+            activity.close_deadline(closing, grace),
+            None,
+            "a stream accepted after the GOAWAY is never cut"
+        );
+        drop(late);
+        assert_eq!(
+            activity.close_deadline(closing, grace),
+            Some(Instant::now() + grace),
+            "the grace restarts when that stream ends"
+        );
     }
 
     #[test]
@@ -562,6 +635,13 @@ mod tests {
         server: ServerConfig,
         tls: Option<tokio_rustls::TlsAcceptor>,
     ) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
+        spawn_server_with(ConnSettings::from_config(&server), tls).await
+    }
+
+    async fn spawn_server_with(
+        settings: ConnSettings,
+        tls: Option<tokio_rustls::TlsAcceptor>,
+    ) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
         let app = axum::Router::new()
             .route("/", axum::routing::get(|| async { "ok" }))
             .route("/stream", axum::routing::get(slow_stream))
@@ -569,7 +649,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let settings = ConnSettings::from_config(&server);
         tokio::spawn(crate::serve_connections(
             listener,
             app,
@@ -744,8 +823,19 @@ mod tests {
         assert_stream_outlives_deadlines(true).await;
     }
 
-    /// (type, flags, stream id, payload) for each complete HTTP/2 frame.
-    fn h2_frames(mut buf: &[u8]) -> Vec<(u8, u8, u32, Vec<u8>)> {
+    const H2_DATA: u8 = 0x0;
+    const H2_HEADERS: u8 = 0x1;
+    const H2_SETTINGS: u8 = 0x4;
+    const H2_PING: u8 = 0x6;
+    const H2_GOAWAY: u8 = 0x7;
+    /// END_STREAM on DATA/HEADERS, ACK on SETTINGS/PING.
+    const H2_END_STREAM_OR_ACK: u8 = 0x1;
+
+    /// (type, flags, stream id, payload)
+    type H2Frame = (u8, u8, u32, Vec<u8>);
+
+    /// Every complete HTTP/2 frame in `buf`.
+    fn h2_frames(mut buf: &[u8]) -> Vec<H2Frame> {
         let mut frames = Vec::new();
         while buf.len() >= 9 {
             let len = u32::from_be_bytes([0, buf[0], buf[1], buf[2]]) as usize;
@@ -759,37 +849,77 @@ mod tests {
         frames
     }
 
+    fn h2_frame(kind: u8, flags: u8, stream_id: u32, payload: &[u8]) -> Vec<u8> {
+        let mut frame = (payload.len() as u32).to_be_bytes()[1..].to_vec();
+        frame.extend_from_slice(&[kind, flags]);
+        frame.extend_from_slice(&stream_id.to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    /// Client preface, an empty SETTINGS and `GET /` on stream 1.
+    fn h2_hello() -> Vec<u8> {
+        let mut hello = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+        hello.extend(h2_frame(H2_SETTINGS, 0, 0, &[]));
+        hello.extend(h2_get(1, "/"));
+        hello
+    }
+
+    /// HEADERS with END_STREAM | END_HEADERS for `GET <path>`.
+    fn h2_get(stream_id: u32, path: &str) -> Vec<u8> {
+        // HPACK: static-table :method GET and :scheme http, then :path as a
+        // literal without indexing on static name index 4.
+        let mut block = vec![0x82, 0x86, 0x04, path.len() as u8];
+        block.extend_from_slice(path.as_bytes());
+        h2_frame(H2_HEADERS, 0x5, stream_id, &block)
+    }
+
+    /// Read into `received` until `done` holds for the frames so far (true)
+    /// or the server closes the socket (false).
+    async fn read_h2_until(
+        client: &mut TcpStream,
+        received: &mut Vec<u8>,
+        done: impl Fn(&[H2Frame]) -> bool,
+    ) -> bool {
+        let mut buf = [0u8; 4096];
+        loop {
+            if done(&h2_frames(received)) {
+                return true;
+            }
+            match client.read(&mut buf).await {
+                Ok(0) | Err(_) => return false,
+                Ok(n) => received.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
+    /// The payload of the PING h2 sends with its graceful-close GOAWAY.
+    fn shutdown_ping(frames: &[H2Frame]) -> Option<Vec<u8>> {
+        frames
+            .iter()
+            .skip_while(|f| f.0 != H2_GOAWAY)
+            .find(|f| f.0 == H2_PING && f.1 & H2_END_STREAM_OR_ACK == 0)
+            .map(|f| f.3.clone())
+    }
+
     #[tokio::test]
     async fn http2_advertises_stream_cap_and_reaps_idle_connections() {
-        let (addr, _stop) = spawn_server(
-            server_config(|s| {
-                s.http2 = true;
-                s.idle_timeout_secs = 1;
-            }),
-            None,
-        )
-        .await;
+        let mut settings = ConnSettings::from_config(&server_config(|s| {
+            s.http2 = true;
+            s.idle_timeout_secs = 1;
+        }));
+        settings.idle_close_grace = Duration::from_millis(500);
+        let (addr, _stop) = spawn_server_with(settings, None).await;
         let mut client = TcpStream::connect(addr).await.unwrap();
-        let mut hello = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
-        hello.extend_from_slice(&[0, 0, 0, 4, 0, 0, 0, 0, 0]); // empty SETTINGS
-                                                               // HEADERS, END_STREAM | END_HEADERS, stream 1: HPACK static-table
-                                                               // :method GET, :scheme http, :path /.
-        hello.extend_from_slice(&[0, 0, 3, 1, 0x5, 0, 0, 0, 1, 0x82, 0x86, 0x84]);
-        client.write_all(&hello).await.unwrap();
+        client.write_all(&h2_hello()).await.unwrap();
 
         let mut received = Vec::new();
-        let mut buf = [0u8; 4096];
-        let saw_goaway = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match client.read(&mut buf).await {
-                    Ok(0) | Err(_) => return false,
-                    Ok(n) => received.extend_from_slice(&buf[..n]),
-                }
-                if h2_frames(&received).iter().any(|f| f.0 == 0x7) {
-                    return true;
-                }
-            }
-        })
+        let saw_goaway = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_h2_until(&mut client, &mut received, |frames| {
+                shutdown_ping(frames).is_some()
+            }),
+        )
         .await;
         assert_eq!(
             saw_goaway,
@@ -800,16 +930,122 @@ mod tests {
 
         let frames = h2_frames(&received);
         let (kind, _, _, settings) = &frames[0];
-        assert_eq!(*kind, 0x4, "server opens with SETTINGS");
+        assert_eq!(*kind, H2_SETTINGS, "server opens with SETTINGS");
         let max_streams = settings
             .chunks(6)
             .find(|s| s[..2] == [0, 3])
             .map(|s| u32::from_be_bytes([s[2], s[3], s[4], s[5]]));
         assert_eq!(max_streams, Some(250), "SETTINGS_MAX_CONCURRENT_STREAMS");
         assert!(
-            frames.iter().any(|f| f.0 == 0x1 && f.2 == 1),
+            frames.iter().any(|f| f.0 == H2_HEADERS && f.2 == 1),
             "the request on stream 1 was answered before the idle close"
         );
+
+        // The client never acks the PING, so h2 would wait on it forever:
+        // the close grace drops the connection.
+        let closed = tokio::time::timeout(
+            Duration::from_secs(3),
+            read_h2_until(&mut client, &mut received, |_| false),
+        )
+        .await;
+        assert_eq!(closed, Ok(false), "dropped after the close grace");
+    }
+
+    #[tokio::test]
+    async fn stream_opened_during_the_idle_goaway_is_served_to_the_end() {
+        // h2's graceful close sends GOAWAY(2^31-1) plus a PING and accepts new
+        // streams until the client acks that PING, so a request already on
+        // the wire still lands. It must be served in full however long it
+        // streams, not cut when the close grace runs out.
+        let mut settings = ConnSettings::from_config(&server_config(|s| {
+            s.http2 = true;
+            s.idle_timeout_secs = 1;
+        }));
+        // Well under slow_stream's 2.4s, so the grace ends mid-response.
+        settings.idle_close_grace = Duration::from_millis(500);
+        let (addr, _stop) = spawn_server_with(settings, None).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(&h2_hello()).await.unwrap();
+
+        let mut received = Vec::new();
+        let goaway = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_h2_until(&mut client, &mut received, |frames| {
+                shutdown_ping(frames).is_some()
+            }),
+        )
+        .await;
+        assert_eq!(goaway, Ok(true), "frames: {:?}", h2_frames(&received));
+        let ping = shutdown_ping(&h2_frames(&received)).unwrap();
+
+        // A request that crossed the GOAWAY on the wire, then the PING ack.
+        let mut late = h2_get(3, "/stream");
+        late.extend(h2_frame(H2_PING, H2_END_STREAM_OR_ACK, 0, &ping));
+        client.write_all(&late).await.unwrap();
+
+        let closed = tokio::time::timeout(
+            Duration::from_secs(8),
+            read_h2_until(&mut client, &mut received, |_| false),
+        )
+        .await;
+        assert_eq!(closed, Ok(false), "connection closes once stream 3 is done");
+        let frames = h2_frames(&received);
+        let body: Vec<u8> = frames
+            .iter()
+            .filter(|f| f.0 == H2_DATA && f.2 == 3)
+            .flat_map(|f| f.3.clone())
+            .collect();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("chunk5;"), "stream 3 cut short: {body}");
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.0 == H2_DATA && f.2 == 3 && f.1 & H2_END_STREAM_OR_ACK != 0),
+            "stream 3 ends with END_STREAM"
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_holds_its_max_connections_slot_until_it_closes() {
+        let (addr, _stop) = spawn_server(
+            server_config(|s| {
+                s.http2 = false;
+                s.max_connections = 1;
+            }),
+            None,
+        )
+        .await;
+        // The first client takes the only slot and keeps its connection open.
+        let mut first = TcpStream::connect(addr).await.unwrap();
+        first
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let n = first.read(&mut buf).await.unwrap();
+        let head = String::from_utf8_lossy(&buf[..n]);
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+
+        // The second connects (the kernel backlog completes the handshake)
+        // but is not served while the first holds the slot...
+        let mut second = TcpStream::connect(addr).await.unwrap();
+        second
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let early = tokio::time::timeout(Duration::from_millis(500), second.read(&mut buf)).await;
+        assert!(
+            early.is_err(),
+            "second client served while the first still holds the only slot"
+        );
+
+        // ...and is served as soon as the first hangs up.
+        drop(first);
+        let served = read_until_closed(&mut second, Duration::from_secs(5))
+            .await
+            .expect("second client is served once the slot frees");
+        let response = String::from_utf8_lossy(&served);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     }
 
     /// Never offers a certificate - fine here, the handshake never gets that far.
