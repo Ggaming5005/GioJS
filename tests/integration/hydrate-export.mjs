@@ -12,6 +12,9 @@
  *      is fetched from out/, swapped in, its route chunk imported, and the
  *      new route mounted and interactive the same way.
  *
+ * Each step also reports the head's metadata tags (`head`), so run.mjs can
+ * check that navigation replaced the first page's tags with the second's.
+ *
  * Run by run.mjs in a child process (it installs DOM globals and a module
  * resolve hook):
  *   node tests/integration/hydrate-export.mjs <outDir> <startPath> <navPath>
@@ -116,6 +119,16 @@ async function until(what, fn, timeoutMs = 10_000) {
   return false;
 }
 
+/** The head's metadata tags as `key=value` lines (title, named/property metas, canonical). */
+const headTags = () =>
+  [...document.head.querySelectorAll('title, meta[name], meta[property], link[rel="canonical"]')].map((el) =>
+    el.tagName === 'TITLE'
+      ? `title=${el.textContent}`
+      : `${el.getAttribute('name') ?? el.getAttribute('property') ?? el.getAttribute('rel')}=${
+          el.getAttribute('content') ?? el.getAttribute('href')
+        }`,
+  );
+
 const probe = () => document.querySelector('#__gio button[data-probe]');
 const probeText = () => probe()?.textContent ?? null;
 const click = (el) =>
@@ -128,6 +141,7 @@ async function exercise(target) {
   if (button !== null) click(button);
   await until(`${window.location.pathname} click handler`, () => /clicks=1/.test(probeText() ?? ''));
   target.afterClick = probeText();
+  target.head = headTags();
 }
 
 // The bootstrap <script type="module"> the exported HTML references.
