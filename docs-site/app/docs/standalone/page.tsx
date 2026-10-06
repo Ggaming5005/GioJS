@@ -39,7 +39,7 @@ export default function Page(): React.JSX.Element {
   server(.exe)     the Rust HTTP server binary for the target platform
   worker.js        the entire Node side bundled to one file (React included)
   run.mjs          launcher: spawns the server wired to worker.js and static/
-  static/          prebuilt hydration chunks
+  static/          prebuilt hydration chunks and route stylesheets
   public/          your public assets (if any)
   gio.toml         your server config (if any)
   .gio/            manifest (deployment ID input) and generated route types`} />
@@ -48,7 +48,10 @@ export default function Page(): React.JSX.Element {
         layout, <code>route.ts</code> handler, <code>gio.config</code>, and{' '}
         <code>middleware</code> file is statically imported and bundled, so boot performs no
         filesystem discovery and no TypeScript transform. The hydration chunks in{' '}
-        <code>static/</code> are built ahead of time too.
+        <code>static/</code> are built ahead of time too, and so are the route stylesheets:{' '}
+        <a href="/docs/css">CSS imports and CSS Modules</a> work exactly as with{' '}
+        <code>gio</code>, with each CSS Module&apos;s class names compiled into{' '}
+        <code>worker.js</code>.
       </p>
 
       <h2>Deploy</h2>
@@ -92,13 +95,6 @@ gio build standalone --target linux-x64`} />
         platform package must be installed - if it isn't, the build fails with the exact{' '}
         <code>npm i</code> command to run.
       </p>
-
-      <h2>Limitations</h2>
-      <div className="callout">
-        App-level <code>.css</code> imports (<code>import './styles.css'</code> from a page or
-        layout) are not carried into the standalone bundle in this version. Serve stylesheets
-        from <code>public/</code> and link them from a layout instead.
-      </div>
 
       <h2>When to prefer a normal deploy</h2>
       <p>
