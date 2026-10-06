@@ -21,7 +21,7 @@ mod tags;
 pub use backend::{CacheBackend, LocalBackend};
 pub use key::build_cache_key;
 pub use singleflight::SingleFlight;
-pub use tags::{path_has_prefix, path_tag, FillTicket, PathMatch, PATH_TAG_PREFIX};
+pub use tags::{path_tag, FillTicket, PathMatch, PATH_TAG_PREFIX};
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;

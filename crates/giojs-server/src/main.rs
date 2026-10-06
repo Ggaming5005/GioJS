@@ -31,6 +31,7 @@ mod ipc;
 mod metrics;
 mod path_hygiene;
 mod public_files;
+mod revalidate;
 mod rules;
 mod security;
 mod session_token;
@@ -58,7 +59,7 @@ use axum::{
 };
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
-use giojs_cache::{CacheConfig, CacheEntry, CacheStatus, PageCache, SingleFlight};
+use giojs_cache::{CacheConfig, CacheEntry, CacheStatus, FillTicket, PageCache, SingleFlight};
 use giojs_plugin::{PluginRegistry, PluginStartupCtx};
 use giojs_prefetch::{PrefetchBudgets, PrefetchConfig};
 use giojs_ratelimit::{RateLimitResult, RateLimitRule, RateLimiter};
@@ -391,6 +392,17 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     }
     let security = Arc::new(security);
 
+    let revalidate_token = match revalidate::resolve_token(
+        std::env::var(revalidate::TOKEN_ENV).ok().as_deref(),
+        &cfg.revalidate.token,
+    ) {
+        Ok(token) => token,
+        Err(error) => {
+            eprintln!("giojs-server: configuration error: {error}");
+            std::process::exit(1);
+        }
+    };
+
     info!("Starting Node SSR worker: {node_script}");
     let ipc = IpcClient::start(&node_script, &ipc_paths, &ipc_token, dev_mode, worker_env).await?;
     let cache_epoch: Arc<str> =
@@ -402,6 +414,14 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         swr_multiplier: 10,
         disk_max_bytes: DEFAULT_DISK_CACHE_MAX_BYTES,
     }));
+
+    // Index what a previous run left on disk so tag and path purges reach
+    // it. In the background: lookups stay correct while it runs.
+    let cache_for_index = cache.clone();
+    let epoch_for_index = cache_epoch.clone();
+    tokio::spawn(async move {
+        cache_for_index.index_disk(&epoch_for_index).await;
+    });
 
     let cache_for_eviction = cache.clone();
     tokio::spawn(async move {
@@ -644,6 +664,8 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         cache_epoch,
     };
 
+    spawn_worker_revalidations(state.clone());
+
     if !dev_mode
         && state.metrics_config.token.is_empty()
         && state.metrics_config.ip_allowlist.is_empty()
@@ -711,6 +733,19 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         .route("/_gio/health", get(health_handler))
         .route("/_gio/metrics", get(metrics_handler))
         .route("/_gio/image", get(image_handler_route));
+    // Without a token the route does not exist: /_gio/revalidate is then an
+    // unrouted /_gio path and answers 404 like any other.
+    if let Some(token) = revalidate_token {
+        info!("on-demand revalidation endpoint enabled: POST /_gio/revalidate");
+        let endpoint = Arc::new(revalidate::Endpoint {
+            token,
+            failures: revalidate::AuthFailures::default(),
+        });
+        app = app.route(
+            "/_gio/revalidate",
+            post(revalidate_handler).layer(axum::Extension(endpoint)),
+        );
+    }
 
     let dev_hosts = dev_mode.then(|| {
         Arc::new(dev_guard::DevHostPolicy::new(
@@ -967,6 +1002,142 @@ async fn metrics_handler(
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(axum::body::Body::from(body))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn i18n_locales(state: &AppState) -> &[String] {
+    state
+        .i18n
+        .as_ref()
+        .map_or(&[], |cfg| cfg.locales.as_slice())
+}
+
+/// `POST /_gio/revalidate` (routed only when a token is configured): purge
+/// cached pages by tag or path for external systems such as CMS webhooks.
+/// Bearer-authenticated; a client past its failed-attempt budget is refused
+/// before its token is even compared.
+async fn revalidate_handler(
+    State(state): State<AppState>,
+    axum::Extension(endpoint): axum::Extension<Arc<revalidate::Endpoint>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    let ip = client_identity::client_ip(&req, addr);
+    let now = std::time::Instant::now();
+    if let Some(retry_after) = endpoint.failures.blocked(ip, now) {
+        let mut resp = revalidate_json(
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({ "error": "too many failed attempts" }),
+        );
+        if let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().max(1).to_string()) {
+            resp.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        return resp;
+    }
+    let authorization = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    if !revalidate::token_matches(authorization, &endpoint.token) {
+        warn!(ip = %ip, "revalidation request with a missing or wrong token");
+        if !endpoint.failures.record(ip, now) {
+            return revalidate_json(
+                StatusCode::TOO_MANY_REQUESTS,
+                serde_json::json!({ "error": "too many failed attempts" }),
+            );
+        }
+        let mut resp = revalidate_json(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({ "error": "unauthorized" }),
+        );
+        resp.headers_mut()
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        return resp;
+    }
+
+    let read = axum::body::to_bytes(req.into_body(), revalidate::MAX_BODY_BYTES);
+    let body = match state.request_body_timeout {
+        Some(limit) => match tokio::time::timeout(limit, read).await {
+            Ok(result) => result,
+            Err(_) => {
+                return revalidate_json(
+                    StatusCode::REQUEST_TIMEOUT,
+                    serde_json::json!({ "error": "request body timed out" }),
+                )
+            }
+        },
+        None => read.await,
+    };
+    let Ok(body) = body else {
+        return revalidate_json(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            serde_json::json!({ "error": "request body too large" }),
+        );
+    };
+    let request = match serde_json::from_slice::<revalidate::RevalidateRequest>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return revalidate_json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": format!(
+                        "expected a JSON body {{ \"tags\"?: string[], \"paths\"?: string[], \"prefix\"?: boolean }}: {error}"
+                    ),
+                }),
+            )
+        }
+    };
+    let targets = match revalidate::Targets::validate(request, i18n_locales(&state)) {
+        Ok(targets) => targets,
+        Err(error) => {
+            return revalidate_json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "error": error.to_string() }),
+            )
+        }
+    };
+    let purged = targets.apply(&state.cache).await;
+    info!(source = "endpoint", ip = %ip, targets = %revalidate::summary(&targets), purged, "cache revalidated");
+    revalidate_json(
+        StatusCode::OK,
+        serde_json::json!({ "ok": true, "purged": purged }),
+    )
+}
+
+fn revalidate_json(status: StatusCode, body: serde_json::Value) -> Response {
+    let mut resp = (status, axum::Json(body)).into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
+}
+
+/// Execute the worker's `revalidateTag` / `revalidatePath` purges in order,
+/// acking each, so an awaited call returns only once its purge happened.
+fn spawn_worker_revalidations(state: AppState) {
+    let Some(mut requests) = state.ipc.take_revalidations() else {
+        return;
+    };
+    tokio::spawn(async move {
+        while let Some(revalidation) = requests.recv().await {
+            let outcome = match revalidate::Targets::validate(
+                revalidation.request,
+                i18n_locales(&state),
+            ) {
+                Ok(targets) => {
+                    let purged = targets.apply(&state.cache).await;
+                    info!(source = "worker", targets = %revalidate::summary(&targets), purged, "cache revalidated");
+                    Ok(purged)
+                }
+                Err(error) => {
+                    warn!(source = "worker", %error, "revalidation refused");
+                    Err(error.to_string())
+                }
+            };
+            state
+                .ipc
+                .send_revalidate_ack(&revalidation.id, outcome)
+                .await;
+        }
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -1742,6 +1913,9 @@ async fn dynamic_handler(
     // the leader serves it directly instead of rendering a second time.
     let leader_slot: Arc<tokio::sync::Mutex<Option<IpcSendResult>>> =
         Arc::new(tokio::sync::Mutex::new(None));
+    // Taken before the render: if a revalidation purges this page while it
+    // renders, the result is served but not cached (it may predate the purge).
+    let fill_ticket = state.cache.fill_ticket();
 
     let coalesced = {
         let coalesce = state.coalesce.clone();
@@ -1820,12 +1994,10 @@ async fn dynamic_handler(
                                 max_age_secs: resp.cache_max_age,
                                 deployment_id: state.cache_epoch.to_string(),
                                 composed,
-                                tags: resp.cache_tags.clone(),
+                                tags: revalidate::entry_tags(&path, &resp.cache_tags),
                                 ppr_shell: false,
                             };
-                            if let Err(e) = state.cache.put(&cache_key, entry).await {
-                                warn!(path = %path, error = %e, "cache write failed");
-                            }
+                            store_fill(&state.cache, &cache_key, entry, fill_ticket, &path).await;
                             CoalescedRender::Page(Arc::new(RenderedPage {
                                 status: resp.status,
                                 headers: resp.headers,
@@ -1915,6 +2087,7 @@ async fn dynamic_handler(
                     respond_from_render(
                         &state,
                         &cache_key,
+                        fill_ticket,
                         &method,
                         &path,
                         resp,
@@ -1940,6 +2113,7 @@ async fn dynamic_handler(
                     &deployment_id,
                     &default_locale,
                     &cache_key,
+                    fill_ticket,
                     encoding,
                     &locale,
                     start,
@@ -2074,6 +2248,7 @@ async fn render_uncoalesced(
         skip_shell: false,
         client,
     };
+    let fill_ticket = state.cache.fill_ticket();
     let ipc_start = std::time::Instant::now();
     match state.ipc.send_request(ipc_req).await {
         Ok(IpcSendResult::Response(resp)) => {
@@ -2083,6 +2258,7 @@ async fn render_uncoalesced(
             respond_from_render(
                 state,
                 cache_key,
+                fill_ticket,
                 method,
                 path,
                 resp,
@@ -2117,6 +2293,7 @@ async fn render_uncoalesced(
                 deployment_id,
                 default_locale,
                 cache_key,
+                fill_ticket,
                 encoding,
                 locale,
                 start,
@@ -2142,6 +2319,7 @@ async fn render_uncoalesced(
 async fn respond_from_render(
     state: &AppState,
     cache_key: &str,
+    fill_ticket: FillTicket,
     method: &str,
     path: &str,
     resp: ipc::IpcResponse,
@@ -2175,12 +2353,10 @@ async fn respond_from_render(
             max_age_secs: resp.cache_max_age,
             deployment_id: state.cache_epoch.to_string(),
             composed,
-            tags: resp.cache_tags.clone(),
+            tags: revalidate::entry_tags(path, &resp.cache_tags),
             ppr_shell: false,
         };
-        if let Err(e) = state.cache.put(cache_key, entry).await {
-            warn!(path = %path, error = %e, "cache write failed");
-        }
+        store_fill(&state.cache, cache_key, entry, fill_ticket, path).await;
     }
     if state.dev_mode {
         state.devtools.update_route_mode(
@@ -2342,6 +2518,7 @@ fn respond_stream(
     deployment_id: &str,
     default_locale: &str,
     cache_key: &str,
+    fill_ticket: FillTicket,
     encoding: &str,
     locale: &str,
     start: std::time::Instant,
@@ -2398,7 +2575,8 @@ fn respond_stream(
         headers: cacheable_response_headers(&response.headers),
         max_age_secs: response.cache_max_age,
         deployment_id: state.cache_epoch.to_string(),
-        tags: response.cache_tags.clone(),
+        tags: revalidate::entry_tags(path, &response.cache_tags),
+        fill_ticket,
         head_snippets: stream_head_snippets(state, deployment_id, default_locale),
         lang,
     });
@@ -2472,6 +2650,7 @@ async fn put_ppr_shell_entry(
     max_age_secs: u64,
     deployment_id: String,
     tags: Vec<String>,
+    fill_ticket: FillTicket,
 ) {
     let html = compose_ppr_shell(raw_shell, head_snippets, lang);
     let entry = CacheEntry {
@@ -2485,8 +2664,25 @@ async fn put_ppr_shell_entry(
         tags,
         ppr_shell: true,
     };
-    if let Err(e) = cache.put(cache_key, entry).await {
-        warn!(path = %path, error = %e, "PPR shell cache write failed");
+    store_fill(cache, cache_key, entry, fill_ticket, path).await;
+}
+
+/// Store a fill rendered after `fill_ticket` was taken - unless a
+/// revalidation purged the page meanwhile: its content may predate the
+/// purge, and the next request renders it again instead.
+async fn store_fill(
+    cache: &PageCache,
+    cache_key: &str,
+    entry: CacheEntry,
+    fill_ticket: FillTicket,
+    path: &str,
+) {
+    match cache.put_fresh(cache_key, entry, fill_ticket).await {
+        Ok(true) => {}
+        Ok(false) => {
+            debug!(path = %path, "page was revalidated while rendering - result not cached")
+        }
+        Err(e) => warn!(path = %path, error = %e, "cache write failed"),
     }
 }
 
@@ -2503,6 +2699,7 @@ struct PprShellCapture {
     max_age_secs: u64,
     deployment_id: String,
     tags: Vec<String>,
+    fill_ticket: FillTicket,
     head_snippets: String,
     lang: Option<String>,
 }
@@ -2536,6 +2733,7 @@ impl PprShellCapture {
             max_age_secs,
             deployment_id,
             tags,
+            fill_ticket,
             head_snippets,
             lang,
             ..
@@ -2553,6 +2751,7 @@ impl PprShellCapture {
                 max_age_secs,
                 deployment_id,
                 tags,
+                fill_ticket,
             )
             .await;
         });
@@ -3797,6 +3996,8 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
     req.client.ip = None;
     let locale = req.locale.clone();
     let req_path = req.path.clone();
+    // Before the render: a purge landing mid-refresh must win over it.
+    let fill_ticket = state.cache.fill_ticket();
     tokio::spawn(async move {
         match state.ipc.send_request(req).await {
             Ok(IpcSendResult::Response(resp)) if render_is_shareable(&resp) => {
@@ -3817,12 +4018,10 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                     max_age_secs: resp.cache_max_age,
                     deployment_id: state.cache_epoch.to_string(),
                     composed,
-                    tags: resp.cache_tags,
+                    tags: revalidate::entry_tags(&req_path, &resp.cache_tags),
                     ppr_shell: false,
                 };
-                if let Err(e) = state.cache.put(&key, entry).await {
-                    warn!(key = %key, error = %e, "background revalidation cache write failed");
-                }
+                store_fill(&state.cache, &key, entry, fill_ticket, &req_path).await;
             }
             // The page is gone (notFound() or `{ notFound: true }` - 404s are
             // never cacheable). This render was the anonymous variant, so the
@@ -3856,7 +4055,8 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                             cacheable_response_headers(&response.headers),
                             response.cache_max_age,
                             state.cache_epoch.to_string(),
-                            response.cache_tags,
+                            revalidate::entry_tags(&req_path, &response.cache_tags),
+                            fill_ticket,
                         )
                         .await;
                     }
@@ -5197,6 +5397,7 @@ mod tests {
     }
 
     fn shell_capture_with(cache: Arc<PageCache>, cache_key: &str) -> PprShellCapture {
+        let fill_ticket = cache.fill_ticket();
         PprShellCapture {
             raw: BytesMut::new(),
             overflowed: false,
@@ -5207,7 +5408,8 @@ mod tests {
             headers: HashMap::from([("content-type".into(), "text/html; charset=utf-8".into())]),
             max_age_secs: 60,
             deployment_id: "dep-1".into(),
-            tags: Vec::new(),
+            tags: revalidate::entry_tags("/ppr", &["feed".to_string()]),
+            fill_ticket,
             head_snippets: "<script>D</script>".into(),
             lang: None,
         }
@@ -5287,6 +5489,31 @@ mod tests {
         assert!(
             cache.get("ppr-torn", "dep-1").await.is_none(),
             "a stream aborted before shell_end must never cache a torn shell"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn a_shell_rendered_across_a_revalidation_is_not_stored() {
+        use tokio_stream::StreamExt as _;
+        let (cache, dir) = temp_cache("ppr-race");
+        let (client, _write_rx) = ipc::test_client_with_write_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
+        let mut stream =
+            render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
+        // The render (and its ticket) started before the purge.
+        stream.shell_capture = Some(shell_capture_with(cache.clone(), "ppr-raced"));
+        assert_eq!(cache.invalidate_tags(&["feed"]).await, 0);
+
+        tx.send(RenderFrame::Chunk(Bytes::from("<p>OLD SHELL</p>")))
+            .unwrap();
+        tx.send(RenderFrame::ShellEnd).unwrap();
+        tx.send(RenderFrame::End).unwrap();
+        while stream.next().await.is_some() {}
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            cache.get("ppr-raced", "dep-1").await.is_none(),
+            "a shell that may predate the purge must not be cached after it"
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

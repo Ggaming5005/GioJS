@@ -39,6 +39,18 @@ pub struct MetricsConfig {
     pub ip_allowlist: Vec<String>,
 }
 
+/// `[revalidate]`: the on-demand revalidation endpoint (see revalidate.rs).
+/// GIO_REVALIDATE_TOKEN overrides `token`; with neither set, the endpoint
+/// does not exist. Unknown keys are a startup error: a misspelled token key
+/// must not silently leave the endpoint off.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RevalidateConfig {
+    /// Bearer token for `POST /_gio/revalidate`, at least 32 bytes.
+    #[serde(default)]
+    pub token: String,
+}
+
 /// `[dev]`: settings that only apply when NODE_ENV=development.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct DevConfig {
@@ -184,6 +196,8 @@ pub struct GioConfig {
     pub dev: DevConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub revalidate: RevalidateConfig,
 }
 
 impl GioConfig {
@@ -673,6 +687,20 @@ mod tests {
             serde_json::from_str(&ImageConfig::default().worker_json()).unwrap();
         assert_eq!(defaults["widths"].as_array().unwrap().len(), 16);
         assert_eq!(defaults["quality"], 75);
+    }
+
+    #[test]
+    fn revalidate_section_parses_and_rejects_misspelled_keys() {
+        let path = unique_temp_path("revalidate.toml");
+        std::fs::write(&path, "[revalidate]\ntoken = \"abc\"\n").unwrap();
+        let result = GioConfig::load_from_path(&path);
+        assert_eq!(result.unwrap().revalidate.token, "abc");
+
+        std::fs::write(&path, "[revalidate]\ntokn = \"abc\"\n").unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
+        assert!(GioConfig::default().revalidate.token.is_empty());
     }
 
     #[test]
