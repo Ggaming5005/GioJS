@@ -21,7 +21,9 @@ export default function Page(): React.JSX.Element {
         attached. GioJS refuses upgrade requests whose <code>Origin</code> is another site
         (403, before the upgrade); same-origin pages, origins listed in{' '}
         <code>[security.csrf] trusted_origins</code>, and clients that send no{' '}
-        <code>Origin</code> connect normally. See <a href="/docs/security">Security</a>.
+        <code>Origin</code> connect normally. The check stays on when{' '}
+        <code>[security.csrf] enabled = false</code>; <code>[security.websocket] check_origin</code>{' '}
+        switches it. See <a href="/docs/security">Security</a>.
       </p>
     </>
   );

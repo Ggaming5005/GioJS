@@ -14,16 +14,18 @@
 //!   PPR shells replayed, so a render cannot know the nonce of the response
 //!   that will carry it: the worker renders with a secret placeholder, and
 //!   this layer swaps it for a fresh nonce in the body and headers of every
-//!   dynamic response - buffered, cached, streamed, PPR shell + holes alike -
-//!   before compression. The placeholder is random, persisted beside the
-//!   page cache (so the disk cache survives restarts) and never sent to a
-//!   client: markup an attacker manages to store cannot name it, so it can
-//!   never be promoted to a valid nonce.
+//!   dynamic response - buffered, cached, streamed, PPR shell + holes alike,
+//!   whatever the content type - before compression. The placeholder is
+//!   random, persisted beside the page cache (so the disk cache survives
+//!   restarts), rotated with each deployment and never sent to a client:
+//!   markup an attacker manages to store cannot name it, so it can never be
+//!   promoted to a valid nonce.
 //! - Cross-site request protection: unsafe methods and WebSocket upgrades
 //!   are refused when the browser reports another site (Sec-Fetch-Site), or,
 //!   without that header, when Origin names another host than the request's.
 //!   Requests carrying neither header are not from a browser page and cannot
-//!   be forged cross-site, so they pass.
+//!   be forged cross-site, so they pass. `[security.csrf] enabled` and
+//!   `[security.websocket] check_origin` switch the two checks separately.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
@@ -39,10 +41,9 @@ use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use bytes::{Bytes, BytesMut};
-use hyper::body::Body as _;
+use hyper::body::{Body as HttpBody, Frame, SizeHint};
 use thiserror::Error;
-use tokio_stream::Stream;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::config::{default_hsts_max_age, HstsSetting, SecurityConfig};
 use crate::rules::{PathPattern, RuleError};
@@ -50,22 +51,25 @@ use crate::rules::{PathPattern, RuleError};
 /// Worker environment variable carrying the nonce placeholder.
 pub const NONCE_PLACEHOLDER_ENV: &str = "GIO_CSP_NONCE_PLACEHOLDER";
 
-/// File (inside the placeholder directory) persisting the placeholder.
+/// Name prefix of the files (inside the placeholder directory) persisting
+/// the placeholder: `csp-nonce-placeholder-<deployment fingerprint>`.
 const PLACEHOLDER_FILE: &str = "csp-nonce-placeholder";
 
 /// Hex characters in a placeholder (128 bits).
 const PLACEHOLDER_LEN: usize = 32;
 
-/// Random bytes in a nonce (144 bits; 24 base64 characters, no padding).
-const NONCE_BYTES: usize = 18;
+/// Random bytes in a nonce (192 bits; 32 base64 characters, no padding).
+const NONCE_BYTES: usize = 24;
 
-/// Bodies with a known length up to this size are rewritten in one pass and
-/// keep a Content-Length; anything else is rewritten as a stream.
-const MAX_BUFFERED_SUBSTITUTION: u64 = 16 * 1024 * 1024;
+// A nonce is exactly as long as the placeholder it replaces, so substitution
+// never changes a body's length: Content-Length, size hints and byte ranges
+// of every response stay valid, and no body has to be buffered.
+// (Whole base64 groups: 3 bytes per 4 characters, no padding.)
+const _: () = assert!(NONCE_BYTES * 4 == PLACEHOLDER_LEN * 3);
 
-/// Distinct rejected origins logged at warn level before the check goes
-/// quiet (debug level) - a hostile page can loop requests at us.
-const MAX_WARNED_ORIGINS: usize = 64;
+/// Distinct keys (rejected origins, refused paths) logged at warn level
+/// before a check goes quiet (debug level) - a client can loop requests.
+const MAX_WARNED_KEYS: usize = 64;
 
 #[derive(Debug, Error)]
 pub enum SecurityConfigError {
@@ -136,30 +140,38 @@ pub fn with_nonce_attr(markup: &str, tag: &str, attr: &str) -> String {
     }
 }
 
-/// The placeholder persisted under `dir`, created on first use. Persisting
-/// keeps disk-cached pages (which contain it) servable across restarts.
+/// The placeholder of `deployment_id` persisted under `dir`, created on
+/// first use. Persisting keeps disk-cached pages (which contain it) servable
+/// across restarts. A new deployment gets a new placeholder and the files of
+/// earlier ones are deleted: its cache entries never match theirs anyway
+/// (see `cache_epoch`), and a placeholder that ever leaked dies with the
+/// deployment that leaked it. Deleting the files rotates it by hand.
 /// Falls back to a per-process placeholder when the directory is not
-/// writable - correct, only the disk cache is then lost at the next start
-/// (cache entries are stamped with the placeholder's fingerprint, see
-/// `cache_epoch`).
-pub fn load_or_create_nonce_placeholder(dir: &Path) -> String {
-    let path = dir.join(PLACEHOLDER_FILE);
+/// writable - correct, only the disk cache is then lost at the next start.
+pub fn load_or_create_nonce_placeholder(dir: &Path, deployment_id: &str) -> String {
+    let name = placeholder_file_name(deployment_id);
+    let placeholder = load_or_create_placeholder_file(dir, &dir.join(&name));
+    remove_stale_placeholder_files(dir, &name);
+    placeholder
+}
+
+fn load_or_create_placeholder_file(dir: &Path, path: &Path) -> String {
     let fresh = generate_placeholder();
     // The second attempt follows the removal of a corrupt file.
     for _ in 0..2 {
-        if let Some(existing) = read_placeholder(&path) {
+        if let Some(existing) = read_placeholder(path) {
             return existing;
         }
-        match create_placeholder_file(dir, &path, &fresh) {
+        match create_placeholder_file(dir, path, &fresh) {
             Ok(()) => return fresh,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // Another instance sharing the cache just won the race (its
                 // file is complete: it was linked into place fully written),
                 // or the file is corrupt and must go.
-                if let Some(existing) = read_placeholder(&path) {
+                if let Some(existing) = read_placeholder(path) {
                     return existing;
                 }
-                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(path);
             }
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "cannot persist the CSP nonce placeholder - the disk page cache will not survive a restart");
@@ -168,6 +180,44 @@ pub fn load_or_create_nonce_placeholder(dir: &Path) -> String {
         }
     }
     fresh
+}
+
+/// `csp-nonce-placeholder-<16 hex>`: the deployment id may come from the
+/// environment (GIO_DEPLOYMENT_ID), so only its fingerprint names the file.
+fn placeholder_file_name(deployment_id: &str) -> String {
+    format!("{PLACEHOLDER_FILE}-{}", fingerprint(deployment_id, 8))
+}
+
+/// Delete the placeholder files of other deployments (and the unsuffixed
+/// name of earlier versions); temp files of a concurrent start are kept.
+fn remove_stale_placeholder_files(dir: &Path, keep: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let stale = name != keep
+            && (name == PLACEHOLDER_FILE
+                || name
+                    .strip_prefix(PLACEHOLDER_FILE)
+                    .and_then(|rest| rest.strip_prefix('-'))
+                    .is_some_and(|fp| fp.len() == 16 && fp.bytes().all(|b| b.is_ascii_hexdigit())));
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// The first `bytes` bytes of SHA-256(`value`), hex.
+fn fingerprint(value: &str, bytes: usize) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(value.as_bytes())[..bytes]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn read_placeholder(path: &Path) -> Option<String> {
@@ -223,7 +273,8 @@ fn random_bytes() -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// A fresh nonce for one response: 144 random bits, base64.
+/// A fresh nonce for one response: 192 random bits, base64 - exactly
+/// `PLACEHOLDER_LEN` characters.
 pub fn generate_nonce() -> String {
     crate::ws_ipc::b64::encode(&random_bytes()[..NONCE_BYTES])
 }
@@ -235,14 +286,9 @@ pub fn generate_nonce() -> String {
 /// after it was disabled (an unsubstituted placeholder would leak), or under
 /// another placeholder are misses - and deleted.
 pub fn cache_epoch(deployment_id: &str, placeholder: Option<&str>) -> String {
-    use sha2::{Digest, Sha256};
     match placeholder {
         None => deployment_id.to_string(),
-        Some(placeholder) => {
-            let digest = Sha256::digest(placeholder.as_bytes());
-            let fingerprint: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
-            format!("{deployment_id}+csp-{fingerprint}")
-        }
+        Some(placeholder) => format!("{deployment_id}+csp-{}", fingerprint(placeholder, 4)),
     }
 }
 
@@ -305,6 +351,11 @@ impl NonceReplacer {
         (!remaining.is_empty()).then(|| remaining.freeze())
     }
 
+    /// Bytes fed but not yet returned.
+    fn held(&self) -> usize {
+        self.carry.len()
+    }
+
     /// Copy `data` into `out` with every complete placeholder replaced, up
     /// to the end of the last match. Returns the offset of the unconsumed rest.
     fn replace_into(&self, data: &[u8], out: &mut BytesMut) -> usize {
@@ -343,36 +394,82 @@ fn partial_prefix_len(data: &[u8], needle: &[u8]) -> usize {
         .unwrap_or(0)
 }
 
-/// Response body stream with the placeholder replaced chunk by chunk.
-struct NonceBodyStream {
-    inner: axum::body::BodyDataStream,
+/// A response body with the placeholder replaced chunk by chunk. The nonce
+/// is exactly as long as the placeholder, so the body keeps its length: its
+/// size hint (hence Content-Length) and byte ranges stay valid, and nothing
+/// is buffered beyond a possible placeholder start at a chunk's end.
+struct NonceBody {
+    inner: Body,
     replacer: NonceReplacer,
+    /// Trailers that arrived while bytes were held back: sent after them.
+    trailers: Option<HeaderMap>,
     done: bool,
 }
 
-impl Stream for NonceBodyStream {
-    type Item = Result<Bytes, axum::Error>;
+impl HttpBody for NonceBody {
+    type Data = Bytes;
+    type Error = axum::Error;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
         let this = self.get_mut();
         loop {
+            if let Some(trailers) = this.trailers.take() {
+                this.done = true;
+                return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
+            }
             if this.done {
                 return Poll::Ready(None);
             }
-            match Pin::new(&mut this.inner).poll_next(cx) {
-                Poll::Ready(Some(Ok(chunk))) => {
-                    if let Some(out) = this.replacer.feed(chunk) {
-                        return Poll::Ready(Some(Ok(out)));
+            match Pin::new(&mut this.inner).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
+                    Ok(chunk) => {
+                        if let Some(out) = this.replacer.feed(chunk) {
+                            return Poll::Ready(Some(Ok(Frame::data(out))));
+                        }
                     }
-                }
+                    // Trailers end the body: release the held bytes first.
+                    Err(frame) => {
+                        if let Ok(trailers) = frame.into_trailers() {
+                            this.trailers = Some(trailers);
+                            if let Some(rest) = this.replacer.finish() {
+                                return Poll::Ready(Some(Ok(Frame::data(rest))));
+                            }
+                        }
+                    }
+                },
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
                 Poll::Ready(None) => {
                     this.done = true;
-                    return Poll::Ready(this.replacer.finish().map(Ok));
+                    return Poll::Ready(this.replacer.finish().map(|rest| Ok(Frame::data(rest))));
                 }
                 Poll::Pending => return Poll::Pending,
             }
         }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.trailers.is_none()
+            && (self.done || (self.replacer.held() == 0 && self.inner.is_end_stream()))
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        if self.done {
+            return SizeHint::with_exact(0);
+        }
+        let held = self.replacer.held() as u64;
+        let inner = self.inner.size_hint();
+        if let Some(exact) = inner.exact() {
+            return SizeHint::with_exact(exact + held);
+        }
+        let mut hint = SizeHint::new();
+        if let Some(upper) = inner.upper() {
+            hint.set_upper(upper + held);
+        }
+        hint.set_lower(inner.lower() + held);
+        hint
     }
 }
 
@@ -443,6 +540,11 @@ pub struct SecurityPolicy {
     /// Set when nonces are on (`with_nonce_placeholder`).
     placeholder: Option<Bytes>,
     csrf: CsrfPolicy,
+    /// `[security.websocket] check_origin`: vet upgrade Origins (with the
+    /// CSRF trusted origins and exempt paths) even when CSRF is off.
+    websocket_origin_check: bool,
+    /// Paths whose encoded dynamic body was refused, already logged.
+    refused_encoded: WarnOnce,
 }
 
 const DEFAULT_HEADERS: [(&str, &str); 3] = [
@@ -507,6 +609,8 @@ impl SecurityPolicy {
             )?,
             placeholder: None,
             csrf: CsrfPolicy::new(&cfg.csrf)?,
+            websocket_origin_check: cfg.websocket.check_origin,
+            refused_encoded: WarnOnce::default(),
         })
     }
 
@@ -529,6 +633,20 @@ impl SecurityPolicy {
         &self.csrf
     }
 
+    pub fn websocket_origin_check(&self) -> bool {
+        self.websocket_origin_check
+    }
+
+    /// Whether a request gets the cross-site check: an unsafe method while
+    /// CSRF protection is on, or a WebSocket upgrade while the origin check
+    /// is on. The two switches are independent - turning CSRF off for an app
+    /// with its own form tokens must not reopen cross-site WebSocket
+    /// hijacking - and an upgrade header never exempts an unsafe method.
+    pub fn checks_cross_site(&self, method: &Method, websocket: bool) -> bool {
+        (self.csrf.enabled && is_unsafe_method(method))
+            || (self.websocket_origin_check && websocket)
+    }
+
     /// Names of the default headers, for the startup log line.
     pub fn default_header_names(&self) -> Vec<&str> {
         self.defaults
@@ -546,9 +664,14 @@ impl SecurityPolicy {
     }
 
     /// Stamp the defaults and CSP onto a response and substitute the nonce
-    /// placeholder (headers and, for dynamic text responses, the body).
-    pub async fn secure_response(&self, mut resp: Response) -> Response {
+    /// placeholder (headers and, for dynamic responses, the body). `path`
+    /// only names the request in the log.
+    pub fn secure_response(&self, path: &str, resp: Response) -> Response {
         let mut nonce = LazyNonce::default();
+        let mut resp = match &self.placeholder {
+            Some(placeholder) => self.substitute_placeholder(path, resp, placeholder, &mut nonce),
+            None => resp,
+        };
         let headers = resp.headers_mut();
         headers.remove(HeaderName::from_static("x-powered-by"));
         for (name, value) in &self.defaults {
@@ -557,32 +680,95 @@ impl SecurityPolicy {
         for csp in [&self.csp, &self.csp_report_only].into_iter().flatten() {
             stamp_default(headers, &csp.name, || csp.value(&mut nonce));
         }
-        let Some(placeholder) = self.placeholder.clone() else {
-            return resp;
-        };
-        substitute_header_values(resp.headers_mut(), &placeholder, &mut nonce);
-        if !substitutes_body(resp.headers()) {
-            return resp;
-        }
-        let replacer = NonceReplacer::new(placeholder, Bytes::from(nonce.get().to_string()));
-        let (mut parts, body) = resp.into_parts();
-        // The nonce and the placeholder differ in length.
-        parts.headers.remove(header::CONTENT_LENGTH);
-        let body = match body.size_hint().exact() {
-            Some(len) if len <= MAX_BUFFERED_SUBSTITUTION => {
-                match axum::body::to_bytes(body, MAX_BUFFERED_SUBSTITUTION as usize).await {
-                    Ok(bytes) => Body::from(replacer.replace_all(bytes)),
-                    Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-                }
-            }
-            _ => Body::from_stream(NonceBodyStream {
-                inner: body.into_data_stream(),
-                replacer,
-                done: false,
-            }),
-        };
-        Response::from_parts(parts, body)
+        resp
     }
+
+    fn substitute_placeholder(
+        &self,
+        path: &str,
+        mut resp: Response,
+        placeholder: &Bytes,
+        nonce: &mut LazyNonce,
+    ) -> Response {
+        substitute_header_values(resp.headers_mut(), placeholder, nonce);
+        match body_scope(&resp) {
+            BodyScope::Untouched => resp,
+            BodyScope::Substitute => {
+                let replacer =
+                    NonceReplacer::new(placeholder.clone(), Bytes::from(nonce.get().to_string()));
+                resp.map(|inner| {
+                    Body::new(NonceBody {
+                        inner,
+                        replacer,
+                        trailers: None,
+                        done: false,
+                    })
+                })
+            }
+            BodyScope::Encoded(encoding) => {
+                if self.refused_encoded.first(path) {
+                    error!(path = %path, content_encoding = %encoding, "refused a dynamic response that sets its own Content-Encoding: with [security] CSP nonces on, every dynamic body must be checked for the nonce placeholder, and a compressed one cannot be - drop the header and let the server compress (repeats for this path are logged at debug level)");
+                } else {
+                    tracing::debug!(path = %path, content_encoding = %encoding, "refused a dynamic response that sets its own Content-Encoding");
+                }
+                refused_encoded_response()
+            }
+        }
+    }
+}
+
+/// What the placeholder substitution does with a response body.
+#[derive(Debug, PartialEq, Eq)]
+enum BodyScope {
+    Untouched,
+    Substitute,
+    /// A dynamic body the app compressed itself (the encoding): it cannot
+    /// be checked, so it is refused rather than risk the placeholder.
+    Encoded(String),
+}
+
+/// Every dynamic body may carry the placeholder, whatever its content type:
+/// app code can put `cspNonce()` into JavaScript, CSS, XML, CSV or a binary
+/// format as easily as into HTML, and one leaked placeholder would let
+/// stored markup name a valid nonce. A random 32-hex string never occurs in
+/// other bytes by accident. Untouched: public/ and build assets (`x-gio-cache:
+/// static`), which never contain it and keep their exact bytes, and empty
+/// bodies (HEAD, 204, 304, upgrades).
+fn body_scope(resp: &Response) -> BodyScope {
+    let headers = resp.headers();
+    if headers
+        .get("x-gio-cache")
+        .is_some_and(|value| value.as_bytes() == b"static")
+        || resp.body().size_hint().exact() == Some(0)
+        || resp.status() == StatusCode::SWITCHING_PROTOCOLS
+    {
+        return BodyScope::Untouched;
+    }
+    let encoding = headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .flat_map(|value| value.to_str().unwrap_or("<invalid>").split(','))
+        .map(str::trim)
+        .filter(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if encoding.is_empty() {
+        BodyScope::Substitute
+    } else {
+        BodyScope::Encoded(encoding)
+    }
+}
+
+/// The 500 that replaces a refused encoded body. Generic: the reason is in
+/// the server log, not for the visitor.
+fn refused_encoded_response() -> Response {
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-gio-cache", "bypass")
+        .body(Body::from("500 Internal Server Error\n"))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Insert a default unless the response set the header itself; a response
@@ -633,39 +819,6 @@ fn substitute_header_values(headers: &mut HeaderMap, placeholder: &Bytes, nonce:
     }
 }
 
-/// Bodies that may carry the placeholder: worker output in a text format.
-/// public/ and build assets (`x-gio-cache: static`) never do - and must
-/// keep their exact bytes, lengths and range support.
-fn substitutes_body(headers: &HeaderMap) -> bool {
-    if headers
-        .get("x-gio-cache")
-        .is_some_and(|value| value.as_bytes() == b"static")
-        || headers.contains_key(header::CONTENT_ENCODING)
-    {
-        return false;
-    }
-    let Some(content_type) = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
-    let mime = content_type
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    matches!(
-        mime.as_str(),
-        "text/html"
-            | "text/plain"
-            | "text/event-stream"
-            | "application/json"
-            | "application/xhtml+xml"
-    ) || mime.ends_with("+json")
-}
-
 /// The Strict-Transport-Security value, or None. Unset means "only when this
 /// server terminates TLS": over plain HTTP the header is either ignored
 /// (direct) or a promise only the operator can make (TLS proxy), so sending
@@ -699,8 +852,9 @@ pub async fn security_headers_middleware(
     req: Request,
     next: Next,
 ) -> Response {
+    let path = req.uri().path().to_string();
     let resp = next.run(req).await;
-    policy.secure_response(resp).await
+    policy.secure_response(&path, resp)
 }
 
 // ── Cross-site request protection ─────────────────────────────────────────────
@@ -839,9 +993,25 @@ impl CrossSiteRejection {
         format!(
             "403 Forbidden: cross-site {what} blocked by CSRF protection - {reason}.\n\
              If that origin is yours, add it to [security.csrf] trusted_origins in gio.toml; \
-             to accept cross-site requests on a path (webhooks), add the path to \
+             to accept cross-site requests on a path (webhooks, OAuth/OIDC form_post or \
+             SAML callbacks, 3-D Secure payment returns), add the path to \
              [security.csrf] exempt.\n"
         )
+    }
+}
+
+/// Keys already reported at warn level (up to MAX_WARNED_KEYS; debug level
+/// after that), so a client looping requests cannot flood the log.
+#[derive(Debug, Default)]
+struct WarnOnce(Mutex<HashSet<u64>>);
+
+impl WarnOnce {
+    /// True the first time `key` is seen.
+    fn first(&self, key: &str) -> bool {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        let mut seen = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        seen.len() < MAX_WARNED_KEYS && seen.insert(hasher.finish())
     }
 }
 
@@ -851,8 +1021,8 @@ pub struct CsrfPolicy {
     enabled: bool,
     trusted_origins: Vec<Origin>,
     exempt: Vec<PathPattern>,
-    /// Hashes of the origins already reported at warn level.
-    warned: Mutex<HashSet<u64>>,
+    /// Origins already reported at warn level.
+    warned: WarnOnce,
 }
 
 impl CsrfPolicy {
@@ -877,7 +1047,7 @@ impl CsrfPolicy {
             enabled: cfg.enabled,
             trusted_origins,
             exempt,
-            warned: Mutex::default(),
+            warned: WarnOnce::default(),
         })
     }
 
@@ -949,12 +1119,9 @@ impl CsrfPolicy {
     }
 
     /// Whether a rejection deserves a warn-level line: once per distinct
-    /// origin (up to MAX_WARNED_ORIGINS), debug level after that.
+    /// origin (up to MAX_WARNED_KEYS), debug level after that.
     pub fn should_warn(&self, rejection: &CrossSiteRejection) -> bool {
-        let mut hasher = DefaultHasher::new();
-        rejection.origin().unwrap_or("").hash(&mut hasher);
-        let mut warned = self.warned.lock().unwrap_or_else(PoisonError::into_inner);
-        warned.len() < MAX_WARNED_ORIGINS && warned.insert(hasher.finish())
+        self.warned.first(rejection.origin().unwrap_or(""))
     }
 }
 
@@ -989,6 +1156,10 @@ mod tests {
             ..Default::default()
         })
         .with_nonce_placeholder(PLACEHOLDER)
+    }
+
+    fn secure(policy: &SecurityPolicy, resp: Response) -> Response {
+        policy.secure_response("/test", resp)
     }
 
     fn html_response(body: impl Into<Body>) -> Response {
@@ -1026,9 +1197,7 @@ mod tests {
         let mut resp = html_response("<p>x</p>");
         resp.headers_mut()
             .insert("x-powered-by", HeaderValue::from_static("Express"));
-        let resp = policy(SecurityConfig::default())
-            .secure_response(resp)
-            .await;
+        let resp = secure(&policy(SecurityConfig::default()), resp);
         assert_eq!(header_str(&resp, "x-content-type-options"), Some("nosniff"));
         assert_eq!(header_str(&resp, "x-frame-options"), Some("SAMEORIGIN"));
         assert_eq!(
@@ -1053,7 +1222,7 @@ mod tests {
             "content-security-policy",
             HeaderValue::from_static("default-src 'none'"),
         );
-        let resp = nonce_policy().secure_response(resp).await;
+        let resp = secure(&nonce_policy(), resp);
         assert_eq!(header_str(&resp, "x-frame-options"), Some("DENY"));
         assert_eq!(header_str(&resp, "referrer-policy"), None);
         assert_eq!(
@@ -1112,7 +1281,7 @@ mod tests {
             .insert("permissions-policy".into(), "camera=()".into());
         cfg.headers
             .insert("cross-origin-opener-policy".into(), "same-origin".into());
-        let resp = policy(cfg).secure_response(html_response("x")).await;
+        let resp = secure(&policy(cfg), html_response("x"));
         assert_eq!(header_str(&resp, "x-frame-options"), Some("DENY"));
         assert_eq!(header_str(&resp, "referrer-policy"), None);
         assert_eq!(header_str(&resp, "permissions-policy"), Some("camera=()"));
@@ -1198,7 +1367,7 @@ mod tests {
             ..Default::default()
         });
         assert!(!policy.uses_nonces());
-        let resp = policy.secure_response(html_response("x")).await;
+        let resp = secure(&policy, html_response("x"));
         assert_eq!(
             header_str(&resp, "content-security-policy"),
             Some("default-src 'self'; img-src *")
@@ -1226,15 +1395,16 @@ mod tests {
             "<html><head><script nonce=\"{PLACEHOLDER}\">a</script></head>\
              <body><script nonce=\"{PLACEHOLDER}\" type=\"module\" src=\"/x.js\"></script></body></html>"
         );
+        let length = body.len();
         let mut resp = html_response(body);
         resp.headers_mut()
-            .insert(header::CONTENT_LENGTH, HeaderValue::from_static("999"));
-        let resp = policy.secure_response(resp).await;
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+        let resp = secure(&policy, resp);
         let csp = header_str(&resp, "content-security-policy")
             .unwrap()
             .to_string();
         let nonce = csp_nonce(&csp);
-        assert_eq!(nonce.len(), 24, "144 bits, base64");
+        assert_eq!(nonce.len(), 32, "192 bits, base64");
         assert_eq!(
             csp_nonce(header_str(&resp, "content-security-policy-report-only").unwrap()),
             nonce,
@@ -1242,10 +1412,12 @@ mod tests {
         );
         assert_eq!(
             header_str(&resp, "content-length"),
-            None,
-            "stale length dropped"
+            Some(length.to_string().as_str()),
+            "the nonce is as long as the placeholder: the length still holds"
         );
+        assert_eq!(resp.body().size_hint().exact(), Some(length as u64));
         let html = body_text(resp).await;
+        assert_eq!(html.len(), length);
         assert!(
             !html.contains(PLACEHOLDER),
             "placeholder never reaches the client"
@@ -1259,7 +1431,7 @@ mod tests {
         let cached = Bytes::from(format!("<script nonce=\"{PLACEHOLDER}\">x</script>"));
         let mut nonces = HashSet::new();
         for _ in 0..3 {
-            let resp = policy.secure_response(html_response(cached.clone())).await;
+            let resp = secure(&policy, html_response(cached.clone()));
             let nonce = csp_nonce(header_str(&resp, "content-security-policy").unwrap());
             assert_eq!(
                 body_text(resp).await,
@@ -1285,7 +1457,7 @@ mod tests {
                 Ok(Bytes::copy_from_slice(b.as_bytes())),
             ];
             let resp = html_response(Body::from_stream(tokio_stream::iter(chunks)));
-            let resp = policy.secure_response(resp).await;
+            let resp = secure(&policy, resp);
             let nonce = csp_nonce(header_str(&resp, "content-security-policy").unwrap());
             assert_eq!(
                 body_text(resp).await,
@@ -1306,7 +1478,7 @@ mod tests {
             vec![Ok(Bytes::from(shell.clone()))];
         chunks.extend(hole.bytes().map(|b| Ok(Bytes::from(vec![b]))));
         let resp = html_response(Body::from_stream(tokio_stream::iter(chunks)));
-        let resp = policy.secure_response(resp).await;
+        let resp = secure(&policy, resp);
         let nonce = csp_nonce(header_str(&resp, "content-security-policy").unwrap());
         let html = body_text(resp).await;
         assert_eq!(html, format!("{shell}{hole}").replace(PLACEHOLDER, &nonce));
@@ -1320,7 +1492,7 @@ mod tests {
         let injected = "<script nonce=\"{nonce}\">evil()</script>\
                         <script nonce=\"00000000000000000000000000000000\">evil()</script>\
                         <script nonce=\"0123456789abcdef0123456789abcdee\">evil()</script>";
-        let resp = policy.secure_response(html_response(injected)).await;
+        let resp = secure(&policy, html_response(injected));
         let nonce = csp_nonce(header_str(&resp, "content-security-policy").unwrap());
         let html = body_text(resp).await;
         assert_eq!(html, injected);
@@ -1328,23 +1500,202 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn static_and_binary_bodies_are_left_untouched() {
+    async fn static_files_are_left_untouched() {
         let policy = nonce_policy();
         let body = format!("<script nonce=\"{PLACEHOLDER}\">");
         let mut static_file = html_response(body.clone());
         static_file
             .headers_mut()
             .insert("x-gio-cache", HeaderValue::from_static("static"));
-        assert_eq!(
-            body_text(policy.secure_response(static_file).await).await,
-            body
-        );
+        assert_eq!(body_text(secure(&policy, static_file)).await, body);
+    }
 
-        let image = Response::builder()
-            .header(header::CONTENT_TYPE, "image/png")
+    #[tokio::test]
+    async fn every_dynamic_body_is_substituted_whatever_its_content_type() {
+        // A route handler can echo cspNonce() into any format; one body that
+        // escapes substitution hands the persisted placeholder to whoever
+        // fetches it.
+        let policy = nonce_policy();
+        let body = format!("window.__cfg={{nonce:\"{PLACEHOLDER}\"}}");
+        for content_type in [
+            Some("text/javascript"),
+            Some("application/javascript; charset=utf-8"),
+            Some("text/css"),
+            Some("application/xml"),
+            Some("application/rss+xml"),
+            Some("text/csv"),
+            Some("application/x-ndjson"),
+            Some("image/svg+xml"),
+            Some("application/octet-stream"),
+            None,
+        ] {
+            let mut builder = Response::builder().header("x-gio-cache", "bypass");
+            if let Some(content_type) = content_type {
+                builder = builder.header(header::CONTENT_TYPE, content_type);
+            }
+            let resp = secure(&policy, builder.body(Body::from(body.clone())).unwrap());
+            let nonce = csp_nonce(header_str(&resp, "content-security-policy").unwrap());
+            assert_eq!(
+                body_text(resp).await,
+                format!("window.__cfg={{nonce:\"{nonce}\"}}"),
+                "{content_type:?}"
+            );
+        }
+        // Rust's own internal endpoints carry no x-gio-cache label at all.
+        let unlabeled = Response::builder()
+            .header(header::CONTENT_TYPE, "text/html")
             .body(Body::from(body.clone()))
             .unwrap();
-        assert_eq!(body_text(policy.secure_response(image).await).await, body);
+        assert!(!body_text(secure(&policy, unlabeled))
+            .await
+            .contains(PLACEHOLDER));
+    }
+
+    #[tokio::test]
+    async fn substitution_keeps_lengths_ranges_and_streams_unbuffered() {
+        let policy = nonce_policy();
+        // A partial response: its Content-Range only stays true because the
+        // nonce is exactly as long as the placeholder.
+        let body = format!("abc{PLACEHOLDER}xyz");
+        let resp = Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, body.len())
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes 0-{}/9000", body.len() - 1),
+            )
+            .body(Body::from(body.clone()))
+            .unwrap();
+        let resp = secure(&policy, resp);
+        assert_eq!(
+            header_str(&resp, "content-length"),
+            Some(body.len().to_string().as_str())
+        );
+        assert_eq!(resp.body().size_hint().exact(), Some(body.len() as u64));
+        let out = body_text(resp).await;
+        assert_eq!(out.len(), body.len());
+        assert!(!out.contains(PLACEHOLDER));
+
+        // A stream of unknown length is passed on chunk by chunk, not
+        // collected first: the first chunk is out before the second exists.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::convert::Infallible>>(1);
+        let resp = html_response(Body::from_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ));
+        let mut body = secure(&policy, resp).into_body();
+        tx.send(Ok(Bytes::from_static(b"<p>first</p>")))
+            .await
+            .unwrap();
+        let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            frame.into_data().unwrap(),
+            Bytes::from_static(b"<p>first</p>")
+        );
+        drop(tx);
+        assert!(
+            std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn encoded_dynamic_bodies_are_refused_while_nonces_are_on() {
+        // Compressed bytes cannot be searched for the placeholder: refusing
+        // is the only answer that cannot leak it.
+        let policy = nonce_policy();
+        let encoded = || {
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/javascript")
+                .header(header::CONTENT_ENCODING, "gzip")
+                .header("x-gio-cache", "bypass")
+                .body(Body::from(format!("gzip bytes {PLACEHOLDER}")))
+                .unwrap()
+        };
+        let resp = secure(&policy, encoded());
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(header_str(&resp, "content-encoding"), None);
+        assert_eq!(header_str(&resp, "x-content-type-options"), Some("nosniff"));
+        assert!(header_str(&resp, "content-security-policy").is_some());
+        assert!(!body_text(resp).await.contains(PLACEHOLDER));
+        assert!(
+            !policy.refused_encoded.first("/test"),
+            "logged once per path"
+        );
+
+        // `identity` is no encoding at all.
+        let mut identity = encoded();
+        identity.headers_mut().insert(
+            header::CONTENT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+        let resp = secure(&policy, identity);
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!body_text(resp).await.contains(PLACEHOLDER));
+
+        // Empty bodies (HEAD) and static files keep their encoding.
+        let mut head = encoded();
+        *head.body_mut() = Body::empty();
+        assert_eq!(secure(&policy, head).status(), StatusCode::OK);
+        let mut precompressed = encoded();
+        precompressed
+            .headers_mut()
+            .insert("x-gio-cache", HeaderValue::from_static("static"));
+        assert_eq!(secure(&policy, precompressed).status(), StatusCode::OK);
+
+        // Without nonces there is nothing to protect.
+        let plain = self::policy(SecurityConfig::default());
+        let resp = secure(&plain, encoded());
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(header_str(&resp, "content-encoding"), Some("gzip"));
+    }
+
+    #[tokio::test]
+    async fn trailers_follow_the_held_back_bytes() {
+        struct WithTrailers(Vec<Frame<Bytes>>);
+        impl HttpBody for WithTrailers {
+            type Data = Bytes;
+            type Error = std::convert::Infallible;
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+                Poll::Ready((!self.0.is_empty()).then(|| Ok(self.0.remove(0))))
+            }
+        }
+        let mut trailers = HeaderMap::new();
+        trailers.insert("x-checksum", HeaderValue::from_static("1"));
+        // The data ends in a placeholder prefix, held back until the
+        // trailers prove it is not one.
+        let body = WithTrailers(vec![
+            Frame::data(Bytes::from(format!("x{}", &PLACEHOLDER[..5]))),
+            Frame::trailers(trailers),
+        ]);
+        let resp = secure(&nonce_policy(), html_response(Body::new(body)));
+        let collected = http_body_util_collect(resp.into_body()).await;
+        assert_eq!(collected.0, format!("x{}", &PLACEHOLDER[..5]));
+        assert_eq!(
+            collected.1.and_then(|t| t.get("x-checksum").cloned()),
+            Some(HeaderValue::from_static("1"))
+        );
+    }
+
+    /// Every data byte and the trailers of a body.
+    async fn http_body_util_collect(mut body: Body) -> (String, Option<HeaderMap>) {
+        let mut data = Vec::new();
+        let mut trailers = None;
+        while let Some(frame) = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await
+        {
+            match frame.unwrap().into_data() {
+                Ok(chunk) => data.extend_from_slice(&chunk),
+                Err(frame) => trailers = frame.into_trailers().ok(),
+            }
+        }
+        (String::from_utf8(data).unwrap(), trailers)
     }
 
     #[tokio::test]
@@ -1355,7 +1706,7 @@ mod tests {
             .header("link", format!("</a.js>; rel=preload; nonce={PLACEHOLDER}"))
             .body(Body::from(format!("{{\"nonce\":\"{PLACEHOLDER}\"}}")))
             .unwrap();
-        let resp = policy.secure_response(resp).await;
+        let resp = secure(&policy, resp);
         let nonce = csp_nonce(header_str(&resp, "content-security-policy").unwrap());
         assert_eq!(
             header_str(&resp, "link").unwrap(),
@@ -1370,7 +1721,7 @@ mod tests {
             csp: Some("default-src 'self'".into()),
             ..Default::default()
         });
-        let resp = policy.secure_response(html_response("<p>hi</p>")).await;
+        let resp = secure(&policy, html_response("<p>hi</p>"));
         assert_eq!(resp.body().size_hint().exact(), Some(9));
     }
 
@@ -1379,7 +1730,7 @@ mod tests {
         let nonces: HashSet<String> = (0..100).map(|_| generate_nonce()).collect();
         assert_eq!(nonces.len(), 100);
         for nonce in &nonces {
-            assert_eq!(nonce.len(), 24);
+            assert_eq!(nonce.len(), PLACEHOLDER_LEN, "substitution keeps lengths");
             assert!(nonce
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/'));
@@ -1434,21 +1785,22 @@ mod tests {
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ));
-        let first = load_or_create_nonce_placeholder(&dir);
+        let file = placeholder_file_name("dep");
+        let first = load_or_create_nonce_placeholder(&dir, "dep");
         assert!(is_valid_placeholder(&first));
         assert_eq!(
-            load_or_create_nonce_placeholder(&dir),
+            load_or_create_nonce_placeholder(&dir, "dep"),
             first,
             "survives restarts"
         );
-        std::fs::write(dir.join(PLACEHOLDER_FILE), "short").unwrap();
-        let replaced = load_or_create_nonce_placeholder(&dir);
+        std::fs::write(dir.join(&file), "short").unwrap();
+        let replaced = load_or_create_nonce_placeholder(&dir, "dep");
         assert!(is_valid_placeholder(&replaced));
-        assert_eq!(load_or_create_nonce_placeholder(&dir), replaced);
+        assert_eq!(load_or_create_nonce_placeholder(&dir, "dep"), replaced);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(dir.join(PLACEHOLDER_FILE))
+            let mode = std::fs::metadata(dir.join(&file))
                 .unwrap()
                 .permissions()
                 .mode();
@@ -1458,9 +1810,42 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(leftovers, vec![std::ffi::OsString::from(PLACEHOLDER_FILE)]);
+        assert_eq!(leftovers, vec![std::ffi::OsString::from(file)]);
         let _ = std::fs::remove_dir_all(&dir);
         assert_ne!(generate_placeholder(), generate_placeholder());
+    }
+
+    #[test]
+    fn placeholder_rotates_with_the_deployment() {
+        let dir = std::env::temp_dir().join(format!(
+            "gio_security_rotate_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The unsuffixed file of earlier versions, and a concurrent start's
+        // temp file that must survive.
+        std::fs::write(dir.join(PLACEHOLDER_FILE), PLACEHOLDER).unwrap();
+        let temp = format!("{PLACEHOLDER_FILE}.0123.tmp");
+        std::fs::write(dir.join(&temp), "x").unwrap();
+
+        let first = load_or_create_nonce_placeholder(&dir, "build-1");
+        assert_ne!(first, PLACEHOLDER, "the legacy file is not reused");
+        assert_eq!(load_or_create_nonce_placeholder(&dir, "build-1"), first);
+        let second = load_or_create_nonce_placeholder(&dir, "build-2");
+        assert_ne!(second, first, "a new deployment gets a new placeholder");
+        let mut files: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        files.sort();
+        assert_eq!(files, vec![placeholder_file_name("build-2"), temp]);
+        assert_ne!(
+            placeholder_file_name("build-1"),
+            placeholder_file_name("build-2")
+        );
+        assert!(!placeholder_file_name("../x").contains('/'));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1580,6 +1965,51 @@ mod tests {
             .message("POST")
             .contains("[security.csrf] trusted_origins"));
         assert!(evil.message("POST").contains("[security.csrf] exempt"));
+    }
+
+    #[test]
+    fn websocket_origin_check_is_switched_separately_from_csrf() {
+        let with = |csrf_enabled: bool, check_origin: bool| {
+            policy(SecurityConfig {
+                csrf: CsrfConfig {
+                    enabled: csrf_enabled,
+                    ..Default::default()
+                },
+                websocket: crate::config::WebSocketSecurityConfig { check_origin },
+                ..Default::default()
+            })
+        };
+        // Defaults: both on.
+        let p = with(true, true);
+        assert!(p.checks_cross_site(&Method::POST, false));
+        assert!(p.checks_cross_site(&Method::GET, true));
+        assert!(!p.checks_cross_site(&Method::GET, false));
+        // CSRF off (the app has its own form tokens): upgrades still checked.
+        let p = with(false, true);
+        assert!(!p.checks_cross_site(&Method::POST, false));
+        assert!(p.checks_cross_site(&Method::GET, true));
+        // Origin check off: unsafe methods still checked, and an upgrade
+        // header does not exempt a POST.
+        let p = with(true, false);
+        assert!(!p.checks_cross_site(&Method::GET, true));
+        assert!(p.checks_cross_site(&Method::POST, true));
+        let p = with(false, false);
+        assert!(!p.checks_cross_site(&Method::POST, true));
+    }
+
+    #[test]
+    fn rejection_message_names_the_callbacks_that_need_exempt() {
+        let rejection = csrf(&[], &[])
+            .check(
+                Some("cross-site"),
+                Some("https://appleid.apple.com"),
+                Some("a"),
+            )
+            .unwrap_err();
+        let message = rejection.message("POST");
+        for kind in ["webhooks", "OAuth", "SAML"] {
+            assert!(message.contains(kind), "{kind}: {message}");
+        }
     }
 
     #[test]

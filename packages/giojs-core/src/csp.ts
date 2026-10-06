@@ -15,11 +15,18 @@ const PLACEHOLDER_PATTERN = /^[0-9a-f]{32}$/;
 
 /**
  * The nonce for inline `<script>` / `<style>` tags in pages and layouts, or
- * `undefined` when the app has no nonce-based CSP. During SSR this is a
- * placeholder that the server swaps for the response's real nonce, so pass
- * it straight to the `nonce` attribute (`<script nonce={cspNonce()}>`) and
- * never derive anything else from it. Read per call (cheap), so tests and
- * static export see the current environment.
+ * `undefined` when the app has no nonce-based CSP. It is meant for `nonce`
+ * attributes only: the value is a secret placeholder that the server swaps
+ * for the response's real nonce, so pass it straight to the attribute
+ * (`<script nonce={cspNonce()}>`) and never derive anything else from it
+ * (hash it, slice it, or encode it, and the server can no longer find it).
+ * The server replaces it in the headers and the body of every dynamic
+ * response, whatever the content type; a response that sets its own
+ * Content-Encoding cannot be checked and is refused (500) while nonces are
+ * on. The placeholder rotates with each deployment - delete
+ * `<cache dir>/meta/csp-nonce-placeholder-*` and restart to rotate it sooner.
+ * Read per call (cheap), so tests and static export see the current
+ * environment.
  */
 export function cspNonce(): string | undefined {
   const placeholder = process.env.GIO_CSP_NONCE_PLACEHOLDER;

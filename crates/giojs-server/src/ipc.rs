@@ -618,7 +618,7 @@ async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> anyhow::Result<B
 
 // ── Deployment ID ────────────────────────────────────────────────────────────
 
-fn generate_deployment_id() -> String {
+pub fn generate_deployment_id() -> String {
     use sha2::{Digest, Sha256};
     // Content-derived, never time-derived: a restart of the same build must
     // keep the same ID or the entire persisted disk cache becomes dead weight

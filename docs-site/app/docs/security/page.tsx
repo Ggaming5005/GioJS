@@ -103,7 +103,7 @@ csp = """
   frame-ancestors 'self'
 """`} />
       <p>
-        Every response gets a fresh, random 144-bit nonce, and every script GioJS writes
+        Every response gets a fresh, random 192-bit nonce, and every script GioJS writes
         carries it: the hydration bootstrap and its module preloads, React&apos;s streaming
         Suspense scripts, the deployment script, the critical-CSS loader, and in development
         the error overlay. Line breaks in the policy are allowed; they are sent as spaces.
@@ -116,20 +116,36 @@ csp = """
         with a secret placeholder, and the Rust server replaces it with the response&apos;s
         nonce every time it serves the page - fresh renders, cache hits, stale-while-revalidate,
         PPR shells and their streamed holes, and streaming SSR alike, before compression. The
-        placeholder is random per installation and never sent to a browser, so a stored-XSS
-        string cannot contain it and can never be turned into a valid nonce. It is kept in{' '}
-        <code>.gio/cache/pages/meta/</code> so the disk cache stays valid across restarts;
-        turning CSP on or off invalidates cached pages automatically.
+        placeholder is random and never sent to a browser, so a stored-XSS string cannot
+        contain it and can never be turned into a valid nonce.
+      </p>
+      <p>
+        The replacement covers the headers and body of every dynamic response - pages, route
+        handlers and SSE streams, whatever their content type (HTML, JSON, JavaScript, CSS,
+        XML, ...) - so even a route handler that echoes <code>cspNonce()</code> sends the
+        response&apos;s nonce, not the placeholder. The nonce is exactly as long as the
+        placeholder, so <code>Content-Length</code> and byte ranges stay valid. Only{' '}
+        <code>public/</code> and build assets are served untouched. A dynamic response that sets
+        its own <code>Content-Encoding</code> (a body your handler compressed itself) cannot be
+        searched, so while nonces are on it is refused with a <code>500</code> and an error in
+        the server log: drop the header and let GioJS compress the response.
+      </p>
+      <p>
+        The placeholder is kept in <code>.gio/cache/pages/meta/</code> so the disk cache stays
+        valid across restarts, and it changes with every deployment (each new build, or a new{' '}
+        <code>GIO_DEPLOYMENT_ID</code>). To rotate it sooner, delete{' '}
+        <code>.gio/cache/pages/meta/csp-nonce-placeholder-*</code> and restart; cached pages
+        are then rendered again. Turning CSP on or off invalidates cached pages automatically.
       </p>
 
       <h3>Your own inline scripts: cspNonce()</h3>
       <p>
         Inline scripts you write need the nonce too. <code>cspNonce()</code> from{' '}
         <code>@gio.js/core</code> returns it during server rendering (or{' '}
-        <code>undefined</code> when no CSP uses <code>{'{nonce}'}</code>). Pass it straight to
-        the <code>nonce</code> attribute - its value is only final in the response, so never
-        derive anything else from it. Put inline scripts in the root layout, which is
-        server-rendered only:
+        <code>undefined</code> when no CSP uses <code>{'{nonce}'}</code>). It is meant for{' '}
+        <code>nonce</code> attributes only: pass it straight to the attribute - its value is
+        only final in the response, so never hash, slice or encode it or derive anything else
+        from it. Put inline scripts in the root layout, which is server-rendered only:
       </p>
       <CodeBlock lang="tsx" code={`// app/layout.tsx
 import { cspNonce } from '@gio.js/core';
@@ -162,12 +178,18 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <code>onClick</code> props are not affected - they are attached by JavaScript.
         </li>
         <li>
-          Styles: React renders <code>style</code> props as <code>style=&quot;...&quot;</code>{' '}
-          attributes, which only <code>&apos;unsafe-inline&apos;</code> allows - hence the
-          recommended <code>style-src &apos;self&apos; &apos;unsafe-inline&apos;</code>.
-          GioJS&apos;s own inline styles (critical CSS, the built-in 404 page) carry the nonce,
-          so a <code>style-src</code> with <code>&apos;nonce-{'{nonce}'}&apos;</code> works if
-          your app avoids style attributes.
+          Styles: keep <code>style-src &apos;self&apos; &apos;unsafe-inline&apos;</code>, without
+          a nonce. React renders <code>style</code> props as <code>style=&quot;...&quot;</code>{' '}
+          attributes, which only <code>&apos;unsafe-inline&apos;</code> allows, and{' '}
+          <code>&lt;Animate&gt;</code> and <code>&lt;Link&gt;</code> view transitions add
+          inline <code>&lt;style&gt;</code> elements that React hoists into the head without a
+          nonce (<code>&lt;Animate&gt;</code> sets a <code>style</code> attribute as well). Adding{' '}
+          <code>&apos;nonce-{'{nonce}'}&apos;</code> or a hash to <code>style-src</code> makes
+          browsers ignore <code>&apos;unsafe-inline&apos;</code> and blocks all of these.
+          GioJS&apos;s critical CSS and built-in 404 page carry the nonce, so a nonce-only{' '}
+          <code>style-src</code> is possible only for an app that uses no{' '}
+          <code>style</code> props, no <code>&lt;Animate&gt;</code> and no{' '}
+          <code>&lt;Link&gt;</code> transitions.
         </li>
         <li>
           Static export (<code>gio export</code>) has no server to set the header or the
@@ -210,7 +232,24 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <CodeBlock lang="toml" code={`[security.csrf]
 enabled = true                                       # default
 trusted_origins = ["https://admin.example.com"]      # scheme://host[:port]
-exempt = ["/api/webhooks/*rest"]                     # same patterns as [[redirects]]`} />
+exempt = [                                           # same patterns as [[redirects]]
+  "/api/webhooks/*rest",                             # webhooks
+  "/auth/callback/apple",                            # OAuth/OIDC response_mode=form_post
+  "/saml/acs",                                       # SAML assertion consumer service
+]`} />
+      <div className="callout">
+        Some legitimate requests are cross-site form posts by design: another site&apos;s page
+        posts the user&apos;s browser back to you, so the browser labels the request{' '}
+        <code>Sec-Fetch-Site: cross-site</code>. OAuth/OpenID Connect callbacks with{' '}
+        <code>response_mode=form_post</code> (Sign in with Apple, Microsoft Entra ID / Azure
+        AD), SAML assertion consumer service (ACS) endpoints, and 3-D Secure or other
+        payment-provider returns all work this way, and get a <code>403</code> until you list
+        their paths in <code>exempt</code> - check yours when upgrading. Such endpoints must
+        verify the request themselves (signature, <code>state</code> or{' '}
+        <code>RelayState</code>, assertion), which they do anyway. Webhooks called server to
+        server send neither header and pass without an entry; exempt them only if the sender
+        adds an <code>Origin</code>.
+      </div>
       <p>
         Exempt patterns use the <a href="/docs/middleware">middleware rule</a> syntax and
         match the normalized path, so spelling variants of a URL cannot dodge or abuse an
@@ -237,12 +276,19 @@ exempt = ["/api/webhooks/*rest"]                     # same patterns as [[redire
         Browsers let any website open a WebSocket to your server and send your users&apos;
         cookies with it (cross-site WebSocket hijacking). Upgrade requests get the same check
         as unsafe methods: an <code>Origin</code> from your own host or from{' '}
-        <code>trusted_origins</code> is accepted, as is a client that sends no{' '}
+        <code>[security.csrf] trusted_origins</code> is accepted, as is a client that sends no{' '}
         <code>Origin</code> (not a browser); anything else is refused with <code>403</code>{' '}
-        before the connection is upgraded. <code>exempt</code> paths and{' '}
-        <code>enabled = false</code> apply here too - exempt a public WebSocket API meant to be
-        used from any site.
+        before the connection is upgraded. <code>[security.csrf] exempt</code> paths are
+        skipped here too - exempt a public WebSocket API meant to be used from any site.
       </p>
+      <p>
+        The check has its own switch and stays on when you set{' '}
+        <code>[security.csrf] enabled = false</code> (for example because your forms carry
+        their own CSRF tokens) - token-protected forms do nothing for WebSockets. Turning it
+        off logs a warning at startup:
+      </p>
+      <CodeBlock lang="toml" code={`[security.websocket]
+check_origin = true      # default; false accepts upgrades from any website`} />
 
       <h2>Behind a reverse proxy</h2>
       <p>
@@ -273,7 +319,10 @@ permissions-policy = "camera=()"
 [security.csrf]
 enabled = true
 trusted_origins = []      # e.g. ["https://admin.example.com"]
-exempt = []               # e.g. ["/api/webhooks/*rest"]`} />
+exempt = []               # e.g. ["/api/webhooks/*rest", "/auth/callback/apple"]
+
+[security.websocket]
+check_origin = true       # independent of [security.csrf] enabled`} />
     </>
   );
 }

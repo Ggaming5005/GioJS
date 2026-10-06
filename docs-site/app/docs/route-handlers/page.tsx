@@ -107,9 +107,10 @@ export function GET() {
         <li>A thrown error is logged server-side and answered with a JSON 500 (no internals leaked).</li>
         <li>
           Cross-site <code>POST</code>/<code>PUT</code>/<code>PATCH</code>/<code>DELETE</code>{' '}
-          requests are refused with 403 before your handler runs (CSRF protection). Webhook
-          endpoints called by other sites go in <code>[security.csrf] exempt</code> - see{' '}
-          <a href="/docs/security">Security</a>.
+          requests are refused with 403 before your handler runs (CSRF protection). Endpoints
+          other sites post to on purpose - OAuth/OIDC <code>form_post</code> and SAML
+          callbacks, payment (3-D Secure) returns, webhooks that send an <code>Origin</code> - go
+          in <code>[security.csrf] exempt</code> - see <a href="/docs/security">Security</a>.
         </li>
         <li>Export <code>wsHandler</code> from the same file for WebSockets - see the WebSockets page.</li>
       </ul>

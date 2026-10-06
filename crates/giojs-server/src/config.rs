@@ -70,6 +70,8 @@ pub struct SecurityConfig {
     pub csp_report_only: Option<String>,
     #[serde(default)]
     pub csrf: CsrfConfig,
+    #[serde(default)]
+    pub websocket: WebSocketSecurityConfig,
 }
 
 /// `hsts = true | false | "raw value" | { max_age, include_subdomains, preload }`.
@@ -120,6 +122,23 @@ impl Default for CsrfConfig {
             trusted_origins: Vec::new(),
             exempt: Vec::new(),
         }
+    }
+}
+
+/// `[security.websocket]`: the Origin check on WebSocket upgrades (cross-site
+/// WebSocket hijacking). On by default and independent of
+/// `[security.csrf] enabled`; it accepts the same `trusted_origins` and
+/// skips the same `exempt` paths.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct WebSocketSecurityConfig {
+    #[serde(default = "default_true")]
+    pub check_origin: bool,
+}
+
+impl Default for WebSocketSecurityConfig {
+    fn default() -> Self {
+        Self { check_origin: true }
     }
 }
 
@@ -729,6 +748,10 @@ redirect_to    = "/"
         assert!(security.csrf.enabled, "CSRF protection is on by default");
         assert!(security.csrf.trusted_origins.is_empty());
         assert!(security.csrf.exempt.is_empty());
+        assert!(
+            security.websocket.check_origin,
+            "the WebSocket origin check is on by default"
+        );
     }
 
     #[test]
@@ -751,12 +774,21 @@ x-frame-options = "DENY"
 referrer-policy = ""
 
 [security.csrf]
+enabled = false
 trusted_origins = ["https://admin.example.com"]
 exempt = ["/api/webhooks/*rest"]
+
+[security.websocket]
+check_origin = true
 "#,
         )
         .unwrap();
         let security = config.security;
+        assert!(!security.csrf.enabled);
+        assert!(
+            security.websocket.check_origin,
+            "switched separately from CSRF"
+        );
         assert_eq!(
             security.hsts,
             Some(HstsSetting::Policy(HstsPolicy {
@@ -787,6 +819,7 @@ exempt = ["/api/webhooks/*rest"]
             "[security]\ncps = \"default-src 'self'\"\n",
             "[security.csrf]\ntrusted_origin = [\"https://a.example\"]\n",
             "[security]\nhsts = { maxage = 10 }\n",
+            "[security.websocket]\ncheck_origins = false\n",
         ] {
             let path = unique_temp_path("security_typo.toml");
             std::fs::write(&path, body).unwrap();

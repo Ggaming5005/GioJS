@@ -101,7 +101,10 @@ permissions-policy = "camera=()"
 [security.csrf]         # cross-site request protection, on by default
 enabled = true
 trusted_origins = []    # other origins allowed to POST / open WebSockets
-exempt = []             # paths never checked, e.g. ["/api/webhooks/*rest"]
+exempt = []             # paths never checked: webhooks, OAuth form_post / SAML callbacks
+
+[security.websocket]
+check_origin = true     # WebSocket Origin check, independent of [security.csrf] enabled
 
 [i18n]
 locales = ["en", "de"]  # empty = i18n disabled

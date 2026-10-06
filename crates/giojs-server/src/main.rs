@@ -343,8 +343,13 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     };
     let nonce_placeholder = security.uses_nonces().then(|| {
         // A subdirectory: the cache's eviction and dev clearing only touch
-        // the entry files at the top level.
-        security::load_or_create_nonce_placeholder(&cache_dir.join("meta"))
+        // the entry files at the top level. Keyed by the deployment id the
+        // worker is about to get (same inputs, same id), so every deployment
+        // renders with its own placeholder.
+        security::load_or_create_nonce_placeholder(
+            &cache_dir.join("meta"),
+            &ipc::generate_deployment_id(),
+        )
     });
     let security = match &nonce_placeholder {
         Some(placeholder) => {
@@ -361,8 +366,16 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         csrf = security.csrf().enabled(),
         csrf_trusted_origins = security.csrf().trusted_origin_count(),
         csrf_exempt = security.csrf().exempt_count(),
+        websocket_origin_check = security.websocket_origin_check(),
         "security policy"
     );
+    if !security.websocket_origin_check() {
+        warn!(
+            "[security.websocket] check_origin = false: any website can open WebSockets to this \
+             server with your visitors' cookies - prefer listing origins in [security.csrf] \
+             trusted_origins, or public endpoints in [security.csrf] exempt"
+        );
+    }
     let security = Arc::new(security);
 
     info!("Starting Node SSR worker: {node_script}");
@@ -1057,7 +1070,8 @@ async fn rate_limit_middleware(
 /// origin, or a client that is not a browser page. Decided on headers alone,
 /// before rules, routing, or any body read. Rust's own `/_gio` endpoints
 /// keep their own checks; `[security.csrf] exempt` matches the canonical
-/// path like every other rule.
+/// path like every other rule. `[security.csrf] enabled` and
+/// `[security.websocket] check_origin` switch the two checks separately.
 async fn cross_site_request_middleware(
     State(state): State<AppState>,
     req: Request,
@@ -1065,10 +1079,7 @@ async fn cross_site_request_middleware(
 ) -> Response {
     let csrf = state.security.csrf();
     let websocket = ws::is_upgrade_request(req.headers());
-    if !csrf.enabled()
-        || !(websocket || security::is_unsafe_method(req.method()))
-        || is_internal_endpoint(&req)
-    {
+    if !state.security.checks_cross_site(req.method(), websocket) || is_internal_endpoint(&req) {
         return next.run(req).await;
     }
     let path = match path_hygiene::canonical(req.uri().path()) {
@@ -1095,10 +1106,10 @@ async fn cross_site_request_middleware(
     let Err(rejection) = verdict else {
         return next.run(req).await;
     };
-    let what = if websocket {
-        "WebSocket upgrade".to_string()
-    } else {
+    let what = if security::is_unsafe_method(req.method()) {
         req.method().to_string()
+    } else {
+        "WebSocket upgrade".to_string()
     };
     // Each distinct origin is reported once; a page looping forged requests
     // must not flood the log.

@@ -64,9 +64,9 @@ export default function Page(): React.JSX.Element {
         The Content-Security-Policy nonce for an inline <code>&lt;script&gt;</code> you
         render, when <code>[security] csp</code> uses <code>{'{nonce}'}</code>;{' '}
         <code>undefined</code> otherwise. During server rendering it returns a placeholder the
-        server replaces with each response&apos;s fresh nonce, so pass it straight to the{' '}
-        <code>nonce</code> attribute (best in the root layout) - see{' '}
-        <a href="/docs/security">Security</a>.
+        server replaces with each response&apos;s fresh nonce, so it is meant for{' '}
+        <code>nonce</code> attributes only: pass it straight to the attribute (best in the root
+        layout) and never derive anything from it - see <a href="/docs/security">Security</a>.
       </p>
       <CodeBlock lang="tsx" code={`import { cspNonce } from '@gio.js/core';
 
