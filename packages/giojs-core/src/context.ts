@@ -56,6 +56,12 @@ export interface IPCResponse {
    * shell_end frame; Rust caches everything before it as the static shell.
    */
   pprShell?: boolean;
+  /**
+   * Set-Cookie values, each sent as its own header (additive, protocol stays
+   * v3). Cookies cannot share the single-valued `headers` map: they are not
+   * comma-joinable (Expires dates contain commas). Plugins append here too.
+   */
+  setCookies?: string[];
 }
 
 export interface IPCError {

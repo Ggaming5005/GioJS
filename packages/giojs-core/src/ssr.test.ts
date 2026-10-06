@@ -8,7 +8,12 @@
  */
 import { describe, it, expect } from 'vitest';
 import React from 'react';
-import { renderRoute, serializeEnvelope, type StreamRenderResult } from './ssr.ts';
+import {
+  renderRoute,
+  serializeEnvelope,
+  flattenResponseHeaders,
+  type StreamRenderResult,
+} from './ssr.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import type { IPCRequest } from './context.ts';
 import type { RouteModule, LayoutEntry, PageModule, LayoutModule } from './router.ts';
@@ -486,6 +491,59 @@ describe('route.ts method handlers', () => {
     expect('status' in result && result.status).toBe(202);
     expect('headers' in result && result.headers['x-custom']).toBe('yes');
     expect('body' in result && result.body).toBe('gone');
+    expect('setCookies' in result).toBe(false);
+  });
+
+  it('keeps every Set-Cookie of a Response as its own entry, verbatim', async () => {
+    const headers = new Headers();
+    headers.append('Set-Cookie', 'session=abc; Path=/; HttpOnly; Expires=Wed, 21 Oct 2026 07:28:00 GMT');
+    headers.append('Set-Cookie', 'csrf=xyz; Path=/; SameSite=Strict');
+    const handlers = makeHandlers('/api/login', {
+      POST: () => new Response('ok', { headers }),
+    });
+    const req = { ...makeRequest('/api/login'), method: 'POST' };
+    const result = await renderRoute(req, new Map(), noLayouts, undefined, undefined, undefined, {
+      handlers,
+    });
+    expect('setCookies' in result && result.setCookies).toEqual([
+      'session=abc; Path=/; HttpOnly; Expires=Wed, 21 Oct 2026 07:28:00 GMT',
+      'csrf=xyz; Path=/; SameSite=Strict',
+    ]);
+    expect('headers' in result && result.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('joins other repeated Response headers instead of dropping them', async () => {
+    const headers = new Headers();
+    headers.append('Link', '</a.css>; rel=preload; as=style');
+    headers.append('Link', '</b.js>; rel=modulepreload');
+    headers.append('WWW-Authenticate', 'Basic realm="a"');
+    headers.append('WWW-Authenticate', 'Bearer realm="b"');
+    const handlers = makeHandlers('/api/thing', {
+      GET: () => new Response(null, { status: 401, headers }),
+    });
+    const result = await renderRoute(
+      makeRequest('/api/thing'), new Map(), noLayouts, undefined, undefined, undefined, { handlers },
+    );
+    expect('headers' in result && result.headers['link']).toBe(
+      '</a.css>; rel=preload; as=style, </b.js>; rel=modulepreload',
+    );
+    expect('headers' in result && result.headers['www-authenticate']).toBe(
+      'Basic realm="a", Bearer realm="b"',
+    );
+  });
+
+  it('keeps cookies on binary (base64) Response bodies', async () => {
+    const headers = new Headers({ 'content-type': 'application/octet-stream' });
+    headers.append('Set-Cookie', 'a=1');
+    headers.append('Set-Cookie', 'b=2');
+    const handlers = makeHandlers('/api/file', {
+      GET: () => new Response(new Uint8Array([0xff, 0xfe, 0x00]), { headers }),
+    });
+    const result = await renderRoute(
+      makeRequest('/api/file'), new Map(), noLayouts, undefined, undefined, undefined, { handlers },
+    );
+    expect('bodyBase64' in result && result.bodyBase64).toBe(true);
+    expect('setCookies' in result && result.setCookies).toEqual(['a=1', 'b=2']);
   });
 
   it('returns 405 with Allow for unexported methods', async () => {
@@ -559,10 +617,100 @@ describe('getServerSideProps context', () => {
       }),
     });
     const result = await renderRoute(makeRequest('/'), routes, noLayouts);
-    expect('headers' in result && result.headers['set-cookie']).toBe('visited=1; Path=/');
+    // Cookies travel in setCookies, never in the single-valued headers map.
+    expect('setCookies' in result && result.setCookies).toEqual(['visited=1; Path=/']);
+    expect('headers' in result && result.headers['set-cookie']).toBeUndefined();
     // Caching a per-request set-cookie would replay it to every visitor.
     expect('cacheable' in result && result.cacheable).toBe(false);
     expect('cacheMaxAge' in result && result.cacheMaxAge).toBe(0);
+  });
+
+  it('sends every cookie of a set-cookie array and joins other repeated headers', async () => {
+    const routes = makeRoute('/', {
+      revalidate: 60,
+      getServerSideProps: async () => ({
+        props: {},
+        headers: {
+          'Set-Cookie': [
+            'session=abc; Path=/; HttpOnly; Expires=Wed, 21 Oct 2026 07:28:00 GMT',
+            'csrf=xyz; Path=/; SameSite=Strict',
+          ],
+          link: ['</a.css>; rel=preload; as=style', '</b.js>; rel=modulepreload'],
+          'x-single': 'one',
+        },
+      }),
+    });
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+    expect('setCookies' in result && result.setCookies).toEqual([
+      'session=abc; Path=/; HttpOnly; Expires=Wed, 21 Oct 2026 07:28:00 GMT',
+      'csrf=xyz; Path=/; SameSite=Strict',
+    ]);
+    expect('headers' in result && result.headers['link']).toBe(
+      '</a.css>; rel=preload; as=style, </b.js>; rel=modulepreload',
+    );
+    expect('headers' in result && result.headers['x-single']).toBe('one');
+    expect('cacheable' in result && result.cacheable).toBe(false);
+  });
+
+  it('carries cookies on the head frame of a streamed render', async () => {
+    const routes = makeRoute('/', {
+      getServerSideProps: async () => ({
+        props: {},
+        headers: { 'set-cookie': ['a=1; Path=/', 'b=2; Path=/'] },
+      }),
+    });
+    const result = await renderRoute(
+      makeRequest('/'), routes, noLayouts, undefined, undefined, undefined, { streaming: true },
+    );
+    const streamed = expectStream(result);
+    expect(streamed.head.setCookies).toEqual(['a=1; Path=/', 'b=2; Path=/']);
+    expect(streamed.head.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('sends cookies with a redirect, keeping the redirect destination authoritative', async () => {
+    const routes = makeRoute('/logout', {
+      getServerSideProps: async () => ({
+        redirect: { destination: '/login', permanent: false },
+        headers: {
+          'set-cookie': ['session=; Max-Age=0; Path=/', 'csrf=; Max-Age=0; Path=/'],
+          location: '/somewhere-else',
+        },
+      }),
+    });
+    const result = await renderRoute(makeRequest('/logout'), routes, noLayouts);
+    expect('status' in result && result.status).toBe(302);
+    expect('headers' in result && result.headers['location']).toBe('/login');
+    expect('setCookies' in result && result.setCookies).toEqual([
+      'session=; Max-Age=0; Path=/',
+      'csrf=; Max-Age=0; Path=/',
+    ]);
+  });
+
+  it('omits setCookies when no cookies are set', async () => {
+    const routes = makeRoute('/', {
+      getServerSideProps: async () => ({ props: {}, headers: { 'x-a': 'b' } }),
+    });
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+    expect('setCookies' in result).toBe(false);
+  });
+
+  it('lets an onResponse plugin add cookies next to the page ones', async () => {
+    const registry = new NodePluginRegistry();
+    registry.register({
+      name: 'test', version: '0.0.0',
+      onResponse: async (_req, res) => ({
+        ...res,
+        setCookies: [...(res.setCookies ?? []), 'plugin=1; Path=/'],
+      }),
+    });
+    const routes = makeRoute('/', {
+      getServerSideProps: async () => ({ props: {}, headers: { 'set-cookie': 'page=1; Path=/' } }),
+    });
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts, registry);
+    expect('setCookies' in result && result.setCookies).toEqual([
+      'page=1; Path=/',
+      'plugin=1; Path=/',
+    ]);
   });
 
   it('flat results containing a headers key stay plain props', async () => {
@@ -620,5 +768,26 @@ describe('special pages', () => {
     expect('status' in result && result.status).toBe(404);
     expect('body' in result && result.body).toContain('HTTP 404');
     expect('body' in result && result.body).toContain('Page not found');
+  });
+});
+
+// ─── response header flattening ───────────────────────────────────────────────
+
+describe('flattenResponseHeaders', () => {
+  it('lowercases names and merges case variants of one header', () => {
+    const { headers, setCookies } = flattenResponseHeaders({
+      Vary: 'accept',
+      vary: ['accept-language'],
+      'SET-COOKIE': 'a=1',
+      'set-cookie': ['b=2'],
+    });
+    expect(headers).toEqual({ vary: 'accept, accept-language' });
+    expect(setCookies).toEqual(['a=1', 'b=2']);
+  });
+
+  it('drops empty arrays instead of sending an empty header', () => {
+    const { headers, setCookies } = flattenResponseHeaders({ link: [], 'set-cookie': [] });
+    expect(headers).toEqual({});
+    expect(setCookies).toEqual([]);
   });
 });
