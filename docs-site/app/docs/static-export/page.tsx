@@ -35,7 +35,10 @@ export default function Page(): React.JSX.Element {
       <p>
         Every static route is rendered through the real SSR pipeline, so what you see
         in dev is what you get in <code>out/</code>. <code>getServerSideProps</code>
-        runs at build time and its data is baked into the HTML.
+        runs at build time and its data is baked into the HTML. The export loads the
+        project's <code>.env</code> files first, with the same{' '}
+        <a href="/docs/configuration">precedence</a> as the server (<code>production</code>{' '}
+        mode unless <code>NODE_ENV=development</code>).
       </p>
       <p>
         Every export also writes <code>out/404.html</code> - your{` `}
