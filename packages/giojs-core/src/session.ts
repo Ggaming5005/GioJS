@@ -76,6 +76,11 @@ export interface SessionStorageOptions {
    * Defaults to GIO_SESSION_SECRET (comma-separated for rotation). The first
    * secret encrypts and signs; every secret is accepted when reading, so a
    * new secret can be prepended without logging everyone out.
+   *
+   * `require_session` guards verify with GIO_SESSION_SECRET only, so leave
+   * this unset for a storage whose cookie a guard checks - rotate through
+   * GIO_SESSION_SECRET instead. A signing secret missing from a set
+   * GIO_SESSION_SECRET logs a warning.
    */
   secrets?: string | readonly string[];
   /** Session lifetime in seconds, carried in the token and the cookie. Defaults to 7 days. */
@@ -192,7 +197,7 @@ function openWithKeys(
   keyring: readonly DerivedKeys[],
   now: number,
 ): SessionData | null {
-  if (token.length > MAX_COOKIE_BYTES) return null;
+  if (typeof token !== 'string' || token.length > MAX_COOKIE_BYTES) return null;
   const parts = token.split('.');
   if (parts.length !== 4) return null;
   const [version, expText, payloadText, macText] = parts as [string, string, string, string];
@@ -263,12 +268,29 @@ function warnOnce(message: string): void {
   logger.warn(message);
 }
 
-function resolveSecrets(option: string | readonly string[] | undefined): string[] {
-  if (option !== undefined) return normalizeSecrets(option, 'createSessionStorage');
-  const fromEnv = (process.env[SESSION_SECRET_ENV] ?? '')
+function envSecrets(): string[] {
+  return (process.env[SESSION_SECRET_ENV] ?? '')
     .split(',')
     .map(secret => secret.trim())
     .filter(secret => secret !== '');
+}
+
+function resolveSecrets(option: string | readonly string[] | undefined, cookieName: string): string[] {
+  const fromEnv = envSecrets();
+  if (option !== undefined) {
+    const secrets = normalizeSecrets(option, 'createSessionStorage');
+    // The Rust guards know only GIO_SESSION_SECRET (in development, the
+    // server's ephemeral one): sessions signed with anything else would be
+    // turned away by every require_session guard, a silent login loop.
+    if (fromEnv.length > 0 && !fromEnv.includes(secrets[0] as string)) {
+      logger.warn(
+        `createSessionStorage("${cookieName}"): the secrets option signs with a secret that is not in ${SESSION_SECRET_ENV}, ` +
+          `but require_session guards verify only with ${SESSION_SECRET_ENV} - a guard on this cookie rejects every session. ` +
+          `Leave secrets unset for a guarded storage and rotate through ${SESSION_SECRET_ENV}.`,
+      );
+    }
+    return secrets;
+  }
   if (fromEnv.length > 0) {
     if (isDevMode() && process.env[EPHEMERAL_FLAG_ENV] === '1') {
       warnOnce(
@@ -311,7 +333,7 @@ export function createSessionStorage<Data extends object = SessionData>(
   if (!validMaxAge(maxAge)) {
     throw new TypeError('createSessionStorage: maxAge must be a positive whole number of seconds');
   }
-  const keyring = resolveSecrets(options.secrets).map(deriveKeys);
+  const keyring = resolveSecrets(options.secrets, cookieName).map(deriveKeys);
   const cookieOptions = options.cookie ?? {};
   // Surface bad cookie options now, not on the first login.
   serializeCookie(cookieName, '', cookieOptions);
@@ -320,8 +342,11 @@ export function createSessionStorage<Data extends object = SessionData>(
     cookieName,
 
     getSession(source) {
-      const token = readCookieHeader(source)[cookieName];
-      const data = token === undefined || token === '' ? null : openWithKeys(token, cookieName, keyring, nowSeconds());
+      const cookies = readCookieHeader(source);
+      // Own properties only: cookieName may be "constructor" or "toString".
+      const token = Object.hasOwn(cookies, cookieName) ? cookies[cookieName] : undefined;
+      const data =
+        typeof token !== 'string' || token === '' ? null : openWithKeys(token, cookieName, keyring, nowSeconds());
       return data === null
         ? new CookieSession<Data>(new Map(), true)
         : new CookieSession<Data>(new Map(Object.entries(data)), false);

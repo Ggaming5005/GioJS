@@ -149,6 +149,33 @@ describe('createSessionStorage', () => {
     const storage = createSessionStorage({ secrets: SECRET });
     expect(() => storage.commitSession(storage.getSession(null), { maxAge: -1 })).toThrow(/maxAge/);
   });
+
+  it('accepts hardened cookie options in development (Secure by default there too)', () => {
+    process.env.NODE_ENV = 'development';
+    const host = createSessionStorage({ secrets: SECRET, cookieName: '__Host-sess' });
+    const session = host.getSession(null);
+    session.set('userId', 'u_9');
+    const setCookie = host.commitSession(session);
+    expect(setCookie).toMatch(/^__Host-sess=v1\..*; Path=\/; HttpOnly; Secure; SameSite=Lax$/);
+    expect(host.getSession(cookieHeader(setCookie)).get('userId')).toBe('u_9');
+    expect(host.destroySession()).toContain('; Secure');
+
+    const crossSite = createSessionStorage({ secrets: SECRET, cookie: { sameSite: 'none' } });
+    expect(crossSite.destroySession()).toContain('; Secure; SameSite=None');
+  });
+
+  it('never throws for cookie names that are Object.prototype members', () => {
+    for (const cookieName of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+      const storage = createSessionStorage({ secrets: SECRET, cookieName });
+      for (const source of [undefined, '', 'a=1', { cookies: {} }, { headers: {} }]) {
+        expect(storage.getSession(source).isNew).toBe(true);
+      }
+      const session = storage.getSession(null);
+      session.set('userId', 'u_10');
+      const header = cookieHeader(storage.commitSession(session));
+      expect(storage.getSession(`other=1; ${header}`).get('userId')).toBe('u_10');
+    }
+  });
 });
 
 describe('tampering, expiry and foreign tokens', () => {
@@ -294,6 +321,24 @@ describe('secrets', () => {
     process.env.NODE_ENV = 'development';
     process.env.GIO_SESSION_SECRET = SECRET;
     createSessionStorage();
+    expect(stderr).toEqual([]);
+  });
+
+  it('warns when explicit secrets sign with a key the Rust guards do not have', () => {
+    // require_session guards verify with GIO_SESSION_SECRET only.
+    process.env.GIO_SESSION_SECRET = `${SECRET},${OLD_SECRET}`;
+    createSessionStorage({ secrets: SECRET });
+    createSessionStorage({ secrets: [OLD_SECRET, 'unrelated-but-long-enough-0123456789abcdef'] });
+    expect(stderr).toEqual([]);
+
+    createSessionStorage({ cookieName: 'admin_session', secrets: ['another-secret-0123456789abcdefghijklmn', SECRET] });
+    const warnings = stderr.filter(line => line.includes('require_session guards verify only with GIO_SESSION_SECRET'));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('admin_session');
+  });
+
+  it('does not warn about explicit secrets when GIO_SESSION_SECRET is unset', () => {
+    createSessionStorage({ secrets: SECRET });
     expect(stderr).toEqual([]);
   });
 });

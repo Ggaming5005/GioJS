@@ -22,8 +22,10 @@ export interface CookieOptions {
   httpOnly?: boolean;
   /**
    * Defaults to true in production and false in development (NODE_ENV,
-   * as decided by the Rust server). Pass `false` explicitly to serve a
-   * production build over plain http.
+   * as decided by the Rust server) - except that a `__Secure-`/`__Host-`
+   * name, `sameSite: 'none'` or `partitioned` defaults it to true in
+   * development too, since browsers reject those cookies without it. Pass
+   * `false` explicitly to serve a production build over plain http.
    */
   secure?: boolean;
   /** Defaults to `lax`. `none` requires `secure`. */
@@ -45,7 +47,12 @@ export function isValidCookieName(name: string): boolean {
   return COOKIE_NAME.test(name);
 }
 
-/** Parse a Cookie header into name → value (first occurrence wins). */
+/**
+ * Parse a Cookie header into name → value (first occurrence wins). Read the
+ * result by own property (`Object.hasOwn`): a plain object also "has"
+ * `constructor` or `toString` through its prototype. A cookie named
+ * `__proto__` is never stored, so the prototype cannot be replaced.
+ */
 export function parseCookies(header: string | undefined): Record<string, string> {
   const cookies: Record<string, string> = {};
   if (header === undefined || header === '') return cookies;
@@ -53,7 +60,7 @@ export function parseCookies(header: string | undefined): Record<string, string>
     const eq = part.indexOf('=');
     if (eq === -1) continue;
     const name = part.slice(0, eq).trim();
-    if (name !== '' && cookies[name] === undefined) {
+    if (name !== '' && name !== '__proto__' && !Object.hasOwn(cookies, name)) {
       cookies[name] = part.slice(eq + 1).trim();
     }
   }
@@ -77,8 +84,13 @@ export function serializeCookie(name: string, value: string, options: CookieOpti
     );
   }
   const path = options.path ?? '/';
-  const secure = options.secure ?? !isDevMode();
   const sameSite = options.sameSite ?? 'lax';
+  // A cookie browsers accept only with Secure gets it in development too
+  // (Chrome and Firefox take Secure cookies from http://localhost); only
+  // an explicit `secure: false` makes these combinations throw below.
+  const needsSecure =
+    sameSite === 'none' || options.partitioned === true || name.startsWith('__Secure-') || name.startsWith('__Host-');
+  const secure = options.secure ?? (needsSecure || !isDevMode());
   const httpOnly = options.httpOnly ?? true;
 
   if (!COOKIE_PATH.test(path)) {

@@ -108,6 +108,31 @@ describe('serializeCookie', () => {
     expect(() => serializeCookie('__Host-a', 'b', { secure: true, domain: 'example.com' })).toThrow(/__Host-/);
     expect(serializeCookie('__Host-a', 'b', { secure: true })).toBe('__Host-a=b; Path=/; HttpOnly; Secure; SameSite=Lax');
   });
+
+  it('defaults Secure on in development for cookies that need it', () => {
+    process.env.NODE_ENV = 'development';
+    expect(serializeCookie('__Host-sess', 'b')).toBe('__Host-sess=b; Path=/; HttpOnly; Secure; SameSite=Lax');
+    expect(serializeCookie('__Secure-sess', 'b')).toContain('; Secure');
+    expect(serializeCookie('embed', 'b', { sameSite: 'none' })).toBe('embed=b; Path=/; HttpOnly; Secure; SameSite=None');
+    expect(serializeCookie('chips', 'b', { partitioned: true })).toContain('; Secure; SameSite=Lax; Partitioned');
+    // Only an explicit opt-out still throws.
+    expect(() => serializeCookie('__Host-sess', 'b', { secure: false })).toThrow(/__Host-/);
+    expect(() => serializeCookie('embed', 'b', { sameSite: 'none', secure: false })).toThrow(/requires secure/);
+  });
+});
+
+describe('parseCookies with Object.prototype names', () => {
+  it('parses cookies named like prototype members as own properties', () => {
+    const cookies = parseCookies('constructor=1; toString=2; valueOf=3; hasOwnProperty=4; constructor=5');
+    expect(cookies).toEqual({ constructor: '1', toString: '2', valueOf: '3', hasOwnProperty: '4' });
+    expect(Object.hasOwn(cookies, 'constructor')).toBe(true);
+  });
+
+  it('never stores __proto__ or touches the prototype', () => {
+    const cookies = parseCookies('__proto__=x; a=1');
+    expect(Object.getPrototypeOf(cookies)).toBe(Object.prototype);
+    expect(Object.keys(cookies)).toEqual(['a']);
+  });
 });
 
 describe('signValue / unsignValue', () => {
