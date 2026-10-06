@@ -106,9 +106,22 @@ export default function Page(): React.JSX.Element {
           exporter lists it as skipped.
         </li>
         <li>
-          The exporter writes <code>robots.txt</code> (and <code>sitemap.xml</code> when{' '}
-          <code>GIO_SITE_URL</code> is set) only when <code>public/</code> has no file of that
-          name - your own always wins.
+          <code>app/sitemap.ts</code>, <code>app/robots.ts</code> and{' '}
+          <code>app/manifest.ts</code> are written as <code>sitemap.xml</code>,{' '}
+          <code>robots.txt</code> and <code>manifest.webmanifest</code> (see{' '}
+          <a href="/docs/metadata">Metadata &amp; SEO</a>); set <code>GIO_SITE_URL</code> so
+          their relative URLs become absolute. Without those modules the exporter generates{' '}
+          <code>robots.txt</code> (and <code>sitemap.xml</code> listing every exported page
+          when <code>GIO_SITE_URL</code> is set).
+        </li>
+        <li>
+          Either way, a <code>public/</code> file of the same name wins - as on the server -
+          and a module it shadows is listed as skipped.
+        </li>
+        <li>
+          Page <code>metadata</code> / <code>generateMetadata</code> run at export time; relative
+          Open Graph and canonical URLs resolve against <code>metadataBase</code> or{' '}
+          <code>GIO_SITE_URL</code>.
         </li>
       </ul>
 

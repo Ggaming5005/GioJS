@@ -21,6 +21,29 @@ export default function Page(): React.JSX.Element {
         </tbody>
       </table>
       <p>
+        Pages and layouts may also export <code>metadata</code> or{' '}
+        <code>generateMetadata</code> for their <code>&lt;head&gt;</code> tags - see{' '}
+        <a href="/docs/metadata">Metadata &amp; SEO</a>.
+      </p>
+      <h2>Metadata files</h2>
+      <p>
+        Only at the root of <code>app/</code>, as <code>.ts</code> or <code>.js</code>. The
+        default export is the data, or a function returning it; <code>export const
+        revalidate</code> sets how long the output is cached (default 3600 seconds).
+      </p>
+      <table>
+        <thead><tr><th>File</th><th>Serves</th></tr></thead>
+        <tbody>
+          <tr><td><code>sitemap.ts</code></td><td><code>/sitemap.xml</code> from <code>[{'{'} url, lastModified, changeFrequency, priority, alternates {'}'}]</code></td></tr>
+          <tr><td><code>robots.ts</code></td><td><code>/robots.txt</code> from <code>{'{'} rules, sitemap, host {'}'}</code></td></tr>
+          <tr><td><code>manifest.ts</code></td><td><code>/manifest.webmanifest</code> from a Web App Manifest object</td></tr>
+        </tbody>
+      </table>
+      <p>
+        A <code>public/</code> file with the same name wins (the server warns at startup);
+        a page or <code>route.ts</code> at the same URL fails startup.
+      </p>
+      <p>
         <code>error.tsx</code>, <code>not-found.tsx</code> and <code>loading.tsx</code> may sit
         in any folder, including route groups and dynamic folders, and the nearest one at or
         above a page wins. Like layouts they take <code>.tsx</code>, <code>.jsx</code> or{' '}
