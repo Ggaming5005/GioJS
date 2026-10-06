@@ -230,6 +230,65 @@ async function main() {
       assert.match(await res.text(), /FIXTURE_CUSTOM_404/);
     });
 
+    await test('catch-all pages match one or more segments, never the bare parent', async () => {
+      const deep = await fetch(`${BASE}/docs/guides/getting-started`);
+      assert.equal(deep.status, 200);
+      assert.match(await deep.text(), /FIXTURE_CATCH_ALL slug=\[guides\/getting-started\]/);
+      const bare = await fetch(`${BASE}/docs`);
+      assert.equal(bare.status, 404);
+      assert.match(await bare.text(), /FIXTURE_CUSTOM_404/);
+    });
+
+    await test('optional catch-all pages also match the bare parent', async () => {
+      const bare = await fetch(`${BASE}/shop`);
+      assert.equal(bare.status, 200);
+      assert.match(await bare.text(), /FIXTURE_OPTIONAL_CATCH_ALL path=\[\]/);
+      const deep = await fetch(`${BASE}/shop/shoes/red`);
+      assert.equal(deep.status, 200);
+      assert.match(await deep.text(), /FIXTURE_OPTIONAL_CATCH_ALL path=\[shoes\/red\]/);
+    });
+
+    /** The hydration entry chunk URL a page's HTML bootstraps. */
+    const entryChunkOf = (html) =>
+      html.match(/\/_next\/static\/chunks\/route-[^"]+?-[A-Z0-9]+\.js/)?.[0];
+
+    await test('route-group pages drop the group from the URL and get only their group layout', async () => {
+      const res = await fetch(`${BASE}/pricing`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.match(html, /FIXTURE_GROUP_PRICING/);
+      // The group layout renders inside the hydration boundary, around the page.
+      assert.ok(html.indexOf('id="__gio"') < html.indexOf('FIXTURE_MARKETING_LAYOUT'));
+      assert.ok(html.indexOf('FIXTURE_MARKETING_LAYOUT') < html.indexOf('FIXTURE_GROUP_PRICING'));
+      const chunk = entryChunkOf(html);
+      assert.ok(chunk, 'group page has a hydration chunk');
+      assert.match(await (await fetch(`${BASE}${chunk}`)).text(), /FIXTURE_MARKETING_LAYOUT/,
+        'the client bundle must wrap the same group layout the server rendered');
+
+      const home = await (await fetch(`${BASE}/`)).text();
+      assert.doesNotMatch(home, /FIXTURE_MARKETING_LAYOUT/, 'a group layout never leaks outside its group');
+      assert.equal((await fetch(`${BASE}/(marketing)/pricing`)).status, 404);
+    });
+
+    await test('a layout inside a dynamic [id] folder wraps its pages on server and client', async () => {
+      const res = await fetch(`${BASE}/posts/42`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.match(html, /FIXTURE_POST id=\[42\]/);
+      assert.ok(html.indexOf('FIXTURE_POST_LAYOUT') !== -1, 'the [id] layout must apply');
+      assert.ok(html.indexOf('FIXTURE_POST_LAYOUT') < html.indexOf('FIXTURE_POST id='));
+      const chunk = entryChunkOf(html);
+      assert.ok(chunk, 'dynamic page has a hydration chunk');
+      assert.match(await (await fetch(`${BASE}${chunk}`)).text(), /FIXTURE_POST_LAYOUT/,
+        'the client bundle must wrap the same [id] layout the server rendered');
+    });
+
+    await test('private _folders are never routable', async () => {
+      const res = await fetch(`${BASE}/_private`);
+      assert.equal(res.status, 404);
+      assert.doesNotMatch(await res.text(), /FIXTURE_PRIVATE_MUST_NOT_RENDER/);
+    });
+
     await test('route.ts SSE handlers stream events', async () => {
       const controller = new AbortController();
       const res = await fetch(`${BASE}/stream`, { signal: controller.signal });
@@ -593,6 +652,17 @@ async function standalonePhase() {
       join(workDir, 'app', 'api', 'hello', 'route.ts'),
       "export function GET() {\n  return { ok: true, source: 'standalone' };\n}\n",
     );
+    // A group layout above a dynamic page: the prebuilt registry must carry
+    // each page's folder so layouts still apply by ancestry.
+    await mkdir(join(workDir, 'app', '(blog)', 'posts', '[id]'), { recursive: true });
+    await writeFile(
+      join(workDir, 'app', '(blog)', 'layout.tsx'),
+      "import React from 'react';\n\nexport default function BlogLayout({ children }) {\n  return <section data-layout=\"STANDALONE_BLOG_LAYOUT\">{children}</section>;\n}\n",
+    );
+    await writeFile(
+      join(workDir, 'app', '(blog)', 'posts', '[id]', 'page.tsx'),
+      "import React from 'react';\n\nexport default function Post({ params }) {\n  return <p>{`STANDALONE_POST id=[${params.id}]`}</p>;\n}\n",
+    );
     await writeFile(
       join(workDir, 'gio.toml'),
       '[app]\nname = "standalone-fixture"\n\n[server]\nhost  = "127.0.0.1"\nport  = 39518\nhttp2 = false\n',
@@ -667,6 +737,16 @@ async function standalonePhase() {
       assert.equal(res.status, 200);
       assert.match(res.headers.get('content-type') ?? '', /application\/json/);
       assert.deepEqual(await res.json(), { ok: true, source: 'standalone' });
+    });
+
+    await test('standalone: group layouts apply to dynamic pages from the prebuilt registry', async () => {
+      const res = await fetch(`${STANDALONE_BASE}/posts/7`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.match(html, /STANDALONE_POST id=\[7\]/);
+      assert.ok(html.indexOf('STANDALONE_BLOG_LAYOUT') !== -1, 'the (blog) layout must apply');
+      assert.ok(html.indexOf('STANDALONE_BLOG_LAYOUT') < html.indexOf('STANDALONE_POST'));
+      assert.doesNotMatch(await (await fetch(`${STANDALONE_BASE}/`)).text(), /STANDALONE_BLOG_LAYOUT/);
     });
 
     await test('standalone: stopping the launcher leaves no orphaned worker', async () => {
