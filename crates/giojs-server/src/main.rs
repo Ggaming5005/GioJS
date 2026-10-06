@@ -21,6 +21,7 @@ mod config;
 mod css_assets;
 mod dev_codeframe;
 mod dev_overlay;
+mod dev_watch;
 mod devtools;
 mod ipc;
 mod metrics;
@@ -2377,20 +2378,41 @@ async fn image_handler_route(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Dev watch: on app-source changes, clear the page cache, re-transform CSS,
-/// restart the Node worker (fresh module cache, route discovery, and client
-/// bundles), and tell connected browsers to reload over the devtools SSE
-/// stream once the IPC connection is restored. Dev mode only.
+/// Dev watch: on source changes anywhere in the project (app/, components/,
+/// lib/, config files - dev_watch.rs decides what counts), clear the page
+/// cache, re-transform CSS, restart the Node worker (fresh module cache,
+/// route discovery, and client bundles), and tell connected browsers to
+/// reload over the devtools SSE stream once the IPC connection is restored.
+/// public/-only changes refresh the root-serving index and reload browsers
+/// without a restart - nothing the worker holds depends on them. Dev only.
 fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
     use notify::Watcher;
 
-    let (fs_tx, mut fs_rx) = tokio::sync::mpsc::channel::<()>(16);
+    // Classification is prefix-based and event paths come back absolute (on
+    // macOS through /private), so compare against canonical paths.
+    let root = match std::fs::canonicalize(&project_root) {
+        Ok(root) => root,
+        Err(e) => {
+            warn!(error = %e, root = %project_root.display(), "dev watch: cannot resolve project root");
+            return;
+        }
+    };
+    let public_dir = dev_watch::resolve_dir(state.public_files.root());
+
+    let (fs_tx, mut fs_rx) = tokio::sync::mpsc::channel::<dev_watch::WatchSignal>(64);
+    let event_root = root.clone();
+    let event_public_dir = public_dir.clone();
     let mut watcher =
         match notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
-            if let Ok(event) = result {
-                if watch_event_is_relevant(&event) {
-                    let _ = fs_tx.blocking_send(());
-                }
+            let Ok(event) = result else {
+                return;
+            };
+            for dir in dev_watch::new_top_level_dirs(&event_root, &event) {
+                let _ = fs_tx.blocking_send(dev_watch::WatchSignal::NewDir(dir));
+            }
+            if let Some(change) = dev_watch::classify_event(&event_root, &event_public_dir, &event)
+            {
+                let _ = fs_tx.blocking_send(dev_watch::WatchSignal::Change(change));
             }
         }) {
             Ok(watcher) => watcher,
@@ -2399,41 +2421,53 @@ fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
                 return;
             }
         };
-    if let Err(e) = watcher.watch(
-        std::path::Path::new(&app_dir),
-        notify::RecursiveMode::Recursive,
-    ) {
-        warn!(error = %e, app_dir = %app_dir, "dev watch: cannot watch app dir");
+    // The root itself non-recursively: top-level files (gio.toml,
+    // middleware.ts, package.json, tsconfig.json) and new top-level dirs.
+    if let Err(e) = watcher.watch(&root, notify::RecursiveMode::NonRecursive) {
+        warn!(error = %e, root = %root.display(), "dev watch: cannot watch project root");
         return;
     }
-    for config_name in [
-        "gio.toml",
-        "gio.config.ts",
-        "gio.config.js",
-        "middleware.ts",
-        "middleware.js",
-    ] {
-        let config_path = project_root.join(config_name);
-        if config_path.exists() {
-            let _ = watcher.watch(&config_path, notify::RecursiveMode::NonRecursive);
-        }
+    for dir in dev_watch::top_level_watch_dirs(&root) {
+        dev_watch::watch_dir_recursive(&mut watcher, &dir);
+    }
+    if !public_dir.starts_with(&root) && public_dir.is_dir() {
+        dev_watch::watch_dir_recursive(&mut watcher, &public_dir);
     }
 
     tokio::spawn(async move {
         // The watcher stops when dropped; it lives as long as this task.
-        let _keep_watching = watcher;
-        info!(app_dir = %app_dir, "dev watch active");
+        let mut watcher = watcher;
+        info!(root = %root.display(), app_dir = %app_dir, "dev watch active");
         loop {
-            if fs_rx.recv().await.is_none() {
+            let Some(first) = fs_rx.recv().await else {
                 return;
-            }
+            };
+            let mut batch = dev_watch::WatchBatch::default();
+            batch.absorb(first, &mut watcher);
             // Debounce bursts - editors emit several events per save.
             loop {
                 match tokio::time::timeout(Duration::from_millis(300), fs_rx.recv()).await {
-                    Ok(Some(())) => continue,
+                    Ok(Some(signal)) => batch.absorb(signal, &mut watcher),
                     Ok(None) => return,
                     Err(_) => break,
                 }
+            }
+            if batch.public {
+                let public_files = state.public_files.clone();
+                match tokio::task::spawn_blocking(move || public_files.refresh()).await {
+                    Ok(files) => info!(files, "dev watch: public/ index refreshed"),
+                    Err(e) => warn!(error = %e, "dev watch: public/ index refresh failed"),
+                }
+            }
+            if !batch.source {
+                if batch.public {
+                    let _ = state
+                        .devtools
+                        .log_tx
+                        .send("event: reload\ndata: {}\n\n".to_string());
+                    info!("dev watch: public/ changed - browsers reloading");
+                }
+                continue;
             }
             info!("dev watch: change detected - restarting worker, clearing caches");
             state.cache.clear().await;
@@ -2471,18 +2505,6 @@ async fn await_restart_then_reclear(
         }
         _ => false,
     }
-}
-
-fn watch_event_is_relevant(event: &notify::Event) -> bool {
-    if matches!(event.kind, notify::EventKind::Access(_)) {
-        return false;
-    }
-    // Build outputs under .gio/ change as a *result* of restarts; reacting to
-    // them would loop forever.
-    event.paths.iter().any(|path| {
-        let text = path.to_string_lossy();
-        !text.contains("/.gio/") && !text.contains("\\.gio\\") && !text.contains("node_modules")
-    })
 }
 
 /// Transform every `.css` under `app_dir` into `css_cache` (URL-keyed).

@@ -97,7 +97,7 @@ async function linkFixtureDeps(targetDir = fixtureDir) {
 async function copyFixtureForDev() {
   const devDir = join(repoRoot, 'tests', 'integration', '.dev-fixture');
   await rm(devDir, { recursive: true, force: true });
-  for (const item of ['app', 'gio.toml', 'gio.config.ts', 'middleware.ts', 'package.json']) {
+  for (const item of ['app', 'components', 'public', 'gio.toml', 'gio.config.ts', 'middleware.ts', 'package.json']) {
     await cp(join(fixtureDir, item), join(devDir, item), { recursive: true });
   }
   await linkFixtureDeps(devDir);
@@ -550,6 +550,27 @@ async function main() {
   }
 }
 
+/**
+ * Rewrite (or create) `file` and wait until `probe` sees the effect. CI runners sometimes
+ * drop the very first watch event under load, so the file is re-touched
+ * every 30s (at most twice) while nothing has happened yet.
+ */
+async function editAndWait(what, file, edit, probe, timeoutMs = 90_000) {
+  const current = await readFile(file, 'utf8').catch(() => '');
+  await writeFile(file, edit(current));
+  const started = Date.now();
+  let retouches = 0;
+  await waitFor(what, async () => {
+    if (await probe()) return true;
+    if (Date.now() - started > 30_000 * (retouches + 1) && retouches < 2) {
+      retouches++;
+      console.log(`  (re-touching ${file} - watch event likely dropped, attempt ${retouches})`);
+      await writeFile(file, await readFile(file, 'utf8'));
+    }
+    return false;
+  }, timeoutMs);
+}
+
 /** Phase 2 (dev mode): file watching restarts the worker and reloads pages. */
 async function devWatchPhase() {
   const binary = findServerBinary();
@@ -627,6 +648,47 @@ async function devWatchPhase() {
         const html = await (await fetch(`${BASE}/cached`)).text();
         return html.includes('WATCH_UPDATED_CACHED');
       }, 30_000);
+    });
+
+    const restartCount = () => (log.match(/dev watch: worker restarted/g) ?? []).length;
+    const changeCount = () => (log.match(/dev watch: change detected/g) ?? []).length;
+
+    await test('dev watch: editing a module outside app/ restarts the worker', async () => {
+      assert.match(await (await fetch(`${BASE}/with-component`)).text(), /FIXTURE_COMPONENT_ORIGINAL/);
+      const restartsBefore = restartCount();
+      await editAndWait(
+        'components/ edit to be served',
+        join(devDir, 'components', 'Banner.tsx'),
+        (src) => src.replace('FIXTURE_COMPONENT_ORIGINAL', 'WATCH_UPDATED_COMPONENT'),
+        async () => (await (await fetch(`${BASE}/with-component`)).text()).includes('WATCH_UPDATED_COMPONENT'),
+      );
+      await waitFor('component-triggered restart completed', () =>
+        Promise.resolve(restartCount() > restartsBefore), 90_000);
+    });
+
+    await test('dev watch: public/ changes refresh root serving without a worker restart', async () => {
+      const restartsBefore = restartCount();
+      const added = join(devDir, 'public', 'added-in-dev.txt');
+      assert.equal((await fetch(`${BASE}/added-in-dev.txt`)).status, 404);
+      await editAndWait(
+        'new public/ file to be served at the root',
+        added,
+        () => 'ADDED_IN_DEV\n',
+        async () => {
+          const res = await fetch(`${BASE}/added-in-dev.txt`);
+          return res.status === 200 && (await res.text()) === 'ADDED_IN_DEV\n';
+        },
+      );
+      assert.match(log, /dev watch: public\/ index refreshed/);
+      assert.equal(restartCount(), restartsBefore, 'public/ edits must not restart the worker');
+    });
+
+    await test('dev watch: the worker writing .gio/ output does not retrigger the watcher', async () => {
+      // The restarts above rebuilt .gio/build and .gio/routes.d.ts inside the
+      // watched root; a feedback loop would show up as further restarts.
+      const changesBefore = changeCount();
+      await sleep(3_000);
+      assert.equal(changeCount(), changesBefore, 'no change may be detected while idle');
     });
   } catch (err) {
     console.error('\nintegration (dev watch): FAILED');

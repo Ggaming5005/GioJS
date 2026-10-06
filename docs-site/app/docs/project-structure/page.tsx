@@ -27,7 +27,7 @@ export default function Page(): React.JSX.Element {
         <li>A public file wins over a page with the same path (the Next.js precedence).</li>
         <li>Dotfiles are never served at the root, except under .well-known/. Directory listings are never served.</li>
         <li>Root-served files use <code>Cache-Control: public, max-age=0, must-revalidate</code> with Last-Modified, so browsers revalidate instead of keeping an old copy after a deploy.</li>
-        <li>The set of root-served files is indexed at startup, so the request path never pays a filesystem lookup; files added after startup need a restart.</li>
+        <li>The set of root-served files is indexed at startup, so the request path never pays a filesystem lookup. In development, edits to public/ refresh the index; in production, files added after startup need a restart.</li>
       </ul>
     </>
   );

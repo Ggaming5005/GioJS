@@ -79,10 +79,11 @@ export default defineMiddleware({
       <p>
         These rules travel to the Rust server inside the worker&apos;s READY
         frame and refresh whenever the worker restarts. In development the
-        watcher restarts the worker on changes under <code>app/</code> and to{' '}
-        <code>gio.toml</code> / <code>gio.config.*</code>, so middleware edits
-        are picked up with the next restart. <code>gio.toml</code> rules are
-        compiled once at server startup.
+        watcher restarts the worker on source changes anywhere in the project,
+        including <code>middleware.ts</code>, <code>gio.toml</code>, and{' '}
+        <code>gio.config.*</code>, so middleware edits are picked up with the
+        next restart. <code>gio.toml</code> rules are compiled once at server
+        startup.
       </p>
 
       <h2>Pattern language</h2>

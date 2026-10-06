@@ -38,6 +38,7 @@ pub const PUBLIC_ROOT_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate"
 const MAX_INDEXED_FILES: usize = 100_000;
 
 pub struct PublicFiles {
+    root: PathBuf,
     serve_dir: ServeDir,
     /// URL paths (`/robots.txt`, `/.well-known/security.txt`), decoded.
     files: RwLock<HashSet<String>>,
@@ -49,8 +50,22 @@ impl PublicFiles {
         let files = scan_public_files(&root);
         Self {
             serve_dir: ServeDir::new(&root),
+            root,
             files: RwLock::new(files),
         }
+    }
+
+    /// Re-walk public/ after a dev-watch change. Blocking filesystem work -
+    /// async callers run this inside `spawn_blocking`.
+    pub fn refresh(&self) -> usize {
+        let files = scan_public_files(&self.root);
+        let count = files.len();
+        *self.files.write().unwrap_or_else(|e| e.into_inner()) = files;
+        count
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn len(&self) -> usize {
@@ -295,6 +310,20 @@ mod tests {
         let public = PublicFiles::load(PathBuf::from("/definitely/not/a/public/dir"));
         assert_eq!(public.len(), 0);
         assert!(!public.contains("/robots.txt"));
+    }
+
+    #[test]
+    fn refresh_picks_up_added_and_removed_files() {
+        let root = temp_public("refresh");
+        write(&root, "old.txt", "old");
+        let public = PublicFiles::load(root.clone());
+        assert!(public.contains("/old.txt"));
+        std::fs::remove_file(root.join("old.txt")).expect("remove");
+        write(&root, "new.txt", "new");
+        assert_eq!(public.refresh(), 1);
+        assert!(!public.contains("/old.txt"));
+        assert!(public.contains("/new.txt"));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
