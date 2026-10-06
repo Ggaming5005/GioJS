@@ -36,7 +36,8 @@ pub struct MetricsConfig {
 pub struct DevConfig {
     /// Extra Host names the /_gio/devtools* endpoints answer to besides
     /// localhost, loopback IPs, and a specific `server.host` (DNS rebinding
-    /// protection). A leading `.` matches subdomains.
+    /// protection). A leading `.` or `*.` matches subdomains; entries that
+    /// are not a hostname or IP are ignored with a startup warning.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
 }

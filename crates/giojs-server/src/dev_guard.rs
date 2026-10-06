@@ -16,7 +16,21 @@
 //! Anyone who can reach the port directly can forge every header checked
 //! here; that threat is addressed by binding to 127.0.0.1, not by this module.
 
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
+use std::sync::{Mutex, PoisonError};
+
+/// Distinct rejections logged at warn level before the guard goes quiet
+/// (see `DevHostPolicy::should_warn`).
+const MAX_WARNED_REJECTIONS: usize = 16;
+
+/// Replaces a render error page's message and stack when the request's Host
+/// is not trusted: a DNS-rebinding page could otherwise read them.
+pub const HIDDEN_ERROR_DETAILS: &str = "This page failed to render. Error details are only \
+     shown on localhost hosts (DNS rebinding protection); the dev server's terminal has them. \
+     To see them through this host, add its hostname to [dev] allowed_hosts in gio.toml.";
 
 /// How much an endpoint is allowed to do, which decides how strictly the
 /// browser-supplied provenance headers are checked.
@@ -44,7 +58,7 @@ impl DevEndpointKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DevGuardRejection {
     MissingHost,
     UntrustedHost(String),
@@ -69,41 +83,59 @@ impl DevGuardRejection {
                 "GioJS dev endpoints refuse requests with Sec-Fetch-Site: {site}; \
                  call them from a page served by this dev server.\n"
             ),
-            Self::ForeignOrigin(origin) => format!(
-                "GioJS dev endpoints refuse requests from origin \"{origin}\"; \
-                 call them from a page served by this dev server.\n"
-            ),
+            // Allowing the host cannot help a cross-site request (the browser
+            // decides Sec-Fetch-Site), but it is the fix for a foreign Origin
+            // behind a proxy or tunnel that rewrites Host to localhost.
+            Self::ForeignOrigin(origin) => {
+                let mut msg = format!(
+                    "GioJS dev endpoints refuse requests from origin \"{origin}\"; \
+                     call them from a page served by this dev server.\n"
+                );
+                if let Some(host) = origin_hostname(origin) {
+                    msg.push_str(&format!(
+                        "If that origin is a proxy or tunnel in front of this dev server \
+                         (one that rewrites the Host header), allow it in gio.toml:\n\n\
+                         [dev]\nallowed_hosts = [\"{host}\"]\n"
+                    ));
+                }
+                msg
+            }
         }
     }
 }
 
 /// Hosts the dev endpoints answer to, normalized to lowercase hostnames
 /// without port or IPv6 brackets.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct DevHostPolicy {
     /// The bind address when it names one interface (not 0.0.0.0 / ::).
     bind_host: Option<String>,
     /// `[dev] allowed_hosts`. Entries starting with `.` match subdomains.
     allowed_hosts: Vec<String>,
+    /// `[dev] allowed_hosts` entries that are not a hostname or IP, verbatim,
+    /// so startup can name them instead of silently dropping them.
+    invalid_allowed_hosts: Vec<String>,
+    /// Hashes of the rejections already logged at warn level.
+    warned: Mutex<HashSet<u64>>,
 }
 
 impl DevHostPolicy {
     pub fn new(bind_host: &str, allowed_hosts: &[String]) -> Self {
         let bind_host = normalize_hostname(bind_host)
             .filter(|host| !host.parse::<IpAddr>().is_ok_and(|ip| ip.is_unspecified()));
-        let allowed_hosts = allowed_hosts
-            .iter()
-            .filter_map(|entry| {
-                let entry = entry.trim();
-                match entry.strip_prefix('.') {
-                    Some(suffix) => normalize_hostname(suffix).map(|s| format!(".{s}")),
-                    None => normalize_hostname(entry),
-                }
-            })
-            .collect();
+        let mut allowed = Vec::new();
+        let mut invalid = Vec::new();
+        for entry in allowed_hosts {
+            match parse_allowed_host(entry) {
+                Some(host) => allowed.push(host),
+                None => invalid.push(entry.clone()),
+            }
+        }
         Self {
             bind_host,
-            allowed_hosts,
+            allowed_hosts: allowed,
+            invalid_allowed_hosts: invalid,
+            warned: Mutex::default(),
         }
     }
 
@@ -174,10 +206,9 @@ impl DevHostPolicy {
     /// while the browser's Origin keeps the public name.
     fn origin_matches(&self, origin: &str, host: &str) -> bool {
         // "null" (sandboxed iframes, file://) has no authority and never matches.
-        let Some((_, authority)) = origin.split_once("://") else {
+        let Some(authority) = origin_authority(origin) else {
             return false;
         };
-        let authority = authority.trim_end_matches('/');
         if authority.eq_ignore_ascii_case(host) {
             return true;
         }
@@ -186,6 +217,56 @@ impl DevHostPolicy {
 
     pub fn allowed_hosts(&self) -> &[String] {
         &self.allowed_hosts
+    }
+
+    pub fn invalid_allowed_hosts(&self) -> &[String] {
+        &self.invalid_allowed_hosts
+    }
+
+    /// Whether a blocked request deserves a warn-level log line. /_gio/* is
+    /// exempt from rate limiting, so a page looping `new Image().src = ...`
+    /// at a dev endpoint would otherwise flood the terminal: each distinct
+    /// rejection (kind + offending host / origin) is reported once, up to
+    /// MAX_WARNED_REJECTIONS of them, and the rest belong at debug level.
+    pub fn should_warn(&self, rejection: &DevGuardRejection) -> bool {
+        // A hash, not the header value itself, keeps the set's memory fixed.
+        let mut hasher = DefaultHasher::new();
+        rejection.hash(&mut hasher);
+        let mut warned = self.warned.lock().unwrap_or_else(PoisonError::into_inner);
+        warned.len() < MAX_WARNED_REJECTIONS && warned.insert(hasher.finish())
+    }
+}
+
+/// `https://abc.example:8443/` -> `abc.example:8443`. `None` for "null".
+fn origin_authority(origin: &str) -> Option<&str> {
+    let (_, authority) = origin.split_once("://")?;
+    Some(authority.trim_end_matches('/'))
+}
+
+/// The hostname an Origin names, normalized like a Host header.
+fn origin_hostname(origin: &str) -> Option<String> {
+    origin_authority(origin).and_then(normalize_hostname)
+}
+
+/// One `[dev] allowed_hosts` entry -> its normalized form (`.suffix` for a
+/// subdomain wildcard), or `None` when it is not a hostname or IP. Accepts
+/// the `*.example.com` spelling other dev servers use, and a pasted URL
+/// (`http://myvm.local:3000/`) for its host.
+fn parse_allowed_host(entry: &str) -> Option<String> {
+    let mut entry = entry.trim();
+    for scheme in ["http://", "https://"] {
+        if entry
+            .get(..scheme.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+        {
+            entry = &entry[scheme.len()..];
+            break;
+        }
+    }
+    let entry = entry.strip_suffix('/').unwrap_or(entry);
+    match entry.strip_prefix("*.").or_else(|| entry.strip_prefix('.')) {
+        Some(suffix) => normalize_hostname(suffix).map(|s| format!(".{s}")),
+        None => normalize_hostname(entry),
     }
 }
 
@@ -213,7 +294,10 @@ fn normalize_hostname(raw: &str) -> Option<String> {
     // A trailing dot is the same FQDN; strip it so "localhost." is not a bypass
     // or a spurious mismatch.
     let host = host.trim_end_matches('.').to_ascii_lowercase();
-    if host.is_empty() || host.contains(['/', '@', ' ', '\\']) {
+    // No real host has a '*' or a leading '.'; rejecting them surfaces
+    // misspelled wildcards in allowed_hosts instead of storing them as
+    // literals that never match.
+    if host.is_empty() || host.starts_with('.') || host.contains(['/', '@', ' ', '\\', '*']) {
         return None;
     }
     Some(host)
@@ -311,6 +395,80 @@ mod tests {
         assert!(p.is_trusted_host("abc.tunnel.example:443"));
         assert!(!p.is_trusted_host("eviltunnel.example"));
         assert!(!p.is_trusted_host("other.local"));
+    }
+
+    #[test]
+    fn allowed_hosts_accept_wildcard_and_url_spellings() {
+        let p = DevHostPolicy::new(
+            "0.0.0.0",
+            &[
+                "*.tunnel.example".to_string(),
+                "http://MyVM.local:3000".to_string(),
+                "HTTPS://box.example/".to_string(),
+            ],
+        );
+        assert!(p.is_trusted_host("abc.tunnel.example:443"));
+        assert!(p.is_trusted_host("tunnel.example"));
+        assert!(!p.is_trusted_host("eviltunnel.example"));
+        assert!(p.is_trusted_host("myvm.local:3000"));
+        assert!(p.is_trusted_host("box.example"));
+        assert!(p.invalid_allowed_hosts().is_empty());
+        assert_eq!(
+            p.allowed_hosts(),
+            [".tunnel.example", "myvm.local", "box.example"]
+        );
+    }
+
+    #[test]
+    fn unusable_allowed_hosts_entries_are_reported_not_stored() {
+        let entries = [
+            "*",
+            "*.",
+            "foo*.example",
+            "http://myvm.local/app",
+            "",
+            "..example",
+            "ok.example",
+        ]
+        .map(String::from);
+        let p = DevHostPolicy::new("0.0.0.0", &entries);
+        assert_eq!(p.allowed_hosts(), ["ok.example"]);
+        assert_eq!(p.invalid_allowed_hosts(), &entries[..6]);
+        assert!(!p.is_trusted_host("foo*.example"));
+        assert!(!p.is_trusted_host(".localhost"));
+    }
+
+    #[test]
+    fn repeated_rejections_are_warned_about_once() {
+        let p = policy();
+        let evil = DevGuardRejection::UntrustedHost("evil.example".into());
+        assert!(p.should_warn(&evil));
+        assert!(
+            !p.should_warn(&evil),
+            "a flood of the same rejection warns once"
+        );
+        assert!(p.should_warn(&DevGuardRejection::ForeignOrigin(
+            "https://evil.example".into()
+        )));
+        // Distinct values stop warning after a fixed number, so a page that
+        // varies its Host / Origin cannot flood the terminal either.
+        let warned = (0..100)
+            .filter(|i| p.should_warn(&DevGuardRejection::UntrustedHost(format!("h{i}.example"))))
+            .count();
+        assert_eq!(warned, MAX_WARNED_REJECTIONS - 2);
+    }
+
+    #[test]
+    fn foreign_origin_message_points_proxies_at_allowed_hosts() {
+        let msg = DevGuardRejection::ForeignOrigin("https://abc.ngrok.app".into()).message();
+        assert!(msg.contains("proxy or tunnel"), "{msg}");
+        assert!(
+            msg.contains("[dev]\nallowed_hosts = [\"abc.ngrok.app\"]"),
+            "{msg}"
+        );
+        // An opaque origin has no hostname to suggest.
+        let null = DevGuardRejection::ForeignOrigin("null".into()).message();
+        assert!(!null.contains("allowed_hosts"), "{null}");
     }
 
     #[test]

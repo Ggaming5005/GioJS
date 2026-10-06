@@ -68,13 +68,15 @@ GIO_EDITOR="subl -w" npm run dev`} />
         dev mode - none of it is compiled into production responses.
       </div>
       <p>
-        Both endpoints only answer to localhost hosts and refuse cross-site
-        requests; open-in-editor additionally takes same-origin{' '}
-        <code>POST</code> only. If you open the dev server through a LAN IP or
-        hostname, add it to <code>[dev] allowed_hosts</code> in{' '}
+        Both endpoints only answer to localhost hosts. The codeframe endpoint
+        refuses cross-site requests; open-in-editor takes same-origin{' '}
+        <code>POST</code> only. The SSR error page follows the same rule: for
+        any other host it leaves out the error message and stack (the
+        terminal still logs them). If you open the dev server through a LAN
+        IP or hostname, add it to <code>[dev] allowed_hosts</code> in{' '}
         <code>gio.toml</code> (see{' '}
-        <a href="/docs/configuration">Configuration</a>) or codeframes and
-        editor links will not work from there.
+        <a href="/docs/configuration">Configuration</a>) or error details,
+        codeframes and editor links will not work from there.
       </p>
 
       <h2>Static export</h2>

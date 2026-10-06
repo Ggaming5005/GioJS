@@ -156,12 +156,26 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
           re-points its own domain at your machine.
         </li>
         <li>
-          Requests a browser marks as cross-site (<code>Sec-Fetch-Site</code>,
-          or an <code>Origin</code> that is not the requested host) are refused.
+          The state, stream and codeframe reads refuse requests a browser marks{' '}
+          <code>Sec-Fetch-Site: cross-site</code>, and requests whose{' '}
+          <code>Origin</code> is neither the requested host nor a host in{' '}
+          <code>allowed_hosts</code> (the latter covers tunnels and port
+          forwarders that rewrite <code>Host</code> to localhost).
         </li>
         <li>
-          open-in-editor accepts same-origin <code>POST</code> only, so a link
-          or <code>&lt;img&gt;</code> on another site cannot launch your editor.
+          open-in-editor accepts <code>POST</code> only, also refuses{' '}
+          <code>Sec-Fetch-Site: same-site</code> (only same-origin calls
+          pass), and applies the same <code>Origin</code> rule, so a link,
+          form or{' '}
+          <code>&lt;img&gt;</code> on another site cannot launch your editor.
+        </li>
+        <li>
+          The dashboard page itself only checks <code>Host</code>: following a
+          link to it is harmless, and another site cannot read it.
+        </li>
+        <li>
+          SSR error pages served to any other host leave out the error message
+          and stack, which name files and code on your machine.
         </li>
       </ul>
       <p>
@@ -170,12 +184,17 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
         hostname or IP you type in the address bar:
       </p>
       <CodeBlock lang="toml" code={`[dev]
-allowed_hosts = ["192.168.1.20", "myvm.local", ".tunnel.example"]  # leading "." = any subdomain`} />
+allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or "." = any subdomain`} />
       <p>
-        Pages themselves are unaffected; without the entry only the overlay
-        codeframes, open-in-editor, live reload, and the dashboard stop working
-        from that host. When bound to <code>0.0.0.0</code> with no{' '}
-        <code>allowed_hosts</code>, the server logs a reminder at startup.
+        Entries are hostnames or IPs; a port or a pasted{' '}
+        <code>http(s)://</code> prefix is ignored, and an entry that is not a
+        host is skipped with a startup warning naming it. Pages themselves
+        are unaffected; without the entry only the overlay codeframes,
+        open-in-editor, live reload, the dashboard, and the details on SSR
+        error pages stop working from that host. When bound to{' '}
+        <code>0.0.0.0</code> with no <code>allowed_hosts</code>, the server
+        logs a reminder at startup. Blocked requests are logged once per
+        distinct host or origin.
       </p>
       <div className="callout">
         These checks stop websites you visit, not people on your network: a

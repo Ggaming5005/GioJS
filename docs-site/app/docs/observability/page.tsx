@@ -22,8 +22,9 @@ token = "a-long-random-secret"   # secure it for production`} />
       <p>
         The dashboard and its endpoints only answer to localhost hosts
         (<code>localhost</code>, <code>*.localhost</code>, <code>127.0.0.1</code>,{' '}
-        <code>[::1]</code>) and refuse cross-site requests, so other websites
-        cannot read them through DNS rebinding. To open it through another
+        <code>[::1]</code>), so other websites cannot read them through DNS
+        rebinding, and its state and stream endpoints also refuse cross-site
+        requests. To open it through another
         hostname or LAN IP, list that host under <code>[dev] allowed_hosts</code>{' '}
         - see <a href="/docs/configuration">Configuration</a>.
       </p>

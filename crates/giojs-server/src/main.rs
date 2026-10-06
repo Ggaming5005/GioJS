@@ -67,7 +67,7 @@ use tower_http::compression::predicate::{DefaultPredicate, Predicate, SizeAbove}
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use ws_ipc::WsIpcClient;
 use ws_registry::WsRegistry;
@@ -503,11 +503,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/_gio/metrics", get(metrics_handler))
         .route("/_gio/image", get(image_handler_route));
 
-    if dev_mode {
-        let dev_hosts = Arc::new(dev_guard::DevHostPolicy::new(
+    let dev_hosts = dev_mode.then(|| {
+        Arc::new(dev_guard::DevHostPolicy::new(
             &cfg.server.host,
             &cfg.dev.allowed_hosts,
-        ));
+        ))
+    });
+    if let Some(dev_hosts) = &dev_hosts {
+        for entry in dev_hosts.invalid_allowed_hosts() {
+            warn!(
+                "ignoring [dev] allowed_hosts entry {entry:?} in gio.toml: expected a hostname or \
+                 IP such as \"myvm.local\", \"192.168.1.20\" or \"*.tunnel.example\""
+            );
+        }
         if !dev_hosts.allowed_hosts().is_empty() {
             info!(allowed_hosts = ?dev_hosts.allowed_hosts(), "dev endpoints also answer to [dev] allowed_hosts");
         } else if dev_guard::binds_all_interfaces(&cfg.server.host) {
@@ -531,17 +539,26 @@ async fn main() -> anyhow::Result<()> {
                 post(devtools_open_editor_handler),
             )
             .route_layer(axum::middleware::from_fn_with_state(
-                dev_hosts,
+                dev_hosts.clone(),
                 dev_endpoint_guard,
             ));
         app = app.merge(dev_routes);
     }
 
-    let app = app
+    let mut app = app
         .nest_service("/public", ServeDir::new(public_dir))
         .nest_service("/_next/static", static_service)
         .nest_service("/_gio/fonts", font_service)
-        .fallback(dynamic_handler)
+        .fallback(dynamic_handler);
+    if let Some(dev_hosts) = dev_hosts {
+        // Innermost, so it swaps the handler's body before any response
+        // transform (i18n, compression) touches it.
+        app = app.layer(axum::middleware::from_fn_with_state(
+            dev_hosts,
+            dev_error_detail_guard,
+        ));
+    }
+    let app = app
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             prefetch_budget_middleware,
@@ -1654,6 +1671,9 @@ async fn respond_from_render(
         &state.css_config,
         state.dev_mode,
     );
+    if state.dev_mode && resp.worker_error {
+        resp_out.extensions_mut().insert(WorkerErrorPage);
+    }
     insert_cache_status_header(
         &mut resp_out,
         if will_cache { "miss; stored" } else { "bypass" },
@@ -2909,6 +2929,16 @@ fn extract_headers(req: &Request) -> HashMap<String, String> {
         .collect()
 }
 
+/// The host a request was sent to: the Host header, or the HTTP/2
+/// :authority when there is none.
+fn request_host(req: &Request) -> Option<String> {
+    req.headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().authority().map(|a| a.as_str().to_string()))
+}
+
 /// Host / Origin / Sec-Fetch-Site vetting for every /_gio/devtools* route
 /// (see dev_guard.rs): defeats DNS rebinding and cross-site requests.
 async fn dev_endpoint_guard(
@@ -2918,10 +2948,7 @@ async fn dev_endpoint_guard(
 ) -> Response {
     let headers = req.headers();
     let header_str = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-    // HTTP/2 carries the host in :authority instead of a Host header.
-    let host = header_str(header::HOST.as_str())
-        .map(str::to_string)
-        .or_else(|| req.uri().authority().map(|a| a.as_str().to_string()));
+    let host = request_host(&req);
     let verdict = policy.check(
         dev_guard::DevEndpointKind::for_path(req.uri().path()),
         host.as_deref(),
@@ -2931,7 +2958,13 @@ async fn dev_endpoint_guard(
     match verdict {
         Ok(()) => next.run(req).await,
         Err(rejection) => {
-            warn!(path = %req.uri().path(), ?rejection, "dev endpoint request blocked");
+            // /_gio/* skips rate limiting, so any open page could loop
+            // requests here: warn once per distinct rejection, then debug.
+            if policy.should_warn(&rejection) {
+                warn!(path = %req.uri().path(), ?rejection, "dev endpoint request blocked (repeats are logged at debug level)");
+            } else {
+                debug!(path = %req.uri().path(), ?rejection, "dev endpoint request blocked");
+            }
             Response::builder()
                 .status(StatusCode::FORBIDDEN)
                 .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -2940,6 +2973,39 @@ async fn dev_endpoint_guard(
                 .unwrap_or_else(|_| StatusCode::FORBIDDEN.into_response())
         }
     }
+}
+
+/// Response extension marking a worker error page (see
+/// `IpcResponse::worker_error`); set in dev mode only.
+#[derive(Clone, Copy)]
+struct WorkerErrorPage;
+
+/// Dev mode: a render error page embeds the error message and stack (file
+/// paths, source excerpts from build errors). Pages carry no Host check, so
+/// a DNS-rebinding site could read them same-origin; a request whose Host is
+/// not trusted gets a page without the details instead.
+async fn dev_error_detail_guard(
+    State(policy): State<Arc<dev_guard::DevHostPolicy>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let host = request_host(&req);
+    let resp = next.run(req).await;
+    if resp.extensions().get::<WorkerErrorPage>().is_none()
+        || host.is_some_and(|h| policy.is_trusted_host(&h))
+    {
+        return resp;
+    }
+    let (mut parts, _) = resp.into_parts();
+    parts.extensions.remove::<WorkerErrorPage>();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    let page =
+        dev_overlay::error_page_html(parts.status.as_u16(), dev_guard::HIDDEN_ERROR_DETAILS, None);
+    Response::from_parts(parts, axum::body::Body::from(page))
 }
 
 async fn devtools_handler(State(state): State<AppState>) -> Response {
@@ -3859,6 +3925,7 @@ mod tests {
             body_base64: false,
             streaming: false,
             ppr_shell: false,
+            worker_error: false,
         }
     }
 
@@ -4265,6 +4332,72 @@ mod tests {
             dev_request("GET", "/_gio/devtools/codeframe", &[]).await,
             StatusCode::FORBIDDEN
         );
+    }
+
+    /// A fallback that answers like a failed render (marked) or a normal page.
+    fn error_detail_router() -> Router {
+        Router::new()
+            .route(
+                "/fine",
+                get(|| async { "PAGE_BODY at /home/dev/app/page.tsx" }),
+            )
+            .fallback(|| async {
+                let mut resp = (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    dev_overlay::error_page_html(
+                        500,
+                        "SECRET_MESSAGE",
+                        Some("Error: SECRET_MESSAGE\n    at Page (/home/dev/app/page.tsx:3:9)"),
+                    ),
+                )
+                    .into_response();
+                resp.extensions_mut().insert(WorkerErrorPage);
+                resp
+            })
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(dev_guard::DevHostPolicy::new("0.0.0.0", &[])),
+                dev_error_detail_guard,
+            ))
+    }
+
+    async fn error_detail_body(path: &str, host: Option<&str>) -> (StatusCode, String) {
+        let mut builder = Request::builder().uri(path);
+        if let Some(host) = host {
+            builder = builder.header("host", host);
+        }
+        let resp = error_detail_router()
+            .call(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn dev_error_details_are_hidden_from_untrusted_hosts() {
+        for host in [Some("evil.example:3000"), None] {
+            let (status, body) = error_detail_body("/broken", host).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(!body.contains("SECRET_MESSAGE"), "{body}");
+            assert!(!body.contains("/home/dev/"), "{body}");
+            assert!(body.contains("allowed_hosts"), "{body}");
+            assert!(body.contains("</body>"), "still an HTML page: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dev_error_details_reach_localhost_and_other_pages_pass_through() {
+        let (_, body) = error_detail_body("/broken", Some("localhost:3000")).await;
+        assert!(body.contains("SECRET_MESSAGE"));
+        assert!(body.contains("/home/dev/app/page.tsx"));
+        // Only marked error pages are rewritten.
+        let (status, body) = error_detail_body("/fine", Some("evil.example")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "PAGE_BODY at /home/dev/app/page.tsx");
     }
 
     // ── TLS error paths ───────────────────────────────────────────────────────

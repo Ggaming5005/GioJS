@@ -506,6 +506,13 @@ async function main() {
 async function devWatchPhase() {
   const binary = findServerBinary();
   const devDir = await copyFixtureForDev();
+  // A page that always throws, for the error-detail checks. Written before
+  // the server starts so the dev watcher never sees it change.
+  await mkdir(join(devDir, 'app', 'dev-boom'), { recursive: true });
+  await writeFile(
+    join(devDir, 'app', 'dev-boom', 'page.tsx'),
+    "export default function Boom() {\n  throw new Error('DEV_BOOM_DETAIL');\n}\n",
+  );
   const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-devcache-'));
 
   let log = '';
@@ -546,6 +553,12 @@ async function devWatchPhase() {
       }
       const post = await rawRequest('POST', editorPath, { host: 'evil.example' });
       assert.equal(post.status, 403);
+      // /_gio/* is not rate limited: a page looping these requests must not
+      // flood the terminal, so the same rejection is warned about once.
+      const blocked = () => log.match(/dev endpoint request blocked.*evil\.example/g) ?? [];
+      await waitFor('blocked-request warning', () => Promise.resolve(blocked().length > 0), 5_000);
+      await sleep(250);
+      assert.equal(blocked().length, 1, 'five identical rejections, one warning');
     });
 
     await test('dev endpoints: localhost hosts are served, including the reload stream', async () => {
@@ -617,6 +630,18 @@ async function devWatchPhase() {
         host: trustedHost,
       });
       assert.equal(direct.status, 400);
+    });
+
+    await test('dev error pages: message and stack only reach localhost hosts', async () => {
+      const local = await rawRequest('GET', '/dev-boom', { host: trustedHost });
+      assert.equal(local.status, 500);
+      assert.match(local.body, /"stack":"[^"]*DEV_BOOM_DETAIL/, 'localhost gets the overlay payload');
+      // DNS rebinding: the attacker's page reads this same-origin under its own Host.
+      const rebound = await rawRequest('GET', '/dev-boom', { host: 'evil.example' });
+      assert.equal(rebound.status, 500);
+      assert.doesNotMatch(rebound.body, /DEV_BOOM_DETAIL/);
+      assert.match(rebound.body, /"stack":null/);
+      assert.match(rebound.body, /allowed_hosts/);
     });
 
     await test('dev watch: editing a page restarts the worker and serves new content', async () => {
