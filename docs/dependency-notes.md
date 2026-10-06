@@ -20,6 +20,10 @@ cargo +nightly udeps --all-targets
 
 Known workspace dependencies and their current locked versions are in `Cargo.lock`.
 
+### Minimum Rust version
+
+`rust-version` under `[workspace.package]` in the root `Cargo.toml` (1.89) is the oldest toolchain that builds the committed `Cargo.lock`, and every crate inherits it. A dependency bump can raise it: if a locked crate starts needing a newer rustc, CI's `msrv` job fails. In the same PR, raise `rust-version` and the `FROM rust:` tag in `docs/deployment/docker.md`. `node scripts/check-msrv.mjs` checks that `rust-version`, `Cargo.lock` and that tag agree.
+
 ## npm packages
 
 `npm outdated` returned no output - all packages are at their specified versions.

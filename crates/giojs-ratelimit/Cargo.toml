@@ -2,6 +2,7 @@
 name    = "giojs-ratelimit"
 version = "0.1.0-beta.1"
 edition = "2021"
+rust-version.workspace = true
 license = "MIT"
 publish = false
 
