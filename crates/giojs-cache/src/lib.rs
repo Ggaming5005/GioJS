@@ -47,6 +47,10 @@ pub struct CacheEntry {
     /// React flushed before the first Suspense boundary). A hit must append a
     /// per-request holes render instead of serving the entry as a full page.
     pub ppr_shell: bool,
+    /// The route pattern that rendered the entry (IPC `route`), so hits keep
+    /// their metrics label without asking the worker. None when no route
+    /// matched or for entries written before routes were stored.
+    pub route: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +216,7 @@ mod tests {
             composed: false,
             tags: Vec::new(),
             ppr_shell: false,
+            route: None,
         }
     }
 

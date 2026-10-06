@@ -75,6 +75,12 @@ export interface IPCResponse {
    * `headers['set-cookie']`; an onResponse plugin strips them with `[]`.
    */
   setCookies?: string[];
+  /**
+   * The matched route pattern, e.g. "/posts/:id" (additive, protocol stays
+   * v3). Rust labels its metrics with it and stores it with cache entries;
+   * absent when no route matched. Stamped by ipc.ts, never by renderRoute.
+   */
+  route?: string;
 }
 
 export interface IPCError {
@@ -92,6 +98,8 @@ export interface IPCError {
   digest?: string;
   /** The failed request's id, echoed so Rust's error log line carries it. */
   requestId?: string;
+  /** The matched route pattern, as on IPCResponse. */
+  route?: string;
 }
 
 export type IPCOutbound = IPCResponse | IPCError;

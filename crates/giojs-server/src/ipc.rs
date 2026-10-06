@@ -194,6 +194,17 @@ pub enum IpcSendResult {
     },
 }
 
+impl IpcSendResult {
+    /// The matched route pattern of the response (head), if any.
+    pub fn route(&self) -> Option<&str> {
+        match self {
+            IpcSendResult::Response(response)
+            | IpcSendResult::SseStream { response, .. }
+            | IpcSendResult::RenderStream { response, .. } => response.route.as_deref(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct IpcRequest {
     pub id: String,
@@ -287,6 +298,11 @@ pub struct IpcResponse {
     /// frame, whose body embeds the error message and, in dev, its stack.
     #[serde(skip)]
     pub worker_error: bool,
+    /// The matched route pattern (`/posts/:id`) - the metrics `route` label,
+    /// stored with cache entries for their hits. Absent when no route matched
+    /// (and from older workers); additive, protocol stays v3.
+    #[serde(default)]
+    pub route: Option<String>,
     /// Set-Cookie values, one header each. They cannot ride in the
     /// single-valued `headers` map: cookies are not comma-joinable (Expires
     /// dates contain commas), so a map would keep only one of them.
@@ -1232,6 +1248,10 @@ fn error_frame_response(id: &str, val: &serde_json::Value, dev_mode: bool) -> Ip
         ppr_shell: false,
         worker_error: true,
         set_cookies: Vec::new(),
+        route: val
+            .get("route")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
     }
 }
 
@@ -1252,6 +1272,7 @@ fn unavailable_response(id: &str) -> IpcResponse {
         ppr_shell: false,
         worker_error: false,
         set_cookies: Vec::new(),
+        route: None,
     }
 }
 
@@ -1982,6 +2003,22 @@ mod tests {
             .expect("EOF ends the worker")
             .unwrap();
         assert_eq!(status.code(), Some(7));
+    }
+
+    #[test]
+    fn ipc_response_route_is_optional_and_error_frames_keep_it() {
+        let plain: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"x","cacheable":false,"cacheMaxAge":0}"#,
+        )
+        .unwrap();
+        assert_eq!(plain.route, None);
+        let error = error_frame_response(
+            "a",
+            &serde_json::json!({"error": true, "code": "RENDER_ERROR", "route": "/boom"}),
+            false,
+        );
+        assert_eq!(error.route.as_deref(), Some("/boom"));
+        assert_eq!(unavailable_response("a").route, None);
     }
 
     #[tokio::test]

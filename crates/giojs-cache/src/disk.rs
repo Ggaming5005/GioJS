@@ -35,6 +35,9 @@ struct DiskEntry {
     /// complete pages, never mistaken for a shell awaiting holes.
     #[serde(default)]
     ppr_shell: bool,
+    /// Route pattern for metrics; absent in entries written before it existed.
+    #[serde(default)]
+    route: Option<String>,
 }
 
 impl From<&CacheEntry> for DiskEntry {
@@ -54,6 +57,7 @@ impl From<&CacheEntry> for DiskEntry {
             composed: e.composed,
             tags: e.tags.clone(),
             ppr_shell: e.ppr_shell,
+            route: e.route.clone(),
         }
     }
 }
@@ -71,6 +75,7 @@ impl From<DiskEntry> for CacheEntry {
             composed: d.composed,
             tags: d.tags,
             ppr_shell: d.ppr_shell,
+            route: d.route,
         }
     }
 }
@@ -210,6 +215,7 @@ mod tests {
             composed: false,
             tags: Vec::new(),
             ppr_shell: false,
+            route: None,
         }
     }
 
@@ -220,6 +226,7 @@ mod tests {
         let entry = CacheEntry::from(disk_entry);
         assert!(!entry.composed);
         assert!(!entry.ppr_shell, "pre-PPR entries must read as full pages");
+        assert_eq!(entry.route, None);
     }
 
     #[test]

@@ -99,6 +99,8 @@ struct RenderedPage {
     /// True when `body` already has all head snippets injected (put-time
     /// composition), so response building must not inject again.
     composed: bool,
+    /// Matched route pattern, the metrics label.
+    route: Option<String>,
 }
 
 /// Result of a coalesced render. `Page` is a shareable cached response.
@@ -694,7 +696,24 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/build/static"));
 
+    // Requests these serve never reach the dynamic pipeline, which records
+    // everything else; each gets a fixed metrics `route` label instead.
+    let static_metrics = FixedRouteMetrics {
+        metrics: state.metrics.clone(),
+        route: metrics::ROUTE_STATIC,
+        cache: "static",
+    };
+    let internal_metrics = FixedRouteMetrics {
+        metrics: state.metrics.clone(),
+        route: metrics::ROUTE_INTERNAL,
+        cache: "bypass",
+    };
+
     let static_service = ServiceBuilder::new()
+        .layer(axum::middleware::from_fn_with_state(
+            static_metrics.clone(),
+            fixed_route_metrics_middleware,
+        ))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
             HeaderValue::from_static(css_assets::IMMUTABLE_CACHE_CONTROL),
@@ -702,8 +721,19 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         .service(ServeDir::new(static_dir));
 
     let font_service = ServiceBuilder::new()
+        .layer(axum::middleware::from_fn_with_state(
+            internal_metrics.clone(),
+            fixed_route_metrics_middleware,
+        ))
         .layer(axum::middleware::from_fn(font_cache_control_middleware))
         .service(ServeDir::new(fonts_dir));
+
+    let public_service = ServiceBuilder::new()
+        .layer(axum::middleware::from_fn_with_state(
+            static_metrics,
+            fixed_route_metrics_middleware,
+        ))
+        .service(ServeDir::new(public_dir));
 
     let compression = CompressionLayer::new().compress_when(
         DefaultPredicate::new()
@@ -714,7 +744,11 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let mut app = Router::new()
         .route("/_gio/health", get(health_handler))
         .route("/_gio/metrics", get(metrics_handler))
-        .route("/_gio/image", get(image_handler_route));
+        .route("/_gio/image", get(image_handler_route))
+        .route_layer(axum::middleware::from_fn_with_state(
+            internal_metrics,
+            fixed_route_metrics_middleware,
+        ));
 
     let dev_hosts = dev_mode.then(|| {
         Arc::new(dev_guard::DevHostPolicy::new(
@@ -759,7 +793,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     }
 
     let mut app = app
-        .nest_service(public_files::PUBLIC_URL_PREFIX, ServeDir::new(public_dir))
+        .nest_service(public_files::PUBLIC_URL_PREFIX, public_service)
         .nest_service("/_next/static", static_service)
         .nest_service("/_gio/fonts", font_service)
         .fallback(root_fallback_handler);
@@ -899,6 +933,35 @@ async fn client_identity_middleware(
 /// from exactly the warn/error lines it is there for.
 fn request_span(request_id: &str) -> tracing::Span {
     tracing::error_span!("request", request_id = %request_id)
+}
+
+/// Labels for requests served outside the dynamic pipeline (see
+/// `fixed_route_metrics_middleware`).
+#[derive(Clone)]
+struct FixedRouteMetrics {
+    metrics: Arc<metrics::Metrics>,
+    route: &'static str,
+    cache: &'static str,
+}
+
+/// Record a request under a fixed `route` / `cache` label: static files
+/// (`static`) and the server's own /_gio endpoints (`internal`).
+async fn fixed_route_metrics_middleware(
+    State(labels): State<FixedRouteMetrics>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let start = std::time::Instant::now();
+    let method = req.method().clone();
+    let resp = next.run(req).await;
+    labels.metrics.record_request(
+        method.as_str(),
+        resp.status().as_u16(),
+        labels.cache,
+        labels.route,
+        start.elapsed().as_nanos() as u64,
+    );
+    resp
 }
 
 /// fonts.css is regenerated from gio.toml at every start under a fixed URL,
@@ -1468,7 +1531,15 @@ async fn root_fallback_handler(
         && (req.method() == axum::http::Method::GET || req.method() == axum::http::Method::HEAD)
         && state.public_files.contains(req.uri().path())
     {
+        let start = std::time::Instant::now();
         if let Some(resp) = state.public_files.serve(&req).await {
+            state.metrics.record_request(
+                req.method().as_str(),
+                resp.status().as_u16(),
+                "static",
+                metrics::ROUTE_STATIC,
+                start.elapsed().as_nanos() as u64,
+            );
             return resp;
         }
     }
@@ -1539,7 +1610,15 @@ async fn dynamic_handler(
     // Serve pre-transformed CSS directly from startup cache
     if path.ends_with(".css") {
         if let Some(css) = state.css_cache.get(&path) {
-            return css_assets::css_response(&css, req.headers());
+            let resp = css_assets::css_response(&css, req.headers());
+            state.metrics.record_request(
+                &method,
+                resp.status().as_u16(),
+                "static",
+                metrics::ROUTE_STATIC,
+                start.elapsed().as_nanos() as u64,
+            );
+            return resp;
         }
     }
 
@@ -1656,6 +1735,7 @@ async fn dynamic_handler(
             let ttl_secs = entry.max_age_secs.saturating_sub(entry_age_secs(&entry));
             let duration_ms = start.elapsed().as_millis() as u64;
             info!(method = %method, path = %path, status = %status, cache = "hit", encoding = %encoding, prefetch = %prefetch_status, "request completed");
+            let route = entry.route.clone();
             let mut resp = build_response_from_entry(
                 entry,
                 &deployment_id,
@@ -1667,9 +1747,13 @@ async fn dynamic_handler(
             )
             .await;
             insert_cache_status_header(&mut resp, &format!("hit; ttl={ttl_secs}"));
-            state
-                .metrics
-                .record_request(&method, status, "hit", start.elapsed().as_nanos() as u64);
+            state.metrics.record_request(
+                &method,
+                status,
+                "hit",
+                metrics::route_label(route.as_deref()),
+                start.elapsed().as_nanos() as u64,
+            );
             record_devtools(
                 &state,
                 &method,
@@ -1687,6 +1771,7 @@ async fn dynamic_handler(
             let status = entry.status;
             let age_secs = entry_age_secs(&entry);
             let duration_ms = start.elapsed().as_millis() as u64;
+            let route = entry.route.clone();
             spawn_revalidation(
                 state.clone(),
                 cache_key.clone(),
@@ -1709,6 +1794,7 @@ async fn dynamic_handler(
                 &method,
                 status,
                 "stale",
+                metrics::route_label(route.as_deref()),
                 start.elapsed().as_nanos() as u64,
             );
             record_devtools(
@@ -1795,9 +1881,10 @@ async fn dynamic_handler(
                     let ipc_start = std::time::Instant::now();
                     match state.ipc.send_request(ipc_req).await {
                         Ok(IpcSendResult::Response(resp)) => {
-                            state
-                                .metrics
-                                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+                            state.metrics.record_ipc_latency(
+                                metrics::route_label(resp.route.as_deref()),
+                                ipc_start.elapsed().as_nanos() as u64,
+                            );
                             if state.dev_mode {
                                 state.devtools.update_route_mode(
                                     &path,
@@ -1826,6 +1913,7 @@ async fn dynamic_handler(
                                 composed,
                                 tags: resp.cache_tags.clone(),
                                 ppr_shell: false,
+                                route: resp.route.clone(),
                             };
                             if let Err(e) = state.cache.put(&cache_key, entry).await {
                                 warn!(path = %path, error = %e, "cache write failed");
@@ -1836,6 +1924,7 @@ async fn dynamic_handler(
                                 body,
                                 cacheable: resp.cacheable,
                                 composed,
+                                route: resp.route,
                             }))
                         }
                         // Streams are per-connection (SSE and streaming SSR
@@ -1845,16 +1934,18 @@ async fn dynamic_handler(
                             stream @ (IpcSendResult::SseStream { .. }
                             | IpcSendResult::RenderStream { .. }),
                         ) => {
-                            state
-                                .metrics
-                                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+                            state.metrics.record_ipc_latency(
+                                metrics::route_label(stream.route()),
+                                ipc_start.elapsed().as_nanos() as u64,
+                            );
                             *slot.lock().await = Some(stream);
                             CoalescedRender::Private
                         }
                         Err(e) => {
-                            state
-                                .metrics
-                                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+                            state.metrics.record_ipc_latency(
+                                metrics::ROUTE_UNMATCHED,
+                                ipc_start.elapsed().as_nanos() as u64,
+                            );
                             error!(path = %path, error = %e, "IPC error");
                             // ipc.rs bails with a plain string on timeout (the tokio
                             // Elapsed is discarded), so the message is the only signal.
@@ -1892,6 +1983,7 @@ async fn dynamic_handler(
                 &method,
                 status_code.as_u16(),
                 "miss",
+                metrics::route_label(page.route.as_deref()),
                 start.elapsed().as_nanos() as u64,
             );
             record_devtools(
@@ -2081,9 +2173,10 @@ async fn render_uncoalesced(
     let ipc_start = std::time::Instant::now();
     match state.ipc.send_request(ipc_req).await {
         Ok(IpcSendResult::Response(resp)) => {
-            state
-                .metrics
-                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+            state.metrics.record_ipc_latency(
+                metrics::route_label(resp.route.as_deref()),
+                ipc_start.elapsed().as_nanos() as u64,
+            );
             respond_from_render(
                 state,
                 cache_key,
@@ -2101,17 +2194,19 @@ async fn render_uncoalesced(
             .await
         }
         Ok(IpcSendResult::SseStream { response, body_rx }) => {
-            state
-                .metrics
-                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+            state.metrics.record_ipc_latency(
+                metrics::route_label(response.route.as_deref()),
+                ipc_start.elapsed().as_nanos() as u64,
+            );
             respond_sse(
                 state, method, path, response, body_rx, encoding, locale, start,
             )
         }
         Ok(IpcSendResult::RenderStream { response, body_rx }) => {
-            state
-                .metrics
-                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+            state.metrics.record_ipc_latency(
+                metrics::route_label(response.route.as_deref()),
+                ipc_start.elapsed().as_nanos() as u64,
+            );
             respond_stream(
                 state,
                 method,
@@ -2127,9 +2222,10 @@ async fn render_uncoalesced(
             )
         }
         Err(e) => {
-            state
-                .metrics
-                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+            state.metrics.record_ipc_latency(
+                metrics::ROUTE_UNMATCHED,
+                ipc_start.elapsed().as_nanos() as u64,
+            );
             error!(path = %path, error = %e, "IPC error");
             // ipc.rs bails with a plain string on timeout (the tokio Elapsed is
             // discarded), so downcast_ref is impossible - the message is the only signal.
@@ -2181,6 +2277,7 @@ async fn respond_from_render(
             composed,
             tags: resp.cache_tags.clone(),
             ppr_shell: false,
+            route: resp.route.clone(),
         };
         if let Err(e) = state.cache.put(cache_key, entry).await {
             warn!(path = %path, error = %e, "cache write failed");
@@ -2221,6 +2318,7 @@ async fn respond_from_render(
         method,
         status_code.as_u16(),
         "miss",
+        metrics::route_label(resp.route.as_deref()),
         start.elapsed().as_nanos() as u64,
     );
     record_devtools(
@@ -2358,6 +2456,7 @@ fn respond_stream(
         method,
         status_code.as_u16(),
         "stream",
+        metrics::route_label(response.route.as_deref()),
         start.elapsed().as_nanos() as u64,
     );
     record_devtools(
@@ -2405,6 +2504,7 @@ fn respond_stream(
         tags: response.cache_tags.clone(),
         head_snippets: stream_head_snippets(state, deployment_id, default_locale),
         lang,
+        route: response.route.clone(),
     });
 
     let stream = RenderBodyStream {
@@ -2477,6 +2577,7 @@ async fn put_ppr_shell_entry(
     max_age_secs: u64,
     deployment_id: String,
     tags: Vec<String>,
+    route: Option<String>,
 ) {
     let html = compose_ppr_shell(raw_shell, head_snippets, lang);
     let entry = CacheEntry {
@@ -2489,6 +2590,7 @@ async fn put_ppr_shell_entry(
         composed: true,
         tags,
         ppr_shell: true,
+        route,
     };
     if let Err(e) = cache.put(cache_key, entry).await {
         warn!(path = %path, error = %e, "PPR shell cache write failed");
@@ -2510,6 +2612,7 @@ struct PprShellCapture {
     tags: Vec<String>,
     head_snippets: String,
     lang: Option<String>,
+    route: Option<String>,
 }
 
 impl PprShellCapture {
@@ -2543,6 +2646,7 @@ impl PprShellCapture {
             tags,
             head_snippets,
             lang,
+            route,
             ..
         } = self;
         tokio::spawn(
@@ -2559,6 +2663,7 @@ impl PprShellCapture {
                     max_age_secs,
                     deployment_id,
                     tags,
+                    route,
                 )
                 .await;
             }
@@ -2680,6 +2785,7 @@ fn respond_ppr_hit(
         method,
         status_code.as_u16(),
         metrics_tier,
+        metrics::route_label(entry.route.as_deref()),
         start.elapsed().as_nanos() as u64,
     );
     record_devtools(
@@ -2804,9 +2910,13 @@ fn respond_ipc_error(
 ) -> Response {
     let status = if timeout { 504u16 } else { 500u16 };
     let duration_ms = start.elapsed().as_millis() as u64;
-    state
-        .metrics
-        .record_request(method, status, "error", start.elapsed().as_nanos() as u64);
+    state.metrics.record_request(
+        method,
+        status,
+        "error",
+        metrics::ROUTE_UNMATCHED,
+        start.elapsed().as_nanos() as u64,
+    );
     record_devtools(
         state,
         method,
@@ -3833,6 +3943,7 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                     composed,
                     tags: resp.cache_tags,
                     ppr_shell: false,
+                    route: resp.route,
                 };
                 if let Err(e) = state.cache.put(&key, entry).await {
                     warn!(key = %key, error = %e, "background revalidation cache write failed");
@@ -3871,6 +3982,7 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                             response.cache_max_age,
                             state.cache_epoch.to_string(),
                             response.cache_tags,
+                            response.route,
                         )
                         .await;
                     }
@@ -4357,6 +4469,7 @@ mod tests {
             composed,
             tags: Vec::new(),
             ppr_shell: false,
+            route: None,
         }
     }
 
@@ -4985,6 +5098,7 @@ mod tests {
             ppr_shell: false,
             worker_error: false,
             set_cookies: Vec::new(),
+            route: None,
         }
     }
 
@@ -5344,6 +5458,7 @@ mod tests {
             tags: Vec::new(),
             head_snippets: "<script>D</script>".into(),
             lang: None,
+            route: Some("/ppr".into()),
         }
     }
 
@@ -5400,6 +5515,11 @@ mod tests {
         assert!(html.contains("SHELL"), "shell content cached");
         assert!(html.contains("<script>D</script></head>"), "shell composed");
         assert!(!html.contains("HOLE"), "hole content must not be cached");
+        assert_eq!(
+            entry.route.as_deref(),
+            Some("/ppr"),
+            "hits keep the route label"
+        );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

@@ -196,6 +196,25 @@ function matchRoute(
   return match === null ? null : { module: match.entry, params: match.params };
 }
 
+/**
+ * The route pattern that owns `path` (e.g. "/posts/:id"), or null when none
+ * matches - the IPC `route` field Rust labels its metrics with. Same
+ * precedence as renderRoute: the more specific of the page and route.ts
+ * matches, equal patterns being one folder's pair.
+ */
+export function resolveRoutePattern(
+  path: string,
+  routes: Map<string, RouteModule>,
+  handlers?: Map<string, HandlerEntry>,
+): string | null {
+  const page = matchIn(path, routes);
+  const handler = handlers !== undefined ? matchIn(path, handlers) : null;
+  if (handler !== null && (page === null || compareSpecificity(handler.pattern, page.pattern) <= 0)) {
+    return handler.pattern;
+  }
+  return page?.pattern ?? null;
+}
+
 /** Build the request object handed to route.ts handlers. */
 function makeGioRequest(req: IPCRequest, params: Record<string, string>): GioRequest {
   return {
