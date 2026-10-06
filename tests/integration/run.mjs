@@ -443,6 +443,20 @@ async function main() {
       }
     });
 
+    await test('malformed percent-escapes are rejected before any rule or route', async () => {
+      // A stray '%' ahead of an escape would be forwarded as a new escape
+      // ("/%61dmin", "/api/%6Cimited") that a later matcher decodes again,
+      // matching a path Node never routes.
+      for (const path of ['/%%361dmin', '/api/%%36Cimited', '/%%32e%%32e/admin', '/%zz', '/trailing%']) {
+        for (const headers of [{}, { cookie: 'session=int-test' }]) {
+          const res = await rawGet(path, headers);
+          assert.equal(res.status, 400, path);
+          assert.doesNotMatch(res.body, /INTEGRATION_FIXTURE_ADMIN|FIXTURE_CUSTOM_404/, path);
+          assert.equal(res.headers['x-ratelimit-limit'], undefined, `${path} must not touch a bucket`);
+        }
+      }
+    });
+
     await test('/_gio paths never reach a top-level dynamic segment', async () => {
       const blocked = await fetch(`${BASE}/acme/settings`, { redirect: 'manual' });
       assert.equal(blocked.status, 302, 'the /:org/settings guard is live');

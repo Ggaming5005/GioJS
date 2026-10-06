@@ -717,11 +717,14 @@ fn is_internal_endpoint(req: &Request) -> bool {
 }
 
 /// Outermost path gate (see path_hygiene.rs), ahead of i18n, rate limits and
-/// rules. Dot segments are refused, the `/_gio` namespace answers 404 for
-/// anything that is not a real internal endpoint (so `/_gio/x` can never
-/// render an app page under a top-level dynamic segment, nor reach the cache
-/// or Node), and unreserved percent-escapes are decoded in the forwarded URI
-/// so every later matcher and the Node router agree on one spelling.
+/// rules. Dot segments and malformed escapes are refused, the `/_gio`
+/// namespace answers 404 for anything that is not a real internal endpoint
+/// (so `/_gio/x` can never render an app page under a top-level dynamic
+/// segment, nor reach the cache or Node), and unreserved percent-escapes are
+/// decoded in the forwarded URI so every later matcher and the Node router
+/// agree on one spelling. The forwarded path is a fixed point of the escape
+/// normalization, so the later matchers' own `canonical` calls decode nothing
+/// further.
 async fn path_hygiene_middleware(mut req: Request, next: Next) -> Response {
     let in_gio_namespace = match path_hygiene::canonical(req.uri().path()) {
         Ok(canonical) => path_hygiene::is_gio_namespace(&canonical),
@@ -735,7 +738,10 @@ async fn path_hygiene_middleware(mut req: Request, next: Next) -> Response {
     if in_gio_namespace && !is_internal_endpoint(&req) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if let std::borrow::Cow::Owned(normalized) = path_hygiene::normalize_escapes(req.uri().path()) {
+    // Cannot fail: canonical() above already ran the same normalization.
+    if let Ok(std::borrow::Cow::Owned(normalized)) =
+        path_hygiene::normalize_escapes(req.uri().path())
+    {
         rewrite_request_uri(&mut req, normalized);
     }
     next.run(req).await
@@ -4010,6 +4016,59 @@ mod tests {
             let (status, internal, _) = hygiene_get(&app, uri).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
             assert_eq!(internal, None, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_escapes_are_rejected_with_400() {
+        let app = hygiene_router(false);
+        for uri in [
+            // Each would forward as a valid escape ("/api/%6Cogin",
+            // "/%2e%2e/admin", "/%61dmin") that a second pass decodes.
+            "/api/%%36Cogin",
+            "/%%32e%%32e/admin",
+            "/%%361dmin",
+            "/%zz",
+            "/trailing%",
+            "/_gio/%",
+        ] {
+            let (status, internal, body) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(internal, None, "{uri}");
+            assert!(!body.contains("fallback"), "{uri} reached the fallback");
+        }
+    }
+
+    #[tokio::test]
+    async fn later_matchers_see_the_path_the_app_is_handed() {
+        // rate_limit_middleware and rules_middleware canonicalize the
+        // forwarded path again. That pass may only fold slashes: decoding an
+        // escape the app's router still sees encoded would let a rule or
+        // limit match one path while Node routes another.
+        let app = hygiene_router(false);
+        for uri in [
+            "/api/%6Cogin",
+            "//%61pi//login/",
+            "/%2561dmin",
+            "/%25%36%31",
+            "/caf%c3%a9/",
+            "/a%2fb",
+        ] {
+            let (status, _, body) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            let forwarded = body.strip_prefix("fallback ").unwrap();
+            assert!(
+                matches!(
+                    path_hygiene::normalize_escapes(forwarded),
+                    Ok(std::borrow::Cow::Borrowed(_))
+                ),
+                "{uri} was forwarded as {forwarded}, which decodes further"
+            );
+            assert_eq!(
+                path_hygiene::canonical(forwarded),
+                path_hygiene::canonical(uri),
+                "{uri}"
+            );
         }
     }
 

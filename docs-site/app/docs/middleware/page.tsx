@@ -113,9 +113,10 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         <code>/admin</code>. Your app sees those escapes decoded too, so a
         rule and the router can never disagree about which page a request
         reaches. A path containing a <code>.</code> or <code>..</code>{' '}
-        segment (raw or escaped) is rejected with <code>400</code> before
-        any rule or route runs. <code>[[rate_limits]]</code> use the same
-        canonical form.
+        segment (raw or escaped), or a <code>%</code> that does not start a
+        valid escape (<code>/%zz</code>, <code>/a%</code>), is rejected with{' '}
+        <code>400</code> before any rule or route runs.{' '}
+        <code>[[rate_limits]]</code> use the same canonical form.
       </p>
       <p>
         Every rule is validated when it is loaded, never at request time: a

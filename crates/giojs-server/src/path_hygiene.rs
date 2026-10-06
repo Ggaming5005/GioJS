@@ -15,12 +15,21 @@
 //! - repeated slashes collapse and a trailing slash is dropped (except root),
 //! - `.` / `..` segments - raw or escaped - are rejected outright: the Node
 //!   router would treat them as ordinary segments while every browser and
-//!   proxy resolves them, so no single canonical form is safe for both.
+//!   proxy resolves them, so no single canonical form is safe for both,
+//! - a `%` that does not start a valid escape is rejected too (as nginx,
+//!   Apache and Go's net/http do): no decoding of such a path is canonical.
 //!
 //! The escape normalization is also applied to the URI forwarded to Node
 //! (see `path_hygiene_middleware` in main.rs), so the string the rules matched
 //! is exactly the string Node routes. Slashes are left as the client sent
 //! them there: the Node router already ignores empty segments.
+//!
+//! That only holds because the escape normalization is idempotent: the
+//! later middlewares canonicalize the forwarded (already normalized) path
+//! again, and a second pass must not decode anything new. Every `%` left in
+//! a normalized path starts an uppercase escape of a reserved byte, so it
+//! is a fixed point. A stray `%` would break that - `/%%36C` would normalize
+//! to `/%6C` and then decode to `/l` - which is why it is refused.
 
 use std::borrow::Cow;
 
@@ -29,6 +38,8 @@ use std::borrow::Cow;
 pub enum PathRejection {
     /// A `.` or `..` segment (possibly percent-encoded).
     DotSegment,
+    /// A `%` not followed by two hex digits (`%zz`, `%6`, a trailing `%`).
+    MalformedEscape,
 }
 
 /// The reserved namespace for Rust's own endpoints (`/_gio/health`, ...).
@@ -43,56 +54,54 @@ fn hex_value(byte: u8) -> Option<u8> {
 }
 
 /// Decode escapes of unreserved characters and uppercase the hex digits of
-/// the remaining escapes. Malformed escapes (`%zz`, a trailing `%`) are kept
-/// verbatim - Node sees them verbatim too. Borrows when nothing changes.
-pub fn normalize_escapes(path: &str) -> Cow<'_, str> {
+/// the remaining escapes. A `%` that does not start a valid escape is
+/// refused (see the module docs: it would make the result decodable again).
+/// The result is a fixed point - normalizing it again changes nothing.
+/// Borrows when nothing changes.
+pub fn normalize_escapes(path: &str) -> Result<Cow<'_, str>, PathRejection> {
     let bytes = path.as_bytes();
     let Some(first_escape) = bytes.iter().position(|&b| b == b'%') else {
-        return Cow::Borrowed(path);
+        return Ok(Cow::Borrowed(path));
     };
     let mut out = String::with_capacity(path.len());
     out.push_str(&path[..first_escape]);
     let mut changed = false;
     let mut index = first_escape;
     while index < bytes.len() {
-        let byte = bytes[index];
-        let escape = if byte == b'%' && index + 2 < bytes.len() {
-            hex_value(bytes[index + 1]).zip(hex_value(bytes[index + 2]))
-        } else {
-            None
-        };
-        match escape {
-            Some((hi, lo)) => {
-                let decoded = hi * 16 + lo;
-                if is_unreserved(decoded) {
-                    out.push(decoded as char);
-                    changed = true;
-                } else {
-                    let (hi_digit, lo_digit) = (bytes[index + 1], bytes[index + 2]);
-                    changed |= hi_digit.is_ascii_lowercase() || lo_digit.is_ascii_lowercase();
-                    out.push('%');
-                    out.push(hi_digit.to_ascii_uppercase() as char);
-                    out.push(lo_digit.to_ascii_uppercase() as char);
-                }
-                index += 3;
-            }
-            None => {
-                // Copy up to the next '%' in one go; slicing at ASCII '%'
-                // positions always lands on a char boundary.
-                let next = bytes[index + 1..]
-                    .iter()
-                    .position(|&b| b == b'%')
-                    .map_or(bytes.len(), |offset| index + 1 + offset);
-                out.push_str(&path[index..next]);
-                index = next;
-            }
+        if bytes[index] != b'%' {
+            // Copy up to the next '%' in one go; slicing at ASCII '%'
+            // positions always lands on a char boundary.
+            let next = bytes[index..]
+                .iter()
+                .position(|&b| b == b'%')
+                .map_or(bytes.len(), |offset| index + offset);
+            out.push_str(&path[index..next]);
+            index = next;
+            continue;
         }
+        let (Some(hi_digit), Some(lo_digit)) = (bytes.get(index + 1), bytes.get(index + 2)) else {
+            return Err(PathRejection::MalformedEscape);
+        };
+        let (Some(hi), Some(lo)) = (hex_value(*hi_digit), hex_value(*lo_digit)) else {
+            return Err(PathRejection::MalformedEscape);
+        };
+        let decoded = hi * 16 + lo;
+        if is_unreserved(decoded) {
+            out.push(decoded as char);
+            changed = true;
+        } else {
+            changed |= hi_digit.is_ascii_lowercase() || lo_digit.is_ascii_lowercase();
+            out.push('%');
+            out.push(hi_digit.to_ascii_uppercase() as char);
+            out.push(lo_digit.to_ascii_uppercase() as char);
+        }
+        index += 3;
     }
-    if changed {
+    Ok(if changed {
         Cow::Owned(out)
     } else {
         Cow::Borrowed(path)
-    }
+    })
 }
 
 fn is_dot_segment(segment: &str) -> bool {
@@ -100,9 +109,12 @@ fn is_dot_segment(segment: &str) -> bool {
 }
 
 /// The canonical form every security matcher compares against. Borrows in the
-/// common case of an already-clean path.
+/// common case of an already-clean path. Because `normalize_escapes` is a
+/// fixed point, `canonical(normalize_escapes(p))` equals `canonical(p)`: the
+/// middlewares behind `path_hygiene_middleware`, which canonicalize the
+/// already-normalized forwarded path, see what the gate saw.
 pub fn canonical(path: &str) -> Result<Cow<'_, str>, PathRejection> {
-    let normalized = normalize_escapes(path);
+    let normalized = normalize_escapes(path)?;
     if normalized.split('/').any(is_dot_segment) {
         return Err(PathRejection::DotSegment);
     }
@@ -188,30 +200,125 @@ mod tests {
     }
 
     #[test]
-    fn malformed_escapes_are_kept_verbatim() {
-        assert_eq!(canon("/%zz"), "/%zz");
-        assert_eq!(canon("/trailing%"), "/trailing%");
-        assert_eq!(canon("/short%6"), "/short%6");
-        assert_eq!(canon("/%%61"), "/%a");
+    fn malformed_escapes_are_rejected() {
+        for path in [
+            "/%zz",
+            "/trailing%",
+            "/short%6",
+            "/%%61",
+            "/%g1",
+            "/%6g",
+            "/%é",
+            "/%6é",
+            // A stray '%' in front of an escape: decoding the escape would
+            // assemble a brand-new one ("%6C", "%2e") for the next pass.
+            "/api/%%36Cogin",
+            "/%%32e%%32e/admin",
+            "/%5Fgio/%",
+        ] {
+            assert_eq!(
+                canonical(path),
+                Err(PathRejection::MalformedEscape),
+                "{path} must be rejected"
+            );
+            assert_eq!(
+                normalize_escapes(path),
+                Err(PathRejection::MalformedEscape),
+                "{path} must not be forwarded"
+            );
+        }
     }
 
     #[test]
     fn decoding_happens_once_not_recursively() {
         // %2561 is an escaped '%' followed by "61" - never "a".
         assert_eq!(canon("/%2561dmin"), "/%2561dmin");
+        assert_eq!(canon("/%25%36%31"), "/%2561");
+    }
+
+    /// The forwarded path is `normalize_escapes(raw)`, and the rate-limit and
+    /// rules middlewares canonicalize that again. They must land where the
+    /// gate did - a second decoding pass would let them match a path Node
+    /// never routes.
+    #[test]
+    fn canonical_of_forwarded_path_equals_canonical_of_raw() {
+        for raw in [
+            "/api/%%36Cogin",
+            "/%%32e%%32e/admin",
+            "/%%61",
+            "/%2561dmin",
+            "/%25%36%31",
+            "/api/%6Cogin",
+            "//%61pi//%6c%6f%67%69%6e/",
+            "/caf%c3%a9",
+            "/a%2fb",
+        ] {
+            match normalize_escapes(raw) {
+                Ok(forwarded) => assert_eq!(canonical(&forwarded), canonical(raw), "{raw}"),
+                Err(rejection) => assert_eq!(canonical(raw), Err(rejection), "{raw}"),
+            }
+        }
+    }
+
+    #[test]
+    fn normalization_is_a_fixed_point_for_every_short_path() {
+        // Every path of up to five characters over an alphabet that can
+        // spell escapes of '%', '.', 'C', '6' and 'l' - including stray '%'s
+        // in front of them.
+        const ALPHABET: &[u8] = b"%2356Cex/.";
+        let mut path = String::new();
+        for len in 0..=5u32 {
+            for mut index in 0..ALPHABET.len().pow(len) {
+                path.clear();
+                for _ in 0..len {
+                    path.push(ALPHABET[index % ALPHABET.len()] as char);
+                    index /= ALPHABET.len();
+                }
+                let canonical_path = canonical(&path);
+                let normalized = match normalize_escapes(&path) {
+                    Ok(normalized) => normalized,
+                    Err(rejection) => {
+                        assert_eq!(canonical_path, Err(rejection), "{path}");
+                        continue;
+                    }
+                };
+                assert_eq!(
+                    normalize_escapes(&normalized).as_deref(),
+                    Ok(&*normalized),
+                    "{path}"
+                );
+                assert_eq!(canonical(&normalized), canonical_path, "{path}");
+                if let Ok(canonical_path) = canonical_path {
+                    assert_eq!(
+                        canonical(&canonical_path).as_deref(),
+                        Ok(&*canonical_path),
+                        "{path}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
     fn multibyte_utf8_passes_through() {
         assert_eq!(canon("/café//x/"), "/café/x");
-        assert_eq!(normalize_escapes("/é%61é"), "/éaé");
+        assert_eq!(normalize_escapes("/é%61é").unwrap(), "/éaé");
     }
 
     #[test]
     fn normalize_escapes_leaves_slashes_alone() {
-        assert_eq!(normalize_escapes("//api//%6Cogin/"), "//api//login/");
-        assert!(matches!(normalize_escapes("/plain//x/"), Cow::Borrowed(_)));
-        assert!(matches!(normalize_escapes("/already%2F"), Cow::Borrowed(_)));
+        assert_eq!(
+            normalize_escapes("//api//%6Cogin/").unwrap(),
+            "//api//login/"
+        );
+        assert!(matches!(
+            normalize_escapes("/plain//x/"),
+            Ok(Cow::Borrowed(_))
+        ));
+        assert!(matches!(
+            normalize_escapes("/already%2F"),
+            Ok(Cow::Borrowed(_))
+        ));
     }
 
     // ── dot segments ─────────────────────────────────────────────────────────
