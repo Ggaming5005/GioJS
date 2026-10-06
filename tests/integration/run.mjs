@@ -20,7 +20,7 @@ import { createHmac, hkdfSync } from 'node:crypto';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const fixtureDir = join(repoRoot, 'tests', 'integration', 'fixture');
@@ -238,6 +238,36 @@ async function waitFor(what, fn, timeoutMs) {
     await sleep(250);
   }
   throw new Error(`timed out waiting for ${what}${lastError ? `: ${lastError}` : ''}`);
+}
+
+/**
+ * Every process below `rootPid` (Unix: `ps`), so a test can watch a whole
+ * tree - the server, the tsx wrapper and the worker runtime under it.
+ */
+function descendantPids(rootPid) {
+  const table = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' }).stdout;
+  const children = new Map();
+  for (const line of table.split('\n')) {
+    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+    if (!pid) continue;
+    if (!children.has(ppid)) children.set(ppid, []);
+    children.get(ppid).push(pid);
+  }
+  const found = [];
+  const queue = [rootPid];
+  while (queue.length > 0) {
+    for (const child of children.get(queue.shift()) ?? []) {
+      found.push(child);
+      queue.push(child);
+    }
+  }
+  return found;
+}
+
+/** Unix: true while `pid` runs (a zombie awaiting its reaper counts as gone). */
+function processRunning(pid) {
+  const stat = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim();
+  return stat !== '' && !stat.startsWith('Z');
 }
 
 /**
@@ -693,6 +723,62 @@ async function main() {
       // X-Gio-Cache narrates the tier transitions.
       assert.match(firstRes.headers.get('x-gio-cache') ?? '', /^miss; stored$/);
       assert.match(secondRes.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/);
+    });
+
+    await test('cached pages: CDN Cache-Control, a strong ETag, and 304 for If-None-Match', async () => {
+      const hit = await fetch(`${BASE}/cached`);
+      const body = await hit.text();
+      assert.match(hit.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/);
+      assert.match(
+        hit.headers.get('cache-control') ?? '',
+        /^public, max-age=0, s-maxage=\d+, stale-while-revalidate=\d+$/,
+      );
+      const etag = hit.headers.get('etag');
+      assert.match(etag ?? '', /^"[0-9a-f]{32}"$/, 'strong ETag');
+
+      const revalidated = await rawGet('/cached', { 'if-none-match': etag });
+      assert.equal(revalidated.status, 304);
+      assert.equal(revalidated.body, '');
+      assert.equal(revalidated.headers.etag, etag);
+      assert.equal(revalidated.headers['cache-control'], hit.headers.get('cache-control'));
+      // A 304 is still a response of this server: request id, security
+      // defaults and header rules all apply.
+      assert.match(revalidated.headers['x-request-id'] ?? '', /^[0-9a-f-]{36}$/);
+      assert.equal(revalidated.headers['x-content-type-options'], 'nosniff');
+      assert.equal(revalidated.headers['x-frame-options'], 'DENY');
+
+      const changed = await rawGet('/cached', { 'if-none-match': '"0123456789abcdef0123456789abcdef"' });
+      assert.equal(changed.status, 200);
+      assert.equal(changed.body, body);
+    });
+
+    await test('personal, streamed and app-controlled pages keep browsers and CDNs honest', async () => {
+      // Personal (reads cookies): never public, never no-store (bfcache).
+      const personal = await fetch(`${BASE}/personal`, { headers: { cookie: 'who=alice' } });
+      assert.match(await personal.text(), /who=alice/);
+      assert.equal(personal.headers.get('cache-control'), 'private, no-cache');
+      assert.equal(personal.headers.get('etag'), null);
+      // getServerSideProps set its own Cache-Control: it wins.
+      const own = await fetch(`${BASE}/cache-headers`);
+      assert.match(await own.text(), /INTEGRATION_FIXTURE_CACHE_HEADERS/);
+      assert.equal(own.headers.get('cache-control'), 'public, max-age=30');
+      // Route handlers are the app's business: no default added.
+      const api = await fetch(`${BASE}/api/whoami`);
+      assert.equal(api.headers.get('cache-control'), null);
+    });
+
+    await test('a malformed worker response frame fails its request at once, with its request id logged', async () => {
+      const started = Date.now();
+      const res = await fetch(`${BASE}/plugin-malformed-frame`);
+      assert.equal(res.status, 500);
+      assert.ok(Date.now() - started < 5_000, 'answered long before the 30s IPC timeout');
+      const id = res.headers.get('x-request-id');
+      await waitFor('parse error logged with its request id', () =>
+        Promise.resolve(log.replace(/\x1b\[[0-9;]*m/g, '').split('\n').some((line) =>
+          line.includes('worker response frame failed to parse') &&
+          line.includes(`request_id=${id}`))), 5_000);
+      // The connection survived: the next request renders normally.
+      assert.equal((await fetch(`${BASE}/cached`)).status, 200);
     });
 
     await test('the worker runs in the mode Rust decided (NODE_ENV=production)', async () => {
@@ -1369,6 +1455,25 @@ async function main() {
       assert.match(allowed.body, /gio_requests_total/);
     });
 
+    await test('metrics label requests by route pattern, never by raw path', async () => {
+      assert.equal((await fetch(`${BASE}/posts/7`)).status, 200);
+      assert.equal((await fetch(`${BASE}/cached`)).status, 200);
+      assert.equal((await fetch(`${BASE}/robots.txt`)).status, 200);
+      assert.equal((await fetch(`${BASE}/no-such-page-for-metrics`)).status, 404);
+      const metrics = (await rawGet('/_gio/metrics', { 'x-forwarded-for': '198.51.100.7' })).body;
+      const has = (pattern) => assert.match(metrics, pattern);
+      has(/gio_requests_total\{method="GET",status="200",cache="hit",route="\/cached"\} \d+/);
+      has(/gio_requests_total\{method="GET",status="200",cache="[a-z]+",route="\/posts\/:id"\} \d+/);
+      has(/gio_requests_total\{method="GET",status="200",cache="static",route="static"\} \d+/);
+      has(/gio_requests_total\{method="GET",status="200",cache="bypass",route="internal"\} \d+/);
+      has(/gio_requests_total\{method="GET",status="404",cache="[a-z]+",route="unmatched"\} \d+/);
+      has(/gio_request_duration_seconds_count\{route="\/cached"\} \d+/);
+      has(/gio_request_duration_seconds_bucket\{route="\/posts\/:id",le="\+Inf"\} \d+/);
+      has(/gio_node_ipc_latency_seconds_count\{route="\/posts\/:id"\} \d+/);
+      assert.doesNotMatch(metrics, /route="\/posts\/7"/);
+      assert.doesNotMatch(metrics, /route="\/no-such-page-for-metrics"/);
+    });
+
     await test('X-Request-Id: a trusted proxy\'s valid id is kept, anything else replaced', async () => {
       const kept = await rawGet('/api/whoami', { 'x-request-id': 'lb-trace.123:a_b' });
       assert.equal(kept.headers['x-request-id'], 'lb-trace.123:a_b');
@@ -1824,6 +1929,111 @@ async function untrustedProxyPhase() {
     });
   } catch (err) {
     console.error('\nintegration (no trusted proxies): FAILED');
+    console.error(err);
+    console.error('\n── server log tail ──');
+    console.error(significantLogTail(log));
+    process.exitCode = 1;
+  } finally {
+    if (!serverGone) server.kill();
+    await serverExited;
+    await rm(workDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Phase 1d (operations): `[logging] format = "json"` makes every server line
+ * one JSON object carrying the request span's request_id, and a server that
+ * dies without any chance to clean up (SIGKILL, OOM kill) still takes its
+ * worker tree down - the worker reads EOF on the stdin pipe the server held.
+ */
+async function opsPhase() {
+  const binary = findServerBinary();
+  const workDir = await mkdtemp(join(tmpdir(), 'gio-int-ops-'));
+  await mkdir(join(workDir, 'app', 'api', 'ping'), { recursive: true });
+  await writeFile(
+    join(workDir, 'app', 'api', 'ping', 'route.ts'),
+    `import { logger } from ${JSON.stringify(
+      pathToFileURL(join(repoRoot, 'packages', 'giojs-core', 'src', 'logger.ts')).href,
+    )};\n` +
+      "export function GET(): unknown {\n  logger.info('ping handled');\n  return { pong: true };\n}\n",
+  );
+  await writeFile(join(workDir, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
+  await writeFile(
+    join(workDir, 'gio.toml'),
+    '[server]\nhost = "127.0.0.1"\nport = 39517\nhttp2 = false\n\n[logging]\nformat = "json"\n',
+  );
+
+  let log = '';
+  const server = spawn(binary, [], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      GIO_APP_DIR: join(workDir, 'app'),
+      GIO_CACHE_DIR: join(workDir, 'cache'),
+      RUST_LOG: 'info',
+      NODE_ENV: 'production',
+    },
+  });
+  server.stdout.on('data', (d) => { log += d.toString(); });
+  server.stderr.on('data', (d) => { log += d.toString(); });
+  let serverGone = false;
+  const serverExited = new Promise((r) =>
+    server.on('exit', () => { serverGone = true; r(); }),
+  );
+  /** Complete log lines parsed as JSON (null for a line that is not). */
+  const jsonLines = () =>
+    log.split('\n').slice(0, -1).filter((line) => line.trim() !== '').map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return { unparseable: line };
+      }
+    });
+
+  try {
+    await waitFor('server health (ops)', async () => {
+      const res = await fetch(`${BASE}/_gio/health`);
+      return res.ok && (await res.json()).nodeReady === true;
+    }, 30_000);
+
+    await test('JSON logs: every line is one JSON object; both processes name the request', async () => {
+      const res = await fetch(`${BASE}/api/ping`);
+      assert.deepEqual(await res.json(), { pong: true });
+      const id = res.headers.get('x-request-id');
+      assert.match(id ?? '', /^[0-9a-f-]{36}$/);
+      const serverLine = await waitFor('the server\'s request line', () =>
+        Promise.resolve(jsonLines().find((line) =>
+          line.request_id === id && line.msg === 'request completed')), 5_000);
+      assert.equal(serverLine.level, 'info');
+      assert.equal(serverLine.path, '/api/ping');
+      assert.match(serverLine.target, /^giojs_server/);
+      // RFC 3339, UTC.
+      assert.match(serverLine.ts, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/);
+      // The worker's line for the same request (logger.ts keys).
+      await waitFor('the worker\'s request line', () =>
+        Promise.resolve(jsonLines().some((line) =>
+          line.requestId === id && line.msg === 'ping handled')), 5_000);
+      const unparseable = jsonLines().filter((line) => line.unparseable !== undefined);
+      assert.deepEqual(unparseable, [], 'no plain-text line in JSON mode');
+      assert.ok(jsonLines().some((line) => line.msg?.startsWith('GioJS listening')));
+    });
+
+    if (process.platform !== 'win32') {
+      await test('a SIGKILLed server takes its worker tree down within seconds', async () => {
+        const tree = descendantPids(server.pid);
+        assert.ok(tree.length > 0, 'the worker runs under the server');
+        server.kill('SIGKILL');
+        await waitFor('server exit', () => Promise.resolve(serverGone), 5_000);
+        // No signal reaches the worker: it notices the closed stdin pipe.
+        await waitFor('worker tree gone', () => Promise.resolve(!tree.some(processRunning)), 5_000);
+        await waitFor('the worker said why it left', () =>
+          Promise.resolve(jsonLines().some((line) =>
+            line.msg === 'server process gone - worker shutting down' &&
+            line.reason === 'stdin-closed')), 2_000);
+      });
+    }
+  } catch (err) {
+    console.error('\nintegration (ops): FAILED');
     console.error(err);
     console.error('\n── server log tail ──');
     console.error(significantLogTail(log));
@@ -2485,19 +2695,22 @@ async function standalonePhase() {
     await rm(join(workDir, 'app'), { recursive: true, force: true });
     await rm(join(workDir, 'node_modules'), { recursive: true, force: true });
 
-    run = spawn(process.execPath, [join(outDir, 'run.mjs')], {
-      cwd: outDir,
-      env: { ...process.env, RUST_LOG: 'info' },
-    });
-    run.stdout.on('data', (d) => { log += d.toString(); });
-    run.stderr.on('data', (d) => { log += d.toString(); });
-    runGone = false;
-    runExited = new Promise((r) => run.on('exit', () => { runGone = true; r(); }));
+    const startLauncher = async () => {
+      run = spawn(process.execPath, [join(outDir, 'run.mjs')], {
+        cwd: outDir,
+        env: { ...process.env, RUST_LOG: 'info' },
+      });
+      run.stdout.on('data', (d) => { log += d.toString(); });
+      run.stderr.on('data', (d) => { log += d.toString(); });
+      runGone = false;
+      runExited = new Promise((r) => run.on('exit', () => { runGone = true; r(); }));
 
-    await waitFor('standalone server health', async () => {
-      const res = await fetch(`${STANDALONE_BASE}/_gio/health`);
-      return res.ok && (await res.json()).nodeReady === true;
-    }, 30_000);
+      await waitFor('standalone server health', async () => {
+        const res = await fetch(`${STANDALONE_BASE}/_gio/health`);
+        return res.ok && (await res.json()).nodeReady === true;
+      }, 30_000);
+    };
+    await startLauncher();
 
     await test('standalone: SSR page renders with envelope and prebuilt chunk', async () => {
       const res = await fetch(`${STANDALONE_BASE}/`);
@@ -2578,6 +2791,21 @@ async function standalonePhase() {
         }
       }, 10_000);
     });
+
+    if (process.platform !== 'win32') {
+      await test('standalone: a SIGKILLed launcher takes the server and worker down, freeing the port', async () => {
+        await startLauncher();
+        const tree = descendantPids(run.pid);
+        assert.ok(tree.length >= 2, 'server and worker run under the launcher');
+        // SIGKILL cannot be forwarded: the server sees EOF on the stdin pipe
+        // the launcher held (GIO_EXIT_ON_STDIN_EOF) and shuts down itself.
+        run.kill('SIGKILL');
+        await waitFor('launcher exit', () => Promise.resolve(runGone), 5_000);
+        await waitFor('server and worker gone', () => Promise.resolve(!tree.some(processRunning)), 5_000);
+        await assert.rejects(fetch(`${STANDALONE_BASE}/_gio/health`), 'nothing listens on the port');
+        assert.match(log, /stdin closed: the launcher exited - shutting down/);
+      });
+    }
   } catch (err) {
     console.error('\nintegration (standalone): FAILED');
     console.error(err);
@@ -2964,6 +3192,9 @@ if (process.exitCode !== 1) {
 }
 if (process.exitCode !== 1) {
   await untrustedProxyPhase();
+}
+if (process.exitCode !== 1) {
+  await opsPhase();
 }
 if (process.exitCode !== 1) {
   await imageConfigCachePhase();
