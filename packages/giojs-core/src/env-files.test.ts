@@ -5,7 +5,7 @@
  * precedence, never overriding existing variables, NODE_ENV handling, and
  * dotenvy's syntax. Every load targets a plain object, never process.env.
  */
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -95,6 +95,16 @@ describe('loadEnvFiles', () => {
     expect(env['URL']).toBe('https://example.com/api');
   });
 
+  it('skips candidates that are not regular files (a Python venv named .env)', async () => {
+    const root = await projectWith({ '.env.local': 'FROM_LOCAL=1\n' });
+    await mkdir(join(root, '.env', 'bin'), { recursive: true });
+    const env: NodeJS.ProcessEnv = {};
+    const loaded = loadEnvFiles(root, { mode: 'production', env });
+    expect(loaded.files).toEqual(['.env.local']);
+    expect(loaded.skipped).toEqual(['.env']);
+    expect(env).toEqual({ FROM_LOCAL: '1' });
+  });
+
   it('names the file and line on a parse error but never the value', async () => {
     const root = await projectWith({ '.env.local': 'OK=1\n\nSECRET="hunter2-unterminated\n' });
     let caught: unknown;
@@ -152,5 +162,14 @@ describe('parseEnvFile (dotenvy syntax)', () => {
     expect(() => parseEnvFile('OK=1\nnot a pair\n')).toThrow('invalid syntax on line 2');
     expect(() => parseEnvFile('A=one two\n')).toThrow('invalid syntax on line 1');
     expect(() => parseEnvFile("A='open\nB=2\n")).toThrow('invalid syntax on line 1');
+  });
+
+  it('reports the same line numbers as env_files.rs', () => {
+    // Same cases as parse_errors_point_at_the_failing_line_not_an_earlier_lookalike.
+    expect(() => parseEnvFile('NOTE="x y"\nB=x y\n')).toThrow('invalid syntax on line 2');
+    expect(() => parseEnvFile('A=1\n\n# x y\n   \nB=x y\n')).toThrow('invalid syntax on line 5');
+    expect(() => parseEnvFile('MULTI="one\ntwo"\nB=x y\n')).toThrow('invalid syntax on line 3');
+    expect(() => parseEnvFile('A=1\nS="a\nb\n')).toThrow('invalid syntax on line 2');
+    expect(() => parseEnvFile('1BAD=x\n')).toThrow('invalid syntax on line 1');
   });
 });

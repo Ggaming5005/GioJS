@@ -8,11 +8,12 @@
  * precedence order, first definition wins - `.env.{mode}.local`,
  * `.env.local`, `.env.{mode}`, `.env` - mode `development` only when
  * NODE_ENV=development, and variables already in the environment are never
- * overridden. The parser is a port of dotenvy's (the Rust side's) so a file
- * means the same thing to both; Node's own util.parseEnv is not used because
- * it differs and needs Node >= 20.12.
+ * overridden, and a candidate that is not a regular file (`python -m venv
+ * .env` makes a `.env/` directory) is skipped. The parser is a port of
+ * dotenvy's (the Rust side's) so a file means the same thing to both; Node's
+ * own util.parseEnv is not used because it differs and needs Node >= 20.12.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 export type EnvMode = 'development' | 'production';
@@ -245,6 +246,8 @@ export interface LoadedEnvFiles {
   mode: EnvMode;
   /** File names actually read, in precedence order. */
   files: string[];
+  /** Candidates that exist but are not regular files, skipped unread. */
+  skipped: string[];
   /** A file tried to set NODE_ENV; mode was already decided, so it is ignored. */
   ignoredNodeEnv: boolean;
 }
@@ -261,11 +264,16 @@ export function loadEnvFiles(
 ): LoadedEnvFiles {
   const env = options.env ?? process.env;
   const mode = options.mode ?? envMode(env['NODE_ENV']);
-  const loaded: LoadedEnvFiles = { mode, files: [], ignoredNodeEnv: false };
+  const loaded: LoadedEnvFiles = { mode, files: [], skipped: [], ignoredNodeEnv: false };
   for (const name of envFileNames(mode)) {
+    const path = join(root, name);
     let source: string;
     try {
-      source = readFileSync(join(root, name), 'utf8');
+      if (!statSync(path).isFile()) {
+        loaded.skipped.push(name);
+        continue;
+      }
+      source = readFileSync(path, 'utf8');
     } catch (readError) {
       if ((readError as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw new EnvFileError(name, readError instanceof Error ? readError.message : String(readError));

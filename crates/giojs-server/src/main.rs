@@ -231,6 +231,12 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             "loaded .env files"
         );
     }
+    if !env_files.skipped.is_empty() {
+        warn!(
+            files = %env_files.skipped.join(", "),
+            "skipped .env candidates that are not regular files"
+        );
+    }
     if env_files.ignored_node_env {
         warn!(
             "NODE_ENV in .env files is ignored - set it in the environment that starts the server"

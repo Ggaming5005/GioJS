@@ -12,9 +12,12 @@
 //! always beats a file. Syntax (quotes, multiline values, `export` prefix,
 //! comments, `${VAR}` substitution) is dotenvy's; packages/giojs-core's
 //! env-files.ts mirrors it for `gio export` and standalone builds. Only file
-//! names are ever logged, never values.
+//! names are ever logged, never values. A candidate that is not a regular
+//! file (`python -m venv .env` makes a `.env/` directory) is skipped.
 
+use std::cell::Cell;
 use std::fmt;
+use std::io::{self, Read};
 use std::path::Path;
 
 /// Which `.env.{mode}*` files apply.
@@ -58,6 +61,8 @@ pub struct LoadedEnvFiles {
     pub mode: EnvMode,
     /// File names actually read, in precedence order.
     pub files: Vec<String>,
+    /// Candidates that exist but are not regular files, skipped unread.
+    pub skipped: Vec<String>,
     /// A file tried to set NODE_ENV. Mode was already decided from the real
     /// environment, so honoring it would mix one mode's files with another
     /// mode's server behavior.
@@ -108,12 +113,25 @@ pub fn load(
     let mut loaded = LoadedEnvFiles {
         mode,
         files: Vec::new(),
+        skipped: Vec::new(),
         ignored_node_env: false,
     };
     for name in candidate_files(mode) {
-        let contents = match std::fs::read_to_string(root.join(&name)) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+        let path = root.join(&name);
+        let read = std::fs::metadata(&path).and_then(|meta| {
+            if meta.is_file() {
+                std::fs::read_to_string(&path).map(Some)
+            } else {
+                Ok(None)
+            }
+        });
+        let contents = match read {
+            Ok(Some(contents)) => contents,
+            Ok(None) => {
+                loaded.skipped.push(name);
+                continue;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => {
                 return Err(EnvFileError {
                     file: name,
@@ -122,12 +140,10 @@ pub fn load(
             }
         };
         let source = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
-        let vars = dotenvy::from_read_iter(source.as_bytes())
-            .collect::<Result<Vec<(String, String)>, dotenvy::Error>>()
-            .map_err(|error| EnvFileError {
-                reason: describe_parse_error(source, &error),
-                file: name.clone(),
-            })?;
+        let vars = parse(source).map_err(|reason| EnvFileError {
+            reason,
+            file: name.clone(),
+        })?;
         // Set per file (not after all files): a later, lower-precedence file
         // can then substitute `${VAR}` from a higher one.
         for (key, value) in vars {
@@ -149,19 +165,70 @@ pub fn load_for_startup() -> Result<LoadedEnvFiles, EnvFileError> {
     load(&root, mode, &mut ProcessEnv)
 }
 
-fn describe_parse_error(source: &str, error: &dotenvy::Error) -> String {
-    match error {
-        // The parser hands back the offending logical line; locate it to
-        // report a line number instead of echoing its (secret) contents.
-        dotenvy::Error::LineParse(line, _) => match source.find(line.as_str()) {
-            Some(offset) if !line.is_empty() => format!(
-                "invalid syntax on line {}",
-                source[..offset].matches('\n').count() + 1
-            ),
-            _ => "invalid syntax".to_string(),
-        },
-        other => other.to_string(),
+/// Hands dotenvy one byte per read, so the BufReader inside its iterator
+/// never reads ahead: `consumed` is always the end of the logical line the
+/// parser last returned.
+struct OneByteReader<'a> {
+    bytes: &'a [u8],
+    consumed: &'a Cell<usize>,
+}
+
+impl Read for OneByteReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let at = self.consumed.get();
+        match (self.bytes.get(at), buf.first_mut()) {
+            (Some(&byte), Some(slot)) => {
+                *slot = byte;
+                self.consumed.set(at + 1);
+                Ok(1)
+            }
+            _ => Ok(0),
+        }
     }
+}
+
+/// Parse with dotenvy. An error is reported as a line number, never the
+/// line itself: the line holds a value, and values are secrets.
+fn parse(source: &str) -> Result<Vec<(String, String)>, String> {
+    let consumed = Cell::new(0);
+    let reader = OneByteReader {
+        bytes: source.as_bytes(),
+        consumed: &consumed,
+    };
+    let mut vars = Vec::new();
+    let mut parsed_up_to = 0;
+    for item in dotenvy::from_read_iter(reader) {
+        match item {
+            Ok(var) => {
+                vars.push(var);
+                parsed_up_to = consumed.get();
+            }
+            Err(dotenvy::Error::LineParse(..)) => {
+                return Err(format!(
+                    "invalid syntax on line {}",
+                    failing_line(source, parsed_up_to)
+                ))
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(vars)
+}
+
+/// 1-based line the failing logical line starts on: the first line after
+/// the last parsed variable that dotenvy does not skip as blank or a
+/// comment. (The error itself carries only the offending text - for a bad
+/// value, just the value - which can also appear earlier in the file.)
+fn failing_line(source: &str, parsed_up_to: usize) -> usize {
+    let mut start = parsed_up_to;
+    for line in source[parsed_up_to..].split_inclusive('\n') {
+        let text = line.trim_start();
+        if !text.is_empty() && !text.starts_with('#') {
+            break;
+        }
+        start += line.len();
+    }
+    source[..start].matches('\n').count() + 1
 }
 
 #[cfg(test)]
@@ -339,5 +406,55 @@ mod tests {
         assert!(message.contains(".env.local"), "{message}");
         assert!(message.contains("line 3"), "{message}");
         assert!(!message.contains("hunter2"), "{message}");
+    }
+
+    fn parse_error_line(source: &str) -> String {
+        parse(source).unwrap_err()
+    }
+
+    #[test]
+    fn parse_errors_point_at_the_failing_line_not_an_earlier_lookalike() {
+        // dotenvy reports only the bad value ("x y"), which line 1 also holds.
+        assert_eq!(
+            parse_error_line("NOTE=\"x y\"\nB=x y\n"),
+            "invalid syntax on line 2"
+        );
+        // Blank and comment lines (even ones containing the text) are skipped.
+        assert_eq!(
+            parse_error_line("A=1\n\n# x y\n   \nB=x y\n"),
+            "invalid syntax on line 5"
+        );
+        // A multi-line value before the error counts all of its lines.
+        assert_eq!(
+            parse_error_line("MULTI=\"one\ntwo\"\nB=x y\n"),
+            "invalid syntax on line 3"
+        );
+        // An unterminated quote names the line the value starts on.
+        assert_eq!(
+            parse_error_line("A=1\nS=\"a\nb\n"),
+            "invalid syntax on line 2"
+        );
+        assert_eq!(parse_error_line("1BAD=x\n"), "invalid syntax on line 1");
+        assert_eq!(
+            parse("A=1 # c\nB=\"x\ny\"\n").unwrap(),
+            [
+                ("A".to_string(), "1".to_string()),
+                ("B".to_string(), "x\ny".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn candidates_that_are_not_files_are_skipped() {
+        // `python -m venv .env` leaves a directory where the file would be.
+        let root = project_with("venv_dir", &[(".env.local", "FROM_LOCAL=1\n")]);
+        std::fs::create_dir_all(root.join(".env").join("bin")).unwrap();
+        let mut env = MapEnv::default();
+        let result = load(&root, EnvMode::Production, &mut env);
+        let _ = std::fs::remove_dir_all(&root);
+        let loaded = result.unwrap();
+        assert_eq!(loaded.files, [".env.local"]);
+        assert_eq!(loaded.skipped, [".env"]);
+        assert_eq!(get(&env, "FROM_LOCAL"), Some("1"));
     }
 }

@@ -16,6 +16,9 @@ const outDir = process.env.GIO_OUT_DIR ?? join(process.cwd(), 'out');
 try {
   const env = loadEnvFiles(dirname(appDir));
   if (env.files.length > 0) console.log(`[giojs] loaded env: ${env.files.join(', ')}`);
+  if (env.skipped.length > 0) {
+    console.log(`[giojs] skipped env candidates that are not files: ${env.skipped.join(', ')}`);
+  }
   if (env.ignoredNodeEnv) console.log('[giojs] NODE_ENV in .env files is ignored');
 } catch (envError) {
   console.error(`[giojs] ${envError instanceof Error ? envError.message : String(envError)}`);
