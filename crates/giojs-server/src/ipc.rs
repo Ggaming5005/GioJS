@@ -1569,6 +1569,7 @@ mod tests {
     fn ipc_request_serializes_client_fields_flat() {
         let client = crate::client_identity::ClientInfo {
             ip: "198.51.100.4".parse().unwrap(),
+            unresolved: false,
             peer: "127.0.0.1:9000".parse().unwrap(),
             scheme: "https",
             host: Some("app.example".into()),

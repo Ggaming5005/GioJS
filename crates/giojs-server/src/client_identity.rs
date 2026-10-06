@@ -13,8 +13,11 @@
 //! The client IP walks the forwarding chain right to left: every hop a
 //! trusted proxy appended is skipped, and the first address no trusted proxy
 //! vouches for is the client. Entries left of it were written by the client
-//! itself and are never read, so a spoofed `X-Forwarded-For: 1.2.3.4` sent
-//! through nginx's `$proxy_add_x_forwarded_for` changes nothing.
+//! itself and are never read - not parsed, not decoded, not measured - so
+//! nothing a client puts there (a spoofed `X-Forwarded-For: 1.2.3.4`, junk
+//! bytes, an unterminated quote, kilobytes of padding) sent through nginx's
+//! `$proxy_add_x_forwarded_for` changes the answer. Every hop the walk does
+//! read was written by a trusted proxy.
 //!
 //! Exactly one header family is honored (`[server] proxy_headers`): the
 //! `X-Forwarded-For/-Proto/-Host` trio (default) or RFC 7239 `Forwarded`.
@@ -26,7 +29,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
-use axum::http::{header, HeaderMap};
+use axum::http::{header, HeaderMap, HeaderValue};
 use serde::Deserialize;
 
 /// Request header carrying the request id (and the response header echoing it).
@@ -35,9 +38,12 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 /// Longest incoming request id accepted from a trusted proxy.
 const MAX_REQUEST_ID_LEN: usize = 128;
 
-/// Longest forwarding header value parsed; anything longer is malformed.
-/// Real chains are a handful of hops, and the walk is per request.
-const MAX_FORWARDED_LEN: usize = 8 * 1024;
+/// Most forwarding hops read per request. Real chains are a handful of
+/// proxies; only a client inside a trusted range can lead the walk further
+/// (an untrusted client stops it at its own address), and its word counts
+/// anyway, so past this many trusted hops the leftmost one read stands for
+/// the client.
+const MAX_FORWARDED_HOPS: usize = 32;
 
 /// One `trusted_proxies` entry: a single address or a CIDR block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,12 +186,27 @@ impl ProxyHeaders {
 
 /// Everything `resolve` needs besides the request itself; built once at
 /// startup.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ProxyTrust {
     pub trusted: TrustedProxies,
     pub headers: ProxyHeaders,
     /// The listener terminates TLS itself, so direct requests are https.
     pub tls: bool,
+    /// `[server] accept_request_id`: adopt a trusted proxy's valid
+    /// X-Request-Id. Off behind proxies that pass a client's own header
+    /// through (AWS ALB, Google Cloud LB, ...), so every id is generated here.
+    pub accept_request_id: bool,
+}
+
+impl Default for ProxyTrust {
+    fn default() -> Self {
+        Self {
+            trusted: TrustedProxies::default(),
+            headers: ProxyHeaders::default(),
+            tls: false,
+            accept_request_id: true,
+        }
+    }
 }
 
 /// The resolved identity of one request, stored as a request extension by
@@ -196,6 +217,11 @@ pub struct ClientInfo {
     /// The client's IP: the peer, or the first address left of the trusted
     /// proxies in the forwarding chain.
     pub ip: IpAddr,
+    /// A trusted proxy sent a forwarding header, but a hop it wrote is not an
+    /// address (`unknown`, an obfuscated id, a misconfigured proxy): `ip` is
+    /// the proxy standing in for a client nobody could name. Access checks
+    /// (the metrics allowlist) treat such a client as unknown and refuse it.
+    pub unresolved: bool,
     /// The TCP peer that sent the request (the proxy, behind one).
     pub peer: SocketAddr,
     /// `"https"` or `"http"`, as the client used it.
@@ -236,39 +262,44 @@ pub fn resolve(
     let direct_scheme = if trust.tls { "https" } else { "http" };
     let via_trusted = !trust.trusted.is_empty() && trust.trusted.contains(peer_ip);
 
-    let (ip, scheme, host) = if !via_trusted {
-        (peer_ip, direct_scheme, direct_host)
+    let (ip, unresolved, scheme, host) = if !via_trusted {
+        (peer_ip, false, direct_scheme, direct_host)
     } else {
         match trust.headers {
             ProxyHeaders::XForwarded => {
-                let ip = joined(headers, "x-forwarded-for")
-                    .and_then(|chain| client_from_x_forwarded_for(&chain, &trust.trusted))
-                    .unwrap_or(peer_ip);
-                let scheme = first_value(headers, "x-forwarded-proto")
+                let (ip, unresolved) = match client_from_x_forwarded_for(
+                    lines(headers, "x-forwarded-for"),
+                    &trust.trusted,
+                ) {
+                    Hop::Absent => (peer_ip, false),
+                    Hop::Client(ip) => (ip, false),
+                    Hop::Malformed => (peer_ip, true),
+                };
+                let scheme = nearest_value(headers, "x-forwarded-proto")
                     .and_then(parse_scheme)
                     .unwrap_or(direct_scheme);
-                let host = first_value(headers, "x-forwarded-host")
+                let host = nearest_value(headers, "x-forwarded-host")
                     .filter(|h| valid_host(h))
                     .map(str::to_string)
                     .or(direct_host);
-                (ip, scheme, host)
+                (ip, unresolved, scheme, host)
             }
             ProxyHeaders::Forwarded => {
-                match joined(headers, "forwarded")
-                    .and_then(|value| client_from_forwarded(&value, &trust.trusted))
-                {
-                    Some(hop) => (
+                match client_from_forwarded(lines(headers, "forwarded"), &trust.trusted) {
+                    Hop::Client(hop) => (
                         hop.ip,
+                        false,
                         hop.proto.unwrap_or(direct_scheme),
                         hop.host.or(direct_host),
                     ),
-                    None => (peer_ip, direct_scheme, direct_host),
+                    Hop::Absent => (peer_ip, false, direct_scheme, direct_host),
+                    Hop::Malformed => (peer_ip, true, direct_scheme, direct_host),
                 }
             }
         }
     };
 
-    let request_id = via_trusted
+    let request_id = (via_trusted && trust.accept_request_id)
         .then(|| headers.get(REQUEST_ID_HEADER))
         .flatten()
         .and_then(|v| v.to_str().ok())
@@ -278,6 +309,7 @@ pub fn resolve(
 
     ClientInfo {
         ip,
+        unresolved,
         peer,
         scheme,
         host,
@@ -285,28 +317,24 @@ pub fn resolve(
     }
 }
 
-/// All values of a possibly repeated list header, comma-joined in order (the
-/// HTTP list-header equivalence). None when absent, non-ASCII or oversized.
-fn joined(headers: &HeaderMap, name: &str) -> Option<String> {
-    let mut out = String::new();
-    for value in headers.get_all(name) {
-        let value = value.to_str().ok()?;
-        if !out.is_empty() {
-            out.push(',');
-        }
-        out.push_str(value);
-        if out.len() > MAX_FORWARDED_LEN {
-            return None;
-        }
-    }
-    (!out.is_empty()).then_some(out)
+/// The raw lines of a possibly repeated header, in wire order. Nothing is
+/// decoded here: a walk decodes only the hops it reads.
+fn lines<'a>(
+    headers: &'a HeaderMap,
+    name: &str,
+) -> impl DoubleEndedIterator<Item = &'a [u8]> + use<'a> {
+    headers.get_all(name).into_iter().map(HeaderValue::as_bytes)
 }
 
-/// The leftmost value of a list header: what the outermost proxy (the one
-/// the client talked to) recorded, when a chain of proxies appended theirs.
-fn first_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    let value = headers.get(name)?.to_str().ok()?;
-    Some(value.split(',').next().unwrap_or("").trim()).filter(|v| !v.is_empty())
+/// What the nearest proxy wrote to a single-valued forwarding header
+/// (X-Forwarded-Proto/-Host): the rightmost element of the last line. A
+/// proxy that appends instead of replacing - HAProxy's `add-header`, a
+/// comma-appending proxy - leaves a client's own copy to the left, where it
+/// is never read.
+fn nearest_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let line = lines(headers, name).next_back()?;
+    let value = line.rsplit(|&b| b == b',').next()?.trim_ascii();
+    std::str::from_utf8(value).ok().filter(|v| !v.is_empty())
 }
 
 fn parse_scheme(value: &str) -> Option<&'static str> {
@@ -330,17 +358,41 @@ fn valid_host(host: &str) -> bool {
         })
 }
 
-/// Walk an X-Forwarded-For chain right to left and return the first address
-/// no trusted proxy vouches for, or the leftmost when every hop is trusted.
-/// None (use the peer) when a hop that has to be read is malformed.
-pub fn client_from_x_forwarded_for(chain: &str, trusted: &TrustedProxies) -> Option<IpAddr> {
-    let mut leftmost = None;
-    for raw in chain.rsplit(',') {
-        let ip = parse_node(raw.trim())?;
+/// Outcome of walking a forwarding header from the right.
+#[derive(Debug, PartialEq, Eq)]
+enum Hop<T> {
+    /// No header, or only empty list elements: the peer is the client.
+    Absent,
+    /// The first hop no trusted proxy vouches for, or the leftmost one read
+    /// when every hop read is trusted.
+    Client(T),
+    /// A hop the walk had to read - one a trusted proxy wrote - is not an
+    /// address.
+    Malformed,
+}
+
+/// Walk X-Forwarded-For right to left - last header line first, each line's
+/// elements from the right - and stop at the first address no trusted proxy
+/// vouches for. Only the hops consumed are trimmed, decoded and parsed.
+/// Empty list elements are skipped (RFC 9110 5.6.1).
+fn client_from_x_forwarded_for<'a>(
+    lines: impl DoubleEndedIterator<Item = &'a [u8]>,
+    trusted: &TrustedProxies,
+) -> Hop<IpAddr> {
+    let hops = lines
+        .rev()
+        .flat_map(|line| line.rsplit(|&b| b == b','))
+        .map(<[u8]>::trim_ascii)
+        .filter(|hop| !hop.is_empty());
+    let mut leftmost = Hop::Absent;
+    for raw in hops.take(MAX_FORWARDED_HOPS) {
+        let Some(ip) = std::str::from_utf8(raw).ok().and_then(parse_node) else {
+            return Hop::Malformed;
+        };
         if !trusted.contains(ip) {
-            return Some(ip);
+            return Hop::Client(ip);
         }
-        leftmost = Some(ip);
+        leftmost = Hop::Client(ip);
     }
     leftmost
 }
@@ -373,19 +425,74 @@ struct ForwardedHop {
 /// RFC 7239: elements are comma-separated, one per proxy, left to right from
 /// the client; each element's `proto`/`host` describe the request that proxy
 /// received. Same right-to-left walk as X-Forwarded-For over the `for=`
-/// values; the chosen hop's own proto and host come with it. None when any
-/// element that has to be read is malformed or lacks a usable `for=`.
-fn client_from_forwarded(value: &str, trusted: &TrustedProxies) -> Option<ForwardedHop> {
-    let elements = split_unquoted(value, ',')?;
-    let mut leftmost = None;
-    for element in elements.iter().rev() {
-        let hop = parse_forwarded_element(element)?;
+/// values; the chosen hop's own proto and host come with it. Elements are
+/// split off from the right, so a client's malformed element (say, an
+/// unterminated quote) left of the client is never scanned. Malformed when
+/// an element the walk has to read is malformed or lacks a usable `for=`.
+fn client_from_forwarded<'a>(
+    lines: impl DoubleEndedIterator<Item = &'a [u8]>,
+    trusted: &TrustedProxies,
+) -> Hop<ForwardedHop> {
+    let elements = lines
+        .rev()
+        .flat_map(|line| RSplitQuoted { rest: Some(line) })
+        .filter(|element| element.is_none_or(|e| !e.trim_ascii().is_empty()));
+    let mut leftmost = Hop::Absent;
+    for element in elements.take(MAX_FORWARDED_HOPS) {
+        let Some(hop) = element
+            .and_then(|e| std::str::from_utf8(e).ok())
+            .and_then(parse_forwarded_element)
+        else {
+            return Hop::Malformed;
+        };
         if !trusted.contains(hop.ip) {
-            return Some(hop);
+            return Hop::Client(hop);
         }
-        leftmost = Some(hop);
+        leftmost = Hop::Client(hop);
     }
     leftmost
+}
+
+/// The comma-separated elements of one list-header line, right to left;
+/// commas inside quoted strings stay in their element. Each step scans back
+/// only to the previous separator, so elements left of where the caller
+/// stops are never looked at. Yields None, then ends, for an element with
+/// unbalanced quotes.
+struct RSplitQuoted<'a> {
+    rest: Option<&'a [u8]>,
+}
+
+impl<'a> Iterator for RSplitQuoted<'a> {
+    type Item = Option<&'a [u8]>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let line = self.rest?;
+        let mut in_quotes = false;
+        let mut i = line.len();
+        while i > 0 {
+            i -= 1;
+            match line[i] {
+                b'"' => {
+                    // An odd run of backslashes before a quote escapes it,
+                    // which only a quoted string allows.
+                    let backslashes = line[..i].iter().rev().take_while(|&&b| b == b'\\').count();
+                    if backslashes % 2 == 0 {
+                        in_quotes = !in_quotes;
+                    } else if !in_quotes {
+                        self.rest = None;
+                        return Some(None);
+                    }
+                }
+                b',' if !in_quotes => {
+                    self.rest = Some(&line[..i]);
+                    return Some(Some(&line[i + 1..]));
+                }
+                _ => {}
+            }
+        }
+        self.rest = None;
+        Some((!in_quotes).then_some(line))
+    }
 }
 
 fn parse_forwarded_element(element: &str) -> Option<ForwardedHop> {
@@ -415,8 +522,8 @@ fn parse_forwarded_element(element: &str) -> Option<ForwardedHop> {
     })
 }
 
-/// Split on `sep` outside double-quoted strings. None on an unterminated
-/// quote.
+/// Split one element on `sep` outside double-quoted strings. None on an
+/// unterminated quote.
 fn split_unquoted(value: &str, sep: char) -> Option<Vec<&str>> {
     let mut parts = Vec::new();
     let mut in_quotes = false;
@@ -499,10 +606,21 @@ pub fn client_ip<B>(req: &axum::http::Request<B>, peer: SocketAddr) -> IpAddr {
         .map_or_else(|| peer.ip().to_canonical(), |client| client.ip)
 }
 
+/// The client IP for an access check (the metrics allowlist): `client_ip`,
+/// except None when a trusted proxy's forwarding header could not be read.
+/// The check then fails closed instead of admitting a client nobody could
+/// name as if it were the proxy itself.
+pub fn access_ip<B>(req: &axum::http::Request<B>, peer: SocketAddr) -> Option<IpAddr> {
+    match req.extensions().get::<ClientInfo>() {
+        Some(client) if client.unresolved => None,
+        Some(client) => Some(client.ip),
+        None => Some(peer.ip().to_canonical()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
 
     fn trust(list: &[&str]) -> TrustedProxies {
         TrustedProxies(list.iter().map(|entry| entry.parse().unwrap()).collect())
@@ -512,7 +630,7 @@ mod tests {
         ProxyTrust {
             trusted: trust(list),
             headers: ProxyHeaders::XForwarded,
-            tls: false,
+            ..ProxyTrust::default()
         }
     }
 
@@ -522,6 +640,30 @@ mod tests {
             map.append(*name, HeaderValue::from_str(value).unwrap());
         }
         map
+    }
+
+    /// Header lines as raw bytes - what a proxy forwards, including bytes
+    /// that are not visible ASCII.
+    fn raw_headers(pairs: &[(&'static str, &[u8])]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.append(*name, HeaderValue::from_bytes(value).unwrap());
+        }
+        map
+    }
+
+    /// The X-Forwarded-For walk over a single header line.
+    fn xff(chain: &str, trusted: &TrustedProxies) -> Hop<IpAddr> {
+        client_from_x_forwarded_for([chain.as_bytes()].into_iter(), trusted)
+    }
+
+    /// The Forwarded walk over a single header line, reduced to the IP.
+    fn fwd(value: &str, trusted: &TrustedProxies) -> Hop<IpAddr> {
+        match client_from_forwarded([value.as_bytes()].into_iter(), trusted) {
+            Hop::Client(hop) => Hop::Client(hop.ip),
+            Hop::Absent => Hop::Absent,
+            Hop::Malformed => Hop::Malformed,
+        }
     }
 
     fn peer(addr: &str) -> SocketAddr {
@@ -682,19 +824,29 @@ mod tests {
         let t = trust(&["127.0.0.1", "10.0.0.0/8"]);
         // client-supplied junk, real client, CDN edge (trusted), LB (trusted)
         let chain = "6.6.6.6, 198.51.100.4, 10.0.0.7, 10.1.0.2";
-        assert_eq!(
-            client_from_x_forwarded_for(chain, &t),
-            Some(ip("198.51.100.4"))
-        );
+        assert_eq!(xff(chain, &t), Hop::Client(ip("198.51.100.4")));
         // A spoofed leftmost entry is never reached.
         assert_eq!(
-            client_from_x_forwarded_for("1.1.1.1, 198.51.100.4", &t),
-            Some(ip("198.51.100.4"))
+            xff("1.1.1.1, 198.51.100.4", &t),
+            Hop::Client(ip("198.51.100.4"))
         );
         // Every hop trusted: the leftmost is the best answer there is.
+        assert_eq!(xff("10.0.0.5, 10.0.0.6", &t), Hop::Client(ip("10.0.0.5")));
+    }
+
+    #[test]
+    fn walk_reads_at_most_max_forwarded_hops() {
+        // Only a client inside a trusted range gets this far; past the limit
+        // the leftmost hop read stands for it.
+        let t = trust(&["10.0.0.0/8"]);
+        let chain = (1..=100)
+            .map(|i| format!("10.0.0.{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let leftmost_read = 100 - MAX_FORWARDED_HOPS + 1;
         assert_eq!(
-            client_from_x_forwarded_for("10.0.0.5, 10.0.0.6", &t),
-            Some(ip("10.0.0.5"))
+            xff(&chain, &t),
+            Hop::Client(ip(&format!("10.0.0.{leftmost_read}")))
         );
     }
 
@@ -716,25 +868,16 @@ mod tests {
     #[test]
     fn ipv6_and_ported_entries_parse() {
         let t = trust(&["::1", "10.0.0.0/8"]);
+        assert_eq!(xff("2001:db8::7, ::1", &t), Hop::Client(ip("2001:db8::7")));
+        assert_eq!(xff("[2001:db8::7]:443", &t), Hop::Client(ip("2001:db8::7")));
+        assert_eq!(xff("[2001:db8::7]", &t), Hop::Client(ip("2001:db8::7")));
         assert_eq!(
-            client_from_x_forwarded_for("2001:db8::7, ::1", &t),
-            Some(ip("2001:db8::7"))
+            xff("198.51.100.4:6000, 10.0.0.1", &t),
+            Hop::Client(ip("198.51.100.4"))
         );
         assert_eq!(
-            client_from_x_forwarded_for("[2001:db8::7]:443", &t),
-            Some(ip("2001:db8::7"))
-        );
-        assert_eq!(
-            client_from_x_forwarded_for("[2001:db8::7]", &t),
-            Some(ip("2001:db8::7"))
-        );
-        assert_eq!(
-            client_from_x_forwarded_for("198.51.100.4:6000, 10.0.0.1", &t),
-            Some(ip("198.51.100.4"))
-        );
-        assert_eq!(
-            client_from_x_forwarded_for("::ffff:198.51.100.4", &t),
-            Some(ip("198.51.100.4")),
+            xff("::ffff:198.51.100.4", &t),
+            Hop::Client(ip("198.51.100.4")),
             "mapped addresses are their IPv4 address"
         );
         // An IPv6 peer is trusted like any other.
@@ -744,45 +887,117 @@ mod tests {
     }
 
     #[test]
-    fn malformed_values_fall_back_to_the_peer() {
+    fn malformed_hops_a_trusted_proxy_wrote_leave_the_client_unresolved() {
         let pt = proxy_trust(&["127.0.0.1", "10.0.0.0/8"]);
         for chain in [
             "not-an-ip",
             "unknown",
             "198.51.100.4, garbage",
-            "198.51.100.4,,10.0.0.1",
-            "",
-            " , ",
+            "garbage, 10.0.0.1",
             "1.2.3.4.5",
             "[::1",
         ] {
             let h = headers(&[("x-forwarded-for", chain)]);
             let info = resolve(peer("127.0.0.1:1"), &h, None, &pt);
             assert_eq!(info.ip, ip("127.0.0.1"), "{chain:?}");
+            assert!(info.unresolved, "{chain:?}");
         }
-        // Malformed entries LEFT of the client are never read.
+        // Non-ASCII bytes in a hop the walk reads are malformed too.
+        let h = raw_headers(&[("x-forwarded-for", b"198.51.100.4\xff")]);
+        let info = resolve(peer("127.0.0.1:1"), &h, None, &pt);
+        assert_eq!(info.ip, ip("127.0.0.1"));
+        assert!(info.unresolved);
+    }
+
+    #[test]
+    fn empty_list_elements_are_skipped_and_an_empty_header_is_absent() {
+        let pt = proxy_trust(&["127.0.0.1", "10.0.0.0/8"]);
+        // RFC 9110: empty list elements carry nothing.
         assert_eq!(
-            client_from_x_forwarded_for("garbage, 198.51.100.4", &pt.trusted),
-            Some(ip("198.51.100.4"))
+            xff("198.51.100.4,,10.0.0.1, ", &pt.trusted),
+            Hop::Client(ip("198.51.100.4"))
         );
-        // Oversized chains are malformed, not walked.
-        let huge = vec!["10.0.0.1"; 2000].join(",");
-        let h = headers(&[("x-forwarded-for", &huge)]);
+        for chain in ["", " , ", ","] {
+            let h = headers(&[("x-forwarded-for", chain)]);
+            let info = resolve(peer("127.0.0.1:1"), &h, None, &pt);
+            assert_eq!(info.ip, ip("127.0.0.1"), "{chain:?}");
+            assert!(
+                !info.unresolved,
+                "{chain:?}: no hop at all, the peer is the client"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_left_of_the_client_is_read() {
+        // What nginx's $proxy_add_x_forwarded_for forwards: whatever the
+        // client sent, then the address the client connected from.
+        let pt = proxy_trust(&["127.0.0.1"]);
+        let client = |info: ClientInfo| (info.ip, info.unresolved);
+        let forwarded = |prefix: &[u8], client_ip: &str| {
+            let mut line = prefix.to_vec();
+            line.extend_from_slice(b", ");
+            line.extend_from_slice(client_ip.as_bytes());
+            line
+        };
+        for prefix in [
+            &b"\xff"[..],
+            b"garbage",
+            b"\"unterminated",
+            b"127.0.0.1",
+            b"\x80\xfe 1.2.3.4",
+        ] {
+            let h = raw_headers(&[("x-forwarded-for", &forwarded(prefix, "198.51.100.4"))]);
+            assert_eq!(
+                client(resolve(peer("127.0.0.1:1"), &h, None, &pt)),
+                (ip("198.51.100.4"), false),
+                "{prefix:?}"
+            );
+        }
+        // An oversized client prefix is never measured, either.
+        let padding = vec![b'a'; 64 * 1024];
+        let h = raw_headers(&[("x-forwarded-for", &forwarded(&padding, "2001:db8::7"))]);
         assert_eq!(
-            resolve(peer("127.0.0.1:1"), &h, None, &pt).ip,
-            ip("127.0.0.1")
+            client(resolve(peer("127.0.0.1:1"), &h, None, &pt)),
+            (ip("2001:db8::7"), false)
+        );
+        // Nor is a client's own header line before the proxy's.
+        let h = raw_headers(&[
+            ("x-forwarded-for", b"\xff\xff"),
+            ("x-forwarded-for", b"198.51.100.4"),
+        ]);
+        assert_eq!(
+            client(resolve(peer("127.0.0.1:1"), &h, None, &pt)),
+            (ip("198.51.100.4"), false)
         );
     }
 
     #[test]
-    fn non_ascii_header_bytes_are_malformed() {
-        let mut h = HeaderMap::new();
-        h.insert(
-            "x-forwarded-for",
-            HeaderValue::from_bytes(b"198.51.100.4\xff").unwrap(),
+    fn access_checks_fail_closed_for_an_unresolved_client() {
+        let pt = proxy_trust(&["127.0.0.1"]);
+        let request = |xff: &str| {
+            let mut req = axum::http::Request::builder()
+                .uri("/_gio/metrics")
+                .header("x-forwarded-for", xff)
+                .body(())
+                .unwrap();
+            let info = resolve(peer("127.0.0.1:1"), req.headers(), None, &pt);
+            req.extensions_mut().insert(info);
+            req
+        };
+        let p = peer("127.0.0.1:1");
+        assert_eq!(
+            access_ip(&request("198.51.100.4"), p),
+            Some(ip("198.51.100.4"))
         );
-        let info = resolve(peer("127.0.0.1:1"), &h, None, &proxy_trust(&["127.0.0.1"]));
-        assert_eq!(info.ip, ip("127.0.0.1"));
+        // The proxy wrote something that is not an address: the client is
+        // unknown, never the proxy itself.
+        let unknown = request("unknown");
+        assert_eq!(client_ip(&unknown, p), ip("127.0.0.1"));
+        assert_eq!(access_ip(&unknown, p), None);
+        // Without the identity layer the peer is the client.
+        let bare = axum::http::Request::builder().body(()).unwrap();
+        assert_eq!(access_ip(&bare, p), Some(ip("127.0.0.1")));
     }
 
     // ── scheme / host ─────────────────────────────────────────────────────────
@@ -804,11 +1019,48 @@ mod tests {
         // A TLS-terminating proxy in front of a TLS listener still decides.
         let h = headers(&[("x-forwarded-proto", "http")]);
         assert_eq!(resolve(peer("127.0.0.1:1"), &h, None, &tls).scheme, "http");
-        // Chains take the outermost proxy's value; junk falls back.
-        let h = headers(&[("x-forwarded-proto", "https, http")]);
-        assert_eq!(resolve(peer("127.0.0.1:1"), &h, None, &pt).scheme, "https");
+        // Junk falls back.
         let h = headers(&[("x-forwarded-proto", "javascript")]);
         assert_eq!(resolve(peer("127.0.0.1:1"), &h, None, &pt).scheme, "http");
+    }
+
+    #[test]
+    fn proto_and_host_are_what_the_nearest_proxy_wrote() {
+        // A proxy that appends (HAProxy `add-header`, a comma list) instead
+        // of replacing leaves the client's own value first; it never wins.
+        let pt = proxy_trust(&["127.0.0.1"]);
+        let resolved = |h: &HeaderMap| {
+            let info = resolve(peer("127.0.0.1:1"), h, None, &pt);
+            (info.scheme, info.host)
+        };
+        let h = headers(&[
+            ("host", "upstream:3000"),
+            ("x-forwarded-proto", "https"),
+            ("x-forwarded-host", "evil.example"),
+            ("x-forwarded-proto", "http"),
+            ("x-forwarded-host", "app.example"),
+        ]);
+        assert_eq!(resolved(&h), ("http", Some("app.example".into())));
+        let h = headers(&[
+            ("host", "upstream:3000"),
+            ("x-forwarded-proto", "http, https"),
+            ("x-forwarded-host", "evil.example, app.example"),
+        ]);
+        assert_eq!(resolved(&h), ("https", Some("app.example".into())));
+        // Non-ASCII junk the client put first is never decoded.
+        let h = raw_headers(&[
+            ("host", b"upstream:3000"),
+            ("x-forwarded-proto", b"\xff, https"),
+            ("x-forwarded-host", b"\xff, app.example"),
+        ]);
+        assert_eq!(resolved(&h), ("https", Some("app.example".into())));
+        // What the nearest proxy wrote is unusable: fall back, never left.
+        let h = headers(&[
+            ("host", "upstream:3000"),
+            ("x-forwarded-proto", "https, gopher"),
+            ("x-forwarded-host", "app.example, a b"),
+        ]);
+        assert_eq!(resolved(&h), ("http", Some("upstream:3000".into())));
     }
 
     #[test]
@@ -864,6 +1116,7 @@ mod tests {
         assert_eq!(effective_host(&req).as_deref(), Some("upstream:3000"));
         req.extensions_mut().insert(ClientInfo {
             ip: ip("198.51.100.4"),
+            unresolved: false,
             peer: peer("127.0.0.1:1"),
             scheme: "https",
             host: Some("app.example".into()),
@@ -878,7 +1131,7 @@ mod tests {
         ProxyTrust {
             trusted: trust(list),
             headers: ProxyHeaders::Forwarded,
-            tls: false,
+            ..ProxyTrust::default()
         }
     }
 
@@ -923,17 +1176,22 @@ mod tests {
     fn forwarded_parsing_is_strict() {
         let t = trust(&["127.0.0.1"]);
         assert_eq!(
-            client_from_forwarded(r#"for="198.51.100.4:80""#, &t).map(|h| h.ip),
-            Some(ip("198.51.100.4"))
+            fwd(r#"for="198.51.100.4:80""#, &t),
+            Hop::Client(ip("198.51.100.4"))
         );
         assert_eq!(
-            client_from_forwarded(r#"For="[2001:db8::1]";by=10.0.0.1"#, &t).map(|h| h.ip),
-            Some(ip("2001:db8::1"))
+            fwd(r#"For="[2001:db8::1]";by=10.0.0.1"#, &t),
+            Hop::Client(ip("2001:db8::1"))
         );
-        // Quoted commas and semicolons do not split.
+        // Quoted commas and semicolons do not split, escaped quotes do not
+        // end a quoted string.
         assert_eq!(
-            client_from_forwarded(r#"for=198.51.100.4;ext="a,b;c""#, &t).map(|h| h.ip),
-            Some(ip("198.51.100.4"))
+            fwd(r#"for=198.51.100.4;ext="a,b;c""#, &t),
+            Hop::Client(ip("198.51.100.4"))
+        );
+        assert_eq!(
+            fwd(r#"for=198.51.100.4;ext="x\",y\\", for=127.0.0.1"#, &t),
+            Hop::Client(ip("198.51.100.4"))
         );
         for bad in [
             "for=unknown",
@@ -941,10 +1199,11 @@ mod tests {
             "proto=https",
             "for=198.51.100.4;for=1.2.3.4",
             r#"for="198.51.100.4"#,
+            r#"for=198.51.100.4\""#,
             "for=198.51.100.4;proto=gopher",
             "garbage",
         ] {
-            assert_eq!(client_from_forwarded(bad, &t), None, "{bad:?}");
+            assert_eq!(fwd(bad, &t), Hop::Malformed, "{bad:?}");
         }
         let h = headers(&[("forwarded", "for=unknown"), ("host", "upstream")]);
         let info = resolve(
@@ -954,7 +1213,84 @@ mod tests {
             &forwarded_trust(&["127.0.0.1"]),
         );
         assert_eq!(info.ip, ip("127.0.0.1"));
+        assert!(info.unresolved);
         assert_eq!(info.host.as_deref(), Some("upstream"));
+        // No element at all: the peer is the client.
+        assert_eq!(fwd(" , ", &t), Hop::Absent);
+    }
+
+    #[test]
+    fn forwarded_elements_left_of_the_client_are_never_scanned() {
+        // The client's own Forwarded header with the proxy's element appended.
+        let t = trust(&["127.0.0.1", "10.0.0.0/8"]);
+        for client_part in [
+            &br#"for="x"#[..],
+            br#"for=1.1.1.1;ext="a"#,
+            b"\xff",
+            b"for=\"[::1\\\"",
+        ] {
+            let mut line = client_part.to_vec();
+            line.extend_from_slice(br#", for=198.51.100.4;proto=https, for=10.0.0.7"#);
+            let h = raw_headers(&[("forwarded", &line)]);
+            let info = resolve(
+                peer("127.0.0.1:1"),
+                &h,
+                None,
+                &forwarded_trust(&["127.0.0.1", "10.0.0.0/8"]),
+            );
+            assert_eq!(
+                (info.ip, info.unresolved, info.scheme),
+                (ip("198.51.100.4"), false, "https"),
+                "{client_part:?}"
+            );
+        }
+        // The client's own header line before the proxy's.
+        let h = raw_headers(&[
+            ("forwarded", br#"for="unterminated"#),
+            ("forwarded", b"for=198.51.100.4"),
+        ]);
+        let info = resolve(
+            peer("127.0.0.1:1"),
+            &h,
+            None,
+            &forwarded_trust(&["127.0.0.1"]),
+        );
+        assert_eq!((info.ip, info.unresolved), (ip("198.51.100.4"), false));
+        // An oversized client prefix is never measured.
+        let mut line = vec![b'a'; 64 * 1024];
+        line.extend_from_slice(b", for=\"[2001:db8::7]:443\"");
+        assert_eq!(
+            client_from_forwarded([&line[..]].into_iter(), &t),
+            Hop::Client(ForwardedHop {
+                ip: ip("2001:db8::7"),
+                proto: None,
+                host: None
+            })
+        );
+    }
+
+    #[test]
+    fn rsplit_quoted_splits_from_the_right_outside_quotes() {
+        let split = |line: &str| {
+            RSplitQuoted {
+                rest: Some(line.as_bytes()),
+            }
+            .map(|e| e.map(|e| String::from_utf8(e.to_vec()).unwrap()))
+            .collect::<Vec<_>>()
+        };
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(
+            split(r#"a, b="x,y", c"#),
+            [some(" c"), some(r#" b="x,y""#), some("a")]
+        );
+        assert_eq!(
+            split(r#"a="q\"r,s", b"#),
+            [some(" b"), some(r#"a="q\"r,s""#)]
+        );
+        // The right element is whole even when the left one is broken.
+        assert_eq!(split(r#"a="x, b"#), [some(" b"), None]);
+        assert_eq!(split(r#"a=x\", b"#), [some(" b"), None]);
+        assert_eq!(split(""), [some("")]);
     }
 
     // ── request ids ───────────────────────────────────────────────────────────
@@ -1005,5 +1341,23 @@ mod tests {
         let a = resolve(peer("192.0.2.1:1"), &HeaderMap::new(), None, &pt).request_id;
         let b = resolve(peer("192.0.2.1:1"), &HeaderMap::new(), None, &pt).request_id;
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn accept_request_id_off_generates_every_id() {
+        // Behind a proxy that passes a client's own X-Request-Id through.
+        let pt = ProxyTrust {
+            accept_request_id: false,
+            ..proxy_trust(&["127.0.0.1"])
+        };
+        let h = headers(&[
+            ("x-request-id", "client-picked"),
+            ("x-forwarded-for", "198.51.100.4"),
+        ]);
+        let info = resolve(peer("127.0.0.1:1"), &h, None, &pt);
+        assert_ne!(info.request_id, "client-picked");
+        assert!(valid_request_id(&info.request_id));
+        // Only the id: the proxy is still trusted for the client.
+        assert_eq!(info.ip, ip("198.51.100.4"));
     }
 }

@@ -426,6 +426,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         trusted: cfg.server.trusted_proxies.clone(),
         headers: cfg.server.proxy_headers,
         tls: tls_enabled,
+        accept_request_id: cfg.server.accept_request_id,
     });
     if !proxy_trust.trusted.is_empty() {
         let entries: Vec<String> = proxy_trust
@@ -795,7 +796,7 @@ async fn client_identity_middleware(
         req.headers_mut()
             .insert(client_identity::REQUEST_ID_HEADER, value.clone());
     }
-    let span = tracing::info_span!("request", request_id = %client.request_id);
+    let span = request_span(&client.request_id);
     req.extensions_mut().insert(client);
     let mut resp = next.run(req).instrument(span).await;
     if let Some(value) = request_id {
@@ -803,6 +804,15 @@ async fn client_identity_middleware(
             .insert(client_identity::REQUEST_ID_HEADER, value);
     }
     resp
+}
+
+/// The span every log line of one request is emitted in. ERROR level, the
+/// most severe there is, so no RUST_LOG filter disables it while letting
+/// any of the request's own lines through: an event inside a disabled span
+/// loses its fields, and at RUST_LOG=warn an INFO span would strip the id
+/// from exactly the warn/error lines it is there for.
+fn request_span(request_id: &str) -> tracing::Span {
+    tracing::error_span!("request", request_id = %request_id)
 }
 
 /// fonts.css is regenerated from gio.toml at every start under a fixed URL,
@@ -842,12 +852,14 @@ async fn metrics_handler(
     }
     if !state.metrics_config.ip_allowlist.is_empty() {
         // The client behind trusted proxies: allowlisting 127.0.0.1 must not
-        // admit everything a local reverse proxy forwards.
-        let ip = client_identity::client_ip(&req, addr);
-        let allowed = state.metrics_config.ip_allowlist.iter().any(|entry| {
-            entry
-                .parse::<client_identity::IpNet>()
-                .is_ok_and(|net| net.contains(ip))
+        // admit everything a local reverse proxy forwards. A client the
+        // proxy's forwarding header could not name is refused outright.
+        let allowed = client_identity::access_ip(&req, addr).is_some_and(|ip| {
+            state.metrics_config.ip_allowlist.iter().any(|entry| {
+                entry
+                    .parse::<client_identity::IpNet>()
+                    .is_ok_and(|net| net.contains(ip))
+            })
         });
         if !allowed {
             return StatusCode::FORBIDDEN.into_response();
@@ -1606,7 +1618,8 @@ async fn dynamic_handler(
         let query_c = query.clone();
         let headers_c = headers.clone();
         // A shared render carries the leader's identity; one that reads it
-        // (ctx.ip) is personal and never shared, so followers re-render.
+        // (ctx.ip, ctx.host, ctx.scheme) is personal and never shared, so
+        // followers re-render.
         let client_c = client.clone();
         let slot_c = leader_slot.clone();
         coalesce
@@ -4820,6 +4833,57 @@ mod tests {
         stamp_rule_headers(resp.headers_mut(), rules.response_headers("/account"));
         let values: Vec<_> = resp.headers().get_all("x-frame-options").iter().collect();
         assert_eq!(values, vec!["DENY"]);
+    }
+
+    /// Log lines written under `filter`, as the server's fmt subscriber
+    /// prints them.
+    fn captured_log(filter: &str, emit: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        let bytes = capture.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn request_id_stays_on_warn_and_error_lines_at_any_log_level() {
+        // Production often runs RUST_LOG=warn: the request span must not be
+        // filtered out from under the lines it exists for.
+        for filter in ["info", "warn", "error", "giojs_server=warn"] {
+            let log = captured_log(filter, || {
+                let _entered = request_span("rid-42").entered();
+                warn!(ip = "203.0.113.50", "rate limit exceeded");
+                error!("IPC error");
+            });
+            for line in ["rate limit exceeded", "IPC error"] {
+                let printed = log.lines().find(|l| l.contains(line));
+                if line == "rate limit exceeded" && filter == "error" {
+                    assert!(printed.is_none(), "{filter}: {log}");
+                    continue;
+                }
+                let printed = printed.unwrap_or_else(|| panic!("{filter}: {line} missing: {log}"));
+                assert!(
+                    printed.contains("request{request_id=rid-42}"),
+                    "{filter}: {printed}"
+                );
+            }
+        }
     }
 
     #[test]

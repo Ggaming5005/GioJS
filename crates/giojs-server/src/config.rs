@@ -321,11 +321,20 @@ pub struct ServerConfig {
     /// (X-Forwarded-For/-Proto/-Host, default) or "forwarded" (RFC 7239).
     #[serde(default)]
     pub proxy_headers: crate::client_identity::ProxyHeaders,
+    /// Adopt a valid X-Request-Id sent by a trusted proxy (default). False
+    /// generates every id here - for proxies that pass a client's own
+    /// X-Request-Id through instead of setting one (AWS ALB, Google Cloud LB).
+    #[serde(default = "default_accept_request_id")]
+    pub accept_request_id: bool,
     #[serde(default)]
     pub tls: TlsConfig,
 }
 
 fn default_http2() -> bool {
+    true
+}
+
+fn default_accept_request_id() -> bool {
     true
 }
 
@@ -408,6 +417,7 @@ impl Default for ServerConfig {
             http2_keep_alive_timeout_secs: default_http2_keep_alive_timeout_secs(),
             trusted_proxies: Default::default(),
             proxy_headers: Default::default(),
+            accept_request_id: default_accept_request_id(),
             tls: TlsConfig::default(),
         }
     }
@@ -653,18 +663,27 @@ redirect_to    = "/"
         let missing = GioConfig::load_from_path(&unique_temp_path("no_proxies.toml")).unwrap();
         assert!(missing.server.trusted_proxies.is_empty());
         assert_eq!(missing.server.proxy_headers, ProxyHeaders::XForwarded);
+        assert!(missing.server.accept_request_id);
+
+        let path = unique_temp_path("proxies_defaults.toml");
+        std::fs::write(&path, "[server]\nhost = \"127.0.0.1\"\nport = 1\n").unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.unwrap().server.accept_request_id);
 
         let path = unique_temp_path("proxies.toml");
         std::fs::write(
             &path,
             "[server]\nhost = \"127.0.0.1\"\nport = 1\n\
              trusted_proxies = [\"127.0.0.1\", \"10.0.0.0/8\", \"::1\"]\n\
-             proxy_headers = \"forwarded\"\n",
+             proxy_headers = \"forwarded\"\n\
+             accept_request_id = false\n",
         )
         .unwrap();
         let result = GioConfig::load_from_path(&path);
         let _ = std::fs::remove_file(&path);
         let server = result.unwrap().server;
+        assert!(!server.accept_request_id);
         assert!(server
             .trusted_proxies
             .contains("10.20.30.40".parse().unwrap()));
