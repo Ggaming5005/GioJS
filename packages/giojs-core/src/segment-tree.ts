@@ -12,6 +12,11 @@
  * therefore never catches its own folder's layout - the boundary above it
  * does - and a loading.* shows while anything below it suspends.
  *
+ * Soft navigation re-renders this tree in the same React root
+ * (client-runtime.ts): layouts the routes share keep their state, the page
+ * itself remounts when the path changes, and a caught error clears when the
+ * user navigates away from it.
+ *
  * Browser-safe: imports only React and not-found.ts.
  */
 import React from 'react';
@@ -93,12 +98,15 @@ export function publicErrorInfo(error: unknown): GioErrorInfo {
 
 interface SegmentErrorBoundaryProps {
   fallback: React.ComponentType<GioErrorProps>;
+  /** The page path: a caught error clears when it changes (navigation). */
+  resetKey?: string;
   children?: React.ReactNode;
 }
 
 interface SegmentErrorBoundaryState {
   // Wrapped: a thrown value may itself be null or undefined.
   caught: { error: unknown } | null;
+  resetKey?: string | undefined;
 }
 
 /**
@@ -110,10 +118,20 @@ export class SegmentErrorBoundary extends React.Component<
   SegmentErrorBoundaryProps,
   SegmentErrorBoundaryState
 > {
-  override state: SegmentErrorBoundaryState = { caught: null };
+  override state: SegmentErrorBoundaryState = { caught: null, resetKey: this.props.resetKey };
 
-  static getDerivedStateFromError(error: unknown): SegmentErrorBoundaryState {
+  static getDerivedStateFromError(error: unknown): Partial<SegmentErrorBoundaryState> {
     return { caught: { error } };
+  }
+
+  // A boundary in a layout the next route shares stays mounted across a soft
+  // navigation; the error it caught belongs to the page the user just left.
+  static getDerivedStateFromProps(
+    props: SegmentErrorBoundaryProps,
+    state: SegmentErrorBoundaryState,
+  ): Partial<SegmentErrorBoundaryState> | null {
+    if (props.resetKey === state.resetKey) return null;
+    return { caught: null, resetKey: props.resetKey };
   }
 
   // Clearing the error remounts the children: the segment renders afresh.
@@ -169,7 +187,9 @@ export function buildSegmentTree(
   path: string,
   levels: readonly SegmentLevel[],
 ): React.ReactNode {
-  let element = page;
+  // Keyed by path: navigating between two URLs of one route (/posts/1 to
+  // /posts/2) mounts a fresh page instead of carrying the old one's state.
+  let element: React.ReactNode = React.createElement(React.Fragment, { key: path }, page);
   for (let i = levels.length - 1; i >= 0; i--) {
     const level = levels[i];
     if (level === undefined) continue;
@@ -186,7 +206,11 @@ export function buildSegmentTree(
       );
     }
     if (level.error) {
-      element = React.createElement(SegmentErrorBoundary, { fallback: level.error }, element);
+      element = React.createElement(
+        SegmentErrorBoundary,
+        { fallback: level.error, resetKey: path },
+        element,
+      );
     }
     if (level.layout) {
       element = React.createElement(level.layout, { children: element, path });

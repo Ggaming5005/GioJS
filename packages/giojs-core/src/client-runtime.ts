@@ -2,19 +2,27 @@
  * giojs-core/src/client-runtime.ts
  *
  * Browser-side mount registry shared by every generated route entry (esbuild
- * splits it into a common chunk). Hydrates the #__gio boundary on first load,
- * and re-mounts after soft navigation swaps (the `gio:navigated` event),
- * dynamically importing the new route's entry chunk when it isn't loaded yet.
- * Everything outside #__gio (root layout, Rust-injected head tags, the dev
- * overlay) is server HTML that React never touches. Inside it, every folder's
- * error.* is a React error boundary, so an error thrown while rendering in
- * the browser replaces only that segment instead of unmounting the page.
+ * splits it into a common chunk). Hydrates the #__gio boundary on first load
+ * and keeps that ONE React root for the rest of the visit: a soft navigation
+ * (@gio.js/react navigation.ts, through `window.__GIO_RUNTIME__`) renders
+ * the next route's tree into it, so layouts the two routes share keep their
+ * state. Everything outside #__gio (root layout, Rust-injected head tags,
+ * the dev overlay) is server HTML that React never touches. Inside it, every
+ * folder's error.* is a React error boundary, so an error thrown while
+ * rendering in the browser replaces only that segment instead of unmounting
+ * the page.
+ *
+ * Every tree is wrapped in the navigation context (navigation-context.ts)
+ * built from the envelope's route info - the values the server rendered
+ * with, so the hooks reading it hydrate without a mismatch.
  *
  * The envelope also carries the `<GioImage>` config the server rendered
  * with; it is installed before every render so srcsets hydrate unchanged.
  */
 import React from 'react';
+import { flushSync } from 'react-dom';
 import { hydrateRoot, createRoot, type Root } from 'react-dom/client';
+import { withNavigation, type GioNavigationState } from './navigation-context.ts';
 
 // Generated entries build their tree with the same function the server used.
 export { buildSegmentTree } from './segment-tree.ts';
@@ -25,16 +33,50 @@ export interface GioEnvelope {
   path: string;
   pattern: string;
   entry: string;
+  /** Route info for the navigation context (absent from older envelopes). */
+  params: Record<string, string>;
+  search: string;
+  locale: string;
   /** image-config.ts ImageRenderConfig, opaque here. */
   images?: Record<string, unknown>;
+}
+
+/**
+ * The runtime's half of soft navigation, published as
+ * `window.__GIO_RUNTIME__` for @gio.js/react (a separate package and bundle
+ * entry, so the contract is a global rather than an import).
+ */
+export interface GioClientRuntime {
+  /**
+   * Load the route entry chunk for `pattern` before the page is shown.
+   * Rejects when the chunk fails to load or registers no such route.
+   */
+  prepare(entry: string, pattern: string): Promise<void>;
+  /**
+   * Show the page whose envelope is now in the document (or the server-only
+   * page without one). `content` is that page's server-rendered #__gio: it
+   * is swapped in only when the page has no client tree to render into the
+   * persistent root.
+   */
+  commit(content: Element | null): void;
 }
 
 type BuildFn = (props: Record<string, unknown>, path: string) => React.ReactNode;
 
 const routeBuilders = new Map<string, BuildFn>();
 let activeRoot: Root | null = null;
-let listenerInstalled = false;
+let activeContainer: Element | null = null;
+let runtimeInstalled = false;
 let waitingForEnvelope = false;
+
+function stringRecord(value: unknown): Record<string, string> {
+  if (typeof value !== 'object' || value === null) return {};
+  const out: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === 'string') out[key] = item;
+  }
+  return out;
+}
 
 function readEnvelope(): GioEnvelope | null {
   const el = document.getElementById('__gio_props');
@@ -49,6 +91,9 @@ function readEnvelope(): GioEnvelope | null {
       path: env['path'],
       pattern: env['pattern'],
       entry: typeof env['entry'] === 'string' ? env['entry'] : '',
+      params: stringRecord(env['params']),
+      search: typeof env['search'] === 'string' ? env['search'] : '',
+      locale: typeof env['locale'] === 'string' ? env['locale'] : '',
       ...(typeof env['images'] === 'object' && env['images'] !== null
         ? { images: env['images'] as Record<string, unknown> }
         : {}),
@@ -58,43 +103,86 @@ function readEnvelope(): GioEnvelope | null {
   }
 }
 
-function mount(): void {
-  const container = document.getElementById('__gio');
-  const envelope = readEnvelope();
-  if (container === null || envelope === null) return;
+function navigationState(envelope: GioEnvelope): GioNavigationState {
+  return {
+    pathname: envelope.path,
+    params: envelope.params,
+    search: envelope.search,
+    locale: envelope.locale,
+    pattern: envelope.pattern,
+  };
+}
 
-  const build = routeBuilders.get(envelope.pattern);
-  if (build === undefined) {
-    // Soft navigation landed on a route whose entry chunk isn't loaded yet;
-    // importing it re-enters mount() via registerRoute.
-    if (envelope.entry !== '') {
-      import(envelope.entry).catch(() => undefined);
-    }
-    return;
-  }
-
+/** The route's tree inside the navigation provider, image config installed. */
+function routeElement(envelope: GioEnvelope, build: BuildFn): React.ReactNode {
   if (envelope.images !== undefined) {
     (globalThis as Record<string, unknown>)['__GIO_IMAGES__'] = envelope.images;
   }
-  const element = build(envelope.props, envelope.path);
-  if (activeRoot === null) {
-    // First load: the container holds this exact tree's server HTML.
-    activeRoot = hydrateRoot(container, element);
-  } else {
-    // After a swap the old root's container is detached; a fresh render
-    // replaces the swapped-in server HTML.
-    activeRoot.unmount();
-    activeRoot = createRoot(container);
-    activeRoot.render(element);
+  return withNavigation(navigationState(envelope), build(envelope.props, envelope.path));
+}
+
+/** First load: hydrate the server HTML. Later route registrations never re-mount. */
+function mount(): void {
+  if (activeRoot !== null) return;
+  const container = document.getElementById('__gio');
+  const envelope = readEnvelope();
+  if (container === null || envelope === null) return;
+  const build = routeBuilders.get(envelope.pattern);
+  if (build === undefined) return;
+  // The container holds this exact tree's server HTML.
+  activeContainer = container;
+  activeRoot = hydrateRoot(container, routeElement(envelope, build));
+}
+
+async function prepare(entry: string, pattern: string): Promise<void> {
+  if (routeBuilders.has(pattern)) return;
+  // The chunk registers its route (registerRoute) as it evaluates.
+  await import(entry);
+  if (!routeBuilders.has(pattern)) {
+    throw new Error(`route entry ${entry} did not register ${pattern}`);
   }
+}
+
+function commit(content: Element | null): void {
+  const envelope = readEnvelope();
+  const build = envelope === null ? undefined : routeBuilders.get(envelope.pattern);
+  const root = activeRoot;
+  if (envelope !== null && build !== undefined && root !== null && activeContainer?.isConnected) {
+    // The persistent root: React reconciles the next route's tree against
+    // the current one. Synchronous, so the caller can scroll and move focus
+    // on the committed page.
+    const element = routeElement(envelope, build);
+    flushSync(() => root.render(element));
+    return;
+  }
+  // No client tree to reconcile with (a server-only page on either side):
+  // the next page's server HTML replaces the old root's container.
+  if (root !== null) {
+    root.unmount();
+    activeRoot = null;
+    activeContainer = null;
+  }
+  const current = document.getElementById('__gio');
+  if (content !== null && current !== null && content !== current) current.replaceWith(content);
+  if (envelope === null || build === undefined) return;
+  const container = document.getElementById('__gio');
+  if (container === null) return;
+  // Rendered, not hydrated: fetched HTML can hold streamed Suspense
+  // boundaries whose completion scripts never ran.
+  const fresh = createRoot(container);
+  activeRoot = fresh;
+  activeContainer = container;
+  const element = routeElement(envelope, build);
+  flushSync(() => fresh.render(element));
 }
 
 /** Called by each generated route entry when its module loads. */
 export function registerRoute(pattern: string, build: BuildFn): void {
   routeBuilders.set(pattern, build);
-  if (!listenerInstalled) {
-    listenerInstalled = true;
-    window.addEventListener('gio:navigated', mount);
+  if (!runtimeInstalled) {
+    runtimeInstalled = true;
+    const runtime: GioClientRuntime = { prepare, commit };
+    (window as unknown as { __GIO_RUNTIME__?: GioClientRuntime }).__GIO_RUNTIME__ = runtime;
   }
   if (document.readyState === 'loading' && readEnvelope() === null) {
     waitForEnvelope();
