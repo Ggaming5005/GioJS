@@ -3015,7 +3015,10 @@ async fn await_restart_then_reclear(
 
 /// Transform every `.css` under `app_dir` into `css_cache` (URL-keyed).
 /// Runs at startup and again on dev-watch changes; existing entries are
-/// replaced so deleted files also disappear.
+/// replaced so deleted files also disappear. CSS Modules are left out: their
+/// class names only exist in the worker's import pipeline (route stylesheets
+/// under `/_next/static/css/`), and a path-served copy hashed differently by
+/// lightningcss could never match the HTML.
 async fn load_css_cache(css_cache: &css_assets::CssCache, app_dir: &str, minify: bool) {
     let transformer = giojs_css::CssTransformer { minify };
     let css_files = scan_css_files(std::path::PathBuf::from(app_dir)).await;
@@ -3059,7 +3062,7 @@ async fn scan_css_files(root: std::path::PathBuf) -> Vec<PathBuf> {
             let path = entry.path();
             if file_type.is_dir() {
                 dirs.push(path);
-            } else if file_type.is_file() && path.extension().is_some_and(|e| e == "css") {
+            } else if file_type.is_file() && is_path_served_css(&path) {
                 result.push(path);
             }
         }
@@ -3067,10 +3070,30 @@ async fn scan_css_files(root: std::path::PathBuf) -> Vec<PathBuf> {
     result
 }
 
+/// A stylesheet served by path from app/: any `.css` except a CSS Module.
+fn is_path_served_css(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|e| e == "css")
+        && !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".module.css"))
+}
+
+/// Public URL prefix of the worker-built route stylesheets (css-build.ts).
+const ROUTE_STYLESHEET_PREFIX: &str = "/_next/static/css/";
+
 /// Extract critical CSS for `html` using the pre-transformed `/globals.css` from the cache.
 /// Returns a ready-to-inject HTML snippet, or `None` if extraction produces nothing useful.
+///
+/// Pages that link imported route stylesheets get none: their CSS - often
+/// app/globals.css itself, imported by the root layout - already loads, and
+/// the snippet would load globals.css a second time after the route's own
+/// rules, letting it override them.
 fn extract_critical_snippet(html: &Bytes, css_cache: &css_assets::CssCache) -> Option<String> {
     let html_str = std::str::from_utf8(html).ok()?;
+    if html_str.contains(ROUTE_STYLESHEET_PREFIX) {
+        return None;
+    }
     let css_entry = css_cache.get("/globals.css")?;
     let css_str = std::str::from_utf8(&css_entry.code).ok()?;
     let result = giojs_css::extract_critical(html_str, css_str).ok()?;
@@ -4236,6 +4259,53 @@ mod tests {
         assert!(snippet.contains(r#"<script nonce="P">(function(l){"#));
         assert!(snippet.contains("l.media='all'"));
         assert!(snippet.contains("<noscript>"));
+    }
+
+    fn globals_cache() -> css_assets::CssCache {
+        let css_cache = DashMap::new();
+        css_cache.insert(
+            "/globals.css".to_string(),
+            css_assets::CssAsset::new(Bytes::from_static(b".hero{color:red}.unused{color:blue}")),
+        );
+        css_cache
+    }
+
+    #[test]
+    fn critical_css_is_extracted_for_pages_on_path_served_css() {
+        let html = Bytes::from(r#"<html><head></head><body><h1 class="hero">x</h1></body></html>"#);
+        let out = compose_final_html(html, "dep-1", "en", &[], &globals_cache(), true);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("<style>.hero{color:red}"), "{s}");
+        assert!(!s.contains(".unused"), "{s}");
+        assert!(s.contains(r#"href="/globals.css""#));
+    }
+
+    #[test]
+    fn critical_css_skips_pages_that_link_imported_stylesheets() {
+        // The root layout imports globals.css: it is in the route stylesheet,
+        // and must not load again after it.
+        let html = Bytes::from(
+            r#"<html><head><link rel="stylesheet" href="/_next/static/css/root-ABC.css" data-precedence="default"/></head><body><h1 class="hero">x</h1></body></html>"#,
+        );
+        let out = compose_final_html(html, "dep-1", "en", &[], &globals_cache(), true);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(!s.contains("<style>"), "{s}");
+        assert!(!s.contains("/globals.css"), "{s}");
+    }
+
+    #[tokio::test]
+    async fn css_modules_are_not_served_by_path() {
+        let dir = std::env::temp_dir().join(format!("gio-css-cache-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("globals.css"), ".a{color:red}").unwrap();
+        std::fs::write(dir.join("nested/card.module.css"), ".card{color:red}").unwrap();
+        std::fs::write(dir.join("nested/plain.css"), ".p{color:red}").unwrap();
+        let css_cache = DashMap::new();
+        load_css_cache(&css_cache, dir.to_str().unwrap(), false).await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        let mut keys: Vec<String> = css_cache.iter().map(|e| e.key().clone()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["/globals.css", "/nested/plain.css"]);
     }
 
     #[test]
