@@ -3265,7 +3265,7 @@ fn load_tls_acceptor(tls: &config::TlsConfig) -> anyhow::Result<tokio_rustls::Tl
     let certs = load_certs(cert_path)?;
     let key = load_private_key(key_path)?;
 
-    let mut server_config = rustls::ServerConfig::builder()
+    let mut server_config = tls_server_config_builder()?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| anyhow::anyhow!("Invalid TLS certificate/key: {e}"))?;
@@ -3274,6 +3274,19 @@ fn load_tls_acceptor(tls: &config::TlsConfig) -> anyhow::Result<tokio_rustls::Tl
     server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
+}
+
+/// rustls server config builder with an explicit crypto provider. Both
+/// aws-lc-rs (rustls' default feature) and ring (enabled through reqwest for
+/// the image/font fetchers) are compiled in, and with two candidates rustls
+/// will not pick a process default - `ServerConfig::builder()` panics.
+fn tls_server_config_builder(
+) -> anyhow::Result<rustls::ConfigBuilder<rustls::ServerConfig, rustls::WantsVerifier>> {
+    rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| anyhow::anyhow!("TLS provider setup failed: {e}"))
 }
 
 fn load_certs(path: &str) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
@@ -3784,6 +3797,15 @@ mod tests {
             }
             _ => panic!("binary body must cross as base64 with bodyBase64=true"),
         }
+    }
+
+    // ── TLS ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tls_config_builds_with_both_crypto_providers_compiled_in() {
+        // rustls::ServerConfig::builder() panics in this build: aws-lc-rs and
+        // ring are both enabled, so there is no process-default provider.
+        assert!(tls_server_config_builder().is_ok());
     }
 
     // ── render sharing rules ──────────────────────────────────────────────────
