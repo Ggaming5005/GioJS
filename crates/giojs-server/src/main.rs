@@ -18,6 +18,7 @@
 //! shell with personalized holes is the point.
 
 mod config;
+mod conn;
 mod dev_codeframe;
 mod dev_overlay;
 mod devtools;
@@ -52,8 +53,7 @@ use giojs_cache::{CacheConfig, CacheEntry, CacheStatus, PageCache, SingleFlight}
 use giojs_plugin::{PluginRegistry, PluginStartupCtx};
 use giojs_prefetch::{PrefetchBudgets, PrefetchConfig};
 use giojs_ratelimit::{RateLimitResult, RateLimitRule, RateLimiter};
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder as AutoConnBuilder;
+use hyper_util::rt::TokioIo;
 use ipc::{IpcClient, IpcRequest, IpcSendResult, RenderFrame};
 use std::convert::Infallible;
 use std::future::Future;
@@ -187,6 +187,7 @@ struct AppState {
     http2: bool,
     tls_enabled: bool,
     max_body_bytes: usize,
+    request_body_timeout: Option<Duration>,
     metrics: Arc<metrics::Metrics>,
     metrics_config: config::MetricsConfig,
     dev_mode: bool,
@@ -417,6 +418,7 @@ async fn main() -> anyhow::Result<()> {
         http2,
         tls_enabled,
         max_body_bytes: cfg.server.max_body_bytes,
+        request_body_timeout: cfg.server.request_body_timeout(),
         metrics: Arc::new(metrics::Metrics::new()),
         metrics_config,
         dev_mode,
@@ -563,7 +565,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     info!(http2 = %http2, tls = %tls_enabled, "GioJS listening on {bind_addr}");
-    serve_connections(listener, app, http2, tls_acceptor).await?;
+    let conn_settings = conn::ConnSettings::from_config(&cfg.server);
+    serve_connections(
+        listener,
+        app,
+        conn_settings,
+        tls_acceptor,
+        shutdown_signal(),
+    )
+    .await?;
     ws_registry_for_shutdown.close_all();
     if let Err(e) = plugin_registry.shutdown_all() {
         error!(error = %e, "plugin shutdown error");
@@ -1015,12 +1025,19 @@ async fn dynamic_handler(
     if method != "GET" && method != "HEAD" {
         let query = parse_query(&query_str);
         let headers = extract_headers(&req);
-        let (body, body_base64) = match read_request_body(req.into_body(), state.max_body_bytes)
-            .await
+        let (body, body_base64) = match read_request_body(
+            req.into_body(),
+            state.max_body_bytes,
+            state.request_body_timeout,
+        )
+        .await
         {
             BodyReadOutcome::Read(body, body_base64) => (body, body_base64),
             BodyReadOutcome::TooLarge => {
                 return (StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large").into_response();
+            }
+            BodyReadOutcome::TimedOut => {
+                return (StatusCode::REQUEST_TIMEOUT, "408 Request Timeout").into_response();
             }
         };
         if dev_mode {
@@ -1419,12 +1436,26 @@ async fn dynamic_handler(
 enum BodyReadOutcome {
     Read(Option<String>, bool),
     TooLarge,
+    TimedOut,
 }
 
 /// Buffer the request body up to `limit` bytes and encode it for the JSON
-/// IPC frame.
-async fn read_request_body(body: axum::body::Body, limit: usize) -> BodyReadOutcome {
-    let bytes = match axum::body::to_bytes(body, limit).await {
+/// IPC frame. `timeout` bounds the whole read: the size cap alone lets a
+/// client trickle a body byte by byte and hold the request open forever.
+async fn read_request_body(
+    body: axum::body::Body,
+    limit: usize,
+    timeout: Option<Duration>,
+) -> BodyReadOutcome {
+    let read = axum::body::to_bytes(body, limit);
+    let result = match timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, read).await {
+            Ok(result) => result,
+            Err(_) => return BodyReadOutcome::TimedOut,
+        },
+        None => read.await,
+    };
+    let bytes = match result {
         Ok(bytes) => bytes,
         // to_bytes fails on the length limit; a mid-read client abort also
         // lands here, but that connection is gone anyway.
@@ -3310,32 +3341,37 @@ fn load_private_key(path: &str) -> anyhow::Result<rustls::pki_types::PrivateKeyD
 async fn serve_connections(
     listener: tokio::net::TcpListener,
     app: axum::Router,
-    http2: bool,
+    settings: conn::ConnSettings,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
+    let settings = Arc::new(settings);
+    let mut acceptor = conn::ConnAcceptor::new(listener, settings.max_connections);
     let mut join_set = tokio::task::JoinSet::new();
-    let mut shutdown = std::pin::pin!(shutdown_signal());
+    let mut shutdown = std::pin::pin!(shutdown);
 
     loop {
         tokio::select! {
-            result = listener.accept() => {
-                let (tcp_stream, peer_addr) = match result {
-                    Ok(pair) => pair,
-                    Err(e) => { warn!(error = %e, "accept failed"); continue; }
-                };
+            // A JoinSet keeps every finished task until it is joined; reap as
+            // we go or a long-running server grows with each connection served.
+            Some(_) = join_set.join_next(), if !join_set.is_empty() => {}
+            accepted = acceptor.accept() => {
+                let Some((tcp_stream, peer_addr, permit)) = accepted else { continue };
                 let app = app.clone();
                 let tls_acceptor = tls_acceptor.clone();
+                let settings = settings.clone();
 
                 join_set.spawn(async move {
+                    // The max_connections slot, held for the connection's lifetime.
+                    let _permit = permit;
                     if let Some(acceptor) = tls_acceptor {
-                        match acceptor.accept(tcp_stream).await {
-                            Ok(tls_stream) => {
-                                run_connection(TokioIo::new(tls_stream), app, peer_addr, http2).await;
-                            }
-                            Err(e) => warn!(error = %e, "TLS handshake failed"),
+                        let handshake =
+                            conn::tls_handshake(&acceptor, tcp_stream, settings.tls_handshake_timeout);
+                        if let Some(tls_stream) = handshake.await {
+                            run_connection(TokioIo::new(tls_stream), app, peer_addr, &settings).await;
                         }
                     } else {
-                        run_connection(TokioIo::new(tcp_stream), app, peer_addr, http2).await;
+                        run_connection(TokioIo::new(tcp_stream), app, peer_addr, &settings).await;
                     }
                 });
             }
@@ -3363,40 +3399,62 @@ async fn serve_connections(
     Ok(())
 }
 
-async fn run_connection<I>(io: I, app: axum::Router, peer_addr: SocketAddr, http2: bool)
-where
+async fn run_connection<I>(
+    io: I,
+    app: axum::Router,
+    peer_addr: SocketAddr,
+    settings: &conn::ConnSettings,
+) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
-    let svc =
+    let activity = conn::ConnActivity::new();
+    let keep_alive_hint = settings.keep_alive_hint();
+    let svc = {
+        let activity = activity.clone();
         hyper::service::service_fn(move |req: axum::http::Request<hyper::body::Incoming>| {
             let mut app = app.clone();
+            // Taken before the handler runs and moved into the response body,
+            // so the idle watchdog never fires under an in-flight request or
+            // a streaming / SSE response.
+            let guard = activity.begin();
+            let keep_alive_hint = match req.version() {
+                axum::http::Version::HTTP_10 | axum::http::Version::HTTP_11 => {
+                    keep_alive_hint.clone()
+                }
+                _ => None,
+            };
             async move {
                 let (mut parts, body) = req.into_parts();
                 parts
                     .extensions
                     .insert(ConnectInfo::<SocketAddr>(peer_addr));
                 let req = axum::http::Request::from_parts(parts, axum::body::Body::new(body));
-                Ok::<_, Infallible>(app.call(req).await.unwrap_or_else(|_| {
+                let mut resp = app.call(req).await.unwrap_or_else(|_| {
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                }))
+                });
+                if let Some(hint) = keep_alive_hint {
+                    if resp.status() != axum::http::StatusCode::SWITCHING_PROTOCOLS {
+                        resp.headers_mut()
+                            .entry(axum::http::HeaderName::from_static("keep-alive"))
+                            .or_insert(hint);
+                    }
+                }
+                Ok::<_, Infallible>(resp.map(|body| conn::TrackedBody::new(body, guard)))
             }
-        });
+        })
+    };
 
-    if http2 {
-        if let Err(e) = AutoConnBuilder::new(TokioExecutor::new())
-            .serve_connection_with_upgrades(io, svc)
-            .await
-        {
-            warn!(error = %e, "connection error");
-        }
+    if settings.http2 {
+        let connection = settings
+            .auto_builder()
+            .serve_connection_with_upgrades(io, svc);
+        conn::drive(connection, |c| c.graceful_shutdown(), &activity, settings).await;
     } else {
-        if let Err(e) = hyper::server::conn::http1::Builder::new()
+        let connection = settings
+            .http1_builder()
             .serve_connection(io, svc)
-            .with_upgrades()
-            .await
-        {
-            warn!(error = %e, "connection error");
-        }
+            .with_upgrades();
+        conn::drive(connection, |c| c.graceful_shutdown(), &activity, settings).await;
     }
 }
 
@@ -3763,7 +3821,7 @@ mod tests {
     #[tokio::test]
     async fn read_body_utf8_is_forwarded() {
         let body = axum::body::Body::from(r#"{"title":"hello"}"#);
-        match read_request_body(body, 1024).await {
+        match read_request_body(body, 1024, None).await {
             BodyReadOutcome::Read(Some(s), false) => assert_eq!(s, r#"{"title":"hello"}"#),
             _ => panic!("expected forwarded UTF-8 body"),
         }
@@ -3773,7 +3831,7 @@ mod tests {
     async fn read_body_empty_is_none() {
         let body = axum::body::Body::empty();
         assert!(matches!(
-            read_request_body(body, 1024).await,
+            read_request_body(body, 1024, None).await,
             BodyReadOutcome::Read(None, false)
         ));
     }
@@ -3782,7 +3840,7 @@ mod tests {
     async fn read_body_over_limit_is_rejected() {
         let body = axum::body::Body::from(vec![b'x'; 2048]);
         assert!(matches!(
-            read_request_body(body, 1024).await,
+            read_request_body(body, 1024, None).await,
             BodyReadOutcome::TooLarge
         ));
     }
@@ -3791,12 +3849,24 @@ mod tests {
     async fn read_body_non_utf8_is_base64_encoded() {
         let raw = vec![0xff, 0xfe, 0x00, 0x01];
         let body = axum::body::Body::from(raw.clone());
-        match read_request_body(body, 1024).await {
+        match read_request_body(body, 1024, None).await {
             BodyReadOutcome::Read(Some(encoded), true) => {
                 assert_eq!(ws_ipc::b64::decode(&encoded).unwrap(), raw);
             }
             _ => panic!("binary body must cross as base64 with bodyBase64=true"),
         }
+    }
+
+    #[tokio::test]
+    async fn read_body_trickled_past_the_deadline_times_out() {
+        use tokio_stream::StreamExt;
+        let chunks = tokio_stream::iter([Ok::<_, Infallible>(Bytes::from("partial"))])
+            .chain(tokio_stream::pending());
+        let body = axum::body::Body::from_stream(chunks);
+        assert!(matches!(
+            read_request_body(body, 1024, Some(Duration::from_millis(100))).await,
+            BodyReadOutcome::TimedOut
+        ));
     }
 
     // ── TLS ───────────────────────────────────────────────────────────────────

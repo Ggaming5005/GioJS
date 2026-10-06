@@ -5,6 +5,9 @@ name = "integration-fixture"
 host  = "127.0.0.1"
 port  = 39517
 http2 = false
+# Tiny connection deadlines keep the slowloris / slow-body tests fast.
+header_read_timeout_secs  = 2
+request_body_timeout_secs = 2
 
 [[redirects]]
 from   = "/moved"

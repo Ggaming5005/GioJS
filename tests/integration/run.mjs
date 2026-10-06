@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,6 +58,30 @@ async function test(name, fn) {
     console.error(`  FAIL ${name}`);
     throw err;
   }
+}
+
+/**
+ * Raw TCP exchange with the fixture server: write `payload` (possibly an
+ * incomplete request) and collect everything until the SERVER closes the
+ * socket. Fetch cannot express a stalled head or a half-sent body.
+ */
+function rawExchange(payload, { port = 39517, maxMs = 8000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    let data = '';
+    const socket = connect(port, '127.0.0.1', () => socket.write(payload));
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`server kept the connection open past ${maxMs}ms; got: ${data}`));
+    }, maxMs);
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => { data += chunk; });
+    socket.on('error', () => {}); // a reset still ends in 'close'
+    socket.on('close', () => {
+      clearTimeout(timer);
+      resolve({ data, closedAfterMs: Date.now() - started });
+    });
+  });
 }
 
 async function waitFor(what, fn, timeoutMs) {
@@ -240,6 +265,47 @@ async function main() {
       const chunk = new TextDecoder().decode(value);
       assert.match(chunk, /"tick":1/);
       controller.abort();
+    });
+
+    await test('SSE streams outlive header_read_timeout_secs', async () => {
+      // The fixture's 2s head deadline must never cut an established stream.
+      const controller = new AbortController();
+      const res = await fetch(`${BASE}/stream`, { signal: controller.signal });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      const started = Date.now();
+      let late = '';
+      while (Date.now() - started < 2600) {
+        const { done, value } = await reader.read();
+        assert.ok(!done, `SSE stream ended after ${Date.now() - started}ms`);
+        if (Date.now() - started > 2000) late += decoder.decode(value);
+      }
+      controller.abort();
+      assert.match(late, /"tick":2/, 'events still arrive past the head deadline');
+    });
+
+    await test('stalled request heads and idle keep-alive sockets are closed after header_read_timeout_secs', async () => {
+      // Both run concurrently so the suite pays the 2s deadline once.
+      const [stalled, idle] = await Promise.all([
+        rawExchange('GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Slow: '),
+        rawExchange('GET /_gio/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n'),
+      ]);
+      assert.ok(
+        stalled.closedAfterMs >= 1500,
+        `slowloris head closed too early (${stalled.closedAfterMs}ms)`,
+      );
+      assert.match(idle.data, /^HTTP\/1\.1 200/);
+      // Clients that honor the hint stop reusing the socket before we close it.
+      assert.match(idle.data, /\r\nkeep-alive: timeout=2\r\n/i);
+      assert.ok(idle.closedAfterMs >= 1500, `idle socket closed too early (${idle.closedAfterMs}ms)`);
+    });
+
+    await test('request bodies trickled past request_body_timeout_secs get 408', async () => {
+      const { data, closedAfterMs } = await rawExchange(
+        'POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\n\r\npartial',
+      );
+      assert.match(data, /^HTTP\/1\.1 408/);
+      assert.ok(closedAfterMs >= 1500, `408 before the body deadline (${closedAfterMs}ms)`);
     });
 
     await test('cacheable pages are served from cache on the second hit', async () => {

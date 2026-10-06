@@ -269,6 +269,36 @@ pub struct ServerConfig {
     pub http2: bool,
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
+    // Connection-level DoS limits. For every field below, 0 disables the
+    // limit/timeout.
+    /// Concurrent TCP connections; past it the accept loop stops accepting
+    /// (new clients wait in the kernel backlog) until a connection closes.
+    #[serde(default = "default_max_connections_server")]
+    pub max_connections: usize,
+    #[serde(default = "default_tls_handshake_timeout_secs")]
+    pub tls_handshake_timeout_secs: u64,
+    /// Deadline for receiving a complete request head. Also bounds how long
+    /// a fresh connection may wait for its first request (protocol sniffing
+    /// and the HTTP/2 handshake included) and, because hyper restarts the
+    /// timer while an HTTP/1.1 connection sits idle, its keep-alive idle time.
+    #[serde(default = "default_header_read_timeout_secs")]
+    pub header_read_timeout_secs: u64,
+    /// Deadline for buffering a whole request body; exceeded -> 408.
+    #[serde(default = "default_request_body_timeout_secs")]
+    pub request_body_timeout_secs: u64,
+    /// Close connections with no request in flight for this long (HTTP/2
+    /// mainly; HTTP/1.1 idles are usually reaped by header_read_timeout_secs
+    /// first). Streaming and SSE responses count as in flight.
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_http2_max_concurrent_streams")]
+    pub http2_max_concurrent_streams: u32,
+    /// HTTP/2 PING cadence; a peer that does not ack within
+    /// http2_keep_alive_timeout_secs is dead and its connection is closed.
+    #[serde(default = "default_http2_keep_alive_interval_secs")]
+    pub http2_keep_alive_interval_secs: u64,
+    #[serde(default = "default_http2_keep_alive_timeout_secs")]
+    pub http2_keep_alive_timeout_secs: u64,
     #[serde(default)]
     pub tls: TlsConfig,
 }
@@ -279,6 +309,56 @@ fn default_http2() -> bool {
 
 fn default_max_body_bytes() -> usize {
     2 * 1024 * 1024
+}
+
+fn default_max_connections_server() -> usize {
+    10_000
+}
+fn default_tls_handshake_timeout_secs() -> u64 {
+    10
+}
+fn default_header_read_timeout_secs() -> u64 {
+    10
+}
+fn default_request_body_timeout_secs() -> u64 {
+    30
+}
+fn default_idle_timeout_secs() -> u64 {
+    60
+}
+fn default_http2_max_concurrent_streams() -> u32 {
+    250
+}
+fn default_http2_keep_alive_interval_secs() -> u64 {
+    20
+}
+fn default_http2_keep_alive_timeout_secs() -> u64 {
+    20
+}
+
+/// A `*_secs` field as a Duration, with 0 meaning "disabled".
+fn secs(value: u64) -> Option<std::time::Duration> {
+    (value > 0).then(|| std::time::Duration::from_secs(value))
+}
+
+impl ServerConfig {
+    pub fn tls_handshake_timeout(&self) -> Option<std::time::Duration> {
+        secs(self.tls_handshake_timeout_secs)
+    }
+    pub fn header_read_timeout(&self) -> Option<std::time::Duration> {
+        secs(self.header_read_timeout_secs)
+    }
+    pub fn request_body_timeout(&self) -> Option<std::time::Duration> {
+        secs(self.request_body_timeout_secs)
+    }
+    pub fn idle_timeout(&self) -> Option<std::time::Duration> {
+        secs(self.idle_timeout_secs)
+    }
+    /// (interval, ack timeout), or None when either is 0: a ping without an
+    /// ack deadline reaps nothing.
+    pub fn http2_keep_alive(&self) -> Option<(std::time::Duration, std::time::Duration)> {
+        secs(self.http2_keep_alive_interval_secs).zip(secs(self.http2_keep_alive_timeout_secs))
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -296,6 +376,14 @@ impl Default for ServerConfig {
             port: 3000,
             http2: true,
             max_body_bytes: default_max_body_bytes(),
+            max_connections: default_max_connections_server(),
+            tls_handshake_timeout_secs: default_tls_handshake_timeout_secs(),
+            header_read_timeout_secs: default_header_read_timeout_secs(),
+            request_body_timeout_secs: default_request_body_timeout_secs(),
+            idle_timeout_secs: default_idle_timeout_secs(),
+            http2_max_concurrent_streams: default_http2_max_concurrent_streams(),
+            http2_keep_alive_interval_secs: default_http2_keep_alive_interval_secs(),
+            http2_keep_alive_timeout_secs: default_http2_keep_alive_timeout_secs(),
             tls: TlsConfig::default(),
         }
     }
@@ -356,6 +444,7 @@ impl GioConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("gio_config_test_{}_{name}", std::process::id()))
@@ -381,6 +470,70 @@ mod tests {
         let config = result.unwrap();
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 4321);
+    }
+
+    #[test]
+    fn connection_limits_default_when_server_section_omits_them() {
+        let path = unique_temp_path("conn_defaults.toml");
+        std::fs::write(&path, "[server]\nhost = \"127.0.0.1\"\nport = 4321\n").unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let server = result.unwrap().server;
+        assert_eq!(server.max_connections, 10_000);
+        assert_eq!(
+            server.tls_handshake_timeout(),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(server.header_read_timeout(), Some(Duration::from_secs(10)));
+        assert_eq!(server.request_body_timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(server.idle_timeout(), Some(Duration::from_secs(60)));
+        assert_eq!(server.http2_max_concurrent_streams, 250);
+        assert_eq!(
+            server.http2_keep_alive(),
+            Some((Duration::from_secs(20), Duration::from_secs(20)))
+        );
+        // The no-file default must agree with the serde defaults.
+        let fallback = ServerConfig::default();
+        assert_eq!(fallback.max_connections, server.max_connections);
+        assert_eq!(fallback.header_read_timeout(), server.header_read_timeout());
+        assert_eq!(fallback.idle_timeout(), server.idle_timeout());
+        assert_eq!(fallback.http2_keep_alive(), server.http2_keep_alive());
+    }
+
+    #[test]
+    fn connection_limits_parse_and_zero_disables() {
+        let path = unique_temp_path("conn_limits.toml");
+        std::fs::write(
+            &path,
+            r#"
+[server]
+host = "127.0.0.1"
+port = 4321
+max_connections = 64
+tls_handshake_timeout_secs = 0
+header_read_timeout_secs = 2
+request_body_timeout_secs = 0
+idle_timeout_secs = 5
+http2_max_concurrent_streams = 16
+http2_keep_alive_interval_secs = 7
+http2_keep_alive_timeout_secs = 0
+"#,
+        )
+        .unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let server = result.unwrap().server;
+        assert_eq!(server.max_connections, 64);
+        assert_eq!(server.tls_handshake_timeout(), None);
+        assert_eq!(server.header_read_timeout(), Some(Duration::from_secs(2)));
+        assert_eq!(server.request_body_timeout(), None);
+        assert_eq!(server.idle_timeout(), Some(Duration::from_secs(5)));
+        assert_eq!(server.http2_max_concurrent_streams, 16);
+        assert_eq!(
+            server.http2_keep_alive(),
+            None,
+            "pings without an ack deadline reap nothing, so either 0 disables both"
+        );
     }
 
     #[test]
