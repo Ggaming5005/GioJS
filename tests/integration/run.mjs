@@ -259,6 +259,42 @@ async function main() {
       assert.deepEqual(res.headers.getSetCookie(), ['a=1; Path=/', 'b=2; Path=/']);
     });
 
+    await test('a set-cookie header rule adds to the response cookies instead of replacing them', async () => {
+      const res = await fetch(`${BASE}/rule-cookies`);
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.headers.getSetCookie(), [
+        'session=r1; Path=/; HttpOnly',
+        'csrf=r2; Path=/',
+        'consent=1; Path=/',
+      ]);
+    });
+
+    await test('a plugin setCookies of null answers at once with no cookies', async () => {
+      // A frame that fails to parse leaves the request waiting for the 30s
+      // IPC timeout; the short signal turns that hang into a failure.
+      const res = await fetch(`${BASE}/plugin-cookies-null`, { signal: AbortSignal.timeout(5_000) });
+      assert.equal(res.status, 200);
+      assert.equal(await res.text(), 'no cookies');
+      assert.deepEqual(res.headers.getSetCookie(), []);
+    });
+
+    await test('event-stream Response cookies arrive as separate Set-Cookie headers', async () => {
+      // Only the head is asserted: respond_sse forwards sse_chunk frames, so
+      // a buffered event-stream body never ends the response - abort instead.
+      const controller = new AbortController();
+      const res = await fetch(`${BASE}/api/events`, { signal: controller.signal });
+      try {
+        assert.equal(res.status, 200);
+        assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/);
+        assert.deepEqual(res.headers.getSetCookie(), [
+          'sse_a=1; Path=/; Expires=Wed, 21 Oct 2037 07:28:00 GMT',
+          'sse_b=2; Path=/; HttpOnly',
+        ]);
+      } finally {
+        controller.abort();
+      }
+    });
+
     await test('unexported methods get 405 with an Allow header', async () => {
       const res = await fetch(`${BASE}/api/notes`, { method: 'DELETE' });
       assert.equal(res.status, 405);

@@ -143,7 +143,10 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         Header rules stamp response headers and do not short-circuit: every
         header rule whose <code>path</code> matches contributes its headers.
         They match the path the client requested (before any rewrite), and
-        names/values are validated once at load time.
+        names/values are validated once at load time. A rule&apos;s value
+        replaces the response&apos;s own value for that header, except
+        <code>set-cookie</code>: a rule cookie is added next to the cookies the
+        page or route handler set, never in place of them.
       </p>
 
       <div className="callout">

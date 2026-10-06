@@ -11,5 +11,9 @@ export default defineMiddleware({
   redirects: [{ from: '/old-home', to: '/' }],
   rewrites: [{ from: '/alias', to: '/cached' }],
   guards: [{ path: '/admin', requireCookie: 'session', redirectTo: '/' }],
-  headers: [{ path: '/cached', headers: { 'x-fixture-header': 'from-middleware' } }],
+  headers: [
+    { path: '/cached', headers: { 'x-fixture-header': 'from-middleware' } },
+    // Rule cookies join the response's own cookies instead of replacing them.
+    { path: '/rule-cookies', headers: { 'set-cookie': 'consent=1; Path=/' } },
+  ],
 });

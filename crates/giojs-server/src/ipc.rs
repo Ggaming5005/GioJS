@@ -249,8 +249,42 @@ pub struct IpcResponse {
     /// Set-Cookie values, one header each. They cannot ride in the
     /// single-valued `headers` map: cookies are not comma-joinable (Expires
     /// dates contain commas), so a map would keep only one of them.
-    #[serde(rename = "setCookies", default)]
+    #[serde(
+        rename = "setCookies",
+        default,
+        deserialize_with = "deserialize_set_cookies"
+    )]
     pub set_cookies: Vec<String>,
+}
+
+/// `setCookies` is plugin-writable, and a frame that fails to parse is
+/// skipped - its request then waits out IPC_RESPONSE_TIMEOUT. So a malformed
+/// value degrades instead of failing the frame: null (a natural "clear
+/// cookies") means none, a lone string is one cookie, and anything else that
+/// is not a string is dropped with a warning.
+fn deserialize_set_cookies<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde_json::Value;
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Null => Vec::new(),
+        Value::String(cookie) => vec![cookie],
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| match item {
+                Value::String(cookie) => Some(cookie),
+                other => {
+                    warn!(value = %other, "dropping non-string setCookies entry from the worker");
+                    None
+                }
+            })
+            .collect(),
+        other => {
+            warn!(value = %other, "ignoring setCookies from the worker: expected an array of strings");
+            Vec::new()
+        }
+    })
 }
 
 /// Materialize a response body: base64-decoded when the worker flagged it
@@ -1420,6 +1454,26 @@ mod tests {
             head.set_cookies,
             vec!["a=1; Path=/", "b=2; Expires=Wed, 21 Oct 2026 07:28:00 GMT"]
         );
+    }
+
+    #[test]
+    fn malformed_set_cookies_degrade_instead_of_failing_the_frame() {
+        let parse = |set_cookies: &str| -> Vec<String> {
+            let frame = format!(
+                r#"{{"id":"a","status":200,"headers":{{}},"body":"x","cacheable":false,"cacheMaxAge":0,"setCookies":{set_cookies}}}"#
+            );
+            serde_json::from_str::<IpcResponse>(&frame)
+                .unwrap_or_else(|e| panic!("setCookies={set_cookies} must not fail the frame: {e}"))
+                .set_cookies
+        };
+        assert!(parse("null").is_empty());
+        assert_eq!(
+            parse(r#"["a=1", 2, null, {"b":2}, "c=3"]"#),
+            vec!["a=1", "c=3"]
+        );
+        assert_eq!(parse(r#""solo=1; Path=/""#), vec!["solo=1; Path=/"]);
+        assert!(parse("42").is_empty());
+        assert!(parse(r#"{"a":"1"}"#).is_empty());
     }
 
     #[test]

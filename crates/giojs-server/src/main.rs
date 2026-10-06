@@ -195,14 +195,35 @@ fn append_set_cookies(headers: &mut axum::http::HeaderMap, set_cookies: &[String
             warn!("dropping invalid set-cookie value from the worker");
             continue;
         };
-        if headers
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .any(|v| v == value)
-        {
-            continue;
-        }
+        append_set_cookie_once(headers, value);
+    }
+}
+
+/// Add one Set-Cookie header unless an identical value is already present.
+fn append_set_cookie_once(headers: &mut axum::http::HeaderMap, value: HeaderValue) {
+    if !headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .any(|v| v == value)
+    {
         headers.append(header::SET_COOKIE, value);
+    }
+}
+
+/// Stamp header-rule headers (gio.toml / middleware.ts) onto a response. A
+/// rule replaces the response's own value for ordinary headers, but
+/// Set-Cookie is additive: cookies are independent, and replacing would
+/// silently drop every cookie the page or route handler set.
+fn stamp_rule_headers(
+    headers: &mut axum::http::HeaderMap,
+    rule_headers: impl IntoIterator<Item = (HeaderName, HeaderValue)>,
+) {
+    for (name, value) in rule_headers {
+        if name == header::SET_COOKIE {
+            append_set_cookie_once(headers, value);
+        } else {
+            headers.insert(name, value);
+        }
     }
 }
 
@@ -859,14 +880,14 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
     };
     let mut resp = next.run(req).await;
     if let Some(path) = stamped_path {
-        for (name, value) in state
-            .static_rules
-            .response_headers(&path)
-            .into_iter()
-            .chain(worker_rules.response_headers(&path))
-        {
-            resp.headers_mut().insert(name, value);
-        }
+        stamp_rule_headers(
+            resp.headers_mut(),
+            state
+                .static_rules
+                .response_headers(&path)
+                .into_iter()
+                .chain(worker_rules.response_headers(&path)),
+        );
     }
     resp
 }
@@ -3932,6 +3953,52 @@ mod tests {
         );
         assert_eq!(set_cookie_values(&resp), vec!["b=2"]);
         assert!(resp.headers().get("x-injected").is_none());
+    }
+
+    fn header_rules(headers: &[(&str, &str)]) -> rules::RuleSet {
+        rules::RuleSet::compile(&rules::MiddlewareRules {
+            headers: vec![rules::HeaderRule {
+                path: "/account".to_string(),
+                headers: headers
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+            }],
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn set_cookie_header_rule_adds_to_worker_cookies_instead_of_replacing() {
+        let cookies = vec![
+            "session=abc; Path=/; HttpOnly".to_string(),
+            "csrf=xyz; Path=/".to_string(),
+        ];
+        let mut resp = buffered_response(&HashMap::new(), &cookies);
+        let rules = header_rules(&[("set-cookie", "consent=1; Path=/")]);
+        stamp_rule_headers(resp.headers_mut(), rules.response_headers("/account"));
+        assert_eq!(
+            set_cookie_values(&resp),
+            vec![
+                "session=abc; Path=/; HttpOnly",
+                "csrf=xyz; Path=/",
+                "consent=1; Path=/"
+            ]
+        );
+        // A rule cookie the worker already sent is not doubled.
+        let rules = header_rules(&[("set-cookie", "csrf=xyz; Path=/")]);
+        stamp_rule_headers(resp.headers_mut(), rules.response_headers("/account"));
+        assert_eq!(set_cookie_values(&resp).len(), 3);
+    }
+
+    #[test]
+    fn ordinary_header_rules_still_replace_the_response_value() {
+        let headers = HashMap::from([("x-frame-options".to_string(), "SAMEORIGIN".to_string())]);
+        let mut resp = buffered_response(&headers, &[]);
+        let rules = header_rules(&[("x-frame-options", "DENY")]);
+        stamp_rule_headers(resp.headers_mut(), rules.response_headers("/account"));
+        let values: Vec<_> = resp.headers().get_all("x-frame-options").iter().collect();
+        assert_eq!(values, vec!["DENY"]);
     }
 
     #[test]
