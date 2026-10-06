@@ -2,6 +2,8 @@
 name    = "giojs-ratelimit"
 version = "0.1.0-beta.1"
 edition = "2021"
+license = "MIT"
+publish = false
 
 [dependencies]
 dashmap.workspace = true
