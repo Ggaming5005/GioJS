@@ -23,11 +23,14 @@ const EXAMPLES: Example[] = [
   },
   {
     title: 'Auth demo (examples/auth-demo)',
-    description: 'Demonstrates the GioNodePlugin interface: an onRequest hook protects /admin/* routes by checking for a session=valid cookie and returning 403 Forbidden otherwise.',
+    description: 'A complete login flow on encrypted cookie sessions: a require_session guard verifies the session in Rust, and an auth plugin checks what is inside it.',
     features: [
-      'gio.config.ts registering the auth plugin via the plugins array',
-      'Plugin onRequest hook that short-circuits with a 403 response',
-      'Protected /admin/dashboard page reachable only with the session cookie',
+      'lib/session.server.ts creating the session storage (createSessionStorage)',
+      'Login form posting to a route.ts that checks DEMO_PASSWORD and commits the session',
+      '[[guards]] require_session = true on /admin/*rest in gio.toml',
+      'Dashboard reading the session in getServerSideProps (personalized, never cached)',
+      'Logout route destroying the session cookie',
+      'gio.config.ts registering createAuthPlugin (plugin onRequest returning 403)',
     ],
   },
   {

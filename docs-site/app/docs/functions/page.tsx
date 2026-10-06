@@ -18,8 +18,10 @@ export default function Page(): React.JSX.Element {
         <code>locale</code>. Return <code>props</code>, a <code>redirect</code>, or
         props plus response <code>headers</code>:
       </p>
-      <CodeBlock lang="ts" code={`export async function getServerSideProps(ctx) {
-  const user = await auth(ctx.cookies['session']);
+      <CodeBlock lang="ts" code={`import { sessions } from '../lib/session.server.ts';   // see Authentication
+
+export async function getServerSideProps(ctx) {
+  const user = await findUser(sessions.getSession(ctx).get('userId'));
   if (!user) {
     return { redirect: { destination: '/login', permanent: false } };
   }

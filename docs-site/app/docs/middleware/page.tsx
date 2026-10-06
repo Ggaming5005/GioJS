@@ -13,7 +13,7 @@ export default function Page(): React.JSX.Element {
       <p>
         GioJS middleware is a set of declarative rules, not request-time
         JavaScript. You describe redirects, rewrites, response headers, and
-        cookie guards; they are compiled once at load time and evaluated in the
+        session or cookie guards; they are compiled once at load time and evaluated in the
         Rust HTTP layer on every request - before routing, before the cache,
         and before any Node code runs. Because the rules execute inside the
         server itself rather than in a separate step, there is no request
@@ -49,9 +49,9 @@ path = "/docs/*rest"
 x-frame-options = "DENY"
 
 [[guards]]
-path           = "/admin/*rest"
-require_cookie = "session"
-redirect_to    = "/login"`} />
+path            = "/admin/*rest"
+require_session = true      # a valid, unexpired session (see Authentication)
+redirect_to     = "/login"`} />
 
       <h2>middleware.ts</h2>
       <p>
@@ -73,7 +73,7 @@ export default defineMiddleware({
     { path: '/admin/*rest', headers: { 'x-frame-options': 'DENY' } },
   ],
   guards: [
-    { path: '/admin/*rest', requireCookie: 'session', redirectTo: '/login' },
+    { path: '/admin/*rest', requireSession: true, redirectTo: '/login' },
   ],
 });`} />
       <p>
@@ -150,12 +150,29 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
 
       <h2>Guards</h2>
       <p>
-        A guard redirects (302) any request to a matching path that does not
-        carry a non-empty cookie of the given name - the request never reaches
-        Node. It is a presence check, not validation: use it to keep anonymous
-        traffic out of authenticated sections cheaply, and verify the session
-        itself in <code>getServerSideProps</code> or a route handler.
+        A guard redirects (302) any request to a matching path that lacks the
+        credential it requires - the request never reaches Node. There are two
+        kinds:
       </p>
+      <ul>
+        <li>
+          <strong><code>require_session = true</code></strong>{' '}
+          (<code>requireSession: true</code>) - the <code>gio_session</code> cookie
+          must hold a session from <code>createSessionStorage</code> whose
+          signature verifies with <code>GIO_SESSION_SECRET</code> (any rotated
+          secret) and that has not expired. Rust checks both before routing;
+          anything else is treated like a missing cookie. Add{' '}
+          <code>require_cookie</code> to read a session stored under another
+          cookie name. Without a valid secret the guard denies every request and
+          the server logs why. See <a href="/docs/authentication">Authentication</a>.
+        </li>
+        <li>
+          <strong><code>require_cookie = &quot;name&quot;</code></strong> alone - a
+          presence check: any non-empty cookie of that name passes. It keeps
+          anonymous traffic out cheaply but proves nothing, so validate the cookie
+          itself in <code>getServerSideProps</code> or a route handler.
+        </li>
+      </ul>
 
       <h2>Header rules</h2>
       <p>

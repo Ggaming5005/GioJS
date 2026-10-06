@@ -98,43 +98,56 @@ export default {
 
 ## Auth Plugin Example
 
-The in-repo `packages/giojs-auth-example` package shows a minimal auth plugin that protects
-`/admin/*` routes. Written against the published package, it looks like this:
+The in-repo `packages/giojs-auth-example` package shows an auth plugin built on
+`createSessionStorage` (see the Authentication docs): requests under a protected
+prefix need a session carrying a user id, or get 403. Written against the published
+package, it looks like this:
 
 ```typescript
-import type { GioNodePlugin } from '@gio.js/core';
+import type { GioNodePlugin, SessionStorage } from '@gio.js/core';
 
-export const authPlugin: GioNodePlugin = {
-  name: 'giojs-auth-example',
-  version: '0.1.0',
+export function createAuthPlugin({ sessions, prefix = '/admin' }: {
+  sessions: SessionStorage;
+  prefix?: string;
+}): GioNodePlugin {
+  return {
+    name: 'giojs-auth-example',
+    version: '0.1.0',
 
-  async onRequest(req) {
-    if (!req.path.startsWith('/admin')) return req;  // not a protected route
-    const cookie = req.headers['cookie'] ?? '';
-    if (cookie.includes('session=valid')) return req;  // authenticated
-    return {
-      id: req.id,
-      status: 403,
-      headers: { 'content-type': 'text/plain; charset=utf-8' },
-      body: 'Forbidden',
-      cacheable: false,
-      cacheMaxAge: 0,
-    };
-  },
-};
+    async onRequest(req) {
+      // Segment-aware: /admin and /admin/x, not /administrator.
+      if (req.path !== prefix && !req.path.startsWith(`${prefix}/`)) return req;
+      // Tampered, expired, or foreign cookies read as an empty session.
+      if (sessions.getSession(req).has('userId')) return req;  // authenticated
+      return {
+        id: req.id,
+        status: 403,
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
+        body: 'Forbidden',
+        cacheable: false,
+        cacheMaxAge: 0,
+      };
+    },
+  };
+}
 ```
 
-To try the demo:
+Pair it with a `require_session` guard on the same paths: the guard verifies the
+session's signature and expiry in Rust before Node is involved, and the plugin
+checks what is inside it (roles, revocation). `examples/auth-demo` wires both
+together with a login form, a session-reading dashboard, and logout:
 
 ```bash
-# Start server with the auth-demo app
+# Start server with the auth-demo app (DEMO_PASSWORD comes from examples/auth-demo/.env;
+# in development the server generates an ephemeral GIO_SESSION_SECRET)
 GIO_APP_DIR=examples/auth-demo/app NODE_ENV=development cargo run -p giojs-server
 
-# Without cookie → 403
+# Without a session -> 302 to /login (the Rust guard)
 curl -i http://localhost:3000/admin/dashboard
 
-# With cookie → 200
-curl -i -H "Cookie: session=valid" http://localhost:3000/admin/dashboard
+# Log in, keeping the session cookie, then visit the dashboard -> 200
+curl -i -c jar.txt -d 'name=Ada&password=gio-demo' http://localhost:3000/api/login
+curl -i -b jar.txt http://localhost:3000/admin/dashboard
 ```
 
 ---

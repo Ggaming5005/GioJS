@@ -52,15 +52,24 @@ export async function POST(req: GioRequest) {
         <code>WWW-Authenticate</code> are combined into one comma-separated value.
       </p>
       <CodeBlock lang="ts" code={`// app/api/login/route.ts
-import type { GioRequest } from '@gio.js/core';
+import { serializeCookie, type GioRequest } from '@gio.js/core';
+import { sessions } from '../../../lib/session.server.ts';
 
 export async function POST(req: GioRequest) {
-  const { session, csrf } = await login(req.json());
+  const user = await login(req.json());
+  const session = sessions.getSession(req);
+  session.set('userId', user.id);
   const headers = new Headers({ Location: '/dashboard' });
-  headers.append('Set-Cookie', \`session=\${session}; Path=/; HttpOnly; Secure; SameSite=Lax\`);
-  headers.append('Set-Cookie', \`csrf=\${csrf}; Path=/; Secure; SameSite=Strict\`);
+  headers.append('Set-Cookie', sessions.commitSession(session));
+  headers.append('Set-Cookie', serializeCookie('theme', user.theme, { httpOnly: false }));
   return new Response(null, { status: 303, headers });
 }`} />
+      <p>
+        <code>serializeCookie</code> applies secure defaults (<code>HttpOnly</code>,{' '}
+        <code>SameSite=Lax</code>, <code>Secure</code> in production) and refuses values that
+        could inject attributes; sessions are covered in{' '}
+        <a href="/docs/authentication">Authentication</a>.
+      </p>
 
       <h2>Server-Sent Events</h2>
       <CodeBlock lang="ts" code={`// app/ticker/route.ts
