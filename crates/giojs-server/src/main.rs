@@ -322,7 +322,12 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let dev_mode = std::env::var("NODE_ENV").as_deref() == Ok("development");
 
     info!("Starting Node SSR worker: {node_script}");
-    let ipc = IpcClient::start(&node_script, &ipc_paths, &ipc_token, dev_mode).await?;
+    // <GioImage> must only emit srcset widths /_gio/image accepts.
+    let worker_env = vec![(
+        config::WORKER_IMAGE_CONFIG_ENV.to_string(),
+        cfg.images.worker_json(),
+    )];
+    let ipc = IpcClient::start(&node_script, &ipc_paths, &ipc_token, dev_mode, worker_env).await?;
 
     let cache_dir = std::env::var("GIO_CACHE_DIR")
         .map(PathBuf::from)

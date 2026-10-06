@@ -249,6 +249,32 @@ impl Default for ImageConfig {
     }
 }
 
+/// Env var the Node worker reads its `[images]` settings from.
+pub const WORKER_IMAGE_CONFIG_ENV: &str = "GIO_IMAGE_CONFIG";
+
+impl ImageConfig {
+    /// The `[images]` settings `<GioImage>` renders with, as JSON for the
+    /// worker: srcset candidates must be widths `/_gio/image` accepts (any
+    /// other width is a 400), and the default quality matches the
+    /// optimizer's. Widths are sorted and deduplicated; 0 is never a usable
+    /// candidate.
+    pub fn worker_json(&self) -> String {
+        let mut widths: Vec<u32> = self
+            .allowed_widths
+            .iter()
+            .copied()
+            .filter(|w| *w > 0)
+            .collect();
+        widths.sort_unstable();
+        widths.dedup();
+        serde_json::json!({
+            "widths": widths,
+            "quality": self.quality.clamp(1, 100),
+        })
+        .to_string()
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct FontEntry {
     pub family: String,
@@ -476,6 +502,29 @@ mod tests {
         assert_eq!(config.images.quality, 75);
         assert_eq!(config.images.disk_max_bytes, 512 * 1024 * 1024);
         assert_eq!(config.images.max_remote_bytes, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn image_worker_json_carries_the_optimizer_widths_and_quality() {
+        let path = unique_temp_path("images_worker.toml");
+        std::fs::write(
+            &path,
+            "[images]\nallowed_widths = [1200, 640, 0, 828, 640]\nquality = 80\n",
+        )
+        .unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let json: serde_json::Value =
+            serde_json::from_str(&result.unwrap().images.worker_json()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "widths": [640, 828, 1200], "quality": 80 })
+        );
+
+        let defaults: serde_json::Value =
+            serde_json::from_str(&ImageConfig::default().worker_json()).unwrap();
+        assert_eq!(defaults["widths"].as_array().unwrap().len(), 16);
+        assert_eq!(defaults["quality"], 75);
     }
 
     #[test]

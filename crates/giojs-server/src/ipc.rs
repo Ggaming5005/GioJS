@@ -347,6 +347,9 @@ struct NodeWorker {
     ws_path: String,
     token: String,
     dev_mode: bool,
+    /// Server settings the worker renders with (e.g. GIO_IMAGE_CONFIG),
+    /// handed to every respawn too.
+    extra_env: Vec<(String, String)>,
 }
 
 impl NodeWorker {
@@ -357,6 +360,7 @@ impl NodeWorker {
             &self.ws_path,
             &self.token,
             self.dev_mode,
+            &self.extra_env,
         )
     }
 }
@@ -367,6 +371,7 @@ impl IpcClient {
         paths: &IpcPaths,
         token: &str,
         dev_mode: bool,
+        extra_env: Vec<(String, String)>,
     ) -> anyhow::Result<Self> {
         let worker = NodeWorker {
             script: node_script.to_string(),
@@ -374,6 +379,7 @@ impl IpcClient {
             ws_path: paths.ws.clone(),
             token: token.to_string(),
             dev_mode,
+            extra_env,
         };
         let mut child = worker.spawn()?;
         let spawned_pid = child.id();
@@ -708,12 +714,13 @@ fn spawn_node_tsx(
     ws_path: &str,
     token: &str,
     dev_mode: bool,
+    extra_env: &[(String, String)],
 ) -> anyhow::Result<tokio::process::Child> {
     if worker_runs_without_tsx(node_script, std::env::var("GIO_STANDALONE").ok().as_deref()) {
         tracing::debug!("spawning prebuilt worker directly: node {node_script}");
         let mut cmd = Command::new("node");
         cmd.arg(node_script);
-        return spawn_worker_command(cmd, ipc_path, ws_path, token, dev_mode);
+        return spawn_worker_command(cmd, ipc_path, ws_path, token, dev_mode, extra_env);
     }
     // Find the tsx package directory: the directory that contains dist/cli.mjs
     let tsx_pkg_dir = std::env::var("GIO_TSX_PKG").unwrap_or_else(|_| {
@@ -766,7 +773,7 @@ fn spawn_node_tsx(
     cmd.arg(&cli_mjs)
         .arg(node_script)
         .env("NODE_PATH", node_path);
-    spawn_worker_command(cmd, ipc_path, ws_path, token, dev_mode)
+    spawn_worker_command(cmd, ipc_path, ws_path, token, dev_mode, extra_env)
 }
 
 /// NODE_ENV for the worker. Rust's mode is the single source of truth: the
@@ -782,6 +789,23 @@ fn worker_node_env(dev_mode: bool) -> &'static str {
     }
 }
 
+/// The worker's environment. `extra_env` goes first so it can never
+/// override the mode, socket paths, or token set after it.
+fn set_worker_env(
+    cmd: &mut Command,
+    ipc_path: &str,
+    ws_path: &str,
+    token: &str,
+    dev_mode: bool,
+    extra_env: &[(String, String)],
+) {
+    cmd.envs(extra_env.iter().map(|(key, value)| (key, value)))
+        .env("NODE_ENV", worker_node_env(dev_mode))
+        .env("GIO_SOCKET_PATH", ipc_path)
+        .env("GIO_WS_SOCKET_PATH", ws_path)
+        .env("GIO_IPC_TOKEN", token);
+}
+
 /// Environment, stdio, and orphan protection shared by both worker launch
 /// modes (tsx wrapper and direct node).
 fn spawn_worker_command(
@@ -790,12 +814,10 @@ fn spawn_worker_command(
     ws_path: &str,
     token: &str,
     dev_mode: bool,
+    extra_env: &[(String, String)],
 ) -> anyhow::Result<tokio::process::Child> {
-    cmd.env("NODE_ENV", worker_node_env(dev_mode))
-        .env("GIO_SOCKET_PATH", ipc_path)
-        .env("GIO_WS_SOCKET_PATH", ws_path)
-        .env("GIO_IPC_TOKEN", token)
-        .stdin(Stdio::null())
+    set_worker_env(&mut cmd, ipc_path, ws_path, token, dev_mode, extra_env);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         // Reap the worker when the supervisor drops it (panic/unwind paths).
@@ -1541,6 +1563,31 @@ mod tests {
     fn worker_node_env_follows_the_server_mode() {
         assert_eq!(worker_node_env(true), "development");
         assert_eq!(worker_node_env(false), "production");
+    }
+
+    #[test]
+    fn worker_env_carries_extra_settings_without_letting_them_override_internals() {
+        let mut cmd = Command::new("node");
+        let extra = vec![
+            (
+                "GIO_IMAGE_CONFIG".to_string(),
+                r#"{"widths":[640]}"#.to_string(),
+            ),
+            ("GIO_IPC_TOKEN".to_string(), "spoofed".to_string()),
+            ("NODE_ENV".to_string(), "development".to_string()),
+        ];
+        set_worker_env(&mut cmd, "/tmp/ipc", "/tmp/ws", "real-token", false, &extra);
+        // Later .env() calls for the same key replace earlier ones.
+        let envs: std::collections::HashMap<_, _> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+            .collect();
+        let get = |key: &str| envs.get(std::ffi::OsStr::new(key)).cloned().flatten();
+        assert_eq!(get("GIO_IMAGE_CONFIG").unwrap(), r#"{"widths":[640]}"#);
+        assert_eq!(get("GIO_IPC_TOKEN").unwrap(), "real-token");
+        assert_eq!(get("NODE_ENV").unwrap(), "production");
+        assert_eq!(get("GIO_SOCKET_PATH").unwrap(), "/tmp/ipc");
     }
 
     #[test]
