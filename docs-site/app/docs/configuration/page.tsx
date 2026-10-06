@@ -120,7 +120,10 @@ enabled = false         # expose /_gio/metrics (Prometheus); off when this secti
 token = ""              # require "Authorization: Bearer <token>" when set
 ip_allowlist = []       # restrict by client IP or CIDR, e.g. ["10.0.0.5", "10.1.0.0/16"]
 
-[dev]                   # only read when NODE_ENV=development
+[revalidate]            # see Caching; unknown keys here are a startup error
+token = ""              # enables POST /_gio/revalidate (>= 32 bytes); GIO_REVALIDATE_TOKEN wins
+
+[dev]                 # only read when NODE_ENV=development
 allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer to`} />
 
       <h2>Connection limits</h2>
@@ -261,6 +264,11 @@ accept_request_id = false   # ignore incoming X-Request-Id, even from trusted pr
             <td><code>/_gio/metrics</code></td>
             <td>off</td>
             <td>Prometheus exposition (request counts, latency histograms, cache hit ratio, IPC timing). Returns <code>404</code> until enabled via <code>[metrics]</code>.</td>
+          </tr>
+          <tr>
+            <td><code>/_gio/revalidate</code></td>
+            <td>off</td>
+            <td><code>POST</code> purges cached pages by tag or path for CMS webhooks and scripts, authenticated with <code>Authorization: Bearer</code>. Returns <code>404</code> until a token is set (<code>GIO_REVALIDATE_TOKEN</code> or <code>[revalidate] token</code>) - see <a href="/docs/caching">Caching</a>.</td>
           </tr>
         </tbody>
       </table>
@@ -424,6 +432,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
           <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the build content and the gio.toml <code>[images]</code> settings). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
           <tr><td><code>GIO_SOCKET_PATH</code></td><td>Rust-to-Node IPC path; the server passes the resolved value to the Node worker</td><td>per-instance <code>.gio/ipc-&lt;pid&gt;-&lt;rand&gt;.sock</code> (Unix), unique named pipe (Windows)</td></tr>
           <tr><td><code>GIO_PUBLIC_DIR</code></td><td>Directory served at the site root and under <code>/public/*</code></td><td><code>public/</code> next to <code>app/</code></td></tr>
+          <tr><td><code>GIO_REVALIDATE_TOKEN</code></td><td>Bearer token that enables <code>POST /_gio/revalidate</code> (<a href="/docs/caching">on-demand revalidation</a>); at least 32 bytes, or the server refuses to start. Overrides <code>[revalidate] token</code></td><td>unset (endpoint disabled)</td></tr>
           <tr><td><code>GIO_SESSION_SECRET</code></td><td>Key material for <a href="/docs/authentication">sessions</a> and <code>require_session</code> guards: at least 32 bytes, comma-separated to rotate (the first signs, all verify). Required in production once sessions are used</td><td>unset (development: an ephemeral secret per server start)</td></tr>
           <tr><td><code>GIO_SITE_URL</code></td><td>Absolute base URL for <code>sitemap.xml</code> during <code>gio export</code></td><td>unset</td></tr>
           <tr><td><code>NODE_ENV</code></td><td><code>development</code> enables dev mode (file watcher, dev endpoints, error details) and selects the <code>.env.development*</code> files; anything else - unset included - is production and selects <code>.env.production*</code>. The server passes the decided mode to the Node worker it spawns</td><td>unset</td></tr>
@@ -584,6 +593,11 @@ export const revalidate = 60;
         <code>revalidate = false</code> maps to a one-year TTL (31536000 seconds) in the
         Rust cache layer - the standard sentinel for "cache indefinitely."
       </div>
+      <p>
+        To refresh a cached page as soon as its data changes, tag it and purge it with{' '}
+        <code>revalidateTag()</code> / <code>revalidatePath()</code> or{' '}
+        <code>POST /_gio/revalidate</code> - see <a href="/docs/caching">Caching</a>.
+      </p>
     </>
   );
 }

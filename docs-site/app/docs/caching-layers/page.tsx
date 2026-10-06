@@ -16,10 +16,17 @@ export default function Page(): React.JSX.Element {
         bounded, with the oldest files evicted past the limit.
       </p>
       <p>
+        On-demand purges (<a href="/docs/caching">revalidateTag, revalidatePath and{' '}
+        <code>POST /_gio/revalidate</code></a>) reach both tiers: a tag index covers entries
+        in memory and on disk - including the ones a previous run left behind, indexed in the
+        background at startup - so a purged page can never come back from disk.
+      </p>
+      <p>
         The architecture includes a storage-backend seam (L3) where a shared cluster-wide tier
         could slot in, but no shared backend ships yet - the cache is per-instance. For
         multi-instance deployments, set <code>GIO_DEPLOYMENT_ID</code> to the same value on
-        every instance so their caches agree on the deployment ID.
+        every instance so their caches agree on the deployment ID, and send on-demand purges
+        (<code>POST /_gio/revalidate</code>) to every instance.
       </p>
       <p>
         Persisted entries survive a restart only while the deployment ID stays the same. The

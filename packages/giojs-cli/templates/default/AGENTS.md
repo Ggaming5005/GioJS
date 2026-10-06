@@ -23,8 +23,8 @@ renders React. Full docs: https://giojs.com/llms.txt
   for content that suspends while rendering - it does not cover
   getServerSideProps, which runs before rendering.
 - Data fetching is `export async function getServerSideProps(ctx)` returning
-  `{ props }` (optionally `{ props, headers }`, a redirect, or
-  `{ notFound: true }`). There are NO
+  `{ props }` (optionally `{ props, headers }`, `{ props, tags }`, a redirect,
+  or `{ notFound: true }`). There are NO
   React Server Components, no `use client`/`use server`, no server actions.
 - Never fetch inside a component render; never use `useEffect` for data that
   belongs in `getServerSideProps`.
@@ -35,6 +35,11 @@ renders React. Full docs: https://giojs.com/llms.txt
   per-user and uncached; personalize inside `<Suspense>` holes with
   `export const shell = 'cache'` instead. Build absolute URLs on cached pages
   from a configured origin (env var), not `ctx.host`.
+- On-demand revalidation: tag cached pages (`export const tags = ['posts']`,
+  or `tags` returned from `getServerSideProps`) and, after a write, call
+  `await revalidateTag('posts')` / `await revalidatePath('/blog')` from
+  `@gio.js/core` in the route handler - the next request renders fresh. CMS
+  webhooks use `POST /_gio/revalidate` (needs `GIO_REVALIDATE_TOKEN`).
 - Client identity: `req.ip` / `ctx.ip` is the visitor's IP - never parse
   `x-forwarded-for` yourself; behind a reverse proxy set
   `[server] trusted_proxies` in `gio.toml`. `req.host` is client-supplied -

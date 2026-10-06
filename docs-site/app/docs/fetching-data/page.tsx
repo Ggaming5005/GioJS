@@ -72,6 +72,18 @@ export async function getServerSideProps() {
         A page that returns headers is never cached, even with <code>revalidate</code> set -
         caching a per-request cookie would hand one visitor&apos;s session to everyone.
       </p>
+      <h2>Cache tags</h2>
+      <p>
+        On a cached page, return <code>tags</code> next to <code>props</code> to name the data
+        this render used; <code>revalidateTag()</code> then purges exactly the pages that
+        showed it - see <a href="/docs/caching">Caching</a>.
+      </p>
+      <CodeBlock lang="tsx" code={`export const revalidate = 3600;
+
+export async function getServerSideProps(ctx) {
+  const post = await db.posts.find(ctx.params.id);
+  return { props: { post }, tags: [\`post:\${post.id}\`] };
+}`} />
       <div className="callout">Never fetch data inside the component body - it runs during SSR and inflates time-to-first-byte. Use getServerSideProps.</div>
       <h2>Cookies and caching</h2>
       <p>

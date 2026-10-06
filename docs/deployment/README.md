@@ -35,11 +35,14 @@ The HTTP port is not an environment variable - it comes from the `[server]` sect
 | `GIO_APP_DIR` | Path to the `app/` directory | `app` |
 | `GIO_DEPLOYMENT_ID` | Pin the deployment ID (otherwise content-derived from the build) | unset |
 | `GIO_SOCKET_PATH` | IPC socket path (Unix socket; named pipe on Windows) | per-instance `.gio/ipc-<pid>-<rand>.sock` |
+| `GIO_REVALIDATE_TOKEN` | Bearer token (32+ bytes) that enables `POST /_gio/revalidate` for on-demand cache purges | unset (endpoint disabled) |
 | `RUST_LOG` | Rust log filter (`info`, `debug`, `trace`) | `info` |
 
 ## Multi-instance deployments
 
 Each instance keeps its own page cache (memory + disk) - there is no shared/distributed cache yet; cross-instance cache coherence is on the roadmap. To keep caches and version-skew detection consistent across instances of the same build, set `GIO_DEPLOYMENT_ID` to the same value (e.g. the release SHA) on every instance.
+
+On-demand purges are per instance too: `revalidateTag()` / `revalidatePath()` purge only the instance whose worker calls them, so a CMS webhook should call `POST /_gio/revalidate` on every instance by its own address, not once through the load balancer.
 
 ## Behind a reverse proxy or load balancer
 
