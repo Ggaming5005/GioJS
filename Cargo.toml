@@ -17,6 +17,15 @@ members = [
 ]
 resolver = "2"
 
+# Minimum supported Rust version, inherited by every crate above
+# (`rust-version.workspace = true`). It is the highest `rust-version` a crate
+# in Cargo.lock needs, so a dependency bump can raise it. The CI `msrv` job
+# checks the workspace with exactly this toolchain, and
+# scripts/check-msrv.mjs keeps it, Cargo.lock and the Rust image in
+# docs/deployment/docker.md in step.
+[workspace.package]
+rust-version = "1.89"
+
 [workspace.dependencies]
 tokio              = { version = "1",    features = ["full"] }
 axum               = { version = "0.7", features = ["ws", "macros"] }

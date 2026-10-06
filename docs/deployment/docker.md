@@ -28,15 +28,17 @@ CMD ["npx", "giojs-server"]
 
 ## Dockerfile (building from the GioJS source tree)
 
-If you deploy from a checkout of the GioJS monorepo, build the Rust binary yourself. Note that `@gio.js/core` ships no `dist/` - the Node worker runs straight from `src/` via `tsx`, so the runtime image copies `src/` and the installed `node_modules`:
+If you deploy from a checkout of the GioJS monorepo, build the Rust binary yourself. Note that `@gio.js/core` ships no `dist/` - the Node worker runs straight from `src/` via `tsx`, so the runtime image copies `src/` and the installed `node_modules`.
+
+The build uses `--locked`, so it compiles exactly the crate versions in the committed `Cargo.lock`. The Rust image must be at least the workspace's minimum Rust version - `rust-version` in the root `Cargo.toml`, currently 1.89. An older image fails at the `cargo build` step. When `rust-version` goes up, raise the `FROM rust:` tag with it.
 
 ```dockerfile
-# Build stage: Rust binary
-FROM rust:1.78 AS rust-builder
+# Build stage: Rust binary. Keep the tag >= rust-version in Cargo.toml.
+FROM rust:1.89 AS rust-builder
 WORKDIR /app
 COPY crates/ ./crates/
 COPY Cargo.toml Cargo.lock ./
-RUN cargo build --release -p giojs-server
+RUN cargo build --release --locked -p giojs-server
 
 # Dependency stage: Node modules for the SSR worker (no compile step)
 FROM node:20-slim AS node-deps
