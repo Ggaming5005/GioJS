@@ -8,6 +8,19 @@ http2 = false
 # Tiny connection deadlines keep the slowloris / slow-body tests fast.
 header_read_timeout_secs  = 2
 request_body_timeout_secs = 2
+# The harness plays the reverse proxy: its X-Forwarded-* / X-Request-Id
+# headers count. Requests without them still resolve to 127.0.0.1.
+trusted_proxies = ["127.0.0.1"]
+
+# Allowlists the forwarded client, never the local proxy itself.
+[metrics]
+ip_allowlist = ["198.51.100.0/24"]
+
+[[rate_limits]]
+path           = "/api/proxied-limit"
+per_ip         = 1
+window_seconds = 3600
+burst          = 0
 
 [[redirects]]
 from   = "/moved"
