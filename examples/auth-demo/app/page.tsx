@@ -1,3 +1,5 @@
+import React from 'react';
+
 export default function Home(): React.JSX.Element {
   return (
     <html>
@@ -5,14 +7,13 @@ export default function Home(): React.JSX.Element {
       <body>
         <h1>Auth Demo</h1>
         <p>
-          <a href="/admin/dashboard">Go to admin dashboard (requires session cookie)</a>
+          <a href="/admin/dashboard">Go to the admin dashboard</a> (requires a session -
+          without one you are sent to the login page)
         </p>
         <p>
-          To log in, set cookie: <code>session=valid</code>
+          <a href="/login">Log in</a>
         </p>
       </body>
     </html>
   );
 }
-
-import React from 'react';
