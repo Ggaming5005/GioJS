@@ -3,8 +3,9 @@
  *
  * Server bootstrap for the source path: loads gio.config, registers node
  * plugins, discovers routes/layouts/WS handlers under app/, builds the
- * route stylesheets and client bundles, then hands the components to worker-boot.ts to start both IPC
- * servers (HTTP bridge + WebSocket bridge) that Rust connects to.
+ * route stylesheets and client bundles, then hands the components to
+ * worker-boot.ts to start both IPC servers (HTTP bridge + WebSocket bridge)
+ * that Rust connects to.
  */
 import { dirname, join } from 'node:path';
 import {
