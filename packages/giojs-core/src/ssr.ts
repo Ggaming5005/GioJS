@@ -30,6 +30,7 @@ import type {
 import { GioEventStream, isGioEventStream } from './sse.ts';
 import type { NodePluginRegistry } from './plugin.ts';
 import { logger } from './logger.ts';
+import { createErrorDigest, describeError, isDevMode } from './mode.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -68,7 +69,8 @@ export interface RenderExtras {
   streaming?: boolean;
 }
 
-const DEV = process.env.NODE_ENV !== 'production';
+/** What production responses say instead of the real error message. */
+const GENERIC_ERROR_MESSAGE = 'Internal Server Error';
 
 /** Match a URL path against pattern-keyed entries (mirrors the Rust trie logic). */
 function matchIn<T>(
@@ -499,10 +501,11 @@ export async function renderRoute(
       // render instead of finishing output nobody will read.
       ...(signal !== undefined ? { signal } : {}),
       onError(streamError) {
-        logger.error('ssr stream error', {
-          path: req.path,
-          error: streamError instanceof Error ? streamError.message : String(streamError),
-        });
+        // The returned digest is what React puts in the HTML in place of the
+        // message (production builds); the log line carries the details.
+        const digest = createErrorDigest();
+        logger.error('ssr stream error', { path: req.path, digest, ...describeError(streamError) });
+        return digest;
       },
     });
 
@@ -551,15 +554,17 @@ export async function renderRoute(
     }
     return ssrResponse;
   } catch (err) {
-    logger.error('ssr render failed', {
-      path: req.path,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    // Production responses carry only a generic message and the digest; the
+    // details live in this log line under the same digest.
+    const digest = createErrorDigest();
+    logger.error('ssr render failed', { path: req.path, digest, ...describeError(err) });
+    const dev = isDevMode();
+    const message = dev ? (err instanceof Error ? err.message : String(err)) : GENERIC_ERROR_MESSAGE;
     const errorPage = await renderSpecialPage(
       req,
       layouts,
       extras?.specialPages?.error,
-      { error: { message: err instanceof Error ? err.message : String(err) } },
+      { error: { message, digest } },
       500,
       signal,
     );
@@ -568,8 +573,9 @@ export async function renderRoute(
       id: req.id,
       error: true,
       code: 'RENDER_ERROR',
-      message: err instanceof Error ? err.message : String(err),
-      ...(DEV && err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
+      message,
+      digest,
+      ...(dev && err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
     };
   }
 }
@@ -641,16 +647,18 @@ async function runRouteHandler(
       body: JSON.stringify(result),
     };
   } catch (err) {
+    const digest = createErrorDigest();
     logger.error('route handler failed', {
       path: req.path,
       method: req.method,
-      error: err instanceof Error ? err.message : String(err),
+      digest,
+      ...describeError(err),
     });
     return {
       ...base,
       status: 500,
       headers: { 'content-type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({ error: 'Internal Server Error' }),
+      body: JSON.stringify({ error: GENERIC_ERROR_MESSAGE, digest }),
     };
   }
 }

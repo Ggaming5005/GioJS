@@ -6,19 +6,19 @@
   "scripts": {
     "dev": "cross-env NODE_ENV=development giojs-server",
     "build": "tsc --noEmit",
-    "start": "giojs-server"
+    "start": "cross-env NODE_ENV=production giojs-server"
   },
   "dependencies": {
     "@gio.js/server": "^0.1.0-beta.7",
     "@gio.js/react": "^0.1.0-beta.7",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "cross-env": "^7.0.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "cross-env": "^7.0.3",
     "typescript": "^5.4.0"
   }
 }

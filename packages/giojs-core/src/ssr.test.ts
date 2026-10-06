@@ -6,7 +6,7 @@
  *   2. getServerSideProps returning {redirect} should produce a 301/302
  *   3. layout.tsx wrappers are applied outermost-first around the page
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { renderRoute, serializeEnvelope, type StreamRenderResult } from './ssr.ts';
 import { NodePluginRegistry } from './plugin.ts';
@@ -112,6 +112,15 @@ describe('getServerSideProps redirect', () => {
 // ─── getServerSideProps props extraction ─────────────────────────────────────
 
 describe('getServerSideProps props extraction', () => {
+  // The contract errors below are about the dev-mode message; production
+  // replaces it with a generic one (see 'error details by mode').
+  beforeEach(() => {
+    vi.stubEnv('NODE_ENV', 'development');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('extracts props from { props: {...} } wrapper (Next.js convention)', async () => {
     const routes = makeRoute('/', {
       getServerSideProps: async () => ({ props: { title: 'hello' } }),
@@ -604,7 +613,23 @@ describe('special pages', () => {
     expect('cacheable' in result && result.cacheable).toBe(false);
   });
 
-  it('renders app/error with the failure message when a page render throws', async () => {
+  it('renders app/error with the failure message in dev mode', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    try {
+      const routes = makeRoute('/', {
+        getServerSideProps: async () => { throw new Error('db exploded'); },
+      });
+      const result = await renderRoute(
+        makeRequest('/'), routes, noLayouts, undefined, undefined, undefined, { specialPages },
+      );
+      expect('status' in result && result.status).toBe(500);
+      expect('body' in result && result.body).toContain('CUSTOM_500 db exploded');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('renders app/error with a generic message outside dev mode', async () => {
     const routes = makeRoute('/', {
       getServerSideProps: async () => { throw new Error('db exploded'); },
     });
@@ -612,7 +637,8 @@ describe('special pages', () => {
       makeRequest('/'), routes, noLayouts, undefined, undefined, undefined, { specialPages },
     );
     expect('status' in result && result.status).toBe(500);
-    expect('body' in result && result.body).toContain('CUSTOM_500 db exploded');
+    expect('body' in result && result.body).toContain('CUSTOM_500 Internal Server Error');
+    expect('body' in result && result.body).not.toContain('db exploded');
   });
 
   it('falls back to the built-in 404 when no not-found page exists', async () => {
@@ -620,5 +646,127 @@ describe('special pages', () => {
     expect('status' in result && result.status).toBe(404);
     expect('body' in result && result.body).toContain('HTTP 404');
     expect('body' in result && result.body).toContain('Page not found');
+  });
+});
+
+// ─── error details by mode ────────────────────────────────────────────────────
+
+/** Capture the logger's JSON lines (it writes to stderr). */
+function captureLogs(): { lines: () => Record<string, unknown>[]; restore: () => void } {
+  const written: string[] = [];
+  const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+    written.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    return true;
+  });
+  return {
+    lines: () =>
+      written
+        .join('')
+        .split('\n')
+        .filter(line => line.startsWith('{'))
+        .map(line => JSON.parse(line) as Record<string, unknown>),
+    restore: () => spy.mockRestore(),
+  };
+}
+
+const DIGEST = /^[0-9a-f]{12}$/;
+
+describe('error details by mode', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function throwingRoute(): Map<string, RouteModule> {
+    return makeRoute('/', {
+      getServerSideProps: async () => { throw new Error('secret db password in message'); },
+    });
+  }
+
+  it('production error frames carry a generic message and a digest, never the stack', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    const logs = captureLogs();
+    let result;
+    try {
+      result = await renderRoute(makeRequest('/'), throwingRoute(), noLayouts);
+    } finally {
+      logs.restore();
+    }
+    expect('error' in result && result.error).toBe(true);
+    expect('message' in result && result.message).toBe('Internal Server Error');
+    expect('stack' in result).toBe(false);
+    const digest = 'digest' in result ? result.digest : undefined;
+    expect(digest).toMatch(DIGEST);
+    // The operator-facing log line carries the real message + stack under the same digest.
+    const line = logs.lines().find(l => l['msg'] === 'ssr render failed');
+    expect(line?.['digest']).toBe(digest);
+    expect(line?.['error']).toBe('secret db password in message');
+    expect(String(line?.['stack'])).toContain('secret db password in message');
+  });
+
+  it('an unset or test NODE_ENV is production, not dev', async () => {
+    for (const value of ['', 'test']) {
+      vi.stubEnv('NODE_ENV', value);
+      const result = await renderRoute(makeRequest('/'), throwingRoute(), noLayouts);
+      expect('message' in result && result.message).toBe('Internal Server Error');
+    }
+  });
+
+  it('dev error frames keep the real message and stack, plus the digest', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const result = await renderRoute(makeRequest('/'), throwingRoute(), noLayouts);
+    expect('message' in result && result.message).toBe('secret db password in message');
+    expect('stack' in result && result.stack).toContain('secret db password in message');
+    expect('digest' in result && result.digest).toMatch(DIGEST);
+  });
+
+  it('app/error receives { message, digest } - generic in production, real in dev', async () => {
+    let seen: { message: string; digest?: string } | undefined;
+    const specialPages = {
+      error: async () => ({
+        default: function ErrorPage(props: Record<string, unknown>) {
+          const error = props['error'] as { message: string; digest?: string };
+          seen = error;
+          return React.createElement('h1', null, `ref ${error.digest ?? ''}`);
+        },
+      }),
+    };
+    const render = () => renderRoute(
+      makeRequest('/'), throwingRoute(), noLayouts, undefined, undefined, undefined, { specialPages },
+    );
+
+    vi.stubEnv('NODE_ENV', 'production');
+    const prod = await render();
+    expect(seen?.message).toBe('Internal Server Error');
+    expect(seen?.digest).toMatch(DIGEST);
+    expect('body' in prod && prod.body).toContain(`ref ${seen?.digest}`);
+    expect('body' in prod && prod.body).not.toContain('secret');
+
+    vi.stubEnv('NODE_ENV', 'development');
+    await render();
+    expect(seen?.message).toBe('secret db password in message');
+    expect(seen?.digest).toMatch(DIGEST);
+  });
+
+  it('route handler failures return a generic JSON body with the logged digest', async () => {
+    const handlers = makeHandlers('/api/boom', {
+      GET: () => { throw new Error('handler secret'); },
+    });
+    const logs = captureLogs();
+    let result;
+    try {
+      result = await renderRoute(
+        makeRequest('/api/boom'), new Map(), noLayouts, undefined, undefined, undefined, { handlers },
+      );
+    } finally {
+      logs.restore();
+    }
+    expect('status' in result && result.status).toBe(500);
+    const body = JSON.parse('body' in result ? result.body : '{}') as Record<string, unknown>;
+    expect(body['error']).toBe('Internal Server Error');
+    expect(body['digest']).toMatch(DIGEST);
+    expect(JSON.stringify(body)).not.toContain('handler secret');
+    const line = logs.lines().find(l => l['msg'] === 'route handler failed');
+    expect(line?.['digest']).toBe(body['digest']);
+    expect(line?.['error']).toBe('handler secret');
   });
 });

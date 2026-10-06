@@ -355,6 +355,7 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
   background: var(--panel); border: 1px solid var(--line);
   font-size: 0.8rem; color: var(--muted); overflow-x: auto;
 }
+.gio-status__ref { font-size: 0.78rem; color: var(--faint); }
 .gio-skeleton-page { max-width: 660px; margin: 0 auto; padding: 5rem 0; display: flex; flex-direction: column; gap: 1rem; }
 .gio-skeleton { height: 1rem; border-radius: 6px; background: linear-gradient(90deg, var(--panel), var(--line-strong), var(--panel)); background-size: 200% 100%; animation: gio-shimmer 1.5s ease-in-out infinite; }
 .gio-skeleton-title { height: 2.4rem; width: 55%; }

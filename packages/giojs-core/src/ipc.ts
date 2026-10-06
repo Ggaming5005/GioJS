@@ -23,6 +23,7 @@ import type { WsHandlerFn } from './ws-router.ts';
 import type { NodePluginRegistry } from './plugin.ts';
 import type { MiddlewareRules } from './middleware.ts';
 import { logger } from './logger.ts';
+import { createErrorDigest, describeError, isDevMode } from './mode.ts';
 
 const IS_WINDOWS = process.platform === 'win32';
 // Rust resolves a per-instance path (unique pipe name on Windows) and passes
@@ -186,16 +187,21 @@ export function createIPCServer(
       try {
         await handleRequest(req);
       } catch (requestError) {
+        const digest = createErrorDigest();
         logger.error('request handling failed', {
           id: req.id,
           path: req.path,
-          error: requestError instanceof Error ? requestError.message : String(requestError),
+          digest,
+          ...describeError(requestError),
         });
         writeFrame(socket, {
           id: req.id,
           error: true,
           code: 'INTERNAL',
-          message: requestError instanceof Error ? requestError.message : String(requestError),
+          message: isDevMode()
+            ? requestError instanceof Error ? requestError.message : String(requestError)
+            : 'Internal Server Error',
+          digest,
         } satisfies IPCError);
       }
     }

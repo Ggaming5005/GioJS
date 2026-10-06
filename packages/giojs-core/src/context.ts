@@ -62,8 +62,15 @@ export interface IPCError {
   id: string;
   error: true;
   code: 'RENDER_ERROR' | 'NOT_FOUND' | 'TIMEOUT' | 'INTERNAL';
+  /** The real message in dev; a generic one in production. */
   message: string;
+  /** Dev only. */
   stack?: string;
+  /**
+   * Error reference (additive, protocol stays v3). Logged with the real
+   * message and stack, and shown on the production error page instead.
+   */
+  digest?: string;
 }
 
 export type IPCOutbound = IPCResponse | IPCError;

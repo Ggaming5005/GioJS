@@ -26,18 +26,39 @@ export default function NotFound() {
 }`} />
 
       <p>
-        The error page receives the failure via props. The message is worth
-        showing only in development:
+        The error page receives the failure via props as{' '}
+        <code>{'{ error: { message, digest } }'}</code> (the Next.js shape). In
+        development <code>message</code> is the real error message; in production
+        it is always the generic <code>Internal Server Error</code>, so nothing
+        from the exception can leak into the page. <code>digest</code> is a short
+        random error reference in both modes - show it so users can quote it:
       </p>
       <CodeBlock lang="tsx" code={`// app/error.tsx
-export default function Error({ error }: { error?: { message: string } }) {
+export default function Error({ error }: { error?: { message: string; digest?: string } }) {
   return (
     <div>
       <h1>Something went wrong</h1>
       {process.env.NODE_ENV === 'development' && <pre>{error?.message}</pre>}
+      {error?.digest && <p>Error reference: <code>{error.digest}</code></p>}
     </div>
   );
 }`} />
+
+      <h2>Production error responses</h2>
+      <p>
+        A production response never carries an error message or stack. Without
+        an <code>app/error.tsx</code>, a failed render is answered with a plain
+        page naming only the status and the error reference. The real message
+        and stack are logged server-side under the same digest, so a user
+        report finds the exact failure:
+      </p>
+      <CodeBlock lang="bash" code={`{"level":"error","msg":"ssr render failed","path":"/posts/7","digest":"3f9a1c0b7e2d","error":"connect ECONNREFUSED 10.0.0.5:5432","stack":"Error: connect ECONNREFUSED ..."}`} />
+      <p>
+        Production means anything other than <code>NODE_ENV=development</code>{' '}
+        when the server starts: unset and <code>test</code> are production too.
+        The Rust server makes this decision once and starts the Node worker with
+        the matching <code>NODE_ENV</code>, so the two halves always agree.
+      </p>
 
       <h2>Development error overlay</h2>
       <p>
@@ -78,8 +99,10 @@ GIO_EDITOR="subl -w" npm run dev`} />
       <h2>API routes</h2>
       <p>
         Errors thrown in <code>route.ts</code> handlers are logged server-side and
-        answered with a JSON <code>500</code> - internal details never reach the
-        client. Requests for methods a handler file doesn&apos;t export get{' '}
+        answered with a JSON <code>500</code>,{' '}
+        <code>{'{ "error": "Internal Server Error", "digest": "..." }'}</code> -
+        internal details never reach the client; the digest matches the log
+        line. Requests for methods a handler file doesn&apos;t export get{' '}
         <code>405</code> with an <code>Allow</code> header.
       </p>
     </>

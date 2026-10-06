@@ -255,6 +255,27 @@ async function main() {
       assert.match(secondRes.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/);
     });
 
+    await test('the worker runs in the mode Rust decided (NODE_ENV=production)', async () => {
+      const html = await (await fetch(`${BASE}/node-env`)).text();
+      assert.match(html, /WORKER_NODE_ENV=production/);
+    });
+
+    await test('production error pages show only a digest; the log has the details', async () => {
+      const res = await fetch(`${BASE}/boom`);
+      assert.equal(res.status, 500);
+      const html = await res.text();
+      assert.doesNotMatch(html, /FIXTURE_SECRET_FAILURE|hunter2/, 'error message must not leak');
+      assert.doesNotMatch(html, /__GIO_SSR_ERROR__|page\.tsx|\bat \S+ \(/, 'no stack or dev payload');
+      assert.match(html, /Internal Server Error/);
+      const digest = html.match(/Error reference: <code>([0-9a-f]{12})<\/code>/)?.[1];
+      assert.ok(digest, `error page must carry a digest:\n${html}`);
+      // Operators correlate by digest: the worker logged message + stack under it.
+      await waitFor('digest in the server log', () => Promise.resolve(
+        log.split('\n').some((line) =>
+          line.includes(digest) && line.includes('FIXTURE_SECRET_FAILURE') && line.includes('"stack"')),
+      ), 5_000);
+    });
+
     await test('streaming SSR: first bytes arrive before suspended content resolves', async () => {
       // accept-encoding: identity keeps the compression layer from buffering
       // chunks, so the timing below measures the server, not the encoder.
@@ -473,6 +494,63 @@ async function main() {
   }
 }
 
+/**
+ * Phase 1b (inherited NODE_ENV): Rust decides the runtime mode and sets
+ * NODE_ENV on the worker it spawns. A server started with NODE_ENV unset or
+ * 'test' is production on the Rust side, so its worker must be production
+ * too - never a dev worker (dev bundles, error details) behind a prod server.
+ */
+async function inheritedModePhase() {
+  const binary = findServerBinary();
+  for (const inherited of [undefined, 'test']) {
+    const label = inherited === undefined ? 'unset' : inherited;
+    const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-modecache-'));
+    const env = {
+      ...process.env,
+      GIO_APP_DIR: join(fixtureDir, 'app'),
+      GIO_CACHE_DIR: cacheDir,
+      RUST_LOG: 'info',
+    };
+    delete env.NODE_ENV;
+    if (inherited !== undefined) env.NODE_ENV = inherited;
+
+    let log = '';
+    const server = spawn(binary, [], { cwd: repoRoot, env });
+    server.stdout.on('data', (d) => { log += d.toString(); });
+    server.stderr.on('data', (d) => { log += d.toString(); });
+    let serverGone = false;
+    const serverExited = new Promise((r) =>
+      server.on('exit', () => { serverGone = true; r(); }),
+    );
+
+    try {
+      await waitFor('server health', async () => {
+        const res = await fetch(`${BASE}/_gio/health`);
+        return res.ok;
+      }, 30_000);
+
+      await test(`NODE_ENV ${label}: the spawned worker runs as production`, async () => {
+        const html = await (await fetch(`${BASE}/node-env`)).text();
+        assert.match(html, /WORKER_NODE_ENV=production/);
+        const boom = await (await fetch(`${BASE}/boom`)).text();
+        assert.doesNotMatch(boom, /FIXTURE_SECRET_FAILURE/);
+        assert.match(boom, /Error reference: <code>[0-9a-f]{12}<\/code>/);
+      });
+    } catch (err) {
+      console.error(`\nintegration (NODE_ENV ${label}): FAILED`);
+      console.error(err);
+      console.error('\n── server log tail ──');
+      console.error(significantLogTail(log));
+      process.exitCode = 1;
+    } finally {
+      if (!serverGone) server.kill();
+      await serverExited;
+      await rm(cacheDir, { recursive: true, force: true });
+    }
+    if (process.exitCode === 1) return;
+  }
+}
+
 /** Phase 2 (dev mode): file watching restarts the worker and reloads pages. */
 async function devWatchPhase() {
   const binary = findServerBinary();
@@ -502,6 +580,17 @@ async function devWatchPhase() {
       const res = await fetch(`${BASE}/_gio/health`);
       return res.ok;
     }, 30_000);
+
+    await test('dev mode: the worker is development and errors keep the full overlay', async () => {
+      assert.match(await (await fetch(`${BASE}/node-env`)).text(), /WORKER_NODE_ENV=development/);
+      const res = await fetch(`${BASE}/boom`);
+      assert.equal(res.status, 500);
+      const html = await res.text();
+      assert.match(html, /FIXTURE_SECRET_FAILURE/);
+      assert.match(html, /__GIO_SSR_ERROR__/);
+      assert.match(html, /"stack":"Error: FIXTURE_SECRET_FAILURE/);
+      assert.match(html, /__gio_dev_overlay_script/);
+    });
 
     await test('dev watch: editing a page restarts the worker and serves new content', async () => {
       assert.match(await (await fetch(`${BASE}/`)).text(), /INTEGRATION_FIXTURE_HOME/);
@@ -711,6 +800,9 @@ async function standalonePhase() {
 }
 
 await main();
+if (process.exitCode !== 1) {
+  await inheritedModePhase();
+}
 if (process.exitCode !== 1) {
   await devWatchPhase();
 }

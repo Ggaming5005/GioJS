@@ -2,7 +2,9 @@ import React from 'react';
 
 /**
  * Rendered server-side with status 500 when a page render throws.
- * Receives { error: { message } }; the message is shown only in development.
+ * Receives { error: { message, digest } }. In production the message is a
+ * generic "Internal Server Error"; the digest is the reference the real
+ * error was logged under, so users can quote it in a report.
  */
 export default function Error({ error }) {
   return (
@@ -12,6 +14,9 @@ export default function Error({ error }) {
       <p>An unexpected error occurred while rendering this page.</p>
       {process.env.NODE_ENV === 'development' && error !== undefined && (
         <pre className="gio-status__stack">{error.message}</pre>
+      )}
+      {error?.digest !== undefined && (
+        <p className="gio-status__ref">Error reference: <code>{error.digest}</code></p>
       )}
       <a href="/" className="gio-btn gio-btn--primary">Go home</a>
     </div>

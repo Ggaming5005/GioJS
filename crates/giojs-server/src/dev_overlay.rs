@@ -158,9 +158,9 @@ fn escape_html(raw: &str) -> String {
 
 /// Full HTML document for a failed render. Carries a `</body>` tag so the
 /// per-request dev injection can splice the overlay script in, and embeds
-/// message + stack as `window.__GIO_SSR_ERROR__` for it to pick up. The
-/// stack is only present in dev (ssr.ts strips it otherwise), and the
-/// overlay script consuming the payload is only injected in dev.
+/// message + stack as `window.__GIO_SSR_ERROR__` for it to pick up. Dev
+/// only: production responses use `production_error_page_html`, which never
+/// carries the message.
 pub fn error_page_html(status: u16, message: &str, stack: Option<&str>) -> String {
     let payload = serde_json::json!({ "message": message, "stack": stack });
     // \u003c-escaping keeps a "</script>" inside the payload from closing the tag early
@@ -173,9 +173,45 @@ pub fn error_page_html(status: u16, message: &str, stack: Option<&str>) -> Strin
     )
 }
 
+/// Production counterpart of `error_page_html`: the status, its reason
+/// phrase, and an error reference - never the worker's message or stack,
+/// which can carry file paths, queries, or secrets. The reference is the
+/// digest the failure was logged under, so a user report finds the log line.
+pub fn production_error_page_html(status: u16, digest: &str) -> String {
+    let reason = axum::http::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|s| s.canonical_reason())
+        .unwrap_or("Error");
+    format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{status} {reason}</title></head>\
+         <body><h1>{status}</h1><p>{reason}</p><p>Error reference: <code>{}</code></p></body></html>",
+        escape_html(digest)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_error_page_shows_reason_and_digest_only() {
+        let html = production_error_page_html(500, "a1b2c3d4e5f6");
+        assert!(html.contains("<h1>500</h1>"));
+        assert!(html.contains("Internal Server Error"));
+        assert!(html.contains("<code>a1b2c3d4e5f6</code>"));
+        assert!(!html.contains("__GIO_SSR_ERROR__"));
+        assert!(!html.contains("<pre>"));
+        // Keeps the </body> anchor Rust's injection relies on.
+        assert!(html.contains("</body>"));
+        assert!(production_error_page_html(404, "x").contains("Not Found"));
+    }
+
+    #[test]
+    fn production_error_page_escapes_the_digest() {
+        let html = production_error_page_html(500, "<img>");
+        assert!(!html.contains("<img>"));
+        assert!(html.contains("&lt;img&gt;"));
+    }
 
     #[test]
     fn error_page_has_body_close_tag_for_overlay_injection() {
