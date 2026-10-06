@@ -28,6 +28,12 @@ path           = "/public/members/*rest"
 require_cookie = "session"
 redirect_to    = "/login"
 
+# Session guards verify the gio_session token's MAC and expiry in Rust.
+[[guards]]
+path            = "/api/me"
+require_session = true
+redirect_to     = "/login"
+
 [[headers]]
 path = "/public/members/*rest"
 [headers.headers]
