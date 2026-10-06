@@ -118,7 +118,7 @@ export const STYLESHEET_WAIT_MS = 3000;
 
 /**
  * Load the route stylesheets `html` links (React stylesheet resources -
- * `<link rel="stylesheet" data-precedence>` - hoisted into its <head>) that
+ * `<link rel="stylesheet" data-precedence>`, hoisted out of #__gio) that
  * this document does not have yet, and resolve once each has loaded or
  * failed (at most STYLESHEET_WAIT_MS), so the swapped-in route is never
  * shown unstyled. Inserted after the existing ones, keeping cascade order;
@@ -132,7 +132,8 @@ export function adoptStylesheets(html: string): Promise<void> {
     ),
   );
   const pending: Promise<void>[] = [];
-  for (const incoming of parsed.head.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"][data-precedence]')) {
+  // Anywhere in the document: without a root layout they open the <body>.
+  for (const incoming of parsed.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"][data-precedence]')) {
     const href = incoming.getAttribute('href');
     if (href === null || present.has(href)) continue;
     present.add(href);

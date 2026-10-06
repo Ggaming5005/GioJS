@@ -146,6 +146,20 @@ describe('route stylesheets on navigation', () => {
     expect(document.getElementById('__gio')?.textContent).toBe('styled-page');
   });
 
+  it('finds the stylesheets of a page without a root layout, which open its <body>', async () => {
+    const page = deferredFetch();
+    vi.stubGlobal('fetch', vi.fn(() => page.response));
+    const nav = navigateTo('/bare', false);
+    page.resolve(
+      '<html><head></head><body><link rel="stylesheet" href="/_next/static/css/route-D.css" data-precedence="default"/>' +
+        '<div id="__gio">bare-page</div></body></html>',
+    );
+    await vi.waitFor(() => expect(headSheets()).toContain('/_next/static/css/route-D.css'));
+    document.head.querySelector('link[href="/_next/static/css/route-D.css"]')?.dispatchEvent(new Event('load'));
+    await nav;
+    expect(document.getElementById('__gio')?.textContent).toBe('bare-page');
+  });
+
   it('swaps immediately when every stylesheet is already present', async () => {
     const page = deferredFetch();
     vi.stubGlobal('fetch', vi.fn(() => page.response));
