@@ -92,6 +92,74 @@ describe('revalidate caching semantics', () => {
   });
 });
 
+describe('cache tags', () => {
+  function cacheTagsOf(result: Awaited<ReturnType<typeof renderRoute>>): string[] | undefined {
+    return 'cacheTags' in result ? result.cacheTags : undefined;
+  }
+
+  it('sends export const tags plus getServerSideProps tags, de-duplicated', async () => {
+    const routes = makeRoute('/posts/:id', {
+      revalidate: 60,
+      tags: ['posts'],
+      getServerSideProps: async ctx => ({
+        props: { id: ctx.params['id'] },
+        tags: [`post:${ctx.params['id']}`, 'posts'],
+      }),
+    }, 'posts/[id]');
+    const req = { ...makeRequest('/posts/42'), params: {} };
+    const result = await renderRoute(req, routes, noLayouts);
+    expect(cacheTagsOf(result)).toEqual(['posts', 'post:42']);
+  });
+
+  it('drops invalid tags instead of failing the render', async () => {
+    const routes = makeRoute('/', {
+      revalidate: 60,
+      tags: ['ok', '', 'x'.repeat(257), '_gio:path:/', 'bad\ntag', 42 as unknown as string],
+    });
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+    expect('status' in result && result.status).toBe(200);
+    expect(cacheTagsOf(result)).toEqual(['ok']);
+  });
+
+  it('caps a render at 64 tags and ignores a non-array declaration', async () => {
+    const many = Array.from({ length: 80 }, (_, i) => `t${i}`);
+    const routes = makeRoute('/', {
+      revalidate: 60,
+      tags: 'posts' as unknown as string[],
+      getServerSideProps: async () => ({ props: {}, tags: many }),
+    });
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+    expect(cacheTagsOf(result)).toEqual(many.slice(0, 64));
+  });
+
+  it('flat props named tags stay props', async () => {
+    const routes = makeRoute('/', {
+      revalidate: 60,
+      getServerSideProps: async () => ({ tags: ['a-prop'] }),
+    });
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+    expect(cacheTagsOf(result)).toBeUndefined();
+  });
+
+  it('uncacheable renders carry no tags', async () => {
+    const routes = makeRoute('/', { tags: ['posts'] });
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+    expect(cacheTagsOf(result)).toBeUndefined();
+  });
+
+  it('a PPR shell head carries the tags its cached shell is stored with', async () => {
+    const routes = makeRoute('/', { shell: 'cache', revalidate: 60, tags: ['feed'] });
+    const result = await renderRoute(
+      makeRequest('/'), routes, noLayouts, undefined, undefined, undefined, { streaming: true },
+    );
+    expect('type' in result && result.type).toBe('stream');
+    const head = (result as StreamRenderResult).head;
+    expect(head.pprShell).toBe(true);
+    expect(head.cacheTags).toEqual(['feed']);
+    await (result as StreamRenderResult).stream.cancel();
+  });
+});
+
 // ─── Bug 3: redirect support ──────────────────────────────────────────────────
 
 describe('getServerSideProps redirect', () => {

@@ -24,6 +24,11 @@ import type { NodePluginRegistry } from './plugin.ts';
 import type { WireMiddlewareRules } from './middleware.ts';
 import { logger, withRequestLogContext } from './logger.ts';
 import { createErrorDigest, describeError, isDevMode } from './mode.ts';
+import {
+  attachRevalidationChannel,
+  enableRevalidation,
+  settleRevalidateAck,
+} from './revalidate.ts';
 
 const IS_WINDOWS = process.platform === 'win32';
 // Rust resolves a per-instance path (unique pipe name on Windows) and passes
@@ -86,6 +91,8 @@ export function createIPCServer(
 
   // Live IPC serving opts into streaming; static export never comes through here.
   const renderExtras: RenderExtras = { ...extras, streaming: true };
+  // revalidateTag()/revalidatePath() now reach a server (once Rust connects).
+  enableRevalidation();
 
   const server = net.createServer(socket => {
     logger.info('rust connected', { pipe: PIPE_PATH });
@@ -103,6 +110,7 @@ export function createIPCServer(
     });
 
     let ackReceived = false;
+    let detachRevalidation: (() => void) | null = null;
     const activeSseCleanups = new Map<string, () => void>();
     const activeRenders = new Map<string, AbortController>();
     const writeDroppableFrame = makeDroppableFrameWriter(socket);
@@ -128,6 +136,9 @@ export function createIPCServer(
             return;
           }
           ackReceived = true;
+          // Purge requests ride this connection only after the handshake:
+          // an unauthenticated peer must never see them.
+          detachRevalidation = attachRevalidationChannel(frame => writeFrame(socket, frame));
           logger.info('ack received, ready to serve requests');
         }
         return;
@@ -136,6 +147,12 @@ export function createIPCServer(
       if (msg['type'] === 'shutdown') {
         logger.info('shutdown requested');
         socket.destroy();
+        return;
+      }
+
+      // Rust confirmed (or refused) a revalidateTag/revalidatePath purge.
+      if (msg['type'] === 'revalidate_ack') {
+        settleRevalidateAck(msg);
         return;
       }
 
@@ -302,6 +319,7 @@ export function createIPCServer(
     });
     socket.on('close', () => {
       logger.info('rust disconnected');
+      detachRevalidation?.();
       // Run all pending SSE cleanups on disconnect. These are user-supplied
       // callbacks running inside a net 'close' listener - a throw here would
       // be an uncaught exception that kills the whole worker.

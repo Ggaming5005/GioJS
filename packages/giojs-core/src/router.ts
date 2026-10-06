@@ -53,10 +53,15 @@ export interface RedirectResult {
   headers?: GsspResponseHeaders;
 }
 
-/** `{ props, headers }` form of a getServerSideProps result. */
+/** `{ props, headers, tags }` form of a getServerSideProps result. */
 export interface PropsResult {
   props: Record<string, unknown>;
   headers?: GsspResponseHeaders;
+  /**
+   * Cache tags for this render, added to the page's `export const tags`
+   * (e.g. `['post:42']`); `revalidateTag()` purges every page carrying one.
+   */
+  tags?: readonly string[];
 }
 
 export interface RouteModule {
@@ -116,6 +121,12 @@ export interface PageModule {
     ctx: GsspContext,
   ) => Promise<PropsResult | RedirectResult | NotFoundResult | Record<string, unknown>>;
   revalidate?: number | false;
+  /**
+   * Cache tags for every render of this page (e.g. `['posts']`), used by
+   * `revalidateTag()` and POST /_gio/revalidate. Strings of 1-256 bytes,
+   * at most 64 per render; `_gio:` is reserved.
+   */
+  tags?: readonly string[];
   /**
    * PPR opt-in: 'cache' streams the render, caches the pre-Suspense shell,
    * and re-renders only the holes per request. Requires `revalidate`.

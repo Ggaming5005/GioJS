@@ -57,6 +57,7 @@ import {
 } from './request-body.ts';
 import { parseCookies } from './cookies.ts';
 import { installedImageConfig, type ImageRenderConfig } from './image-config.ts';
+import { sanitizeCacheTags } from './revalidate.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -653,6 +654,7 @@ export async function renderRoute(
 
     let props: Record<string, unknown> = {};
     let gsspHeaders: IpcHeaders | null = null;
+    let gsspTags: unknown = undefined;
     let credentialsRead = (): boolean => false;
     if (pageModule.getServerSideProps) {
       const gssp = makeGsspContext(req, match.params, credentialHeaders);
@@ -683,11 +685,13 @@ export async function renderRoute(
         );
       }
       // Support both { props: {...} } (Next.js convention) and flat { key: value }.
-      // Response headers ({ props, headers }) are honored only alongside a
-      // props key, so flat objects that happen to contain `headers` still work.
+      // Response headers ({ props, headers }) and cache tags ({ props, tags })
+      // are honored only alongside a props key, so flat objects that happen
+      // to contain `headers` or `tags` still work.
       const nested = result['props'];
       if (isRecord(nested)) {
         props = nested;
+        gsspTags = result['tags'];
         const returnedHeaders = result['headers'];
         if (isHeaderRecord(returnedHeaders)) {
           // Checked after flattening: `{ 'set-cookie': [] }` (cookies set
@@ -769,6 +773,15 @@ export async function renderRoute(
       'content-type': 'text/html; charset=utf-8',
       ...(gsspHeaders?.headers ?? {}),
     };
+    // Rust stores them with the cached page (plus its path) for
+    // revalidateTag() / revalidatePath() and POST /_gio/revalidate.
+    const cacheTags = sanitizeCacheTags(
+      [
+        { source: 'export const tags', value: pageModule.tags },
+        { source: 'getServerSideProps tags', value: gsspTags },
+      ],
+      match.module.urlPattern,
+    );
     const pageCookies = setCookiesField(gsspHeaders?.setCookies ?? []);
 
     // Streaming applies only to non-shareable renders (mirrors Rust's
@@ -916,6 +929,7 @@ export async function renderRoute(
           cacheMaxAge: skipShell ? 0 : cacheMaxAge,
           streaming: true,
           ...(storeShell ? { pprShell: true } : {}),
+          ...(storeShell && cacheTags.length > 0 ? { cacheTags } : {}),
           ...pageCookies,
         },
         stream,
@@ -963,6 +977,7 @@ export async function renderRoute(
       body,
       cacheable,
       cacheMaxAge,
+      ...(cacheable && cacheTags.length > 0 ? { cacheTags } : {}),
       ...pageCookies,
     };
 

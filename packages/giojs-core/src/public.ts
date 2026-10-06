@@ -10,6 +10,8 @@ export type { SseStream, SseCleanupFn } from './sse.ts';
 export type { GioRequest, GioSocket } from './context.ts';
 export type { GioNodePlugin } from './plugin.ts';
 export { notFound } from './not-found.ts';
+export { revalidatePath, revalidateTag } from './revalidate.ts';
+export type { RevalidateResult, RevalidatePathOptions } from './revalidate.ts';
 export type { GioErrorProps, GioErrorInfo } from './segment-tree.ts';
 export { defineMiddleware } from './middleware.ts';
 export { cspNonce } from './csp.ts';
