@@ -8,6 +8,7 @@
  *
  * Fixtures live under this package so page files can resolve `react`.
  */
+import { spawnSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile, access } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,4 +66,51 @@ describe('exportSite 404.html', () => {
     expect(html).toContain('EXPORT_CUSTOM_404');
     expect(html).not.toContain('HTTP 404');
   });
+});
+
+describe('gio export .env loading', () => {
+  afterAll(async () => {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  });
+
+  it('loads the project .env files (production precedence) without overriding the environment', async () => {
+    const projectDir = join(fixtureRoot, 'env');
+    const appDir = join(projectDir, 'app');
+    const outDir = join(projectDir, 'out');
+    await mkdir(appDir, { recursive: true });
+    await writeFile(
+      join(appDir, 'page.tsx'),
+      `import React from 'react';
+export default function Home(props: { a: string; b: string }) {
+  return React.createElement('p', null, \`A=\${props.a};B=\${props.b}\`);
+}
+export async function getServerSideProps() {
+  return { props: { a: process.env.GIO_EXPORT_TEST_A, b: process.env.GIO_EXPORT_TEST_B } };
+}
+`,
+    );
+    await writeFile(join(projectDir, '.env'), 'GIO_EXPORT_TEST_A=from-env\nGIO_EXPORT_TEST_B=from-env\n');
+    await writeFile(join(projectDir, '.env.production'), 'GIO_EXPORT_TEST_A=from-env-production\n');
+    await writeFile(join(projectDir, '.env.development'), 'GIO_EXPORT_TEST_A=from-env-development\n');
+
+    const result = spawnSync(
+      process.execPath,
+      [join(packageDir, 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(packageDir, 'src', 'export-cli.ts')],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          NODE_ENV: 'production',
+          GIO_APP_DIR: appDir,
+          GIO_OUT_DIR: outDir,
+          GIO_EXPORT_TEST_B: 'from-process',
+        },
+        timeout: 60_000,
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('loaded env: .env.production, .env');
+    const html = await readFile(join(outDir, 'index.html'), 'utf8');
+    expect(html).toContain('A=from-env-production;B=from-process');
+  }, 60_000);
 });
