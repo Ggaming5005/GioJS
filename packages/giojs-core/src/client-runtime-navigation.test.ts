@@ -208,6 +208,55 @@ describe('persistent root', () => {
     expect(document.querySelector('h1')?.textContent).toBe('Y');
   });
 
+  it("shows the folder's loading.* while the next page suspends, inside the kept layout", async () => {
+    const withLoading: SegmentLevel[] = [
+      { layout: CounterLayout, loading: () => React.createElement('p', { id: 'loading' }, 'loading') },
+    ];
+    const runtime = await import('./client-runtime.ts');
+    const first: PageSpec = { path: '/s/1', pattern: '/s/:id', props: { label: 'one' } };
+    const html = renderToString(
+      withNavigation(
+        navState(first),
+        React.createElement(
+          'div',
+          { id: '__gio' },
+          runtime.buildSegmentTree(React.createElement(Page, { label: 'one' }), first.path, withLoading),
+        ),
+      ),
+    );
+    document.body.innerHTML = html;
+    swapEnvelope(first);
+    let release: (value: string) => void = () => undefined;
+    const data = new Promise<string>(resolve => {
+      release = resolve;
+    });
+    function Slow(): React.ReactElement {
+      return React.createElement('h1', null, React.use(data));
+    }
+    await act(async () => {
+      runtime.registerRoute('/s/:id', (props, path) =>
+        runtime.buildSegmentTree(
+          React.createElement(path === '/s/1' ? Page : Slow, props as { label: string }),
+          path,
+          withLoading,
+        ),
+      );
+    });
+    act(() => document.getElementById('count')?.click());
+
+    swapEnvelope({ path: '/s/2', pattern: '/s/:id', props: { label: 'two' } });
+    // Async act: a sync act() scope never delivers the retry ping of a
+    // boundary that suspended inside flushSync (browsers do).
+    await act(async () => runtimeApi().commit(null));
+    expect(text('loading')).toBe('loading');
+    expect(text('count')).toBe('count=1');
+
+    await act(async () => release('second'));
+    expect(text('loading')).toBeNull();
+    expect(document.querySelector('h1')?.textContent).toBe('second');
+    expect(text('count')).toBe('count=1');
+  });
+
   it('swaps server-only pages in, then renders a fresh root for the next client page', async () => {
     await loadFirstPage({ path: '/a', pattern: '/a', props: { label: 'A' } }, Page);
     act(() => document.getElementById('count')?.click());
