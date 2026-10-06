@@ -31,11 +31,14 @@ function makeRequest(path: string, id = 'req-1'): IPCRequest {
 function makeRoute(
   pattern: string,
   pageOverrides: Partial<PageModule> = {},
+  // app/-relative page directory; for static patterns it mirrors the URL.
+  dir = pattern.slice(1),
 ): Map<string, RouteModule> {
   const routes = new Map<string, RouteModule>();
   routes.set(pattern, {
     filePath: '/fake/page.tsx',
     urlPattern: pattern,
+    dir,
     load: async () => ({
       default: function TestPage() {
         return React.createElement('div', null, 'page content');
@@ -47,6 +50,10 @@ function makeRoute(
 }
 
 const noLayouts = new Map<string, LayoutEntry>();
+
+function bodyOf(result: Awaited<ReturnType<typeof renderRoute>>): string {
+  return 'body' in result ? result.body : '';
+}
 
 // ─── Bug 2: revalidate caching ────────────────────────────────────────────────
 
@@ -162,10 +169,10 @@ describe('getServerSideProps props extraction', () => {
 // ─── Bug 1: layout wrapping ───────────────────────────────────────────────────
 
 describe('layout wrapping', () => {
-  function makeLayout(urlPrefix: string, wrapperClass: string): LayoutEntry {
+  function makeLayout(dir: string, wrapperClass: string): LayoutEntry {
     return {
       filePath: '/fake/layout.tsx',
-      urlPrefix,
+      dir,
       load: async (): Promise<LayoutModule> => ({
         default: function TestLayout({ children }: { children: React.ReactNode; path?: string }) {
           return React.createElement('div', { className: wrapperClass }, children);
@@ -177,7 +184,7 @@ describe('layout wrapping', () => {
   it('wraps page content in a single layout', async () => {
     const routes = makeRoute('/docs');
     const layouts = new Map<string, LayoutEntry>([
-      ['/', makeLayout('/', 'root-layout')],
+      ['', makeLayout('', 'root-layout')],
     ]);
     const result = await renderRoute(makeRequest('/docs'), routes, layouts);
     expect('body' in result && result.body).toContain('root-layout');
@@ -187,8 +194,8 @@ describe('layout wrapping', () => {
   it('applies nested layouts outermost-first', async () => {
     const routes = makeRoute('/docs/guide');
     const layouts = new Map<string, LayoutEntry>([
-      ['/', makeLayout('/', 'root-layout')],
-      ['/docs', makeLayout('/docs', 'docs-layout')],
+      ['', makeLayout('', 'root-layout')],
+      ['docs', makeLayout('docs', 'docs-layout')],
     ]);
     const result = await renderRoute(makeRequest('/docs/guide'), routes, layouts);
     const body = 'body' in result ? result.body : '';
@@ -200,7 +207,7 @@ describe('layout wrapping', () => {
   it('skips the document wrapper when a root layout exists, keeping the #__gio boundary inside it', async () => {
     const routes = makeRoute('/');
     const layouts = new Map<string, LayoutEntry>([
-      ['/', makeLayout('/', 'root-layout')],
+      ['', makeLayout('', 'root-layout')],
     ]);
     const result = await renderRoute(makeRequest('/'), routes, layouts);
     const body = 'body' in result ? result.body : '';
@@ -220,14 +227,165 @@ describe('layout wrapping', () => {
   it('keeps the root layout outside the hydration boundary but inner layouts inside it', async () => {
     const routes = makeRoute('/docs/guide');
     const layouts = new Map<string, LayoutEntry>([
-      ['/', makeLayout('/', 'root-layout')],
-      ['/docs', makeLayout('/docs', 'docs-layout')],
+      ['', makeLayout('', 'root-layout')],
+      ['docs', makeLayout('docs', 'docs-layout')],
     ]);
     const result = await renderRoute(makeRequest('/docs/guide'), routes, layouts);
     const body = 'body' in result ? result.body : '';
     const boundary = body.indexOf('id="__gio"');
     expect(body.indexOf('root-layout')).toBeLessThan(boundary);
     expect(body.indexOf('docs-layout')).toBeGreaterThan(boundary);
+  });
+
+  it('applies a layout inside a dynamic [id] folder to the pages beneath it', async () => {
+    const routes = makeRoute('/posts/:id', {}, 'posts/[id]');
+    const layouts = new Map<string, LayoutEntry>([
+      ['', makeLayout('', 'root-layout')],
+      ['posts/[id]', makeLayout('posts/[id]', 'post-layout')],
+    ]);
+    const body = bodyOf(await renderRoute(makeRequest('/posts/42'), routes, layouts));
+    expect(body).toContain('post-layout');
+    expect(body.indexOf('root-layout')).toBeLessThan(body.indexOf('post-layout'));
+  });
+
+  it("applies a (group) layout only to that group's pages", async () => {
+    const layouts = new Map<string, LayoutEntry>([
+      ['(shop)', makeLayout('(shop)', 'shop-layout')],
+      ['(marketing)', makeLayout('(marketing)', 'marketing-layout')],
+    ]);
+    const routes = new Map([
+      ...makeRoute('/cart', {}, '(shop)/cart'),
+      ...makeRoute('/about', {}, '(marketing)/about'),
+    ]);
+    const cart = bodyOf(await renderRoute(makeRequest('/cart'), routes, layouts));
+    expect(cart).toContain('shop-layout');
+    expect(cart).not.toContain('marketing-layout');
+    const about = bodyOf(await renderRoute(makeRequest('/about'), routes, layouts));
+    expect(about).toContain('marketing-layout');
+    expect(about).not.toContain('shop-layout');
+  });
+
+  it('associates layouts by folder, not URL prefix', async () => {
+    // app/(feeds)/blog/rss/page.tsx serves /blog/rss but is not inside
+    // app/blog/, so app/blog/layout.tsx must not wrap it.
+    const routes = makeRoute('/blog/rss', {}, '(feeds)/blog/rss');
+    const layouts = new Map<string, LayoutEntry>([['blog', makeLayout('blog', 'blog-layout')]]);
+    const body = bodyOf(await renderRoute(makeRequest('/blog/rss'), routes, layouts));
+    expect(body).toContain('page content');
+    expect(body).not.toContain('blog-layout');
+  });
+
+  it('wraps root special pages in the root layout only, whatever the URL', async () => {
+    const layouts = new Map<string, LayoutEntry>([
+      ['', makeLayout('', 'root-layout')],
+      ['docs', makeLayout('docs', 'docs-layout')],
+    ]);
+    const specialPages = {
+      notFound: async () => ({
+        default: function NotFound() {
+          return React.createElement('h1', null, 'MISSING');
+        },
+      }),
+    };
+    const result = await renderRoute(
+      makeRequest('/docs/missing'), new Map(), layouts, undefined, undefined, undefined, { specialPages },
+    );
+    expect('status' in result && result.status).toBe(404);
+    const body = bodyOf(result);
+    expect(body).toContain('MISSING');
+    expect(body).toContain('root-layout');
+    expect(body).not.toContain('docs-layout');
+  });
+});
+
+// ─── Route matching ───────────────────────────────────────────────────────────
+
+describe('route matching', () => {
+  /** Pages that print their own pattern and params, registered in the given order. */
+  function routesFor(patterns: string[]): Map<string, RouteModule> {
+    const routes = new Map<string, RouteModule>();
+    for (const pattern of patterns) {
+      routes.set(pattern, {
+        filePath: '/fake/page.tsx',
+        urlPattern: pattern,
+        dir: '',
+        load: async () => ({
+          default: function MatchedPage({ params }: Record<string, unknown>) {
+            return React.createElement('p', null, `ROUTE ${pattern} PARAMS ${JSON.stringify(params)}`);
+          },
+        }),
+      });
+    }
+    return routes;
+  }
+
+  async function resolve(patterns: string[], path: string): Promise<string> {
+    const result = await renderRoute(makeRequest(path), routesFor(patterns), noLayouts);
+    if (!('status' in result) || result.status === 404) return '404';
+    // React escapes the JSON quotes in text content.
+    return (/ROUTE (\S+) PARAMS (.*?)<\/p>/.exec(result.body)?.slice(1).join(' ') ?? '')
+      .replace(/&quot;/g, '"');
+  }
+
+  it('matches a catch-all against one or more segments, keeping slashes', async () => {
+    expect(await resolve(['/docs/*slug'], '/docs/a')).toBe('/docs/*slug {"slug":"a"}');
+    expect(await resolve(['/docs/*slug'], '/docs/a/b/c')).toBe('/docs/*slug {"slug":"a/b/c"}');
+  });
+
+  it('never matches a required catch-all against its bare parent', async () => {
+    expect(await resolve(['/docs/*slug'], '/docs')).toBe('404');
+    expect(await resolve(['/docs/*slug'], '/docs/')).toBe('404');
+  });
+
+  it('matches an optional catch-all against the bare parent with an empty param', async () => {
+    expect(await resolve(['/shop/*path?'], '/shop')).toBe('/shop/*path? {"path":""}');
+    expect(await resolve(['/shop/*path?'], '/shop/')).toBe('/shop/*path? {"path":""}');
+    expect(await resolve(['/shop/*path?'], '/shop/a/b')).toBe('/shop/*path? {"path":"a/b"}');
+    expect(await resolve(['/*all?'], '/')).toBe('/*all? {"all":""}');
+  });
+
+  it('ranks static > dynamic > catch-all > optional catch-all regardless of registration order', async () => {
+    const patterns = ['/blog/*any?', '/blog/*rest', '/blog/:id', '/blog/new'];
+    for (const order of [patterns, [...patterns].reverse()]) {
+      expect(await resolve(order, '/blog/new')).toBe('/blog/new {}');
+      expect(await resolve(order, '/blog/42')).toBe('/blog/:id {"id":"42"}');
+      expect(await resolve(order, '/blog/a/b')).toBe('/blog/*rest {"rest":"a/b"}');
+      expect(await resolve(order, '/blog')).toBe('/blog/*any? {"any":""}');
+    }
+  });
+
+  it('prefers a static page over an optional catch-all that matches nothing', async () => {
+    for (const order of [['/shop', '/shop/*p?'], ['/shop/*p?', '/shop']]) {
+      expect(await resolve(order, '/shop')).toBe('/shop {}');
+      expect(await resolve(order, '/shop/x')).toBe('/shop/*p? {"p":"x"}');
+    }
+    // A deeper dynamic pattern beats an optional catch-all one level up.
+    expect(await resolve(['/:a/*b?', '/:a/:b'], '/x/y')).toBe('/:a/:b {"a":"x","b":"y"}');
+    expect(await resolve(['/:a/:b', '/:a/*b?'], '/x')).toBe('/:a/*b? {"a":"x","b":""}');
+  });
+
+  it('compares specificity segment by segment, left to right', async () => {
+    for (const order of [['/:a/b', '/a/:b'], ['/a/:b', '/:a/b']]) {
+      expect(await resolve(order, '/a/b')).toBe('/a/:b {"b":"b"}');
+    }
+  });
+
+  it('never resolves a literal request for a dynamic pattern without params', async () => {
+    expect(await resolve(['/posts/:id'], '/posts/:id')).toBe('/posts/:id {"id":":id"}');
+  });
+
+  it('matches route.ts handlers with catch-all patterns', async () => {
+    const handlers = new Map<string, HandlerEntry>([
+      ['/api/files/*key', {
+        filePath: '/fake/route.ts',
+        urlPattern: '/api/files/*key',
+        methods: new Map<string, RouteHandlerFn>([['GET', req => ({ key: req.params['key'] })]]),
+      }],
+    ]);
+    const result = await renderRoute(
+      makeRequest('/api/files/a/b.txt'), new Map(), noLayouts, undefined, undefined, undefined, { handlers },
+    );
+    expect('body' in result && JSON.parse(result.body)).toEqual({ key: 'a/b.txt' });
   });
 });
 
@@ -360,9 +518,9 @@ describe('streaming SSR', () => {
   it('streams without the document wrapper when a root layout provides the shell', async () => {
     const routes = makeRoute('/');
     const layouts = new Map<string, LayoutEntry>([
-      ['/', {
+      ['', {
         filePath: '/fake/layout.tsx',
-        urlPrefix: '/',
+        dir: '',
         load: async () => ({
           default: function RootLayout({ children }: { children?: React.ReactNode }) {
             return React.createElement('html', null,

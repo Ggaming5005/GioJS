@@ -12,8 +12,8 @@ import { resolve, sep } from 'node:path';
 export interface StandaloneEntrySpec {
   /** Absolute path to giojs-core's standalone-entry.ts. */
   entryModulePath: string;
-  routes: Array<{ pattern: string; filePath: string }>;
-  layouts: Array<{ prefix: string; filePath: string }>;
+  routes: Array<{ pattern: string; dir: string; filePath: string }>;
+  layouts: Array<{ dir: string; filePath: string }>;
   routeFiles: Array<{ pattern: string; filePath: string }>;
   notFoundPath?: string;
   errorPath?: string;
@@ -37,14 +37,14 @@ export function generateStandaloneEntry(spec: StandaloneEntrySpec): string {
   spec.routes.forEach((route, index) => {
     imports.push(`import * as gioPage${index} from ${moduleSpecifier(route.filePath)};`);
     routeEntries.push(
-      `    { pattern: ${JSON.stringify(route.pattern)}, filePath: ${JSON.stringify(route.filePath)}, module: gioPage${index} },`,
+      `    { pattern: ${JSON.stringify(route.pattern)}, dir: ${JSON.stringify(route.dir)}, filePath: ${JSON.stringify(route.filePath)}, module: gioPage${index} },`,
     );
   });
   const layoutEntries: string[] = [];
   spec.layouts.forEach((layout, index) => {
     imports.push(`import * as gioLayout${index} from ${moduleSpecifier(layout.filePath)};`);
     layoutEntries.push(
-      `    { prefix: ${JSON.stringify(layout.prefix)}, filePath: ${JSON.stringify(layout.filePath)}, module: gioLayout${index} },`,
+      `    { dir: ${JSON.stringify(layout.dir)}, filePath: ${JSON.stringify(layout.filePath)}, module: gioLayout${index} },`,
     );
   });
   const routeFileEntries: string[] = [];

@@ -15,10 +15,10 @@ function fullSpec(): StandaloneEntrySpec {
   return {
     entryModulePath: CORE_ENTRY,
     routes: [
-      { pattern: '/', filePath: resolve('/proj/app/page.tsx') },
-      { pattern: '/posts/:id', filePath: resolve('/proj/app/posts/[id]/page.tsx') },
+      { pattern: '/', dir: '', filePath: resolve('/proj/app/page.tsx') },
+      { pattern: '/posts/:id', dir: 'posts/[id]', filePath: resolve('/proj/app/posts/[id]/page.tsx') },
     ],
-    layouts: [{ prefix: '/', filePath: resolve('/proj/app/layout.tsx') }],
+    layouts: [{ dir: '', filePath: resolve('/proj/app/layout.tsx') }],
     routeFiles: [{ pattern: '/api/notes', filePath: resolve('/proj/app/api/notes/route.ts') }],
     notFoundPath: resolve('/proj/app/not-found.tsx'),
     errorPath: resolve('/proj/app/error.tsx'),
@@ -50,7 +50,8 @@ describe('generateStandaloneEntry', () => {
 
   it('wires layouts, route files, special pages, config, and middleware', () => {
     const source = generateStandaloneEntry(fullSpec());
-    expect(source).toContain('prefix: "/", ');
+    expect(source).toContain('dir: "", filePath: ');
+    expect(source).toContain('dir: "posts/[id]", ');
     expect(source).toContain('module: gioLayout0');
     expect(source).toContain('pattern: "/api/notes", ');
     expect(source).toContain('module: gioRoute0');
@@ -63,7 +64,7 @@ describe('generateStandaloneEntry', () => {
   it('omits optional sections that were not discovered', () => {
     const source = generateStandaloneEntry({
       entryModulePath: CORE_ENTRY,
-      routes: [{ pattern: '/', filePath: resolve('/proj/app/page.tsx') }],
+      routes: [{ pattern: '/', dir: '', filePath: resolve('/proj/app/page.tsx') }],
       layouts: [],
       routeFiles: [],
       clientScripts: {},

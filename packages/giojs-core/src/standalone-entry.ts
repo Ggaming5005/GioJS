@@ -24,14 +24,16 @@ import { logger } from './logger.ts';
 export interface StandaloneRouteEntry {
   /** URL pattern, e.g. "/posts/:id". */
   pattern: string;
+  /** app/-relative directory of the page; selects its layouts (RouteModule.dir). */
+  dir: string;
   /** Original source path, kept for logs and error messages. */
   filePath: string;
   module: PageModule;
 }
 
 export interface StandaloneLayoutEntry {
-  /** URL prefix this layout covers, e.g. "/" or "/docs". */
-  prefix: string;
+  /** app/-relative directory holding the layout, '' for the root (LayoutEntry.dir). */
+  dir: string;
   filePath: string;
   module: LayoutModule;
 }
@@ -65,15 +67,16 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     routes.set(entry.pattern, {
       filePath: entry.filePath,
       urlPattern: entry.pattern,
+      dir: entry.dir,
       load: () => Promise.resolve(entry.module),
     });
   }
 
   const layouts = new Map<string, LayoutEntry>();
   for (const entry of registry.layouts) {
-    layouts.set(entry.prefix, {
+    layouts.set(entry.dir, {
       filePath: entry.filePath,
-      urlPrefix: entry.prefix,
+      dir: entry.dir,
       load: () => Promise.resolve(entry.module),
     });
   }
