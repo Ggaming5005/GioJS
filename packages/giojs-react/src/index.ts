@@ -1,6 +1,8 @@
 export { GioLink } from './Link.js';
 export type { TransitionPreset } from './Link.js';
 export { GioImage } from './Image.js';
+export { JsonLd } from './JsonLd.js';
+export type { JsonLdProps, JsonLdData } from './JsonLd.js';
 export { GioFont } from './Font.js';
 export { Animate } from './Animate.js';
 export type { AnimatePreset } from './Animate.js';
