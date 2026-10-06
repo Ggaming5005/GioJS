@@ -34,6 +34,11 @@ export default function Page(): React.JSX.Element {
         down to its own, groups and dynamic folders included. Two files resolving to the same
         URLs fail startup with an error naming both. See Layouts &amp; Pages for matching order.
       </p>
+      <p>
+        Param names may not start with <code>.</code> or contain <code>?</code>, <code>:</code>{' '}
+        or <code>*</code>; a folder like <code>[...slug?]</code> or <code>[id?]</code> fails
+        startup instead of quietly changing what the route matches.
+      </p>
     </>
   );
 }

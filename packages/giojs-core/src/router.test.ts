@@ -115,6 +115,20 @@ describe('dynamic segment conventions', () => {
     await expect(discoverRoutes(appDir)).rejects.toThrow(`folder ":id" may not start with ':' or '*'`);
   });
 
+  // '?', ':' and '*' are not legal filename characters on Windows.
+  it.skipIf(process.platform === 'win32')('rejects param names containing pattern syntax', async () => {
+    // "[...slug?]" would otherwise read back as an optional catch-all named
+    // "slug", and "[id?]" as a param literally named "id?".
+    for (const folder of ['[...slug?]', '[[...slug?]]', '[id?]', '[a:b]', '[*x]']) {
+      await rm(appDir, { recursive: true, force: true });
+      await touch(`a/${folder}/page.tsx`);
+      await expect(discoverRoutes(appDir)).rejects.toThrow(`unsupported dynamic segment "${folder}"`);
+    }
+    await rm(appDir, { recursive: true, force: true });
+    await touch('api/[...key?]/route.ts', 'export function GET() {}');
+    await expect(discoverRouteFiles(appDir)).rejects.toThrow('unsupported dynamic segment "[...key?]"');
+  });
+
   it('rejects a param name used twice in one route', async () => {
     await touch('[id]/items/[id]/page.tsx');
     await expect(discoverRoutes(appDir)).rejects.toThrow('param "id" appears more than once');
@@ -194,6 +208,34 @@ describe('route conflicts', () => {
     const routeFiles = await discoverRouteFiles(appDir);
     expect(() => assertNoRouteConflicts(appDir, routes, routeFiles)).toThrow(
       'app/(a)/about/page.tsx and app/(b)/about/route.ts both resolve to "/about"',
+    );
+  });
+
+  it('fails when a catch-all and an optional catch-all share a parent', async () => {
+    await touch('docs/[...a]/page.tsx');
+    await touch('docs/[[...b]]/page.tsx');
+    await expect(discoverRoutes(appDir)).rejects.toThrow(
+      'route conflict: app/docs/[...a]/page.tsx and app/docs/[[...b]]/page.tsx overlap - ' +
+        '"/docs/*a" outranks "/docs/*b?" on every URL below "/docs", leaving the optional ' +
+        'catch-all only "/docs" itself',
+    );
+  });
+
+  it('applies the catch-all / optional catch-all rule to route.ts files and across file types', async () => {
+    await touch('(v1)/[[...rest]]/route.ts', 'export function GET() {}');
+    await touch('(v2)/[...all]/route.ts', 'export function GET() {}');
+    await expect(discoverRouteFiles(appDir)).rejects.toThrow(
+      'app/(v1)/[[...rest]]/route.ts and app/(v2)/[...all]/route.ts overlap - "/*all" outranks ' +
+        '"/*rest?" on every URL below "/"',
+    );
+
+    await rm(appDir, { recursive: true, force: true });
+    await touch('docs/[[...b]]/page.tsx');
+    await touch('(api)/docs/[...a]/route.ts', 'export function GET() {}');
+    const routes = await discoverRoutes(appDir);
+    const routeFiles = await discoverRouteFiles(appDir);
+    expect(() => assertNoRouteConflicts(appDir, routes, routeFiles)).toThrow(
+      'app/docs/[[...b]]/page.tsx and app/(api)/docs/[...a]/route.ts overlap - "/docs/*a" outranks "/docs/*b?"',
     );
   });
 

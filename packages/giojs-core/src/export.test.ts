@@ -166,7 +166,7 @@ describe('exportSite catch-all routes', () => {
     expect(written).toEqual(['/docs/ok']);
     expect(skipped.map(s => s.reason)).toEqual([
       'getStaticPaths entry is missing param "slug"',
-      'param "slug" has an empty or relative segment: "../../escape"',
+      'param "slug" has an empty, relative or backslashed segment: "../../escape"',
     ]);
     expect(await exists(join(fixtureRoot, 'catch-all-bad', 'escape'))).toBe(false);
   });
@@ -187,6 +187,20 @@ describe('patternToPath', () => {
   it('rejects a multi-segment value for a one-segment param', () => {
     expect(patternToPath('/posts/:id', { id: 'a/b' })).toEqual({
       error: 'param "id" is a single segment but "a/b" contains \'/\'',
+    });
+  });
+
+  // On Windows path.join treats '\' as a separator and resolves the '..'
+  // parts, so these would write outside out/.
+  it('rejects values whose segments contain a backslash', () => {
+    expect(patternToPath('/docs/*slug', { slug: 'a\\..\\..\\x' })).toEqual({
+      error: 'param "slug" has an empty, relative or backslashed segment: "a\\..\\..\\x"',
+    });
+    expect(patternToPath('/posts/:id', { id: '..\\..' })).toEqual({
+      error: 'param "id" has an empty, relative or backslashed segment: "..\\.."',
+    });
+    expect(patternToPath('/shop/*p?', { p: ['ok', 'a\\b'] })).toEqual({
+      error: 'param "p" has an empty, relative or backslashed segment: "ok/a\\b"',
     });
   });
 });

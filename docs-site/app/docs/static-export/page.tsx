@@ -70,7 +70,8 @@ export function getStaticPaths() {
 }`} />
       <p>
         Entries missing a required param, or whose values contain empty, <code>.</code> or{' '}
-        <code>..</code> segments, are skipped with a reason instead of being written.
+        <code>..</code> segments or a backslash, are skipped with a reason instead of being
+        written - nothing is ever written outside <code>out/</code>.
       </p>
       <div className="callout">
         Dynamic routes without <code>getStaticPaths</code> are skipped with a warning -

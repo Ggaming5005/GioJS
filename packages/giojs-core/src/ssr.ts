@@ -299,10 +299,22 @@ export async function renderRoute(
     req = intercepted;
   }
 
+  const match = matchRoute(req.path, routes);
+
   // ── route.ts method handlers (API routes + SSE) ───────────────────────────
+  // Pages and route.ts files share one precedence rule: the more specific
+  // pattern owns the URL, so app/blog/about/page.tsx is never shadowed by
+  // app/blog/[slug]/route.ts or a catch-all route.ts above it. Equal
+  // patterns are the same-folder pairing (discovery rejects any other): the
+  // route.ts serves the methods it exports and GET/HEAD fall through to the
+  // page.
   const handlerMatch =
     extras?.handlers !== undefined ? matchIn(req.path, extras.handlers) : null;
-  if (handlerMatch !== null) {
+  const handlerVsPage =
+    handlerMatch === null || match === null
+      ? -1
+      : compareSpecificity(handlerMatch.pattern, match.module.urlPattern);
+  if (handlerMatch !== null && handlerVsPage <= 0) {
     // HEAD is served by the GET handler (body discarded by the client).
     const method = req.method === 'HEAD' ? 'GET' : req.method;
     const handler = handlerMatch.entry.methods.get(method);
@@ -313,15 +325,13 @@ export async function renderRoute(
       }
       return result;
     }
-    // A handler file owns this path for its exported methods; a GET without a
-    // GET handler may still be a page render. Anything else is a 405.
-    const pageExists = matchRoute(req.path, routes) !== null;
-    if (!((req.method === 'GET' || req.method === 'HEAD') && pageExists)) {
+    // The route.ts owns this URL; only a sibling page (same pattern) may still
+    // render a GET it does not export. Anything else is a 405.
+    const siblingPage = handlerVsPage === 0;
+    if (!((req.method === 'GET' || req.method === 'HEAD') && siblingPage)) {
       return methodNotAllowed(req, [...handlerMatch.entry.methods.keys()]);
     }
   }
-
-  const match = matchRoute(req.path, routes);
 
   if (!match) {
     const notFound = await renderSpecialPage(req, layouts, extras?.specialPages?.notFound, {}, 404, signal);

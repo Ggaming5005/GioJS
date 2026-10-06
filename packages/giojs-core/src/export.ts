@@ -8,7 +8,7 @@
  * (route handlers, SSE, WebSockets) are skipped with a warning.
  */
 import { mkdir, writeFile, cp, access } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative, resolve, isAbsolute, sep } from 'node:path';
 import { discoverRoutes, discoverLayouts, discoverSpecialPages } from './router.ts';
 import { renderRoute } from './ssr.ts';
 import type { IPCRequest, IPCResponse } from './context.ts';
@@ -60,9 +60,11 @@ export function patternToPath(
       return { error: `param "${name}" is a single segment but "${value}" contains '/'` };
     }
     // Each value segment becomes a directory under out/: empty, '.' and '..'
-    // segments would write outside the route (or outside out/ entirely).
-    if (valueSegments.some(s => s === '' || s === '.' || s === '..')) {
-      return { error: `param "${name}" has an empty or relative segment: "${value}"` };
+    // segments would write outside the route (or outside out/ entirely), and
+    // so would a backslash, which Windows path.join treats as a separator
+    // ("a\..\..\x").
+    if (valueSegments.some(s => s === '' || s === '.' || s === '..' || s.includes('\\'))) {
+      return { error: `param "${name}" has an empty, relative or backslashed segment: "${value}"` };
     }
     resolved[name] = value;
     parts.push(...valueSegments);
@@ -70,10 +72,16 @@ export function patternToPath(
   return { path: '/' + parts.join('/'), params: resolved };
 }
 
-/** Map a URL path to its output file: "/" → out/index.html, "/a/b" → out/a/b/index.html. */
-function pathToFile(outDir: string, urlPath: string): string {
+/**
+ * Map a URL path to its output file: "/" → out/index.html, "/a/b" →
+ * out/a/b/index.html. Returns null when the resolved file would land outside
+ * out/ - a last line of defense behind patternToPath's segment checks.
+ */
+function pathToFile(outDir: string, urlPath: string): string | null {
   const clean = urlPath.replace(/^\/+|\/+$/g, '');
-  return clean === '' ? join(outDir, 'index.html') : join(outDir, clean, 'index.html');
+  const file = clean === '' ? join(outDir, 'index.html') : join(outDir, clean, 'index.html');
+  const rel = relative(resolve(outDir), resolve(file));
+  return rel.startsWith(`..${sep}`) || isAbsolute(rel) ? null : file;
 }
 
 function makeRequest(path: string, params: Record<string, string>): IPCRequest {
@@ -135,6 +143,10 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
       const res = out as IPCResponse;
       if (res.status === 200 && typeof res.body === 'string') {
         const file = pathToFile(outDir, target.path);
+        if (file === null) {
+          skipped.push({ route: target.path, reason: 'output path escapes the export directory' });
+          continue;
+        }
         await mkdir(dirname(file), { recursive: true });
         await writeFile(file, res.body, 'utf8');
         written.push(target.path);

@@ -60,6 +60,13 @@ export function GET() {
         <li>Handler responses are never cached or coalesced - every request runs your code.</li>
         <li>Requests for methods you didn&apos;t export get <code>405</code> with an <code>Allow</code> header.</li>
         <li>A GET without a GET handler falls through to a sibling <code>page.tsx</code> if one exists.</li>
+        <li>
+          When a page and a route.ts in different folders both match a URL, the more specific
+          pattern owns it (see Layouts &amp; Pages): <code>app/blog/about/page.tsx</code> wins
+          /blog/about over <code>app/blog/[slug]/route.ts</code>, and a route.ts that is more
+          specific than a matching page answers every method itself (405 for those it does
+          not export).
+        </li>
         <li>Pages only answer GET/HEAD - mutations belong in route handlers.</li>
         <li>A thrown error is logged server-side and answered with a JSON 500 (no internals leaked).</li>
         <li>Export <code>wsHandler</code> from the same file for WebSockets - see the WebSockets page.</li>

@@ -339,10 +339,12 @@ async function walkAppDir(
 
 // Optional catch-all is tested before catch-all before plain dynamic. Names
 // may not start with '.' or contain brackets, so "[...slug]" can never be
-// read as a one-segment param named "...slug".
-const OPTIONAL_CATCH_ALL_RE = /^\[\[\.\.\.([^[\]./][^[\]/]*)\]\]$/;
-const CATCH_ALL_RE = /^\[\.\.\.([^[\]./][^[\]/]*)\]$/;
-const DYNAMIC_RE = /^\[([^[\]./][^[\]/]*)\]$/;
+// read as a one-segment param named "...slug". Nor may they contain the
+// pattern syntax characters '?', ':' or '*': "[...slug?]" would otherwise
+// become "*slug?" and silently turn into an optional catch-all.
+const OPTIONAL_CATCH_ALL_RE = /^\[\[\.\.\.([^[\]./?:*][^[\]/?:*]*)\]\]$/;
+const CATCH_ALL_RE = /^\[\.\.\.([^[\]./?:*][^[\]/?:*]*)\]$/;
+const DYNAMIC_RE = /^\[([^[\]./?:*][^[\]/?:*]*)\]$/;
 
 /**
  * Convert app/-relative folder segments to a URL pattern:
@@ -398,17 +400,25 @@ function segmentsToUrlPattern(segments: readonly string[], source: string): stri
 /**
  * A pattern with its param names erased. Two patterns with the same shape
  * match exactly the same URLs (`/posts/:id` vs `/posts/:slug`), so precedence
- * cannot order them - that is a conflict, not a tie to break.
+ * cannot order them - that is a conflict, not a tie to break. Catch-all
+ * optionality is erased too: beside `/docs/*a`, which outranks it on every
+ * deeper URL, `/docs/*b?` could only ever serve "/docs" itself.
  */
 function patternShape(pattern: string): string {
   return pattern
     .split('/')
     .map(segment => {
       if (segment.startsWith(':')) return ':';
-      if (segment.startsWith('*')) return segment.endsWith('?') ? '*?' : '*';
+      if (segment.startsWith('*')) return '*';
       return segment;
     })
     .join('/');
+}
+
+/** Whether the last segment is an optional catch-all (`*slug?`). */
+function endsInOptionalCatchAll(pattern: string): boolean {
+  const last = pattern.slice(pattern.lastIndexOf('/') + 1);
+  return last.startsWith('*') && last.endsWith('?');
 }
 
 /** Project-relative, '/'-separated path for messages ("app/(a)/about/page.tsx"). */
@@ -423,12 +433,23 @@ function routeConflict(
   secondFile: string,
   secondPattern: string,
 ): Error {
+  const files = `${displayPath(appDir, firstFile)} and ${displayPath(appDir, secondFile)}`;
+  if (endsInOptionalCatchAll(firstPattern) !== endsInOptionalCatchAll(secondPattern)) {
+    const [required, optional] = endsInOptionalCatchAll(secondPattern)
+      ? [firstPattern, secondPattern]
+      : [secondPattern, firstPattern];
+    const parent = optional.slice(0, optional.lastIndexOf('/')) || '/';
+    return new Error(
+      `route conflict: ${files} overlap - "${required}" outranks "${optional}" on every URL ` +
+        `below "${parent}", leaving the optional catch-all only "${parent}" itself; keep one ` +
+        `catch-all (a page can serve "${parent}" beside a required one)`,
+    );
+  }
   const resolved =
     firstPattern === secondPattern
       ? `"${firstPattern}"`
       : `"${firstPattern}" and "${secondPattern}" (the same URLs under different param names)`;
   return new Error(
-    `route conflict: ${displayPath(appDir, firstFile)} and ${displayPath(appDir, secondFile)} ` +
-      `both resolve to ${resolved} - every URL must be served by exactly one file`,
+    `route conflict: ${files} both resolve to ${resolved} - every URL must be served by exactly one file`,
   );
 }

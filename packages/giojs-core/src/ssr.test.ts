@@ -686,6 +686,81 @@ describe('route.ts method handlers', () => {
   });
 });
 
+// ─── pages vs route.ts handlers ───────────────────────────────────────────────
+
+describe('page and route.ts precedence', () => {
+  async function render(
+    method: string,
+    path: string,
+    routes: Map<string, RouteModule>,
+    handlers: Map<string, HandlerEntry>,
+  ): Promise<{ status: number; body: string; allow: string | undefined }> {
+    const result = await renderRoute(
+      { ...makeRequest(path), method }, routes, noLayouts, undefined, undefined, undefined, { handlers },
+    );
+    if (!('status' in result)) throw new Error('expected a buffered response');
+    return { status: result.status, body: result.body, allow: result.headers['allow'] };
+  }
+
+  const echoSlug: RouteHandlerFn = req => ({ handler: true, params: req.params });
+
+  it('serves a static page over a dynamic route.ts that also matches it', async () => {
+    const routes = makeRoute('/blog/about');
+    const handlers = makeHandlers('/blog/:slug', { GET: echoSlug, POST: echoSlug });
+
+    const page = await render('GET', '/blog/about', routes, handlers);
+    expect(page.status).toBe(200);
+    expect(page.body).toContain('page content');
+    // The page owns the URL, so it answers mutations too - with a 405.
+    const post = await render('POST', '/blog/about', routes, handlers);
+    expect(post.status).toBe(405);
+    expect(post.allow).toBe('GET, HEAD');
+    // Other slugs still reach the handler.
+    const other = await render('GET', '/blog/hello', routes, handlers);
+    expect(JSON.parse(other.body)).toEqual({ handler: true, params: { slug: 'hello' } });
+  });
+
+  it('never lets a catch-all route.ts shadow the pages below it', async () => {
+    const routes = makeRoute('/api/docs');
+    const handlers = makeHandlers('/api/*p', { GET: echoSlug });
+    expect((await render('GET', '/api/docs', routes, handlers)).body).toContain('page content');
+    expect(JSON.parse((await render('GET', '/api/x/y', routes, handlers)).body)).toEqual({
+      handler: true,
+      params: { p: 'x/y' },
+    });
+
+    // An optional catch-all route.ts loses its bare parent to a static page.
+    const shop = makeRoute('/shop');
+    const shopHandlers = makeHandlers('/shop/*p?', { GET: echoSlug });
+    expect((await render('GET', '/shop', shop, shopHandlers)).body).toContain('page content');
+  });
+
+  it('lets a more specific route.ts own its URL outright, without falling through', async () => {
+    const routes = makeRoute('/blog/:slug', {}, 'blog/[slug]');
+    const handlers = makeHandlers('/blog/feed', { POST: echoSlug });
+    // Only a sibling page (same pattern) renders a GET the route.ts lacks.
+    const get = await render('GET', '/blog/feed', routes, handlers);
+    expect(get.status).toBe(405);
+    expect(get.allow).toBe('POST');
+    expect((await render('POST', '/blog/feed', routes, handlers)).status).toBe(200);
+    expect((await render('GET', '/blog/hello', routes, handlers)).body).toContain('page content');
+  });
+
+  it('keeps the same-folder pairing: exported methods hit the route.ts, GET falls through', async () => {
+    const routes = makeRoute('/contact');
+    const handlers = makeHandlers('/contact', { POST: echoSlug });
+    expect((await render('GET', '/contact', routes, handlers)).body).toContain('page content');
+    expect((await render('HEAD', '/contact', routes, handlers)).status).toBe(200);
+    expect(JSON.parse((await render('POST', '/contact', routes, handlers)).body)).toEqual({
+      handler: true,
+      params: {},
+    });
+    const put = await render('PUT', '/contact', routes, handlers);
+    expect(put.status).toBe(405);
+    expect(put.allow).toBe('POST');
+  });
+});
+
 // ─── getServerSideProps context + response headers ────────────────────────────
 
 describe('getServerSideProps context', () => {

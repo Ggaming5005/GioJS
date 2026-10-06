@@ -82,11 +82,18 @@ export default function Page(): React.JSX.Element {
         the static page and /shop/a the catch-all.
       </p>
       <p>
+        Pages and route.ts handlers share this order: <code>blog/about/page.tsx</code> serves
+        /blog/about even beside <code>blog/[slug]/route.ts</code>, and a catch-all route.ts
+        never shadows the pages below it.
+      </p>
+      <p>
         Two files that would answer the same URLs fail startup with an error naming both: two
         pages in different groups (<code>(a)/about</code> and <code>(b)/about</code>),{' '}
         <code>posts/[id]</code> next to <code>posts/[slug]</code>, or a page and a route.ts in
-        different folders. A route.ts in the same folder as its page.tsx is fine - see Route
-        Handlers.
+        different folders. So does <code>docs/[...a]</code> next to{' '}
+        <code>docs/[[...b]]</code>: the catch-all wins every URL below /docs, which would leave
+        the optional catch-all only /docs itself. A route.ts in the same folder as its page.tsx
+        is fine - see Route Handlers.
       </p>
     </>
   );
