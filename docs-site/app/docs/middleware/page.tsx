@@ -169,6 +169,13 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         header, except <code>set-cookie</code>: a rule cookie is added next to
         the cookies the page or route handler set, never in place of them.
       </p>
+      <p>
+        Header rules also win over the default security headers
+        (<code>x-frame-options</code>, <code>referrer-policy</code>, CSP, ...),
+        and an empty value removes such a default for the rule&apos;s paths -{' '}
+        <code>x-frame-options = &quot;&quot;</code> lets other sites frame{' '}
+        <code>/embed/*rest</code>. See <a href="/docs/security">Security</a>.
+      </p>
 
       <h2>public/ files at the site root</h2>
       <p>

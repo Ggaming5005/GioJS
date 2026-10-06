@@ -31,8 +31,15 @@ renders React. Full docs: https://giojs.com/llms.txt
   `sharp` or `next/image`). Route-handler types come from `@gio.js/core`
   (`GioRequest`, `GioEventStream` for SSE).
 - WebSockets: export `wsHandler(socket)` from a `route.js`.
+- Security runs in Rust: default headers (nosniff, `X-Frame-Options:
+  SAMEORIGIN`, referrer policy) on every response, and cross-site
+  POST/PUT/PATCH/DELETE or WebSocket upgrades get 403 (CSRF) - endpoints other
+  sites call (webhooks) go in `[security.csrf] exempt`. `req.json()` requires
+  `Content-Type: application/json` (otherwise 415). For a CSP put
+  `'nonce-{nonce}'` in `[security] csp`; your own inline scripts then need
+  `nonce={cspNonce()}` (from `@gio.js/core`).
 - Config is `gio.toml` (server, TLS, images.remote_patterns, rate_limits,
-  fonts, i18n, websocket, metrics). There is no `[cache]`/redirects/rewrites
+  fonts, i18n, websocket, metrics, security). There is no `[cache]`/redirects/rewrites
   section.
 - Env: `.env.{mode}.local`, `.env.local`, `.env.{mode}`, `.env` load at server
   start (first wins; real env vars always win; restart after editing). Only

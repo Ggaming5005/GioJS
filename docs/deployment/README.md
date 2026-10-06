@@ -58,6 +58,11 @@ GioJS closes an HTTP/1.1 keep-alive connection after `header_read_timeout_secs` 
 
 A plain `proxy_pass` with no `upstream { keepalive }` block, as in the [systemd guide](linux-systemd.md), opens a fresh upstream connection per request and needs neither. See *Connection limits* on the configuration docs page for every connection setting.
 
+Two security settings depend on the proxy too (see the *Security* docs page):
+
+- **Pass the original `Host` through** (`proxy_set_header Host $host;` in nginx). CSRF protection and the WebSocket origin check compare the browser's `Origin` with the `Host` GioJS receives; a proxy that rewrites it to an internal name makes every same-origin form post and WebSocket look cross-origin (403). If it cannot be passed through, list the public origin in `[security.csrf] trusted_origins`.
+- **HSTS is opt-in when the proxy terminates TLS.** GioJS only sends `Strict-Transport-Security` on its own when `[server.tls]` is enabled; behind a TLS proxy set `[security] hsts = true` in `gio.toml` (or add the header in the proxy).
+
 ## Health check
 
 `/_gio/health` returns JSON and is always available - use it for readiness probes and uptime monitors:

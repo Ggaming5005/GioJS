@@ -32,6 +32,24 @@ export async function POST(req: GioRequest) {
         <code>cookies</code>, the raw <code>body</code> (<code>bodyBase64</code> is true for
         binary bodies), and a <code>json()</code> helper.
       </p>
+      <p>
+        <code>json()</code> parses only bodies sent with{' '}
+        <code>Content-Type: application/json</code> (or <code>application/*+json</code>). For
+        anything else it throws <code>UnsupportedMediaTypeError</code>, which becomes a{' '}
+        <code>415 Unsupported Media Type</code> response unless you catch it - a form on
+        another site can send <code>text/plain</code> without a CORS preflight, so a handler
+        must not treat it as JSON. <code>req.body</code> always holds the raw body:
+      </p>
+      <CodeBlock lang="ts" code={`import { isUnsupportedMediaTypeError, type GioRequest } from '@gio.js/core';
+
+export function POST(req: GioRequest) {
+  try {
+    return { saved: req.json<{ text: string }>().text };
+  } catch (err) {
+    if (!isUnsupportedMediaTypeError(err)) throw err;
+    return { saved: new URLSearchParams(req.body ?? '').get('text') };  // form post
+  }
+}`} />
 
       <h2>What you can return</h2>
       <ul>
@@ -87,6 +105,12 @@ export function GET() {
         </li>
         <li>Pages only answer GET/HEAD - mutations belong in route handlers.</li>
         <li>A thrown error is logged server-side and answered with a JSON 500 (no internals leaked).</li>
+        <li>
+          Cross-site <code>POST</code>/<code>PUT</code>/<code>PATCH</code>/<code>DELETE</code>{' '}
+          requests are refused with 403 before your handler runs (CSRF protection). Webhook
+          endpoints called by other sites go in <code>[security.csrf] exempt</code> - see{' '}
+          <a href="/docs/security">Security</a>.
+        </li>
         <li>Export <code>wsHandler</code> from the same file for WebSockets - see the WebSockets page.</li>
       </ul>
     </>

@@ -148,6 +148,14 @@ idle_timeout_secs = 65`}</code>
         connection per request and needs neither. See{' '}
         <a href="/docs/configuration">Configuration</a> for every connection limit.
       </p>
+      <p>
+        Keep the original <code>Host</code> header (<code>proxy_set_header Host $host;</code>{' '}
+        in nginx): CSRF protection and the WebSocket origin check compare the browser&apos;s{' '}
+        <code>Origin</code> with it, so a proxy that rewrites it makes same-origin form posts
+        and WebSockets fail with 403. And when the proxy terminates TLS, GioJS does not send{' '}
+        <code>Strict-Transport-Security</code> by itself - set <code>[security] hsts = true</code>.
+        See <a href="/docs/security">Security</a>.
+      </p>
 
       <h2>Multi-instance deployments</h2>
       <p>
