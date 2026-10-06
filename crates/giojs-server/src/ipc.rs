@@ -205,6 +205,35 @@ pub struct IpcRequest {
     /// chunks after the shell boundary (the cached shell was already served).
     #[serde(rename = "skipShell")]
     pub skip_shell: bool,
+    /// Who sent the request (additive, protocol stays v3: omitted when
+    /// unset, optional on the Node side).
+    #[serde(flatten)]
+    pub client: IpcClientFields,
+}
+
+/// The request's resolved client identity (see client_identity.rs), as the
+/// optional `ip` / `scheme` / `host` / `requestId` request fields.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct IpcClientFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(rename = "requestId", skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+impl From<&crate::client_identity::ClientInfo> for IpcClientFields {
+    fn from(client: &crate::client_identity::ClientInfo) -> Self {
+        Self {
+            ip: Some(client.ip.to_string()),
+            scheme: Some(client.scheme.to_string()),
+            host: client.host.clone(),
+            request_id: Some(client.request_id.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1095,7 +1124,14 @@ fn error_frame_response(id: &str, val: &serde_json::Value, dev_mode: bool) -> Ip
     // stack is only present on dev frames (ssr.ts strips it in prod)
     let stack = val.get("stack").and_then(|v| v.as_str());
     let digest = error_digest(val.get("digest").and_then(|v| v.as_str()));
-    error!(digest = %digest, "Node render error [{code}]: {msg}");
+    // Logged by the reader task, outside the request's span: the worker
+    // echoes the request id so this line still names its request.
+    let request_id = val
+        .get("requestId")
+        .and_then(|v| v.as_str())
+        .filter(|id| crate::client_identity::valid_request_id(id))
+        .unwrap_or("-");
+    error!(digest = %digest, request_id = %request_id, "Node render error [{code}]: {msg}");
     // Production never echoes the worker's message: the page names only the
     // digest the logs are keyed by.
     let body = if dev_mode {
@@ -1495,6 +1531,7 @@ mod tests {
             deployment_id: "dep-test".into(),
             locale: String::new(),
             skip_shell: false,
+            client: IpcClientFields::default(),
         };
         let result = client.send_request(req).await;
         assert!(result.is_err());
@@ -1518,9 +1555,44 @@ mod tests {
             deployment_id: "dep".into(),
             locale: String::new(),
             skip_shell: true,
+            client: IpcClientFields::default(),
         };
         let value = serde_json::to_value(&req).expect("serializable request");
         assert_eq!(value["skipShell"], serde_json::Value::Bool(true));
+        // Unset client fields stay off the wire entirely.
+        for absent in ["ip", "scheme", "host", "requestId", "client"] {
+            assert!(value.get(absent).is_none(), "{absent} must be omitted");
+        }
+    }
+
+    #[test]
+    fn ipc_request_serializes_client_fields_flat() {
+        let client = crate::client_identity::ClientInfo {
+            ip: "198.51.100.4".parse().unwrap(),
+            peer: "127.0.0.1:9000".parse().unwrap(),
+            scheme: "https",
+            host: Some("app.example".into()),
+            request_id: "req-abc".into(),
+        };
+        let req = IpcRequest {
+            id: "req-c".into(),
+            method: "GET".into(),
+            path: "/".into(),
+            params: HashMap::new(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+            body_base64: false,
+            deployment_id: "dep".into(),
+            locale: String::new(),
+            skip_shell: false,
+            client: IpcClientFields::from(&client),
+        };
+        let value = serde_json::to_value(&req).expect("serializable request");
+        assert_eq!(value["ip"], "198.51.100.4");
+        assert_eq!(value["scheme"], "https");
+        assert_eq!(value["host"], "app.example");
+        assert_eq!(value["requestId"], "req-abc");
     }
 
     #[test]

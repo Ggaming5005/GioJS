@@ -17,6 +17,7 @@
 //! passes. The HOLES render runs with the requester's own cookies - a shared
 //! shell with personalized holes is the point.
 
+mod client_identity;
 mod config;
 mod conn;
 mod css_assets;
@@ -72,7 +73,7 @@ use tower_http::compression::predicate::{DefaultPredicate, Predicate, SizeAbove}
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 use uuid::Uuid;
 use ws_ipc::WsIpcClient;
 use ws_registry::WsRegistry;
@@ -421,6 +422,25 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let http2 = cfg.server.http2;
     let tls_enabled = cfg.server.tls.enabled;
 
+    let proxy_trust = Arc::new(client_identity::ProxyTrust {
+        trusted: cfg.server.trusted_proxies.clone(),
+        headers: cfg.server.proxy_headers,
+        tls: tls_enabled,
+    });
+    if !proxy_trust.trusted.is_empty() {
+        let entries: Vec<String> = proxy_trust
+            .trusted
+            .entries()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        info!(
+            trusted_proxies = %entries.join(", "),
+            proxy_headers = proxy_trust.headers.as_str(),
+            "client IPs are read from forwarding headers sent by trusted proxies"
+        );
+    }
+
     let app_dir = std::env::var("GIO_APP_DIR").unwrap_or_else(|_| "app".to_string());
     let css_cache: Arc<css_assets::CssCache> = Arc::new(DashMap::new());
     if cfg.css.enabled {
@@ -705,6 +725,13 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     // Plugin routes and middleware are applied post-with_state (both operate on Router<()>).
     let app = plugin_registry.merge_routes(app);
     let app = plugin_registry.apply_middleware(app);
+    // Outermost of all, plugin middleware included: every layer below sees
+    // the resolved client, and every response - plugin short-circuits,
+    // 400s from path hygiene, 429s - carries the request id.
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        proxy_trust,
+        client_identity_middleware,
+    ));
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
 
@@ -730,6 +757,41 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve who sent the request (see client_identity.rs) once, for rate
+/// limits, prefetch budgets, the metrics allowlist and the worker, and give
+/// it its request id: on the tracing span every log line of the request is
+/// emitted in, on the request header the worker sees (never a client's
+/// spoofed one), and as X-Request-Id on the response.
+async fn client_identity_middleware(
+    State(trust): State<Arc<client_identity::ProxyTrust>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let Some(ConnectInfo(peer)) = req.extensions().get::<ConnectInfo<SocketAddr>>().copied() else {
+        return next.run(req).await;
+    };
+    let client = client_identity::resolve(
+        peer,
+        req.headers(),
+        req.uri().authority().map(|a| a.as_str()),
+        &trust,
+    );
+    // Validated ids are header-safe; generated ones are UUIDs.
+    let request_id = HeaderValue::from_str(&client.request_id).ok();
+    if let Some(value) = &request_id {
+        req.headers_mut()
+            .insert(client_identity::REQUEST_ID_HEADER, value.clone());
+    }
+    let span = tracing::info_span!("request", request_id = %client.request_id);
+    req.extensions_mut().insert(client);
+    let mut resp = next.run(req).instrument(span).await;
+    if let Some(value) = request_id {
+        resp.headers_mut()
+            .insert(client_identity::REQUEST_ID_HEADER, value);
+    }
+    resp
 }
 
 /// fonts.css is regenerated from gio.toml at every start under a fixed URL,
@@ -768,8 +830,15 @@ async fn metrics_handler(
         return StatusCode::NOT_FOUND.into_response();
     }
     if !state.metrics_config.ip_allowlist.is_empty() {
-        let ip = addr.ip().to_string();
-        if !state.metrics_config.ip_allowlist.iter().any(|a| a == &ip) {
+        // The client behind trusted proxies: allowlisting 127.0.0.1 must not
+        // admit everything a local reverse proxy forwards.
+        let ip = client_identity::client_ip(&req, addr);
+        let allowed = state.metrics_config.ip_allowlist.iter().any(|entry| {
+            entry
+                .parse::<client_identity::IpNet>()
+                .is_ok_and(|net| net.contains(ip))
+        });
+        if !allowed {
             return StatusCode::FORBIDDEN.into_response();
         }
     }
@@ -859,7 +928,7 @@ async fn prefetch_budget_middleware(
     if !is_prefetch(&req) {
         return next.run(req).await;
     }
-    let ip = addr.ip();
+    let ip = client_identity::client_ip(&req, addr);
     if !state.prefetch.try_acquire(ip) {
         warn!(ip = %ip, path = %req.uri().path(), "prefetch budget exceeded");
         state.metrics.record_prefetch_rejected();
@@ -941,7 +1010,9 @@ async fn rate_limit_middleware(
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
-    let ip = addr.ip();
+    // Behind trusted proxies this is the forwarded client, so visitors no
+    // longer share the proxy's bucket (IPv6 is still keyed by its /64).
+    let ip = client_identity::client_ip(&req, addr);
     let headers: HashMap<String, String> = req
         .headers()
         .iter()
@@ -1250,6 +1321,11 @@ async fn dynamic_handler(
     let prefetch_status = if is_prefetch(&req) { "allowed" } else { "n/a" };
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
+    let client = req
+        .extensions()
+        .get::<client_identity::ClientInfo>()
+        .map(ipc::IpcClientFields::from)
+        .unwrap_or_default();
     // Nothing under /_gio belongs to the app. path_hygiene_middleware already
     // 404s unrouted /_gio requests; this also covers paths that only land in
     // the namespace after a locale prefix is stripped or a rule rewrites.
@@ -1277,12 +1353,16 @@ async fn dynamic_handler(
     // ── WebSocket upgrade ────────────────────────────────────────────────────
     if let Some(ws) = ws_upgrade {
         if let Some(ws_ipc) = &state.ws_ipc {
+            let client_addr = req
+                .extensions()
+                .get::<client_identity::ClientInfo>()
+                .map_or(addr, client_identity::ClientInfo::addr);
             return ws::handle_ws_upgrade(
                 ws,
                 ws_ipc.clone(),
                 state.ws_registry.clone(),
                 path,
-                addr,
+                client_addr,
                 state.ws_config.max_connections,
                 state.ws_config.ping_interval_secs,
             )
@@ -1347,6 +1427,7 @@ async fn dynamic_handler(
             headers,
             body,
             body_base64,
+            client,
             &deployment_id,
             &locale,
             &default_locale,
@@ -1513,6 +1594,9 @@ async fn dynamic_handler(
         let default_locale_c = default_locale.clone();
         let query_c = query.clone();
         let headers_c = headers.clone();
+        // A shared render carries the leader's identity; one that reads it
+        // (ctx.ip) is personal and never shared, so followers re-render.
+        let client_c = client.clone();
         let slot_c = leader_slot.clone();
         coalesce
             .run(&coalesce_key, move || {
@@ -1525,6 +1609,7 @@ async fn dynamic_handler(
                 let default_locale = default_locale_c.clone();
                 let query = query_c.clone();
                 let headers = headers_c.clone();
+                let client = client_c.clone();
                 let slot = slot_c.clone();
                 async move {
                     let ipc_req = IpcRequest {
@@ -1539,6 +1624,7 @@ async fn dynamic_handler(
                         deployment_id: deployment_id.clone(),
                         locale,
                         skip_shell: false,
+                        client,
                     };
                     let ipc_start = std::time::Instant::now();
                     match state.ipc.send_request(ipc_req).await {
@@ -1707,6 +1793,7 @@ async fn dynamic_handler(
                         headers,
                         None,
                         false,
+                        client,
                         &deployment_id,
                         &locale,
                         &default_locale,
@@ -1802,6 +1889,7 @@ async fn render_uncoalesced(
     headers: HashMap<String, String>,
     body: Option<String>,
     body_base64: bool,
+    client: ipc::IpcClientFields,
     deployment_id: &str,
     locale: &str,
     default_locale: &str,
@@ -1822,6 +1910,7 @@ async fn render_uncoalesced(
         deployment_id: deployment_id.to_string(),
         locale: locale.to_string(),
         skip_shell: false,
+        client,
     };
     let ipc_start = std::time::Instant::now();
     match state.ipc.send_request(ipc_req).await {
@@ -3133,6 +3222,11 @@ fn build_ipc_request(
         deployment_id: deployment_id.to_string(),
         locale: locale.to_string(),
         skip_shell: false,
+        client: req
+            .extensions()
+            .get::<client_identity::ClientInfo>()
+            .map(ipc::IpcClientFields::from)
+            .unwrap_or_default(),
     }
 }
 
@@ -3516,6 +3610,10 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
     // every visitor.
     req.headers.remove("cookie");
     req.headers.remove("authorization");
+    // Same for the client IP (ctx.ip marks a render personal). The request
+    // id stays, tying the refresh's worker logs to the request that
+    // triggered it.
+    req.client.ip = None;
     let locale = req.locale.clone();
     let req_path = req.path.clone();
     tokio::spawn(async move {
@@ -4989,6 +5087,7 @@ mod tests {
             deployment_id: "dep-test".into(),
             locale: String::new(),
             skip_shell: true,
+            client: ipc::IpcClientFields::default(),
         };
         tokio::spawn(feed_ppr_holes(
             Arc::new(client),

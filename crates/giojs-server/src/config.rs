@@ -312,6 +312,15 @@ pub struct ServerConfig {
     pub http2_keep_alive_interval_secs: u64,
     #[serde(default = "default_http2_keep_alive_timeout_secs")]
     pub http2_keep_alive_timeout_secs: u64,
+    /// Reverse proxies (IPs or CIDR blocks) whose forwarding headers name
+    /// the client. Empty = trust nobody: the TCP peer is the client and
+    /// forwarding headers are ignored. A malformed entry fails startup.
+    #[serde(default)]
+    pub trusted_proxies: crate::client_identity::TrustedProxies,
+    /// Which forwarding headers the trusted proxies set: "x-forwarded"
+    /// (X-Forwarded-For/-Proto/-Host, default) or "forwarded" (RFC 7239).
+    #[serde(default)]
+    pub proxy_headers: crate::client_identity::ProxyHeaders,
     #[serde(default)]
     pub tls: TlsConfig,
 }
@@ -397,6 +406,8 @@ impl Default for ServerConfig {
             http2_max_concurrent_streams: default_http2_max_concurrent_streams(),
             http2_keep_alive_interval_secs: default_http2_keep_alive_interval_secs(),
             http2_keep_alive_timeout_secs: default_http2_keep_alive_timeout_secs(),
+            trusted_proxies: Default::default(),
+            proxy_headers: Default::default(),
             tls: TlsConfig::default(),
         }
     }
@@ -634,6 +645,54 @@ redirect_to    = "/"
         let _ = std::fs::remove_file(&path);
         let config = result.unwrap();
         assert_eq!(config.dev.allowed_hosts, vec!["192.168.1.20", "myvm.local"]);
+    }
+
+    #[test]
+    fn trusted_proxies_parse_and_default_to_trusting_nobody() {
+        use crate::client_identity::ProxyHeaders;
+        let missing = GioConfig::load_from_path(&unique_temp_path("no_proxies.toml")).unwrap();
+        assert!(missing.server.trusted_proxies.is_empty());
+        assert_eq!(missing.server.proxy_headers, ProxyHeaders::XForwarded);
+
+        let path = unique_temp_path("proxies.toml");
+        std::fs::write(
+            &path,
+            "[server]\nhost = \"127.0.0.1\"\nport = 1\n\
+             trusted_proxies = [\"127.0.0.1\", \"10.0.0.0/8\", \"::1\"]\n\
+             proxy_headers = \"forwarded\"\n",
+        )
+        .unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let server = result.unwrap().server;
+        assert!(server
+            .trusted_proxies
+            .contains("10.20.30.40".parse().unwrap()));
+        assert!(server.trusted_proxies.contains("::1".parse().unwrap()));
+        assert!(!server
+            .trusted_proxies
+            .contains("192.0.2.1".parse().unwrap()));
+        assert_eq!(server.proxy_headers, ProxyHeaders::Forwarded);
+    }
+
+    #[test]
+    fn malformed_trusted_proxies_fail_to_load() {
+        // Trust config is never silently shortened: a typo is a startup error.
+        for bad in [
+            "trusted_proxies = [\"10.0.0.0/33\"]",
+            "trusted_proxies = [\"proxy.internal\"]",
+            "proxy_headers = \"x-real-ip\"",
+        ] {
+            let path = unique_temp_path("bad_proxies.toml");
+            std::fs::write(
+                &path,
+                format!("[server]\nhost = \"127.0.0.1\"\nport = 1\n{bad}\n"),
+            )
+            .unwrap();
+            let result = GioConfig::load_from_path(&path);
+            let _ = std::fs::remove_file(&path);
+            assert!(matches!(result, Err(ConfigError::Parse { .. })), "{bad}");
+        }
     }
 
     #[test]
