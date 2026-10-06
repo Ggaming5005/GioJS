@@ -121,6 +121,8 @@ server {
         proxy_set_header   X-Real-IP $remote_addr;
         proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   X-Forwarded-Host $host;
+        proxy_set_header   X-Request-Id $request_id;
     }
 }
 ```
@@ -129,6 +131,17 @@ server {
 sudo ln -s /etc/nginx/sites-available/my-app /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+GioJS only believes those forwarding headers from proxies it trusts. Tell it nginx is one, and keep the port off the network so nobody can reach GioJS around nginx:
+
+```toml
+# gio.toml
+[server]
+host = "127.0.0.1"
+trusted_proxies = ["127.0.0.1", "::1"]
+```
+
+Rate limits, the metrics IP allowlist and `req.ip` / `ctx.ip` now see each visitor instead of nginx, and nginx's `$request_id` becomes the `X-Request-Id` on the response and in both processes' logs. See [Client IPs, HTTPS and request IDs](README.md#client-ips-https-and-request-ids).
 
 > **Note:** When using nginx for TLS, keep `server.tls.enabled = false` in `gio.toml`. GioJS can also terminate TLS directly - see `gio.toml` `[server.tls]` section for that path.
 

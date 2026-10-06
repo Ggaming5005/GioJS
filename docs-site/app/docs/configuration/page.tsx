@@ -30,6 +30,8 @@ idle_timeout_secs = 60              # close connections with nothing in flight
 http2_max_concurrent_streams = 250
 http2_keep_alive_interval_secs = 20 # PING HTTP/2 peers this often...
 http2_keep_alive_timeout_secs = 20  # ...and drop them if the ack takes longer
+trusted_proxies = []    # reverse proxies whose forwarding headers count (see Reverse proxies)
+proxy_headers = "x-forwarded"       # "x-forwarded" (X-Forwarded-*) or "forwarded" (RFC 7239)
 
 [server.tls]
 enabled = false         # set true to terminate TLS in GioJS directly
@@ -97,7 +99,7 @@ detect_from = ["path", "accept-language", "cookie"]
 [metrics]
 enabled = false         # expose /_gio/metrics (Prometheus); off when this section is absent
 token = ""              # require "Authorization: Bearer <token>" when set
-ip_allowlist = []       # restrict by client IP, e.g. ["10.0.0.5"]
+ip_allowlist = []       # restrict by client IP or CIDR, e.g. ["10.0.0.5", "10.1.0.0/16"]
 
 [dev]                   # only read when NODE_ENV=development
 allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer to`} />
@@ -140,6 +142,68 @@ allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer t
         <a href="/docs/deployment">deployment guide</a> has settings for each proxy.
       </div>
 
+      <h2>Reverse proxies &amp; client IPs</h2>
+      <p>
+        Behind a reverse proxy or load balancer, every connection GioJS sees comes from
+        the proxy. The real client is in a forwarding header the proxy adds - which any
+        client can also send itself. <code>trusted_proxies</code> lists the peers whose
+        forwarding headers GioJS believes; from everyone else they are ignored entirely:
+      </p>
+      <CodeBlock lang="toml" code={`[server]
+trusted_proxies = ["127.0.0.1", "::1", "10.0.0.0/8"]   # IPs and CIDR blocks, IPv4 and IPv6`} />
+      <p>
+        The default is an empty list: nobody is trusted and the connecting address is the
+        client, which is right when GioJS faces the internet directly. A malformed entry
+        stops the server at startup. With trusted proxies configured, the client IP is
+        found by walking <code>X-Forwarded-For</code> from right to left, skipping every
+        trusted address; the first untrusted one is the client (if every hop is trusted,
+        the leftmost). Entries left of it were written by the client and are never read,
+        so a spoofed <code>X-Forwarded-For</code> changes nothing. A malformed value falls
+        back to the connecting address.
+      </p>
+      <p>
+        From a trusted peer, <code>X-Forwarded-Proto</code> sets the scheme (otherwise{' '}
+        <code>https</code> when <code>[server.tls]</code> is on, else <code>http</code>) and{' '}
+        <code>X-Forwarded-Host</code> sets the host (otherwise the <code>Host</code>{' '}
+        header). Set <code>proxy_headers = &quot;forwarded&quot;</code> if your proxy sends
+        the standard RFC 7239 <code>Forwarded: for=...;proto=...;host=...</code> header
+        instead; exactly one header family is read, because a proxy that manages one
+        passes a client&apos;s copy of the other straight through.
+      </p>
+      <p>The resolved client is used everywhere a client matters:</p>
+      <ul>
+        <li><code>[[rate_limits]]</code> buckets (IPv6 clients are still grouped by /64) and prefetch budgets.</li>
+        <li>The <code>[metrics] ip_allowlist</code> - allowlisting <code>127.0.0.1</code> no longer admits everything a local proxy forwards.</li>
+        <li>
+          <code>req.ip</code> in <a href="/docs/route-handlers">route handlers</a> and{' '}
+          <code>ctx.ip</code> in <a href="/docs/fetching-data">getServerSideProps</a>, plus{' '}
+          <code>scheme</code> and <code>host</code>.
+        </li>
+      </ul>
+      <div className="callout">
+        Only list proxies you control, and make sure each one <em>overwrites</em>{' '}
+        <code>X-Forwarded-Proto</code> and <code>X-Forwarded-Host</code> (or strips them)
+        rather than passing a client&apos;s values through. Never trust a range your
+        visitors can connect from - with <code>0.0.0.0/0</code> every client picks its own
+        IP. The <a href="/docs/deployment">deployment guide</a> has per-proxy settings.
+      </div>
+
+      <h2>Request IDs</h2>
+      <p>
+        Every response carries an <code>X-Request-Id</code> header - cache hits, static
+        files, redirects and errors included. The same id is on the server&apos;s log lines
+        for that request and on every log line the Node worker writes while handling it
+        (see <a href="/docs/observability">Observability</a>), and route handlers and{' '}
+        <code>getServerSideProps</code> can read it as <code>req.requestId</code> /{' '}
+        <code>ctx.requestId</code>.
+      </p>
+      <p>
+        An incoming <code>X-Request-Id</code> is kept only when it comes from a trusted
+        proxy and matches <code>^[A-Za-z0-9._:-]{'{'}1,128{'}'}$</code>, so a load
+        balancer&apos;s trace id follows the request through. Otherwise GioJS generates a
+        UUID; a client cannot pick its own id.
+      </p>
+
       <h2>Health &amp; metrics</h2>
       <p>
         GioJS serves two built-in observability endpoints directly from the Rust
@@ -171,7 +235,11 @@ enabled = true          # serve /_gio/metrics
 
 # Secure it for production - use either or both:
 token        = "a-long-random-secret"     # require Authorization: Bearer <token>
-ip_allowlist = ["10.0.0.5", "10.0.0.6"]   # only allow these client IPs`} />
+ip_allowlist = ["10.0.0.5", "10.0.0.6"]   # only allow these client IPs (or CIDRs)`} />
+      <p>
+        The allowlist checks the client IP after <code>trusted_proxies</code> resolution:
+        behind a trusted proxy it is the forwarded client, never the proxy itself.
+      </p>
       <CodeBlock lang="bash" code={`# Scrape with a token:
 curl -H "Authorization: Bearer a-long-random-secret" \\
   http://localhost:3000/_gio/metrics`} />

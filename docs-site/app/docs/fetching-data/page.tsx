@@ -62,6 +62,23 @@ export async function getServerSideProps() {
         <a href="/docs/caching">Caching</a>.
       </p>
       <p>
+        <code>ctx.ip</code> is the visitor&apos;s IP address (proxy-aware: behind a reverse
+        proxy it needs <code>[server] trusted_proxies</code>, see{' '}
+        <a href="/docs/configuration">Configuration</a>). Reading it marks the render as
+        personalized exactly like reading a cookie - a page that varies by IP (geo, an
+        allowlist) must never be cached and served to everyone - and so does reading the raw{' '}
+        <code>x-forwarded-for</code>, <code>forwarded</code> or <code>x-real-ip</code>{' '}
+        headers. <code>ctx.requestId</code> (the response&apos;s <code>X-Request-Id</code>,
+        for logs and downstream calls), <code>ctx.scheme</code> and <code>ctx.host</code>{' '}
+        do not mark the render: they never single out the visitor.
+      </p>
+      <CodeBlock lang="tsx" code={`export const revalidate = 60;
+
+export async function getServerSideProps(ctx) {
+  const posts = await db.posts.latest({ requestId: ctx.requestId }); // still cached
+  return { props: { posts } };
+}`} />
+      <p>
         <code>ctx.headers</code> is a tracked view of the request headers (a Proxy), so{' '}
         <code>structuredClone</code>, <code>postMessage</code> and worker threads reject it.
         Pass a plain copy instead - <code>{'{ ...ctx.headers }'}</code> - which, like any

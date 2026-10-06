@@ -32,6 +32,24 @@ export async function POST(req: GioRequest) {
         <code>cookies</code>, the raw <code>body</code> (<code>bodyBase64</code> is true for
         binary bodies), and a <code>json()</code> helper.
       </p>
+      <p>
+        It also says who is asking: <code>ip</code> is the client&apos;s address,{' '}
+        <code>scheme</code> (<code>&apos;https&apos;</code> or <code>&apos;http&apos;</code>) and{' '}
+        <code>host</code> are what the client used, and <code>requestId</code> is the
+        request&apos;s <code>X-Request-Id</code>, also on every log line for the request.
+        Behind a reverse proxy these describe the visitor only when the proxy is listed in{' '}
+        <code>[server] trusted_proxies</code> - otherwise <code>ip</code> is the proxy&apos;s
+        address (see <a href="/docs/configuration">Configuration</a>). Use{' '}
+        <code>req.ip</code>, never the <code>x-forwarded-for</code> header: any client can
+        send that header, while <code>req.ip</code> only honors it from trusted proxies.
+      </p>
+      <CodeBlock lang="ts" code={`// app/api/audit/route.ts
+import type { GioRequest } from '@gio.js/core';
+
+export async function POST(req: GioRequest) {
+  await audit.record({ ip: req.ip, requestId: req.requestId, action: req.json() });
+  return { ok: true };
+}`} />
 
       <h2>What you can return</h2>
       <ul>

@@ -58,6 +58,34 @@ GioJS closes an HTTP/1.1 keep-alive connection after `header_read_timeout_secs` 
 
 A plain `proxy_pass` with no `upstream { keepalive }` block, as in the [systemd guide](linux-systemd.md), opens a fresh upstream connection per request and needs neither. See *Connection limits* on the configuration docs page for every connection setting.
 
+### Client IPs, HTTPS and request IDs
+
+Behind a proxy every connection comes from the proxy: without configuration, `[[rate_limits]]` put all visitors in one bucket, the `[metrics] ip_allowlist` sees only the proxy, and `req.ip` / `ctx.ip` are the proxy's address. List the proxy in `trusted_proxies` and GioJS reads the real client from its forwarding headers - and ignores those headers from everyone else:
+
+```toml
+[server]
+trusted_proxies = ["127.0.0.1", "::1"]   # IPs and CIDR blocks; default [] = trust nobody
+# proxy_headers = "forwarded"            # if the proxy sends RFC 7239 Forwarded instead of X-Forwarded-*
+```
+
+The client IP is the first address in `X-Forwarded-For` that is not a trusted proxy, reading from the right, so a client that sends its own `X-Forwarded-For` through a proxy that appends to it changes nothing. From a trusted proxy, `X-Forwarded-Proto` sets the scheme and `X-Forwarded-Host` the host. Whatever the proxy:
+
+- **Trust only the proxy**, and make sure clients cannot reach GioJS directly (bind `127.0.0.1`, or firewall the port).
+- **Forward `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host`**, with the proxy overwriting Proto and Host rather than passing a client's values through.
+- **Keep the `Host` header** (or set `X-Forwarded-Host`).
+
+| Proxy | What to configure |
+|-------|-------------------|
+| nginx | `proxy_set_header Host $host;` `X-Forwarded-For $proxy_add_x_forwarded_for;` `X-Forwarded-Proto $scheme;` `X-Forwarded-Host $host;` and optionally `X-Request-Id $request_id;` - see the [systemd guide](linux-systemd.md). `trusted_proxies = ["127.0.0.1", "::1"]` on the same host. |
+| Caddy | `reverse_proxy 127.0.0.1:3000` already sets all three headers, keeps `Host`, and ignores spoofed ones. Trust Caddy's address. |
+| Traefik | Sets all three headers and keeps `Host` by default. Trust the network Traefik connects from (in Docker, e.g. `"172.16.0.0/12"`). |
+| AWS ALB | Appends `X-Forwarded-For`, sets `X-Forwarded-Proto`, keeps `Host`. Trust your VPC CIDR, e.g. `"10.0.0.0/16"`. |
+| Google Cloud HTTPS LB | Appends the client IP *and its own forwarding-rule IP* to `X-Forwarded-For`: trust that public IP plus Google's proxy ranges `"35.191.0.0/16"` and `"130.211.0.0/22"`. |
+| Kubernetes ingress-nginx | Trust the pod CIDR the controller runs in. It also sends `X-Request-ID`, which GioJS adopts. |
+| Cloudflare | Trust Cloudflare's published IP ranges (cloudflare.com/ips). |
+
+Every response carries `X-Request-Id`. A valid incoming id (`^[A-Za-z0-9._:-]{1,128}$`) from a trusted proxy is kept, so the proxy's id follows the request; anything else is replaced by a generated UUID. The same id is on the server's log lines for the request (`request{request_id=...}`) and on every JSON line the Node worker logs while handling it (`"requestId"`).
+
 ## Health check
 
 `/_gio/health` returns JSON and is always available - use it for readiness probes and uptime monitors:

@@ -149,6 +149,82 @@ idle_timeout_secs = 65`}</code>
         <a href="/docs/configuration">Configuration</a> for every connection limit.
       </p>
 
+      <h3>Client IPs, HTTPS and request IDs</h3>
+      <p>
+        Behind a proxy, every connection comes from the proxy, so rate limits would put all
+        visitors in one bucket and <code>req.ip</code> would be the proxy&apos;s address.
+        List the proxy in <code>trusted_proxies</code> and GioJS reads the real client from
+        the headers it adds (see{' '}
+        <a href="/docs/configuration">Reverse proxies &amp; client IPs</a> for the exact
+        rules). Whatever the proxy, get three things right:
+      </p>
+      <ul>
+        <li>
+          <strong>Trust only the proxy.</strong> Put its address (or the private range it
+          connects from) in <code>trusted_proxies</code>, and make sure clients cannot reach
+          GioJS directly - bind to <code>127.0.0.1</code> or firewall the port.
+        </li>
+        <li>
+          <strong>Forward <code>X-Forwarded-For</code>, <code>X-Forwarded-Proto</code> and{' '}
+          <code>X-Forwarded-Host</code></strong>, with the proxy overwriting Proto and Host
+          rather than passing a client&apos;s values through. Appending to{' '}
+          <code>X-Forwarded-For</code> is fine: GioJS reads it from the right.
+        </li>
+        <li>
+          <strong>Keep the <code>Host</code> header</strong> (or set{' '}
+          <code>X-Forwarded-Host</code>), so the host GioJS sees is the one the browser used.
+        </li>
+      </ul>
+      <p>nginx (on the same machine):</p>
+      <pre>
+        <code>{`location / {
+    proxy_pass         http://127.0.0.1:3000;
+    proxy_set_header   Host $host;
+    proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header   X-Forwarded-Proto $scheme;
+    proxy_set_header   X-Forwarded-Host $host;
+    proxy_set_header   X-Request-Id $request_id;   # optional: nginx's id becomes GioJS's
+}
+
+# gio.toml
+[server]
+host = "127.0.0.1"
+trusted_proxies = ["127.0.0.1", "::1"]`}</code>
+      </pre>
+      <p>
+        Caddy&apos;s <code>reverse_proxy</code> sets all three headers and keeps{' '}
+        <code>Host</code> by default, and Traefik does the same for its routers - both drop
+        forwarding headers sent by untrusted clients. Only <code>trusted_proxies</code> is
+        needed:
+      </p>
+      <pre>
+        <code>{`# Caddyfile
+example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+
+# gio.toml - Caddy on the same host; for Traefik in Docker, trust the
+# network it connects from instead, e.g. ["172.16.0.0/12"]
+[server]
+trusted_proxies = ["127.0.0.1", "::1"]`}</code>
+      </pre>
+      <p>
+        Cloud load balancers connect from addresses inside your network: trust that range.
+        AWS ALB appends to <code>X-Forwarded-For</code>, sets <code>X-Forwarded-Proto</code>{' '}
+        and keeps <code>Host</code>, so <code>trusted_proxies = [&quot;10.0.0.0/16&quot;]</code>{' '}
+        (your VPC CIDR) is all it takes. Google Cloud&apos;s HTTPS load balancer appends both
+        the client IP <em>and its own forwarding-rule IP</em>, so add that public IP and
+        Google&apos;s proxy ranges (<code>35.191.0.0/16</code>, <code>130.211.0.0/22</code>).
+        In Kubernetes, trust the pod CIDR the ingress controller runs in; ingress-nginx also
+        sends an <code>X-Request-ID</code> that GioJS then uses. Behind Cloudflare, trust
+        Cloudflare&apos;s published IP ranges.
+      </p>
+      <p>
+        Every response carries <code>X-Request-Id</code>, and the same id is on the server and
+        worker log lines for the request - see{' '}
+        <a href="/docs/observability">Observability</a>.
+      </p>
+
       <h2>Multi-instance deployments</h2>
       <p>
         The page cache is per-instance (in-memory LRU plus a local disk tier) - there is no
