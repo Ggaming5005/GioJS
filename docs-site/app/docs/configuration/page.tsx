@@ -200,6 +200,10 @@ API_ENDPOINT=\${GIO_PUBLIC_API_URL}/v2`} />
           the mode is decided before the files are read. Set it in the real environment.
         </li>
         <li>
+          A candidate that is not a regular file - such as the <code>.env/</code> directory{' '}
+          <code>python -m venv .env</code> creates - is skipped with a warning.
+        </li>
+        <li>
           The files load once at startup; restart the server after editing them.
         </li>
         <li>
@@ -214,11 +218,15 @@ API_ENDPOINT=\${GIO_PUBLIC_API_URL}/v2`} />
         <code>process.env</code>. Variables prefixed <code>GIO_PUBLIC_</code> that are set
         when the client bundles are built are inlined as string literals; every other{' '}
         <code>process.env.X</code> read in client code is <code>undefined</code>. Secrets
-        can only ship to the browser if you name them <code>GIO_PUBLIC_*</code>.
+        can only ship to the browser if you name them <code>GIO_PUBLIC_*</code>. In the
+        browser <code>process.env</code> is an object holding exactly those public values
+        (plus <code>NODE_ENV</code>), so destructuring and <code>process.env[name]</code>{' '}
+        see the same values the server rendered with.
       </p>
       <CodeBlock lang="tsx" code={`export default function Checkout() {
   // Inlined at build time: safe to read anywhere.
   const apiUrl = process.env.GIO_PUBLIC_API_URL;
+  const { GIO_PUBLIC_STRIPE_KEY } = process.env; // works too
   // Server-only: undefined in the browser. Read it in getServerSideProps.
   const key = process.env.STRIPE_SECRET_KEY;
   // ...
@@ -254,17 +262,19 @@ import '@gio.js/core/server-only';
 export const db = createClient(process.env.DATABASE_URL);`} />
       <p>
         Using <code>db</code> from <code>getServerSideProps</code> or a{' '}
-        <code>route.ts</code> handler is fine. If a component imports it, that route's
-        client bundle is rejected - it is never written to disk - and the error names the
-        import chain:
+        <code>route.ts</code> handler is fine. If a component imports it - or reads a
+        TypeScript enum it declares - that route's client bundle is rejected (it is never
+        written to disk), and the error names the import chain:
       </p>
       <CodeBlock lang="text" code={`client bundle for route "/dashboard" imports server-only code:
 app/dashboard/page.tsx -> components/Stats.tsx -> lib/db.ts -> @gio.js/core/server-only.
 The page still server-renders but will NOT hydrate (no client JS) until this import
 is removed from client code.`} />
       <p>
-        The error is logged at startup and, in development, shown in the error overlay when
-        you open the page. Other routes are unaffected. The bare <code>server-only</code>{' '}
+        The error is logged at startup and, in development (<code>NODE_ENV=development</code>
+        ), shown in the error overlay when you open the page; in production it stays in the
+        server log. Other routes are unaffected and keep their shared chunks. The bare{' '}
+        <code>server-only</code>{' '}
         specifier is recognized too, but prefer <code>@gio.js/core/server-only</code>: the
         npm <code>server-only</code> package throws when loaded outside React Server
         Components, which includes GioJS's server render.
