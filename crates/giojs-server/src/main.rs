@@ -192,16 +192,33 @@ fn apply_page_cache_control(resp: &mut Response, policy: PageCachePolicy) {
         return;
     }
     if let Ok(value) = HeaderValue::from_str(&page_cache_control(policy)) {
-        resp.headers_mut().insert(header::CACHE_CONTROL, value);
-        resp.extensions_mut().insert(FrameworkCacheControl);
+        resp.headers_mut()
+            .insert(header::CACHE_CONTROL, value.clone());
+        resp.extensions_mut().insert(FrameworkCacheControl(value));
     }
 }
 
-/// Response-extension marker: Cache-Control was set by
-/// `apply_page_cache_control`, not by the app, so i18n_middleware may
-/// tighten it.
-#[derive(Debug, Clone, Copy)]
-struct FrameworkCacheControl;
+/// Response extension: the Cache-Control value `apply_page_cache_control`
+/// set, so i18n_middleware can tell it from one the app or a header rule
+/// put there.
+#[derive(Debug, Clone)]
+struct FrameworkCacheControl(HeaderValue);
+
+/// Turn the pipeline's own Cache-Control private (a header-negotiated
+/// locale, see `HeaderNegotiatedLocale`). Only while the header still holds
+/// the value the pipeline set: one a [[headers]] rule stamped later wins.
+fn make_framework_cache_control_private(resp: &mut Response) {
+    let ours = resp
+        .extensions()
+        .get::<FrameworkCacheControl>()
+        .is_some_and(|set| resp.headers().get(header::CACHE_CONTROL) == Some(&set.0));
+    if ours {
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-cache"),
+        );
+    }
+}
 
 /// Request-extension marker from i18n_middleware: the locale came from
 /// request headers (Accept-Language / cookie), not the URL, so one URL
@@ -1587,16 +1604,8 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
     }
     let req = Request::from_parts(parts, body);
     let mut response = next.run(req).await;
-    if header_negotiated
-        && response
-            .extensions()
-            .get::<FrameworkCacheControl>()
-            .is_some()
-    {
-        response.headers_mut().insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("private, no-cache"),
-        );
+    if header_negotiated {
+        make_framework_cache_control_private(&mut response);
     }
 
     if locale != i18n_cfg.default_locale {
@@ -5342,6 +5351,37 @@ mod tests {
         let mut json = html_response(None, "application/json");
         apply_page_cache_control(&mut json, PageCachePolicy::Private);
         assert!(json.headers().get(header::CACHE_CONTROL).is_none());
+    }
+
+    #[test]
+    fn negotiated_locales_tighten_only_the_pipelines_own_cache_control() {
+        let shared = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 0,
+        };
+        let mut page = html_response(None, "text/html");
+        apply_page_cache_control(&mut page, shared);
+        make_framework_cache_control_private(&mut page);
+        assert_eq!(page.headers()[header::CACHE_CONTROL], "private, no-cache");
+
+        // A [[headers]] rule stamped its own value after the handler: it wins.
+        let mut ruled = html_response(None, "text/html");
+        apply_page_cache_control(&mut ruled, shared);
+        ruled.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=300"),
+        );
+        make_framework_cache_control_private(&mut ruled);
+        assert_eq!(
+            ruled.headers()[header::CACHE_CONTROL],
+            "public, max-age=300"
+        );
+
+        // App-set from the start: never touched.
+        let mut own = html_response(Some("public, max-age=5"), "text/html");
+        apply_page_cache_control(&mut own, shared);
+        make_framework_cache_control_private(&mut own);
+        assert_eq!(own.headers()[header::CACHE_CONTROL], "public, max-age=5");
     }
 
     #[test]
