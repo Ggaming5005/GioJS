@@ -6,7 +6,7 @@
  *   2. getServerSideProps returning {redirect} should produce a 301/302
  *   3. layout.tsx wrappers are applied outermost-first around the page
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import React from 'react';
 import { renderRoute, serializeEnvelope, type StreamRenderResult } from './ssr.ts';
 import { clearClientBuildErrors, recordClientBuildError } from './client-build-errors.ts';
@@ -277,6 +277,7 @@ describe('hydration envelope', () => {
   });
 
   it('hands a rejected client bundle to the dev overlay, escaped', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
     recordClientBuildError('/', 'route "/" imports server-only code: </script><b>x</b>');
     try {
       const result = await renderRoute(makeRequest('/'), makeRoute('/'), noLayouts);
@@ -287,8 +288,29 @@ describe('hydration envelope', () => {
       expect(body).toContain('page content');
     } finally {
       clearClientBuildErrors();
+      vi.unstubAllEnvs();
     }
   });
+
+  // Rust is in production mode unless NODE_ENV=development (an unset
+  // NODE_ENV is the template's `npm start`): no overlay, so no diagnostics.
+  it.each([undefined, 'production', 'test'])(
+    'keeps build diagnostics out of the HTML when NODE_ENV is %s',
+    async nodeEnv => {
+      vi.stubEnv('NODE_ENV', nodeEnv);
+      recordClientBuildError('/', 'route "/" imports server-only code: lib/db.ts');
+      try {
+        const result = await renderRoute(makeRequest('/'), makeRoute('/'), noLayouts);
+        const body = 'body' in result ? result.body : '';
+        expect(body).toContain('page content');
+        expect(body).not.toContain('__GIO_SSR_ERROR__');
+        expect(body).not.toContain('lib/db.ts');
+      } finally {
+        clearClientBuildErrors();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('emits no overlay script when the route bundle built', async () => {
     recordClientBuildError('/other', 'unrelated failure');

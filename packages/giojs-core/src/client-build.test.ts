@@ -12,6 +12,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   bareImportSpecifiers,
@@ -342,6 +343,32 @@ export const DB_MARKER = 'GIO_TEST_DB_DO_NOT_BUNDLE';
 export function query(): string { return DB_MARKER; }
 `,
       'lib/keys.server.ts': `export const API_KEY = 'GIO_TEST_SERVER_FILE_DO_NOT_BUNDLE';\n`,
+      // esbuild inlines enum members across modules; the guard must still
+      // see the server-only module that declared them.
+      'lib/enums.ts': `import '@gio.js/core/server-only';
+export enum Secret { Key = 'GIO_TEST_ENUM_DO_NOT_BUNDLE' }
+`,
+      'lib/flags.server.ts': `export const enum Flag { A = 'GIO_TEST_CONST_ENUM_DO_NOT_BUNDLE' }\n`,
+      // Server-only code with an enum next to parameter decorators
+      // (TypeORM/Nest style): precompiling it must not break the build.
+      'lib/entity.server.ts': `export enum Role { Admin = 'GIO_TEST_ENTITY_ENUM_DO_NOT_BUNDLE' }
+function Inject(): ParameterDecorator { return () => undefined; }
+export class Repo { constructor(@Inject() readonly role: Role) {} }
+`,
+      'app/enum/page.tsx': `import React from 'react';
+import { Secret } from '../../lib/enums.ts';
+export default function Page() { return React.createElement('p', null, Secret.Key); }
+`,
+      'app/constenum/page.tsx': `import React from 'react';
+import { Flag } from '../../lib/flags.server.ts';
+export default function Page() { return React.createElement('p', null, Flag.A); }
+`,
+      'app/enumok/page.tsx': page('ENUM_OK_PAGE', `import { Secret } from '../../lib/enums.ts';
+import { Flag } from '../../lib/flags.server.ts';
+import { Repo, Role } from '../../lib/entity.server.ts';
+export async function getServerSideProps() {
+  return { props: { s: Secret.Key + Flag.A + String(new Repo(Role.Admin).role) } };
+}`),
       'components/Rows.tsx': `import React from 'react';
 import { query } from '../lib/db.ts';
 export function Rows() { return React.createElement('ul', null, query()); }
@@ -369,7 +396,16 @@ export default function Page() { return React.createElement('p', null, API_KEY);
 import { API_KEY } from '../../lib/keys.server.ts';
 export async function getServerSideProps() { return { props: { q: query() + API_KEY } }; }`),
     });
-    manifest = await buildPages(root, ['leaky', 'barrel', 'bare', 'named', 'ok']);
+    manifest = await buildPages(root, [
+      'leaky',
+      'barrel',
+      'bare',
+      'named',
+      'ok',
+      'enum',
+      'constenum',
+      'enumok',
+    ]);
   }, 60_000);
 
   afterAll(async () => {
@@ -387,6 +423,19 @@ export async function getServerSideProps() { return { props: { q: query() + API_
   it('keeps routes that use server-only code only from getServerSideProps', () => {
     expect(manifest.get('/ok')).toBeDefined();
     expect(clientBuildErrorFor('/ok')).toBeUndefined();
+    expect(clientBuildErrorFor('/enumok')).toBeUndefined();
+    expect(manifest.get('/enumok')).toBeDefined();
+  });
+
+  it('rejects client reads of enums declared in server-only modules', () => {
+    expect(manifest.get('/enum')).toBeUndefined();
+    expect(clientBuildErrorFor('/enum')).toContain(
+      'app/enum/page.tsx -> lib/enums.ts -> @gio.js/core/server-only',
+    );
+    expect(manifest.get('/constenum')).toBeUndefined();
+    expect(clientBuildErrorFor('/constenum')).toContain(
+      'app/constenum/page.tsx -> lib/flags.server.ts',
+    );
   });
 
   it('names the importing file chain and says the page will not hydrate', () => {
@@ -406,6 +455,8 @@ export async function getServerSideProps() { return { props: { q: query() + API_
     expect(logged.map(call => (call[1] as { pattern: string }).pattern).sort()).toEqual([
       '/bare',
       '/barrel',
+      '/constenum',
+      '/enum',
       '/leaky',
       '/named',
     ]);
@@ -414,10 +465,85 @@ export async function getServerSideProps() { return { props: { q: query() + API_
   it('never writes a rejected bundle to the public chunks directory', async () => {
     const chunks = await allChunks(root);
     expect(chunks).toContain('OK_PAGE');
+    expect(chunks).toContain('ENUM_OK_PAGE');
     expect(chunks).not.toContain('GIO_TEST_DB_DO_NOT_BUNDLE');
     expect(chunks).not.toContain('GIO_TEST_SERVER_FILE_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('GIO_TEST_ENUM_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('GIO_TEST_CONST_ENUM_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('GIO_TEST_ENTITY_ENUM_DO_NOT_BUNDLE');
     expect(chunks).not.toContain('server-only module bundled for the browser');
   });
+});
+
+describe('a route that cannot ship', () => {
+  const CLEAN_PAGES = {
+    'app/one/page.tsx': page('ROUTE_ONE', ''),
+    'app/two/page.tsx': page('ROUTE_TWO', ''),
+  };
+  let errorLog: ReturnType<typeof vi.spyOn>;
+  let warnLog: ReturnType<typeof vi.spyOn>;
+
+  beforeAll(() => {
+    errorLog = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    warnLog = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterAll(() => {
+    errorLog.mockRestore();
+    warnLog.mockRestore();
+  });
+
+  /** The clean routes still hydrate from small entries over one shared chunk. */
+  async function expectSharedChunks(root: string, manifest: ClientManifest): Promise<void> {
+    const chunksDir = join(root, '.gio', 'build', 'static', 'chunks');
+    const files = await readdir(chunksDir);
+    expect(files.some(f => f.startsWith('shared-') && f.endsWith('.js'))).toBe(true);
+    for (const pattern of ['/one', '/two']) {
+      const url = manifest.get(pattern);
+      expect(url, `${pattern} must hydrate`).toBeDefined();
+      const entry = await readFile(join(chunksDir, url?.split('/').pop() ?? ''), 'utf8');
+      // Isolated per-route bundles each carry their own React (~190KB).
+      expect(entry).toMatch(/from "\.\/shared-[A-Z0-9]+\.js"/);
+      expect(entry.length).toBeLessThan(20_000);
+    }
+  }
+
+  it('keeps shared chunks for the other routes when it imports server-only code', async () => {
+    const root = await writeProject('gio-client-reject-shared-', {
+      ...CLEAN_PAGES,
+      'lib/keys.server.ts': `export const API_KEY = 'GIO_TEST_SERVER_FILE_DO_NOT_BUNDLE';\n`,
+      'app/leak/page.tsx': `import React from 'react';
+import { API_KEY } from '../../lib/keys.server.ts';
+export default function Page() { return React.createElement('p', null, API_KEY); }
+`,
+    });
+    try {
+      const manifest = await buildPages(root, ['one', 'two', 'leak']);
+      expect(manifest.get('/leak')).toBeUndefined();
+      expect(clientBuildErrorFor('/leak')).toMatch(/imports server-only code/);
+      await expectSharedChunks(root, manifest);
+      expect(await allChunks(root)).not.toContain('GIO_TEST_SERVER_FILE_DO_NOT_BUNDLE');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('keeps shared chunks for the other routes when it fails to build', async () => {
+    const root = await writeProject('gio-client-broken-shared-', {
+      ...CLEAN_PAGES,
+      'app/bad/page.tsx': `import { missing } from './does-not-exist.ts';
+export default missing;
+`,
+    });
+    try {
+      const manifest = await buildPages(root, ['one', 'two', 'bad']);
+      expect(manifest.get('/bad')).toBeUndefined();
+      expect(clientBuildErrorFor('/bad')).toMatch(/does-not-exist/);
+      await expectSharedChunks(root, manifest);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
 
 describe('client env inlining', () => {
@@ -427,12 +553,15 @@ describe('client env inlining', () => {
 
   beforeAll(async () => {
     process.env['GIO_PUBLIC_TEST_GREETING'] = 'hello "public" world';
+    process.env['GIO_PUBLIC_TEST_DESTRUCTURED'] = 'GIO_TEST_DESTRUCTURED_VALUE';
     process.env['GIO_TEST_PRIVATE_TOKEN'] = 'GIO_TEST_PRIVATE_VALUE_DO_NOT_BUNDLE';
     root = await writeProject('gio-client-env-', {
       'app/env/page.tsx': `import React from 'react';
 export default function Page() {
   const secret = process.env.GIO_TEST_PRIVATE_TOKEN;
-  return React.createElement('p', null, process.env.GIO_PUBLIC_TEST_GREETING, String(secret === undefined));
+  const { GIO_PUBLIC_TEST_DESTRUCTURED, GIO_TEST_PRIVATE_TOKEN } = process.env;
+  return React.createElement('p', null, process.env.GIO_PUBLIC_TEST_GREETING, String(secret === undefined),
+    GIO_PUBLIC_TEST_DESTRUCTURED, GIO_TEST_PRIVATE_TOKEN);
 }
 `,
     });
@@ -448,6 +577,8 @@ export default function Page() {
     expect(manifest.get('/env')).toBeDefined();
     const chunks = await allChunks(root);
     expect(chunks).toContain('hello "public" world');
+    // Destructured reads see the public values too (the server rendered them).
+    expect(chunks).toContain('GIO_TEST_DESTRUCTURED_VALUE');
     expect(chunks).not.toContain('GIO_TEST_PRIVATE_VALUE_DO_NOT_BUNDLE');
     // Non-public reads resolve against an empty object, not a global
     // `process` that would throw in the browser.
@@ -467,13 +598,44 @@ describe('clientEnvDefines', () => {
     );
     expect(defines['process.env.GIO_PUBLIC_API_URL']).toBe('"https://api.example.com"');
     expect(defines['process.env.NODE_ENV']).toBe('"production"');
-    expect(defines['process.env']).toBe('{}');
+    expect(JSON.parse(defines['process.env'] ?? '')).toEqual({
+      NODE_ENV: 'production',
+      GIO_EXPORT: '0',
+      GIO_PUBLIC_API_URL: 'https://api.example.com',
+    });
     expect(Object.keys(defines).some(k => k.includes('BAD-KEY'))).toBe(false);
+    expect(JSON.stringify(defines)).not.toContain('BAD-KEY');
     expect(JSON.stringify(defines)).not.toContain('postgres://secret');
   });
 
   it('marks dev builds as development', () => {
     expect(clientEnvDefines({}, true)['process.env.NODE_ENV']).toBe('"development"');
+  });
+
+  it('gives destructuring and dynamic reads the public values, and only those', async () => {
+    const result = await build({
+      stdin: {
+        contents: `const { GIO_PUBLIC_A, DATABASE_URL } = process.env;
+const name = 'GIO_PUBLIC_A';
+export const probe = [GIO_PUBLIC_A, process.env[name], process.env.GIO_PUBLIC_A, DATABASE_URL,
+  process.env.DATABASE_URL, process.env.NODE_ENV];
+`,
+        loader: 'js',
+      },
+      bundle: true,
+      write: false,
+      format: 'iife',
+      globalName: 'gioEnvProbe',
+      platform: 'browser',
+      define: clientEnvDefines(
+        { GIO_PUBLIC_A: 'public-a', DATABASE_URL: 'postgres://secret' },
+        false,
+      ),
+    });
+    const code = result.outputFiles[0]?.text ?? '';
+    expect(code).not.toContain('postgres://secret');
+    const { probe } = new Function(`${code}; return gioEnvProbe;`)() as { probe: unknown[] };
+    expect(probe).toEqual(['public-a', 'public-a', 'public-a', undefined, undefined, 'production']);
   });
 });
 

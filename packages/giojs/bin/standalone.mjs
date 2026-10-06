@@ -169,7 +169,9 @@ async function main() {
   tsxApi.register();
   const coreSrc = (name) => pathToFileURL(join(coreDir, 'src', name)).href;
   const router = await import(coreSrc('router.ts'));
-  const { buildClientBundles, publicEnvDefines } = await import(coreSrc('client-build.ts'));
+  const { buildClientBundles, publicEnv, publicEnvDefines } = await import(
+    coreSrc('client-build.ts')
+  );
   const { generateStandaloneEntry } = await import(coreSrc('standalone-gen.ts'));
   const { loadEnvFiles } = await import(coreSrc('env-files.ts'));
 
@@ -194,6 +196,9 @@ async function main() {
   console.log(`  out:    ${options.out}`);
   if (envFiles.files.length > 0) {
     console.log(`  env:    ${envFiles.files.join(', ')} (GIO_PUBLIC_* inlined at build time)`);
+  }
+  if (envFiles.skipped.length > 0) {
+    console.log(`  env:    skipped ${envFiles.skipped.join(', ')} (not a regular file)`);
   }
 
   const [routes, layouts, routeFiles] = await Promise.all([
@@ -255,12 +260,17 @@ async function main() {
       // Build-time-only packages: never loaded on the registry path, so the
       // bundle runs without node_modules.
       external: ['tsx', 'tsx/*', 'esbuild'],
+      // The same frozen GIO_PUBLIC_* values the client chunks got, so server
+      // renders match what hydrates: inlined at each literal read, and set in
+      // process.env before any app code runs for destructured and dynamic
+      // reads. Everything else stays a runtime read.
       banner: {
-        js: "import { createRequire as __gioCreateRequire } from 'node:module';\nconst require = __gioCreateRequire(import.meta.url);",
+        js:
+          "import { createRequire as __gioCreateRequire } from 'node:module';\n" +
+          'const require = __gioCreateRequire(import.meta.url);\n' +
+          `Object.assign(process.env, ${JSON.stringify(publicEnv(process.env))});`,
       },
       loader: { '.css': 'empty' },
-      // The same frozen GIO_PUBLIC_* values the client chunks got, so server
-      // renders match what hydrates. Everything else stays a runtime read.
       define: publicEnvDefines(process.env),
       minify: false,
       sourcemap: false,

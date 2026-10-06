@@ -71,6 +71,18 @@ export interface RenderExtras {
 
 const DEV = process.env.NODE_ENV !== 'production';
 
+/**
+ * Whether build diagnostics may be written into page HTML for the error
+ * overlay. Uses Rust's dev-mode rule (main.rs), which also decides whether
+ * the overlay is injected at all: only NODE_ENV=development. An unset
+ * NODE_ENV - a plain `giojs-server` start - is production there, and the
+ * diagnostics (import chains, esbuild errors with file paths) must not reach
+ * public responses. Read per render so tests can switch it.
+ */
+function devOverlayHandOff(): boolean {
+  return process.env.NODE_ENV === 'development' && process.env.GIO_EXPORT !== '1';
+}
+
 /** Match a URL path against pattern-keyed entries (mirrors the Rust trie logic). */
 function matchIn<T>(
   path: string,
@@ -441,9 +453,7 @@ export async function renderRoute(
     // Dev: a route whose client bundle was rejected says so in the error
     // overlay - otherwise the only symptom is a page that never hydrates.
     const clientBuildError =
-      DEV && entryScript === undefined && process.env.GIO_EXPORT !== '1'
-        ? clientBuildErrorFor(pattern)
-        : undefined;
+      entryScript === undefined && devOverlayHandOff() ? clientBuildErrorFor(pattern) : undefined;
 
     let element: React.ReactNode = React.createElement(
       React.Fragment,

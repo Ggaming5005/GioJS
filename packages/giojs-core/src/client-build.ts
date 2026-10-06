@@ -27,10 +27,18 @@
  * build time are inlined; every other `process.env.X` reads as undefined.
  *
  * A route whose entry fails to build is logged and served without hydration -
- * client build errors must not take down SSR. In dev the error is also handed
- * to the error overlay (client-build-errors.ts).
+ * client build errors must not take down SSR, nor cost the other routes their
+ * shared chunks. In dev the error is also handed to the error overlay
+ * (client-build-errors.ts).
  */
-import { build, type Loader, type Metafile, type OutputFile, type Plugin } from 'esbuild';
+import {
+  build,
+  transform,
+  type Loader,
+  type Metafile,
+  type OutputFile,
+  type Plugin,
+} from 'esbuild';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -130,6 +138,14 @@ const SERVER_ONLY_SPECIFIER = /^(?:@gio\.js\/core\/server-only|server-only)$/;
 const SERVER_ONLY_NAMESPACE = 'gio-server-only';
 /** `*.server.ts` / `.tsx` / `.js` / `.jsx` (+ module variants) never ship to the browser. */
 const SERVER_FILE_PATTERN = /\.server\.(?:[cm]?[jt]s|[jt]sx)$/;
+/**
+ * Loose scans of a TypeScript module's source: one that names a server-only
+ * specifier, and one that may declare an enum. False positives (the text in
+ * a comment or string) only cost a needless compile in loadServerModule().
+ */
+const NAMES_SERVER_ONLY = /(['"])(?:@gio\.js\/core\/server-only|server-only)\1/;
+const MAY_DECLARE_ENUM = /\benum\s/;
+const TS_FILE_PATTERN = /\.(?:[cm]?ts|tsx)$/;
 
 /**
  * Bare side-effect imports (`import 'x'`) in `source`. A loose scan is safe:
@@ -145,30 +161,46 @@ export function bareImportSpecifiers(source: string): Set<string> {
 }
 
 /**
- * esbuild defines inlining every `GIO_PUBLIC_*` variable in `env`,
- * JSON-encoded. Keys esbuild cannot express as a member chain (dashes etc.)
- * are skipped instead of failing the whole build.
+ * The `GIO_PUBLIC_*` variables in `env`. Keys esbuild cannot express as a
+ * member chain (dashes etc.) are skipped instead of failing the whole build.
  */
-export function publicEnvDefines(env: NodeJS.ProcessEnv): Record<string, string> {
-  const defines: Record<string, string> = {};
+export function publicEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const vars: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
-    if (value === undefined || !/^GIO_PUBLIC_[A-Za-z0-9_]+$/.test(key)) continue;
-    defines[`process.env.${key}`] = JSON.stringify(value);
+    if (value !== undefined && /^GIO_PUBLIC_[A-Za-z0-9_]+$/.test(key)) vars[key] = value;
   }
-  return defines;
+  return vars;
+}
+
+/** esbuild defines inlining every `GIO_PUBLIC_*` variable in `env`, JSON-encoded. */
+export function publicEnvDefines(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(publicEnv(env)).map(([key, value]) => [
+      `process.env.${key}`,
+      JSON.stringify(value),
+    ]),
+  );
 }
 
 /**
- * Client bundle defines: the build-time `GIO_PUBLIC_*` values, and an empty
- * object for everything else under `process.env`, so a non-public read is
- * `undefined` in the browser - never a secret, and never a `process is not
- * defined` crash. The more specific defines win over the catch-all.
+ * Client bundle defines: the build-time `GIO_PUBLIC_*` values, inlined at
+ * each `process.env.GIO_PUBLIC_X` read. `process.env` itself becomes an
+ * object holding only those values (plus NODE_ENV and GIO_EXPORT), so
+ * destructuring and `process.env[name]` see the same values the server
+ * rendered with, and a non-public read is `undefined` in the browser - never
+ * a secret, and never a `process is not defined` crash. The more specific
+ * defines win over the object.
  */
 export function clientEnvDefines(env: NodeJS.ProcessEnv, dev: boolean): Record<string, string> {
+  const visible = {
+    NODE_ENV: dev ? 'development' : 'production',
+    GIO_EXPORT: '0',
+    ...publicEnv(env),
+  };
   return {
-    'process.env': '{}',
-    'process.env.NODE_ENV': JSON.stringify(dev ? 'development' : 'production'),
-    'process.env.GIO_EXPORT': '"0"',
+    'process.env': JSON.stringify(visible),
+    'process.env.NODE_ENV': JSON.stringify(visible.NODE_ENV),
+    'process.env.GIO_EXPORT': JSON.stringify(visible.GIO_EXPORT),
     ...publicEnvDefines(env),
   };
 }
@@ -233,18 +265,65 @@ function gioServerCodePlugin(projectRoot: string): Plugin {
         return { path: resolved.path, namespace: resolved.namespace, sideEffects: false };
       });
 
-      // *.server.* files get a side effect so they never contribute zero
-      // bytes (a pure re-export barrel would) and slip past the metafile scan.
-      pluginBuild.onLoad({ filter: SERVER_FILE_PATTERN }, async args => {
-        if (args.path.includes('node_modules')) return null;
-        return {
-          contents: `${await readFile(args.path, 'utf8')}\n;globalThis.__gioServerModule = true;\n`,
-          loader: loaderForFile(args.path),
-          resolveDir: dirname(args.path),
-        };
-      });
+      pluginBuild.onLoad({ filter: /\.(?:[cm]?[jt]s|[jt]sx)$/ }, args =>
+        args.namespace === 'file' && !args.path.includes('node_modules')
+          ? loadServerModule(args.path)
+          : null,
+      );
     },
   };
+}
+
+/**
+ * Load a project module the server-only guard must see through, or null to
+ * let esbuild load it normally.
+ *
+ * - A server-only TypeScript module (`*.server.*`, or one naming the
+ *   server-only marker) that declares an enum is compiled to plain JS first.
+ *   esbuild inlines enum members across modules, so a client read of
+ *   `Secret.Key` would ship the value while the module - and its marker -
+ *   was tree-shaken away unseen. Compiled, the enum is an ordinary object:
+ *   reading it keeps the module live, and the guard rejects the route. The
+ *   compiled code itself never ships (the module is either shaken out or
+ *   its route rejected), so only what stays live matters.
+ * - `*.server.*` files also get a side effect, so they never contribute zero
+ *   bytes (a pure re-export barrel would) and slip past the metafile scan.
+ */
+async function loadServerModule(
+  path: string,
+): Promise<{ contents: string; loader: Loader; resolveDir: string } | null> {
+  const serverFile = SERVER_FILE_PATTERN.test(path);
+  const typescript = TS_FILE_PATTERN.test(path);
+  if (!serverFile && !typescript) return null;
+  const source = await readFile(path, 'utf8');
+  const compile =
+    typescript && MAY_DECLARE_ENUM.test(source) && (serverFile || NAMES_SERVER_ONLY.test(source));
+  if (!serverFile && !compile) return null;
+  const loader = loaderForFile(path);
+  let contents = compile ? await compileEnums(source, loader, path) : source;
+  if (serverFile) contents += '\n;globalThis.__gioServerModule = true;\n';
+  return { contents, loader, resolveDir: dirname(path) };
+}
+
+/** `source` with TypeScript compiled away (enums become objects); best-effort. */
+async function compileEnums(source: string, loader: Loader, path: string): Promise<string> {
+  try {
+    const result = await transform(source, {
+      loader,
+      jsx: 'preserve',
+      sourcefile: path,
+      // Accept parameter decorators too (TypeORM/Nest-style modules).
+      tsconfigRaw: { compilerOptions: { experimentalDecorators: true } },
+    });
+    return result.code;
+  } catch (compileError) {
+    // The bundler reports real syntax errors on the original source.
+    logger.debug('server-only module not precompiled', {
+      file: path,
+      error: compileError instanceof Error ? compileError.message : String(compileError),
+    });
+    return source;
+  }
 }
 
 function isServerOnlyInput(input: string): boolean {
@@ -288,13 +367,29 @@ function shortestImportPath(
   return null;
 }
 
+/** Whether any server-only module survived tree-shaking in this build. */
+function hasLiveServerOnly(metafile: Metafile): boolean {
+  return [...liveInputs(metafile)].some(isServerOnlyInput);
+}
+
+/**
+ * Whether `entryInput` has any import path to a server-only module that
+ * survived tree-shaking. In a combined build liveness is the union across
+ * routes, so this over-approximates (the module may be live only for
+ * another route): it picks the suspects to rebuild alone, never a verdict.
+ */
+function mayReachServerOnly(metafile: Metafile, entryInput: string): boolean {
+  const live = liveInputs(metafile);
+  const isOffender = (input: string): boolean => live.has(input) && isServerOnlyInput(input);
+  return shortestImportPath(metafile, entryInput, isOffender, () => true) !== null;
+}
+
 /**
  * Import chain (metafile input paths) from `entryInput` to a server-only
  * module that survived tree-shaking, or null when none did - an import used
- * only by shaken-out code (getServerSideProps) never counts. Any live
- * server-only module yields a chain: in a single-route build everything
- * live belongs to that route, and in a combined build (liveness is the
- * union across routes) callers rebuild each route alone before blaming it.
+ * only by shaken-out code (getServerSideProps) never counts. For a
+ * single-route build only: any live server-only module yields a chain,
+ * since everything live belongs to that route.
  */
 export function findServerOnlyChain(metafile: Metafile, entryInput: string): string[] | null {
   const live = liveInputs(metafile);
@@ -455,61 +550,99 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
         plugin,
         nodePaths: options.nodePaths,
       });
-    const serverOnlyChain = (built: BuiltBundles, entry: GeneratedEntry): string[] | null => {
-      const input = built.entryInputs.get(resolve(entry.file));
-      return input === undefined ? null : findServerOnlyChain(built.metafile, input);
+    const entryInput = (built: BuiltBundles, entry: GeneratedEntry): string | undefined =>
+      built.entryInputs.get(resolve(entry.file));
+
+    /**
+     * Build `entry` alone and judge it: null - recorded for the overlay and
+     * logged - when it fails to build or still has live server-only code.
+     */
+    const buildAlone = async (entry: GeneratedEntry): Promise<BuiltBundles | null> => {
+      try {
+        const single = await bundle([entry]);
+        const input = entryInput(single, entry);
+        const chain = input === undefined ? null : findServerOnlyChain(single.metafile, input);
+        if (chain === null) return single;
+        const message = serverOnlyMessage(entry.pattern, chain);
+        recordClientBuildError(entry.pattern, message);
+        logger.error(
+          'client bundle imports server-only code - route will render without hydration',
+          { pattern: entry.pattern, chain: describeChain(chain), error: message },
+        );
+      } catch (entryError) {
+        const message = entryError instanceof Error ? entryError.message : String(entryError);
+        recordClientBuildError(
+          entry.pattern,
+          `client bundle for route "${entry.pattern}" failed to build: ${message}`,
+        );
+        logger.error('client bundle failed - route will render without hydration', {
+          pattern: entry.pattern,
+          error: message,
+        });
+      }
+      return null;
     };
 
+    /** A build of `selected` that ships no server-only code, or null. */
+    const buildTogether = async (selected: GeneratedEntry[]): Promise<BuiltBundles | null> => {
+      try {
+        const built = await bundle(selected);
+        return hasLiveServerOnly(built.metafile) ? null : built;
+      } catch {
+        return null;
+      }
+    };
+
+    // Routes build in one pass so shared code (react, the client runtime)
+    // lands in shared chunks - soft navigation must never load a second
+    // copy. A route that cannot ship (a build error, or server-only code
+    // still live after tree-shaking) must not cost the others that: the
+    // suspects are rebuilt alone to confirm, then the rest rebuilt together.
     let combined: BuiltBundles | null = null;
+    let suspects = entries;
     try {
       const built = await bundle(entries);
-      // Liveness in a combined build is the union across routes, so a
-      // server-only hit there may belong to another route: rebuild each
-      // route alone to pin it on the right one.
-      if (!entries.some(e => serverOnlyChain(built, e) !== null)) combined = built;
+      if (!hasLiveServerOnly(built.metafile)) {
+        combined = built;
+      } else {
+        // Liveness is the union across routes: only an entry that can
+        // reach a live server-only module is a suspect (if none can be
+        // pinned, every route is checked).
+        const reaching = entries.filter(entry => {
+          const input = entryInput(built, entry);
+          return input !== undefined && mayReachServerOnly(built.metafile, input);
+        });
+        if (reaching.length > 0) suspects = reaching;
+      }
     } catch (combinedError) {
-      // One broken page must not cost every route its bundle: retry each
-      // entry alone and keep the ones that build.
-      logger.warn('client build failed - retrying routes individually', {
+      logger.warn('client build failed - isolating the failing routes', {
         error: combinedError instanceof Error ? combinedError.message : String(combinedError),
       });
     }
 
+    let shipped = entries;
+    if (combined === null) {
+      const rejected = new Set<GeneratedEntry>();
+      for (const entry of suspects) {
+        if ((await buildAlone(entry)) === null) rejected.add(entry);
+      }
+      shipped = entries.filter(entry => !rejected.has(entry));
+      if (shipped.length > 0) combined = await buildTogether(shipped);
+    }
+
     const entryFileToUrl = new Map<string, string>();
+    const ship = async (built: BuiltBundles): Promise<void> => {
+      await writeOutputs(built.outputFiles);
+      for (const [file, url] of built.entryFileToUrl) entryFileToUrl.set(file, url);
+    };
     if (combined !== null) {
-      await writeOutputs(combined.outputFiles);
-      for (const [file, url] of combined.entryFileToUrl) entryFileToUrl.set(file, url);
+      await ship(combined);
     } else {
-      for (const entry of entries) {
-        try {
-          const single = await bundle([entry]);
-          const chain = serverOnlyChain(single, entry);
-          if (chain !== null) {
-            const message = serverOnlyMessage(entry.pattern, chain);
-            recordClientBuildError(entry.pattern, message);
-            logger.error(
-              'client bundle imports server-only code - route will render without hydration',
-              {
-                pattern: entry.pattern,
-                chain: describeChain(chain),
-                error: message,
-              },
-            );
-            continue;
-          }
-          await writeOutputs(single.outputFiles);
-          for (const [file, url] of single.entryFileToUrl) entryFileToUrl.set(file, url);
-        } catch (entryError) {
-          const message = entryError instanceof Error ? entryError.message : String(entryError);
-          recordClientBuildError(
-            entry.pattern,
-            `client bundle for route "${entry.pattern}" failed to build: ${message}`,
-          );
-          logger.error('client bundle failed - route will render without hydration', {
-            pattern: entry.pattern,
-            error: message,
-          });
-        }
+      // Last resort (the remaining routes build alone but not together):
+      // per-route bundles, each with its own copy of shared code.
+      for (const entry of shipped) {
+        const single = await buildAlone(entry);
+        if (single !== null) await ship(single);
       }
     }
 

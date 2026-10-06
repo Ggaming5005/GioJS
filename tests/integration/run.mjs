@@ -205,6 +205,15 @@ async function main() {
       );
     });
 
+    await test('the rejected route does not cost the others their shared chunks', async () => {
+      const html = await (await fetch(`${BASE}/`)).text();
+      const chunk = html.match(/\/_next\/static\/chunks\/route-index-[A-Z0-9]+\.js/)?.[0];
+      assert.ok(chunk, 'home page still hydrates');
+      const js = await (await fetch(`${BASE}${chunk}`)).text();
+      // Per-route fallback bundles would each carry their own React.
+      assert.match(js, /\.\/shared-[A-Z0-9]+\.js/, 'entry imports a shared chunk');
+    });
+
     await test('POST bodies are forwarded to Node', async () => {
       const res = await fetch(`${BASE}/echo`, { method: 'POST', body: 'hello body' });
       assert.equal(res.status, 200);
@@ -520,6 +529,60 @@ async function main() {
   }
 }
 
+/**
+ * Phase 1b (NODE_ENV unset - the template's `npm start`): Rust runs in
+ * production mode, so the worker must not write build diagnostics into
+ * public HTML either - no overlay is there to read them.
+ */
+async function unsetNodeEnvPhase() {
+  const binary = findServerBinary();
+  const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-unset-cache-'));
+  const env = {
+    ...process.env,
+    GIO_APP_DIR: join(fixtureDir, 'app'),
+    GIO_CACHE_DIR: cacheDir,
+    RUST_LOG: 'info',
+  };
+  delete env.NODE_ENV;
+
+  let log = '';
+  const server = spawn(binary, [], { cwd: repoRoot, env });
+  server.stdout.on('data', (d) => { log += d.toString(); });
+  server.stderr.on('data', (d) => { log += d.toString(); });
+  let serverGone = false;
+  const serverExited = new Promise((r) =>
+    server.on('exit', () => { serverGone = true; r(); }),
+  );
+
+  try {
+    await waitFor('server health (NODE_ENV unset)', async () => {
+      const res = await fetch(`${BASE}/_gio/health`);
+      return res.ok && (await res.json()).nodeReady === true;
+    }, 30_000);
+
+    await test('NODE_ENV unset: rejected bundles stay out of public HTML', async () => {
+      assert.match(log, /loaded \.env files.*"production"/);
+      const html = await (await fetch(`${BASE}/server-only-leak`)).text();
+      assert.match(html, /SERVER_ONLY_LEAK_FIXTURE/);
+      assert.doesNotMatch(html, /__gio_dev_overlay_script/, 'production mode: no overlay');
+      assert.doesNotMatch(html, /__GIO_SSR_ERROR__/);
+      assert.doesNotMatch(html, /imports server-only code|fixture-keys\.server/);
+      // The diagnostic still reaches the server log.
+      assert.match(log, /imports server-only code/);
+    });
+  } catch (err) {
+    console.error('\nintegration (NODE_ENV unset): FAILED');
+    console.error(err);
+    console.error('\n── server log tail ──');
+    console.error(significantLogTail(log));
+    process.exitCode = 1;
+  } finally {
+    if (!serverGone) server.kill();
+    await serverExited;
+    await rm(cacheDir, { recursive: true, force: true });
+  }
+}
+
 /** Phase 2 (dev mode): file watching restarts the worker and reloads pages. */
 async function devWatchPhase() {
   const binary = findServerBinary();
@@ -655,8 +718,10 @@ async function standalonePhase() {
     await writeFile(
       join(workDir, 'app', 'api', 'hello', 'route.ts'),
       'export function GET() {\n' +
+        '  const { GIO_PUBLIC_STANDALONE_GREETING } = process.env;\n' +
         "  return { ok: true, source: 'standalone', dotenv: process.env.GIO_STANDALONE_DOTENV ?? null,\n" +
-        '    buildOnly: process.env.GIO_STANDALONE_BUILD_ONLY ?? null };\n}\n',
+        '    buildOnly: process.env.GIO_STANDALONE_BUILD_ONLY ?? null,\n' +
+        '    publicDestructured: GIO_PUBLIC_STANDALONE_GREETING ?? null };\n}\n',
     );
     // Build-time env: the public value is frozen into the bundles; the
     // server-only one must not travel into the deploy dir.
@@ -753,6 +818,9 @@ async function standalonePhase() {
         dotenv: 'from-deploy-dir',
         // ...while the build machine's server variables stay behind.
         buildOnly: null,
+        // Frozen GIO_PUBLIC_* values hold for destructured reads too, as
+        // they do in the client chunks.
+        publicDestructured: 'STANDALONE_PUBLIC_VALUE',
       });
     });
 
@@ -798,6 +866,9 @@ async function standalonePhase() {
 }
 
 await main();
+if (process.exitCode !== 1) {
+  await unsetNodeEnvPhase();
+}
 if (process.exitCode !== 1) {
   await devWatchPhase();
 }
