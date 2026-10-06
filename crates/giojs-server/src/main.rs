@@ -5099,6 +5099,7 @@ mod tests {
             worker_error: false,
             set_cookies: Vec::new(),
             route: None,
+            frame_error: None,
         }
     }
 

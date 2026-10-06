@@ -303,6 +303,10 @@ pub struct IpcResponse {
     /// (and from older workers); additive, protocol stays v3.
     #[serde(default)]
     pub route: Option<String>,
+    /// Never on the wire: set on the 500 built for a response frame that
+    /// failed to parse; `send_request` logs it inside the request's span.
+    #[serde(skip)]
+    pub frame_error: Option<MalformedFrame>,
     /// Set-Cookie values, one header each. They cannot ride in the
     /// single-valued `headers` map: cookies are not comma-joinable (Expires
     /// dates contain commas), so a map would keep only one of them.
@@ -314,11 +318,19 @@ pub struct IpcResponse {
     pub set_cookies: Vec<String>,
 }
 
-/// `setCookies` is plugin-writable, and a frame that fails to parse is
-/// skipped - its request then waits out IPC_RESPONSE_TIMEOUT. So a malformed
-/// value degrades instead of failing the frame: null (a natural "clear
-/// cookies") means none, a lone string is one cookie, and anything else that
-/// is not a string is dropped with a warning.
+/// Why a worker response frame was answered with a 500 instead of its own
+/// content, plus the digest the error page shows.
+#[derive(Debug, Clone)]
+pub struct MalformedFrame {
+    pub error: String,
+    pub digest: String,
+}
+
+/// `setCookies` is plugin-writable, and a frame that fails to parse fails
+/// its request with a 500. So a malformed value degrades instead of failing
+/// the frame: null (a natural "clear cookies") means none, a lone string is
+/// one cookie, and anything else that is not a string is dropped with a
+/// warning.
 fn deserialize_set_cookies<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -542,6 +554,20 @@ impl IpcClient {
         match timeout(IPC_RESPONSE_TIMEOUT, rx).await {
             Ok(Ok(result)) => {
                 cancel_guard.armed = false;
+                // Logged here, not by the reader task: this runs in the
+                // request's span, so the line carries its request id.
+                if let IpcSendResult::Response(IpcResponse {
+                    frame_error: Some(frame_error),
+                    ..
+                }) = &result
+                {
+                    error!(
+                        id = %id,
+                        digest = %frame_error.digest,
+                        error = %frame_error.error,
+                        "worker response frame failed to parse - answered 500"
+                    );
+                }
                 Ok(result)
             }
             Ok(Err(_)) => {
@@ -1135,7 +1161,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                             match serde_json::from_value::<IpcResponse>(val) {
                                 Ok(r) => r,
                                 Err(e) => {
-                                    error!("IPC parse error: {e}");
+                                    fail_malformed_response(&inner, &id, &e.to_string());
                                     continue;
                                 }
                             }
@@ -1204,6 +1230,38 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
     }
 }
 
+/// A response frame that fails to deserialize (a mistyped field from a plugin
+/// or a version-skewed worker) still names its request - the id was read
+/// leniently from the raw JSON. Answer that request with a 500 now instead
+/// of letting it wait out IPC_RESPONSE_TIMEOUT, and tell Node to stop any
+/// stream the frame may have opened.
+fn fail_malformed_response(inner: &IpcClientInner, id: &str, parse_error: &str) {
+    send_cancel_like_frame(inner, "cancel", id);
+    let Some((_, tx)) = inner.pending.remove(id) else {
+        error!(id = %id, error = %parse_error, "unparseable worker response frame for no pending request");
+        return;
+    };
+    let digest = error_digest(None);
+    let body = if inner.dev_mode {
+        crate::dev_overlay::error_page_html(
+            500,
+            &format!("The worker sent a response frame the server cannot parse: {parse_error}"),
+            None,
+        )
+    } else {
+        crate::dev_overlay::production_error_page_html(500, &digest)
+    };
+    let mut resp = unavailable_response(id);
+    resp.status = 500;
+    resp.body = body;
+    resp.worker_error = true;
+    resp.frame_error = Some(MalformedFrame {
+        error: parse_error.to_string(),
+        digest,
+    });
+    let _ = tx.send(IpcSendResult::Response(resp));
+}
+
 /// Tell Node to run cleanup for an SSE stream whose Rust-side receiver is gone.
 fn send_sse_close_frame(inner: &IpcClientInner, req_id: &str) {
     send_cancel_like_frame(inner, "sse_close", req_id);
@@ -1252,6 +1310,7 @@ fn error_frame_response(id: &str, val: &serde_json::Value, dev_mode: bool) -> Ip
             .get("route")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        frame_error: None,
     }
 }
 
@@ -1273,6 +1332,7 @@ fn unavailable_response(id: &str) -> IpcResponse {
         worker_error: false,
         set_cookies: Vec::new(),
         route: None,
+        frame_error: None,
     }
 }
 
@@ -1969,6 +2029,73 @@ mod tests {
             client.inner.render_streams.is_empty(),
             "chunk_end must unregister the stream"
         );
+        reader_task.abort();
+    }
+
+    #[tokio::test]
+    async fn malformed_response_frames_answer_their_request_with_a_500_at_once() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client, mut write_rx) = test_client_with_write_channel();
+        let (tx, rx) = oneshot::channel();
+        client.inner.pending.insert("req-bad".into(), tx);
+        let (read_half, _keep_write_open) = tokio::io::split(server_io);
+        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), client.inner.clone()));
+
+        // `status` mistyped: the frame cannot become an IpcResponse.
+        let (_r, mut node_writer) = tokio::io::split(client_io);
+        let frame = serde_json::json!({
+            "id": "req-bad", "status": "200", "headers": {},
+            "body": "<p>x</p>", "cacheable": false, "cacheMaxAge": 0,
+        });
+        write_frame(&mut node_writer, &serde_json::to_vec(&frame).unwrap())
+            .await
+            .unwrap();
+        let resolved = timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("resolved immediately, not after IPC_RESPONSE_TIMEOUT")
+            .unwrap();
+        let IpcSendResult::Response(resp) = resolved else {
+            panic!("a malformed frame resolves to a plain response");
+        };
+        assert_eq!(resp.status, 500);
+        assert!(resp.worker_error);
+        let frame_error = resp.frame_error.expect("parse error carried for logging");
+        assert!(
+            frame_error.error.contains("invalid type"),
+            "{}",
+            frame_error.error
+        );
+        assert!(
+            resp.body.contains(&frame_error.digest),
+            "production page names the digest"
+        );
+        assert!(
+            !resp.body.contains("invalid type"),
+            "never echoes the parse error"
+        );
+        assert!(client.inner.pending.is_empty());
+
+        // Node is told to stop whatever the frame belonged to.
+        let cancel = write_rx.recv().await.expect("cancel frame queued");
+        let cancel: serde_json::Value = serde_json::from_slice(&cancel).unwrap();
+        assert_eq!(cancel["type"], "cancel");
+        assert_eq!(cancel["id"], "req-bad");
+
+        // The connection survives: the next frame is delivered normally.
+        let (tx, rx) = oneshot::channel();
+        client.inner.pending.insert("req-ok".into(), tx);
+        let good = serde_json::json!({
+            "id": "req-ok", "status": 200, "headers": {}, "body": "ok",
+            "cacheable": false, "cacheMaxAge": 0, "route": "/posts/:id",
+        });
+        write_frame(&mut node_writer, &serde_json::to_vec(&good).unwrap())
+            .await
+            .unwrap();
+        let IpcSendResult::Response(resp) = rx.await.unwrap() else {
+            panic!("plain response expected");
+        };
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.route.as_deref(), Some("/posts/:id"));
         reader_task.abort();
     }
 
