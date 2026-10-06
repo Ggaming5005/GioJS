@@ -19,6 +19,8 @@ import { GioLink, GioImage } from '@gio.js/react';
 ```
 
 - **`GioLink`** - internal navigation with budgeted prefetch and optional view transitions.
+- **`usePathname` / `useParams` / `useSearchParams` / `useLocale`** - the matched route, SSR-safe and hydration-safe.
+- **`useRouter`** / **`navigate`** - `push`, `replace`, `back`, `forward`, `refresh`, `prefetch`.
 - **`GioImage`** - automatic format conversion and resizing, no CDN required.
 - **`GioFont`** - self-hosted fonts with correct preload headers.
 

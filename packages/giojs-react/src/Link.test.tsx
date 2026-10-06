@@ -3,8 +3,10 @@
  * packages/giojs-react/src/Link.test.tsx
  *
  * GioLink's prefetch path: a prefetched page is reused by the click, and a
- * page that cannot be swapped in (404/500) is remembered - hovering it again
- * must not refetch it, and clicking it goes straight to a full load.
+ * page that cannot be rendered in place (a static 404.html, a 500 without the
+ * GioJS boundary) is remembered - hovering it again must not refetch it, and
+ * clicking it goes straight to a full load. `replace`, `scroll` and same-page
+ * hash links go through the router.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -15,11 +17,7 @@ import { GioLink } from './Link.tsx';
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 function htmlResponse(status: number, html: string): Response {
-  return {
-    status,
-    headers: { get: (): string | null => null },
-    text: async (): Promise<string> => html,
-  } as unknown as Response;
+  return new Response(html, { status, headers: { 'content-type': 'text/html' } });
 }
 
 /** Let the prefetch's fetch().then().then() chain settle. */
@@ -32,6 +30,8 @@ describe('GioLink prefetch', () => {
   let root: Root;
 
   beforeEach(() => {
+    history.replaceState(null, '', '/');
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
     document.body.innerHTML = '<div id="__gio">initial</div>';
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -44,9 +44,9 @@ describe('GioLink prefetch', () => {
     vi.restoreAllMocks();
   });
 
-  function renderLink(href: string): HTMLAnchorElement {
+  function renderLink(href: string, props: { replace?: boolean; scroll?: boolean } = {}): HTMLAnchorElement {
     act(() => {
-      root.render(<GioLink href={href}>go</GioLink>);
+      root.render(<GioLink href={href} {...props}>go</GioLink>);
     });
     const anchor = container.querySelector('a');
     if (anchor === null) throw new Error('GioLink rendered no anchor');
@@ -70,12 +70,13 @@ describe('GioLink prefetch', () => {
 
   function captureHardNavigations(): string[] {
     const assigned: string[] = [];
+    const real = window.location;
     vi.stubGlobal('location', {
-      pathname: '/',
-      search: '',
-      set href(value: string) {
-        assigned.push(value);
-      },
+      get href() { return real.href; },
+      get origin() { return real.origin; },
+      get pathname() { return real.pathname; },
+      get search() { return real.search; },
+      get hash() { return real.hash; },
       assign(value: string) {
         assigned.push(value);
       },
@@ -124,5 +125,32 @@ describe('GioLink prefetch', () => {
     root = createRoot(container);
     await hover(renderLink('/prefetch-broken'));
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('replace and scroll={false} reach the router', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => htmlResponse(200, '<html><body><div id="__gio">next</div></body></html>')));
+    const push = vi.spyOn(history, 'pushState');
+    const scrollTo = vi.mocked(window.scrollTo);
+    Object.defineProperty(window, 'scrollY', { value: 500, configurable: true });
+    await click(renderLink('/replaced', { replace: true, scroll: false }));
+    expect(document.getElementById('__gio')?.textContent).toBe('next');
+    expect(window.location.pathname).toBe('/replaced');
+    expect(push).not.toHaveBeenCalled();
+    expect(scrollTo).not.toHaveBeenCalled();
+    Object.defineProperty(window, 'scrollY', { value: 0, configurable: true });
+  });
+
+  it('a same-page hash link scrolls without fetching', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    document.getElementById('__gio')?.insertAdjacentHTML('beforeend', '<h2 id="details">d</h2>');
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const anchor = renderLink('#details');
+    await hover(anchor);
+    await click(anchor);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('#details');
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
   });
 });

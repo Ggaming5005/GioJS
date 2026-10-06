@@ -2,7 +2,9 @@
  * packages/giojs-react/src/LocaleLink.tsx
  *
  * Wrapper around GioLink that prefixes href with the current locale
- * when the locale is non-default. Uses the lang attribute injected by Rust.
+ * when the locale is non-default. The locale comes from useLocale(), which
+ * reads the request locale during SSR too, so the server HTML already holds
+ * the prefixed href.
  */
 import React from 'react';
 import { GioLink } from './Link.js';
