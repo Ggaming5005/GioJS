@@ -97,7 +97,12 @@ export interface GioRequest {
   /** Raw request body (UTF-8, or base64 when bodyBase64 is true); null if none. */
   body: string | null;
   bodyBase64: boolean;
-  /** Parse the body as JSON. Throws on absent, base64, or malformed bodies. */
+  /**
+   * Parse the body as JSON. The request must declare `application/json` (or
+   * `application/*+json`): otherwise it throws `UnsupportedMediaTypeError`,
+   * which becomes a 415 response unless the handler catches it. Also throws
+   * on absent, base64, or malformed bodies. `body` stays available raw.
+   */
   json<T = unknown>(): T;
   locale?: string;
 }

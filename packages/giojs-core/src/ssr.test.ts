@@ -16,6 +16,11 @@ import {
 } from './ssr.ts';
 import { clearClientBuildErrors, recordClientBuildError } from './client-build-errors.ts';
 import { cspNonce } from './csp.ts';
+import {
+  isJsonContentType,
+  isUnsupportedMediaTypeError,
+  UnsupportedMediaTypeError,
+} from './request-body.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import type { IPCRequest } from './context.ts';
 import type { RouteModule, LayoutEntry, PageModule, LayoutModule } from './router.ts';
@@ -686,7 +691,7 @@ describe('route.ts method handlers', () => {
       ...makeRequest('/api/notes/42'),
       method: 'POST',
       body: '{"text":"hi"}',
-      headers: { cookie: 'session=abc; theme=dark' },
+      headers: { cookie: 'session=abc; theme=dark', 'content-type': 'application/json' },
     };
     const result = await renderRoute(req, new Map(), noLayouts, undefined, undefined, undefined, {
       handlers,
@@ -802,6 +807,79 @@ describe('route.ts method handlers', () => {
       handlers,
     });
     expect('status' in result && result.status).toBe(204);
+  });
+
+  async function postJson(contentType: string | undefined, handler: RouteHandlerFn) {
+    const handlers = makeHandlers('/api/json', { POST: handler });
+    const req: IPCRequest = {
+      ...makeRequest('/api/json'),
+      method: 'POST',
+      body: '{"a":1}',
+      headers: contentType === undefined ? {} : { 'content-type': contentType },
+    };
+    const result = await renderRoute(req, new Map(), noLayouts, undefined, undefined, undefined, {
+      handlers,
+    });
+    if (!('status' in result)) throw new Error('expected a buffered response');
+    return result;
+  }
+
+  it('json() parses bodies declared as application/json or +json', async () => {
+    for (const contentType of [
+      'application/json',
+      'application/json; charset=utf-8',
+      'Application/JSON',
+      'application/merge-patch+json',
+      'application/vnd.api+json; charset=utf-8',
+    ]) {
+      const result = await postJson(contentType, req => req.json());
+      expect(result.status, contentType).toBe(200);
+      expect(JSON.parse(result.body)).toEqual({ a: 1 });
+    }
+  });
+
+  it('json() on a body not declared as JSON is a 415, not a 500', async () => {
+    for (const contentType of [undefined, 'text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=x', 'application/jsonp', 'text/json']) {
+      const result = await postJson(contentType, req => req.json());
+      expect(result.status, String(contentType)).toBe(415);
+      expect(result.headers['content-type']).toContain('application/json');
+      expect(JSON.parse(result.body)).toMatchObject({ error: 'Unsupported Media Type' });
+    }
+  });
+
+  it('a handler can catch the 415 error and still read the raw body', async () => {
+    const result = await postJson('text/plain', req => {
+      try {
+        return req.json();
+      } catch (err) {
+        if (!isUnsupportedMediaTypeError(err)) throw err;
+        expect(err).toBeInstanceOf(UnsupportedMediaTypeError);
+        expect(err.status).toBe(415);
+        return { raw: req.body };
+      }
+    });
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ raw: '{"a":1}' });
+  });
+
+  it('a handler-thrown UnsupportedMediaTypeError from another module copy maps to 415', async () => {
+    // Route files load in their own module namespace: detection is by brand.
+    const foreign = Object.assign(new Error('nope'), { __gioUnsupportedMediaType: true });
+    const result = await postJson('application/json', () => {
+      throw foreign;
+    });
+    expect(result.status).toBe(415);
+  });
+});
+
+describe('isJsonContentType', () => {
+  it('accepts JSON media types only', () => {
+    expect(isJsonContentType('application/json')).toBe(true);
+    expect(isJsonContentType(' application/ld+json ;profile=x')).toBe(true);
+    expect(isJsonContentType(undefined)).toBe(false);
+    expect(isJsonContentType('')).toBe(false);
+    expect(isJsonContentType('application/json-seq')).toBe(false);
+    expect(isJsonContentType('text/plain; application/json')).toBe(false);
   });
 });
 

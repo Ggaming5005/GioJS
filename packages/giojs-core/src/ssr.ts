@@ -36,6 +36,11 @@ import { logger } from './logger.ts';
 import { clientBuildErrorFor } from './client-build-errors.ts';
 import { createErrorDigest, describeError, isDevMode } from './mode.ts';
 import { cspNonce, nonceAttr } from './csp.ts';
+import {
+  isJsonContentType,
+  isUnsupportedMediaTypeError,
+  UnsupportedMediaTypeError,
+} from './request-body.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -168,6 +173,8 @@ function makeGioRequest(req: IPCRequest, params: Record<string, string>): GioReq
     body: req.body,
     bodyBase64: req.bodyBase64,
     json<T = unknown>(): T {
+      const contentType = req.headers['content-type'];
+      if (!isJsonContentType(contentType)) throw new UnsupportedMediaTypeError(contentType);
       if (req.body === null) throw new Error('request has no body');
       if (req.bodyBase64) throw new Error('request body is binary (base64) - decode it manually');
       return JSON.parse(req.body) as T;
@@ -937,6 +944,15 @@ async function runRouteHandler(
       body: JSON.stringify(result),
     };
   } catch (err) {
+    // A client error, not a handler failure: nothing to log or hide.
+    if (isUnsupportedMediaTypeError(err)) {
+      return {
+        ...base,
+        status: 415,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+        body: JSON.stringify({ error: 'Unsupported Media Type', message: err.message }),
+      };
+    }
     const digest = createErrorDigest();
     logger.error('route handler failed', {
       path: req.path,

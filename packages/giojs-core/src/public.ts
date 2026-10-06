@@ -11,6 +11,7 @@ export type { GioRequest, GioSocket } from './context.ts';
 export type { GioNodePlugin } from './plugin.ts';
 export { defineMiddleware } from './middleware.ts';
 export { cspNonce } from './csp.ts';
+export { UnsupportedMediaTypeError, isUnsupportedMediaTypeError } from './request-body.ts';
 export type {
   MiddlewareRules,
   MiddlewareRedirect,

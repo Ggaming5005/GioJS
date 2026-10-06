@@ -1131,6 +1131,12 @@ async function main() {
       assert.equal(await upgradeStatus('/live'), 101, 'non-browser clients send no Origin');
     });
 
+    await test('route.ts json() answers 415 for bodies not declared as JSON', async () => {
+      const res = await fetch(`${BASE}/api/notes`, { method: 'POST', body: JSON.stringify({ text: 'plain' }) });
+      assert.equal(res.status, 415);
+      assert.equal((await res.json()).error, 'Unsupported Media Type');
+    });
+
     await test('killing the Node worker mid-flight recovers within seconds', async () => {
       const pidsBefore = workerPids();
       assert.ok(pidsBefore.length > 0, 'worker pid parsed from server log');
