@@ -2415,6 +2415,7 @@ fn respond_stream(
         idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
         done: false,
         shell_capture,
+        span: tracing::Span::current(),
     };
 
     let mut builder = Response::builder().status(status_code);
@@ -2544,22 +2545,25 @@ impl PprShellCapture {
             lang,
             ..
         } = self;
-        tokio::spawn(async move {
-            put_ppr_shell_entry(
-                &cache,
-                &cache_key,
-                &path,
-                raw.freeze(),
-                head_snippets,
-                lang,
-                status,
-                headers,
-                max_age_secs,
-                deployment_id,
-                tags,
-            )
-            .await;
-        });
+        tokio::spawn(
+            async move {
+                put_ppr_shell_entry(
+                    &cache,
+                    &cache_key,
+                    &path,
+                    raw.freeze(),
+                    head_snippets,
+                    lang,
+                    status,
+                    headers,
+                    max_age_secs,
+                    deployment_id,
+                    tags,
+                )
+                .await;
+            }
+            .instrument(tracing::Span::current()),
+        );
     }
 }
 
@@ -2577,6 +2581,9 @@ struct RenderBodyStream {
     /// Set on PPR miss renders; a stream ending without shell_end drops the
     /// capture unstored, so an aborted render can never cache a torn shell.
     shell_capture: Option<PprShellCapture>,
+    /// The request's span: hyper polls the body after the handler returned,
+    /// outside it, and lines logged here must still name their request.
+    span: tracing::Span,
 }
 
 impl Drop for RenderBodyStream {
@@ -2597,6 +2604,7 @@ impl Stream for RenderBodyStream {
         if this.done {
             return Poll::Ready(None);
         }
+        let _entered = this.span.clone().entered();
         loop {
             match this.inner.poll_recv(cx) {
                 Poll::Ready(Some(RenderFrame::Chunk(bytes))) => {
@@ -2687,12 +2695,11 @@ fn respond_ppr_hit(
     );
 
     let (hole_tx, hole_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
-    tokio::spawn(feed_ppr_holes(
-        state.ipc.clone(),
-        holes_req,
-        hole_tx,
-        path.to_string(),
-    ));
+    // In the request's span: the holes render outlives this handler.
+    tokio::spawn(
+        feed_ppr_holes(state.ipc.clone(), holes_req, hole_tx, path.to_string())
+            .instrument(tracing::Span::current()),
+    );
 
     let stream = PprHitBodyStream {
         shell: Some(entry.html),
@@ -3801,6 +3808,9 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
     req.client.ip = None;
     let locale = req.locale.clone();
     let req_path = req.path.clone();
+    // The refresh runs in the triggering request's span (its worker logs
+    // carry that request id too), so every line it logs names the request.
+    let span = tracing::Span::current();
     tokio::spawn(async move {
         match state.ipc.send_request(req).await {
             Ok(IpcSendResult::Response(resp)) if render_is_shareable(&resp) => {
@@ -3880,7 +3890,7 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
             Err(e) => warn!(key = %key, error = %e, "background revalidation IPC error"),
         }
         state.revalidating.remove(&key);
-    });
+    }.instrument(span));
 }
 
 /// Drain a PPR revalidation stream up to shell_end, returning the raw shell
@@ -5126,6 +5136,27 @@ mod tests {
         read_until_eof(Broken);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn render_body_stream_logs_inside_its_request_span() {
+        // hyper polls bodies after the handler returned, outside its span:
+        // the stream carries the span so its lines still name the request.
+        let (client, _write_rx) = ipc::test_client_with_write_channel();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
+        let mut stream =
+            render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
+        tokio::time::advance(ipc::IPC_RESPONSE_TIMEOUT + Duration::from_secs(1)).await;
+        let log = captured_log("warn", || {
+            stream.span = request_span("rid-body");
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            let _ = Pin::new(&mut stream).poll_next(&mut cx);
+        });
+        let line = log
+            .lines()
+            .find(|line| line.contains("idle-gap timeout"))
+            .unwrap_or_else(|| panic!("timeout warning missing: {log}"));
+        assert!(line.contains("request_id=rid-body"), "{line}");
+    }
+
     /// Log lines written under `filter`, as the server's fmt subscriber
     /// prints them.
     fn captured_log(filter: &str, emit: impl FnOnce()) -> String {
@@ -5226,6 +5257,7 @@ mod tests {
             idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
             done: false,
             shell_capture: None,
+            span: tracing::Span::none(),
         }
     }
 
