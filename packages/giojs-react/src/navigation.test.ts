@@ -7,7 +7,7 @@
  * click can never clobber the newer page.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { navigateTo } from './navigation.ts';
+import { navigateTo, STYLESHEET_WAIT_MS } from './navigation.ts';
 
 function pageHtml(marker: string): string {
   return `<html><head><title>${marker}</title></head><body><div id="__gio">${marker}</div></body></html>`;
@@ -102,5 +102,69 @@ describe('navigateTo sequencing', () => {
     expect(document.getElementById('__gio')?.textContent).toBe('fast-page');
     expect(pushSpy).toHaveBeenCalledTimes(1);
     expect(pushSpy).toHaveBeenCalledWith({ gio: true }, '', '/fast');
+  });
+});
+
+describe('route stylesheets on navigation', () => {
+  const styledPage = (marker: string, hrefs: string[]): string =>
+    `<html><head>${hrefs
+      .map(href => `<link rel="stylesheet" href="${href}" data-precedence="default"/>`)
+      .join('')}<title>${marker}</title></head><body><div id="__gio">${marker}</div></body></html>`;
+
+  const headSheets = (): (string | null)[] =>
+    [...document.head.querySelectorAll('link[rel="stylesheet"]')].map(l => l.getAttribute('href'));
+
+  beforeEach(() => {
+    document.head.innerHTML =
+      '<link rel="stylesheet" href="/_next/static/css/root-A.css" data-precedence="default"/>' +
+      '<link rel="stylesheet" href="/legacy.css"/>';
+    document.body.innerHTML = '<div id="__gio">initial</div>';
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("loads the next route's new stylesheets before swapping it in, in cascade order", async () => {
+    const page = deferredFetch();
+    vi.stubGlobal('fetch', vi.fn(() => page.response));
+    const nav = navigateTo('/styled', false);
+    page.resolve(styledPage('styled-page', ['/_next/static/css/root-A.css', '/_next/static/css/route-B.css']));
+    await vi.waitFor(() => expect(headSheets()).toContain('/_next/static/css/route-B.css'));
+    // Only the missing sheet is added - after the other route stylesheets,
+    // never after a hand-written link - and the content waits for it.
+    expect(headSheets()).toEqual([
+      '/_next/static/css/root-A.css',
+      '/_next/static/css/route-B.css',
+      '/legacy.css',
+    ]);
+    expect(document.getElementById('__gio')?.textContent).toBe('initial');
+    document.head.querySelector('link[href="/_next/static/css/route-B.css"]')?.dispatchEvent(new Event('load'));
+    await nav;
+    expect(document.getElementById('__gio')?.textContent).toBe('styled-page');
+  });
+
+  it('swaps immediately when every stylesheet is already present', async () => {
+    const page = deferredFetch();
+    vi.stubGlobal('fetch', vi.fn(() => page.response));
+    const nav = navigateTo('/same', false);
+    page.resolve(styledPage('same-page', ['/_next/static/css/root-A.css']));
+    await nav;
+    expect(document.getElementById('__gio')?.textContent).toBe('same-page');
+    expect(headSheets()).toHaveLength(2);
+  });
+
+  it('swaps anyway when a stylesheet never loads', async () => {
+    vi.useFakeTimers();
+    const page = deferredFetch();
+    vi.stubGlobal('fetch', vi.fn(() => page.response));
+    const nav = navigateTo('/slow-css', false);
+    page.resolve(styledPage('slow-css-page', ['/_next/static/css/route-C.css']));
+    await vi.waitFor(() => expect(headSheets()).toContain('/_next/static/css/route-C.css'));
+    await vi.advanceTimersByTimeAsync(STYLESHEET_WAIT_MS);
+    await nav;
+    expect(document.getElementById('__gio')?.textContent).toBe('slow-css-page');
   });
 });

@@ -2,8 +2,8 @@
  * packages/giojs-react/src/navigation.ts
  *
  * Client-side navigation machinery shared by GioLink: deployment-id version
- * skew detection, the bounded prefetch cache, fetch+swap content navigation,
- * and the popstate handler that restores content on back/forward. All DOM
+ * skew detection, the bounded prefetch cache, fetch+swap content navigation
+ * (after the next route's stylesheets have loaded), and the popstate handler that restores content on back/forward. All DOM
  * access is guarded so this module is safe to import during SSR.
  */
 
@@ -113,6 +113,53 @@ function swapContent(html: string): void {
   window.dispatchEvent(new Event('gio:navigated'));
 }
 
+/** How long a navigation waits for the next route's stylesheets before swapping anyway. */
+export const STYLESHEET_WAIT_MS = 3000;
+
+/**
+ * Load the route stylesheets `html` links (React stylesheet resources -
+ * `<link rel="stylesheet" data-precedence>` - hoisted into its <head>) that
+ * this document does not have yet, and resolve once each has loaded or
+ * failed (at most STYLESHEET_WAIT_MS), so the swapped-in route is never
+ * shown unstyled. Inserted after the existing ones, keeping cascade order;
+ * React adopts them by href when it renders the route.
+ */
+export function adoptStylesheets(html: string): Promise<void> {
+  const parsed = new DOMParser().parseFromString(html, 'text/html');
+  const present = new Set(
+    [...document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')].map(
+      link => link.getAttribute('href'),
+    ),
+  );
+  const pending: Promise<void>[] = [];
+  for (const incoming of parsed.head.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"][data-precedence]')) {
+    const href = incoming.getAttribute('href');
+    if (href === null || present.has(href)) continue;
+    present.add(href);
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.setAttribute('data-precedence', incoming.getAttribute('data-precedence') ?? 'default');
+    pending.push(
+      new Promise<void>(resolve => {
+        link.addEventListener('load', () => resolve(), { once: true });
+        link.addEventListener('error', () => resolve(), { once: true });
+      }),
+    );
+    const last = [...document.head.querySelectorAll('link[rel="stylesheet"][data-precedence]')].at(-1);
+    if (last !== undefined) last.after(link);
+    else document.head.append(link);
+  }
+  if (pending.length === 0) return Promise.resolve();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    Promise.all(pending).then(() => undefined),
+    new Promise<void>(resolve => {
+      timer = setTimeout(resolve, STYLESHEET_WAIT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Fetch a page for client navigation. Returns null when the browser must
  * load the URL itself (deployment skew, or a response that cannot be swapped).
@@ -188,6 +235,8 @@ export async function navigateTo(
     html = fetched;
   }
 
+  await adoptStylesheets(html);
+  if (!isCurrentNavigation(seq)) return;
   await applyWithTransition(html, transition, seq);
   if (!isCurrentNavigation(seq)) return;
   history.pushState({ gio: true }, '', href);
@@ -210,7 +259,9 @@ export function initPopstateHandler(): void {
           window.location.reload();
           return;
         }
-        swapContent(html);
+        return adoptStylesheets(html).then(() => {
+          if (isCurrentNavigation(seq)) swapContent(html);
+        });
       })
       .catch(() => {
         if (isCurrentNavigation(seq)) window.location.reload();
