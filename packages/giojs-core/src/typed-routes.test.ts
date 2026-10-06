@@ -2,7 +2,7 @@
  * giojs-core/src/typed-routes.test.ts
  *
  * generateRouteTypes must emit a declaration-merging .d.ts covering static,
- * :param, and *catchall patterns; writeRouteTypes must create .gio/routes.d.ts
+ * :param, *catchall, and optional *catchall? patterns; writeRouteTypes must create .gio/routes.d.ts
  * and skip rewrites when the content is unchanged (tsc watch churn).
  */
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { generateRouteTypes, writeRouteTypes } from './typed-routes.ts';
+import { discoverRoutes } from './router.ts';
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const fixtureRoot = join(packageDir, '.typed-routes-test-fixture');
@@ -39,6 +40,28 @@ describe('generateRouteTypes', () => {
   it('maps *catchall segments to string fields', () => {
     const output = generateRouteTypes(['/docs/*slug']);
     expect(output).toContain("'/docs/*slug': { slug: string };");
+  });
+
+  it('maps optional *catchall? segments to optional string fields', () => {
+    const output = generateRouteTypes(['/shop/*path?', '/u/:id/*rest?']);
+    expect(output).toContain("'/shop/*path?': { path?: string };");
+    expect(output).toContain("'/u/:id/*rest?': { id: string; rest?: string };");
+  });
+
+  it('types the patterns discovery produces: groups stripped, catch-alls typed', async () => {
+    const appDir = join(fixtureRoot, 'discovered', 'app');
+    const page = 'export default function P() { return null; }';
+    for (const dir of ['(marketing)/about', 'docs/[...slug]', '(shop)/shop/[[...path]]', '_lib']) {
+      await mkdir(join(appDir, dir), { recursive: true });
+      await writeFile(join(appDir, dir, 'page.tsx'), page);
+    }
+    const routes = await discoverRoutes(appDir);
+    const output = generateRouteTypes([...routes.keys()]);
+    expect(output).toContain("'/about': Record<string, never>;");
+    expect(output).toContain("'/docs/*slug': { slug: string };");
+    expect(output).toContain("'/shop/*path?': { path?: string };");
+    expect(output).not.toContain('(marketing)');
+    expect(output).not.toContain('_lib');
   });
 
   it('deduplicates and sorts patterns for deterministic output', () => {

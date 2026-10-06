@@ -11,8 +11,14 @@ export interface GioRegisteredRoutes {}
 
 export type RouteParamsOf<P extends keyof GioRegisteredRoutes> = GioRegisteredRoutes[P];
 
+// Static routes take no params; routes whose params are all optional (an
+// optional catch-all, `*slug?`) may omit the argument.
 type HrefArgs<P extends keyof GioRegisteredRoutes> =
-  RouteParamsOf<P> extends Record<string, never> ? [] : [params: RouteParamsOf<P>];
+  RouteParamsOf<P> extends Record<string, never>
+    ? []
+    : {} extends RouteParamsOf<P>
+      ? [params?: RouteParamsOf<P>]
+      : [params: RouteParamsOf<P>];
 
 function encodeSegmentValue(value: string, isCatchAll: boolean): string {
   // Catch-all values may span segments; encode each one, keep the separators.
@@ -28,14 +34,19 @@ export function href<P extends keyof GioRegisteredRoutes & string>(
 ): string;
 export function href(pattern: string, params?: Record<string, string>): string {
   const paramValues = params ?? {};
-  return pattern
-    .split('/')
-    .map(segment => {
-      const isCatchAll = segment.startsWith('*');
-      if (!isCatchAll && !segment.startsWith(':')) {
-        return segment;
-      }
-      return encodeSegmentValue(paramValues[segment.slice(1)] ?? '', isCatchAll);
-    })
-    .join('/');
+  const segments: string[] = [];
+  for (const segment of pattern.split('/')) {
+    const isCatchAll = segment.startsWith('*');
+    if (!isCatchAll && !segment.startsWith(':')) {
+      segments.push(segment);
+      continue;
+    }
+    const isOptional = isCatchAll && segment.endsWith('?');
+    const value = paramValues[isOptional ? segment.slice(1, -1) : segment.slice(1)] ?? '';
+    // An empty optional catch-all is the bare parent: '/shop', not '/shop/'.
+    if (isOptional && value === '') continue;
+    segments.push(encodeSegmentValue(value, isCatchAll));
+  }
+  const url = segments.join('/');
+  return url === '' ? '/' : url;
 }
