@@ -41,6 +41,23 @@ The HTTP port is not an environment variable - it comes from the `[server]` sect
 
 Each instance keeps its own page cache (memory + disk) - there is no shared/distributed cache yet; cross-instance cache coherence is on the roadmap. To keep caches and version-skew detection consistent across instances of the same build, set `GIO_DEPLOYMENT_ID` to the same value (e.g. the release SHA) on every instance.
 
+## Behind a reverse proxy or load balancer
+
+GioJS closes an HTTP/1.1 keep-alive connection after `header_read_timeout_secs` (10s by default) without a new request, and any connection after `idle_timeout_secs` (60s) with nothing in flight. A proxy or load balancer that pools upstream connections and keeps them idle for longer can reuse one at the moment GioJS closes it, and answers that request with a 502. Proxies ignore the `Keep-Alive: timeout=N` hint GioJS sends, so line the timeouts up yourself. Either:
+
+- keep the proxy's upstream idle timeout below 10s: `keepalive_timeout 5s;` in an nginx `upstream` block, or `upstream-keepalive-timeout: "5"` in the ingress-nginx controller ConfigMap; or
+- raise both GioJS deadlines above the proxy's timeout. AWS ALB keeps target connections for its idle timeout (60s by default), and ingress-nginx and nginx `upstream` keep-alive default to 60s:
+
+  ```toml
+  [server]
+  header_read_timeout_secs = 65
+  idle_timeout_secs = 65
+  ```
+
+  The proxy reads each request head in full before forwarding it, so the longer head deadline costs nothing as long as clients can reach GioJS only through the proxy.
+
+A plain `proxy_pass` with no `upstream { keepalive }` block, as in the [systemd guide](linux-systemd.md), opens a fresh upstream connection per request and needs neither. See *Connection limits* on the configuration docs page for every connection setting.
+
 ## Health check
 
 `/_gio/health` returns JSON and is always available - use it for readiness probes and uptime monitors:

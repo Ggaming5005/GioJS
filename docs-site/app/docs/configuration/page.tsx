@@ -126,12 +126,15 @@ ip_allowlist = []       # restrict by client IP, e.g. ["10.0.0.5"]`} />
       </p>
       <div className="callout">
         HTTP/1.1 responses carry <code>Keep-Alive: timeout=N</code>, so clients stop reusing
-        a connection before the server closes it. If a reverse proxy or load balancer pools
-        upstream connections to GioJS (nginx <code>keepalive</code>, AWS ALB), set its upstream
-        idle timeout below <code>header_read_timeout_secs</code>, or raise
-        <code>header_read_timeout_secs</code> above the proxy&apos;s timeout (the proxy already
+        a connection before the server closes it. Proxies and load balancers that pool
+        upstream connections to GioJS (nginx <code>keepalive</code>, ingress-nginx, AWS ALB)
+        ignore that hint and keep idle connections for 60 seconds by default, longer than
+        the 10-second HTTP/1.1 idle close. Set the proxy&apos;s upstream idle timeout below{' '}
+        <code>header_read_timeout_secs</code>, or raise both <code>header_read_timeout_secs</code>{' '}
+        and <code>idle_timeout_secs</code> above the proxy&apos;s timeout (the proxy already
         absorbs slow clients). Otherwise the proxy can reuse a connection at the moment
-        GioJS closes it and answer that request with a 502.
+        GioJS closes it and answer that request with a 502. The{' '}
+        <a href="/docs/deployment">deployment guide</a> has settings for each proxy.
       </div>
 
       <h2>Health &amp; metrics</h2>
