@@ -140,6 +140,16 @@ spec:
       secretName: my-app-tls
 ```
 
+ingress-nginx keeps idle connections to each pod open for 60s (`upstream-keepalive-timeout`), but GioJS closes an idle HTTP/1.1 connection after `header_read_timeout_secs` (10s by default). Without a fix, the ingress sometimes reuses a connection just as the pod closes it, and that request gets a 502. Raise both GioJS deadlines above the ingress timeout in the `gio.toml` ConfigMap:
+
+```toml
+[server]
+header_read_timeout_secs = 65
+idle_timeout_secs = 65
+```
+
+Alternatively, set `upstream-keepalive-timeout: "5"` in the ingress-nginx controller ConfigMap. See [Behind a reverse proxy or load balancer](README.md#behind-a-reverse-proxy-or-load-balancer).
+
 ---
 
 ## Horizontal Pod Autoscaler

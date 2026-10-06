@@ -106,6 +106,30 @@ export default function DeploymentPage(): React.JSX.Element {
 }`}</code>
       </pre>
 
+      <h2>Behind a reverse proxy or load balancer</h2>
+      <p>
+        GioJS closes an HTTP/1.1 keep-alive connection after{' '}
+        <code>header_read_timeout_secs</code> (10 seconds by default) without a new request,
+        and any connection after <code>idle_timeout_secs</code> (60 seconds) with nothing in
+        flight. Proxies that pool upstream connections (nginx <code>upstream</code>{' '}
+        keep-alive, ingress-nginx, AWS ALB) keep them idle for 60 seconds by default and
+        ignore the <code>Keep-Alive</code> hint, so they can reuse a connection at the moment
+        GioJS closes it and answer that request with a 502. Either keep the proxy&apos;s
+        upstream idle timeout below 10 seconds, or raise both GioJS deadlines above the
+        proxy&apos;s. The proxy reads every request head in full, so a longer head deadline
+        behind it costs nothing:
+      </p>
+      <pre>
+        <code>{`[server]
+header_read_timeout_secs = 65   # above a 60s ALB / ingress-nginx idle timeout
+idle_timeout_secs = 65`}</code>
+      </pre>
+      <p>
+        A plain <code>proxy_pass</code> with no <code>upstream</code> keep-alive opens a fresh
+        connection per request and needs neither. See{' '}
+        <a href="/docs/configuration">Configuration</a> for every connection limit.
+      </p>
+
       <h2>Multi-instance deployments</h2>
       <p>
         The page cache is per-instance (in-memory LRU plus a local disk tier) - there is no

@@ -22,6 +22,14 @@ host = "0.0.0.0"        # bind address
 port = 3000
 http2 = true            # HTTP/2 support
 max_body_bytes = 2097152  # request body limit (2 MiB)
+max_connections = 10000   # concurrent connections (see Connection limits)
+tls_handshake_timeout_secs = 10
+header_read_timeout_secs = 10       # slowloris guard; also the HTTP/1.1 idle timeout
+request_body_timeout_secs = 30      # whole-body upload deadline, then 408
+idle_timeout_secs = 60              # close connections with nothing in flight
+http2_max_concurrent_streams = 250
+http2_keep_alive_interval_secs = 20 # PING HTTP/2 peers this often...
+http2_keep_alive_timeout_secs = 20  # ...and drop them if the ack takes longer
 
 [server.tls]
 enabled = false         # set true to terminate TLS in GioJS directly
@@ -90,6 +98,44 @@ detect_from = ["path", "accept-language", "cookie"]
 enabled = false         # expose /_gio/metrics (Prometheus); off when this section is absent
 token = ""              # require "Authorization: Bearer <token>" when set
 ip_allowlist = []       # restrict by client IP, e.g. ["10.0.0.5"]`} />
+
+      <h2>Connection limits</h2>
+      <p>
+        The Rust server bounds what a single client can hold open, so slow or idle
+        connections cannot exhaust it. Every field lives in <code>[server]</code>, and
+        setting any of them to <code>0</code> disables that limit.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Field</th><th>Default</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>max_connections</code></td><td>10000</td><td>Concurrent client connections. At the cap the server stops accepting, and new clients wait in the OS listen backlog until a connection closes. Upgraded WebSockets are not counted here; <code>[websocket] max_connections</code> caps them. Keep the process file-descriptor limit (<code>ulimit -n</code>) above this value.</td></tr>
+          <tr><td><code>tls_handshake_timeout_secs</code></td><td>10</td><td>Deadline for completing the TLS handshake when <code>[server.tls]</code> is enabled.</td></tr>
+          <tr><td><code>header_read_timeout_secs</code></td><td>10</td><td>Deadline for receiving a complete request head (the slowloris guard). A new connection must send its first request within it, including the HTTP/2 handshake. Because the timer restarts while an HTTP/1.1 connection waits for its next request, it is also the HTTP/1.1 keep-alive idle timeout.</td></tr>
+          <tr><td><code>request_body_timeout_secs</code></td><td>30</td><td>Deadline for receiving a whole request body. A client that sends the body too slowly gets <code>408 Request Timeout</code>.</td></tr>
+          <tr><td><code>idle_timeout_secs</code></td><td>60</td><td>Connections with no request in flight are closed after this long, gracefully for HTTP/2 (GOAWAY). In practice it applies to HTTP/2, because HTTP/1.1 idles are reaped by <code>header_read_timeout_secs</code> first.</td></tr>
+          <tr><td><code>http2_max_concurrent_streams</code></td><td>250</td><td>Concurrent streams (requests) per HTTP/2 connection.</td></tr>
+          <tr><td><code>http2_keep_alive_interval_secs</code><br /><code>http2_keep_alive_timeout_secs</code></td><td>20 / 20</td><td>The server PINGs each HTTP/2 connection on this interval and closes it if the ack does not arrive within the timeout, so dead peers are reaped. Setting either to <code>0</code> disables pings.</td></tr>
+        </tbody>
+      </table>
+      <p>
+        These deadlines never cut an established response. Streaming SSR, SSE streams and
+        WebSockets stay open as long as they run: the head deadline covers only the reading
+        of request heads, and a connection with a response still streaming is never idle.
+      </p>
+      <div className="callout">
+        HTTP/1.1 responses carry <code>Keep-Alive: timeout=N</code>, so clients stop reusing
+        a connection before the server closes it. Proxies and load balancers that pool
+        upstream connections to GioJS (nginx <code>keepalive</code>, ingress-nginx, AWS ALB)
+        ignore that hint and keep idle connections for 60 seconds by default, longer than
+        the 10-second HTTP/1.1 idle close. Set the proxy&apos;s upstream idle timeout below{' '}
+        <code>header_read_timeout_secs</code>, or raise both <code>header_read_timeout_secs</code>{' '}
+        and <code>idle_timeout_secs</code> above the proxy&apos;s timeout (the proxy already
+        absorbs slow clients). Otherwise the proxy can reuse a connection at the moment
+        GioJS closes it and answer that request with a 502. The{' '}
+        <a href="/docs/deployment">deployment guide</a> has settings for each proxy.
+      </div>
 
       <h2>Health &amp; metrics</h2>
       <p>

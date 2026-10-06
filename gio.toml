@@ -6,6 +6,15 @@ router = "app"
 host  = "0.0.0.0"
 port  = 3000
 http2 = false
+# Connection limits (defaults shown; 0 disables any of them):
+# max_connections                = 10000
+# tls_handshake_timeout_secs     = 10
+# header_read_timeout_secs       = 10  # slowloris guard; also the HTTP/1.1 idle timeout
+# request_body_timeout_secs      = 30  # slow uploads get 408
+# idle_timeout_secs              = 60  # close connections with nothing in flight
+# http2_max_concurrent_streams   = 250
+# http2_keep_alive_interval_secs = 20
+# http2_keep_alive_timeout_secs  = 20
 
 [server.tls]
 enabled   = false
