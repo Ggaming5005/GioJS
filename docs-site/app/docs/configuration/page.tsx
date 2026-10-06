@@ -412,8 +412,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
       <h2>Environment variables</h2>
       <p>
         A few runtime knobs live in the environment rather than
-        <code>gio.toml</code> (the listen host and port are configured in
-        <code>[server]</code>, not via env):
+        <code>gio.toml</code>:
       </p>
       <table>
         <thead>
@@ -421,6 +420,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         </thead>
         <tbody>
           <tr><td><code>GIO_APP_DIR</code></td><td>Path to the <code>app/</code> directory; <code>gio.toml</code> is loaded from its parent</td><td>app</td></tr>
+          <tr><td><code>GIO_HOST</code> / <code>GIO_PORT</code></td><td>Override <code>[server] host</code> / <code>port</code> without editing <code>gio.toml</code> (a second instance, a platform-assigned port). The host must be an IP address; a malformed value stops startup</td><td><code>[server]</code> values</td></tr>
           <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the build content and the gio.toml <code>[images]</code> settings). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
           <tr><td><code>GIO_SOCKET_PATH</code></td><td>Rust-to-Node IPC path; the server passes the resolved value to the Node worker</td><td>per-instance <code>.gio/ipc-&lt;pid&gt;-&lt;rand&gt;.sock</code> (Unix), unique named pipe (Windows)</td></tr>
           <tr><td><code>GIO_PUBLIC_DIR</code></td><td>Directory served at the site root and under <code>/public/*</code></td><td><code>public/</code> next to <code>app/</code></td></tr>
