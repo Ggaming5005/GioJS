@@ -37,4 +37,4 @@ Known workspace dependencies and their current locked versions are in `Cargo.loc
 
 - Upgrade `axum` to 0.8 when stable and update handler signatures
 - Evaluate `lightningcss` stable release once available
-- Consider `cargo-deny` for license and advisory auditing in CI
+- ~~Consider `cargo-deny` for license and advisory auditing in CI~~ - done: `deny.toml` runs in CI and gates releases

@@ -1,0 +1,67 @@
+# cargo-deny policy for the Rust workspace. CI runs it on every PR and the
+# release workflow refuses to publish binaries that fail it.
+#
+#   cargo install cargo-deny --locked
+#   cargo deny --all-features --locked check
+
+[graph]
+# Only the targets release.yml actually ships. Without this, cfg(fuzzing),
+# wasm and redox-only dependencies that never reach a binary get audited too.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "x86_64-pc-windows-msvc",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+version = 2
+# Vulnerability and unsound advisories always fail. Unmaintained notices fail
+# only for crates we depend on directly - those are ours to replace; a
+# transitive one is the upstream crate's call and would only add noise.
+unmaintained = "workspace"
+yanked = "warn"
+# Every entry needs a reason; drop it as soon as the dependency moves.
+ignore = [
+  { id = "RUSTSEC-2026-0235", reason = "rkyv 0.7 (via lightningcss -> parcel_sourcemap): the bug is in validating untrusted rkyv archives and GioJS never deserializes rkyv data. No fixed 0.7 release; goes away when lightningcss leaves rkyv 0.7." },
+  { id = "RUSTSEC-2026-0002", reason = "lru 0.12 IterMut stacked-borrows violation: giojs-cache and giojs-image never call iter_mut. Drop once lru is bumped to >=0.18.2." },
+  { id = "RUSTSEC-2026-0253", reason = "lru 0.12 pop() panic safety: needs a key type whose Drop panics plus catch_unwind; our keys are String. Drop once lru is bumped to >=0.18.2." },
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is archived but is a thin wrapper over the rustls-pki-types PEM parser; drop once the TLS loader uses rustls_pki_types::pem::PemObject." },
+]
+
+[licenses]
+version = 2
+# Exactly the licenses present in the shipped dependency tree (cargo-deny
+# warns about entries no crate uses). Adding one is a reviewed decision.
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.8
+
+# The workspace crates are `publish = false`: they ship inside the npm
+# platform packages, never to crates.io.
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between the unpublished workspace crates.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

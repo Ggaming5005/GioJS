@@ -13,8 +13,8 @@ jobs:
     name: Version lockstep check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
       - run: node scripts/sync-versions.mjs --check
@@ -30,24 +30,25 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
-      - run: cargo clippy --workspace -- -D warnings
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --locked -- -D warnings
 
   node-tests:
     name: Node tests + typecheck
     needs: version-lockstep
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 9
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: pnpm
@@ -72,23 +73,39 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 9
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: cargo build -p giojs-server
+      - run: cargo build -p giojs-server --locked
       - run: node tests/integration/run.mjs
+
+  # Never publish binaries that link a crate with a known vulnerability (or
+  # that break the license/source policy) - unlike CI on pull requests, the
+  # advisories check is a hard gate here. Policy lives in deny.toml.
+  cargo-deny:
+    name: cargo-deny
+    needs: version-lockstep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories bans licenses sources
+          arguments: --all-features --locked
 
   build-platform:
     name: Build ${{ matrix.pkg }}
-    needs: [rust-tests, node-tests, integration]
+    needs: [rust-tests, node-tests, integration, cargo-deny]
     runs-on: ${{ matrix.os }}
     permissions:
       id-token: write
@@ -108,10 +125,11 @@ jobs:
           - { os: macos-14,       target: aarch64-apple-darwin,      pkg: giojs-darwin-arm64,   cross: false }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Install musl toolchain
@@ -120,15 +138,18 @@ jobs:
 
       - name: Install cross
         if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        # Pinned to an exact rev: an unpinned git install builds whatever
+        # cross-rs main is on release day into our published binaries.
+        # A main commit, not crates.io 0.2.5, to keep what this step installed.
+        run: cargo install cross --locked --git https://github.com/cross-rs/cross --rev 74e99b2223de06166f8cdcc1af7f1308ec52baf4
 
       - name: Build (native)
         if: ${{ !matrix.cross }}
-        run: cargo build --release --target ${{ matrix.target }} -p giojs-server
+        run: cargo build --release --locked --target ${{ matrix.target }} -p giojs-server
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }} -p giojs-server
+        run: cross build --release --locked --target ${{ matrix.target }} -p giojs-server
 
       - name: Stage binary (Unix)
         if: runner.os != 'Windows'
@@ -140,7 +161,7 @@ jobs:
         if: runner.os == 'Windows'
         run: copy target\${{ matrix.target }}\release\giojs-server.exe platform\${{ matrix.pkg }}\bin\giojs-server.exe
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
@@ -171,13 +192,13 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: pnpm
