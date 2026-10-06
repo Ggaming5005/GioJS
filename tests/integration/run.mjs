@@ -1957,10 +1957,20 @@ async function opsPhase() {
     )};\n` +
       "export function GET(): unknown {\n  logger.info('ping handled');\n  return { pong: true };\n}\n",
   );
+  // A cached page under [i18n]: one URL per locale may be shared, a locale
+  // negotiated from request headers may not.
+  await mkdir(join(workDir, 'app', 'hello'), { recursive: true });
+  await writeFile(
+    join(workDir, 'app', 'hello', 'page.tsx'),
+    "import React from 'react';\nexport const revalidate = 300;\n" +
+      'export default function Hello() {\n  return <p>OPS_HELLO rendered_at={Date.now()}</p>;\n}\n',
+  );
+  await linkFixtureDeps(workDir);
   await writeFile(join(workDir, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
   await writeFile(
     join(workDir, 'gio.toml'),
-    '[server]\nhost = "127.0.0.1"\nport = 39517\nhttp2 = false\n\n[logging]\nformat = "json"\n',
+    '[server]\nhost = "127.0.0.1"\nport = 39517\nhttp2 = false\n\n[logging]\nformat = "json"\n\n' +
+      '[i18n]\nlocales = ["en", "de"]\ndefault_locale = "en"\ndetect_from = ["path", "accept-language"]\n',
   );
 
   let log = '';
@@ -2016,6 +2026,31 @@ async function opsPhase() {
       const unparseable = jsonLines().filter((line) => line.unparseable !== undefined);
       assert.deepEqual(unparseable, [], 'no plain-text line in JSON mode');
       assert.ok(jsonLines().some((line) => line.msg?.startsWith('GioJS listening')));
+    });
+
+    await test('i18n: locale-prefixed pages are public with ETags; negotiated locales stay private', async () => {
+      await fetch(`${BASE}/de/hello`);
+      const hit = await fetch(`${BASE}/de/hello`);
+      const body = await hit.text();
+      assert.match(body, /OPS_HELLO/);
+      assert.match(body, /<html[^>]* lang="de"/);
+      assert.match(hit.headers.get('x-gio-cache') ?? '', /^hit/);
+      assert.match(hit.headers.get('cache-control') ?? '', /^public, max-age=0, s-maxage=\d+/);
+      const etag = hit.headers.get('etag');
+      assert.match(etag ?? '', /^"[0-9a-f]{32}"$/);
+      const revalidated = await rawGet('/de/hello', { 'if-none-match': etag });
+      assert.equal(revalidated.status, 304);
+      assert.equal(revalidated.body, '', 'a 304 carries no body');
+
+      // Same URL, locale from Accept-Language: one URL, different pages.
+      for (const language of ['de', 'en']) {
+        await fetch(`${BASE}/hello`, { headers: { 'accept-language': language } });
+        const negotiated = await fetch(`${BASE}/hello`, { headers: { 'accept-language': language } });
+        await negotiated.text();
+        assert.match(negotiated.headers.get('x-gio-cache') ?? '', /^hit/, language);
+        assert.equal(negotiated.headers.get('cache-control'), 'private, no-cache', language);
+        assert.equal(negotiated.headers.get('etag'), null, language);
+      }
     });
 
     if (process.platform !== 'win32') {

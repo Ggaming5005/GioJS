@@ -1618,7 +1618,9 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
         // Streamed bodies must not be buffered here; their lang attribute is
         // spliced by the StreamInjector instead.
         let is_streamed = response.extensions().get::<StreamedBody>().is_some();
-        if is_html && !is_streamed {
+        // A 304 has no body to inject into, and must not gain one.
+        let not_modified = response.status() == StatusCode::NOT_MODIFIED;
+        if is_html && !is_streamed && !not_modified {
             let (resp_parts, resp_body) = response.into_parts();
             match axum::body::to_bytes(resp_body, 16 * 1024 * 1024).await {
                 Ok(bytes) => {
