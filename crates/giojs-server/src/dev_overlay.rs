@@ -153,6 +153,18 @@ pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
 })();
 </script>"#;
 
+/// The overlay script as injected: `DEV_OVERLAY_SCRIPT` with the CSP nonce
+/// placeholder on its tag when nonces are on, so the overlay keeps working
+/// under a strict `script-src`.
+pub fn overlay_script() -> &'static str {
+    static NONCED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let attr = crate::security::nonce_attr();
+    if attr.is_empty() {
+        return DEV_OVERLAY_SCRIPT;
+    }
+    NONCED.get_or_init(|| crate::security::with_nonce_attr(DEV_OVERLAY_SCRIPT, "<script", attr))
+}
+
 fn escape_html(raw: &str) -> String {
     raw.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -171,8 +183,9 @@ pub fn error_page_html(status: u16, message: &str, stack: Option<&str>) -> Strin
     format!(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{status}</title></head>\
          <body><h1>{status}</h1><pre>{}</pre>\
-         <script>window.__GIO_SSR_ERROR__={payload_json};</script></body></html>",
-        escape_html(message)
+         <script{}>window.__GIO_SSR_ERROR__={payload_json};</script></body></html>",
+        escape_html(message),
+        crate::security::nonce_attr()
     )
 }
 

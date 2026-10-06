@@ -448,6 +448,18 @@ es.onerror=function(){console.warn('[devtools] SSE disconnected');};
 </body>
 </html>"##);
 
+    // The dashboard is served under the app's CSP like any page: its inline
+    // style and script carry the nonce placeholder when nonces are on.
+    let nonce_attr = crate::security::nonce_attr();
+    if !nonce_attr.is_empty() {
+        html = html
+            .replacen("<style>\n", &format!("<style{nonce_attr}>\n"), 1)
+            .replacen(
+                "<script>\n(function(){",
+                &format!("<script{nonce_attr}>\n(function(){{"),
+                1,
+            );
+    }
     html
 }
 

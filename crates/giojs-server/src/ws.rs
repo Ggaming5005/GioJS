@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::http::{header, HeaderMap};
 use axum::response::Response;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -15,6 +16,19 @@ use uuid::Uuid;
 
 use crate::ws_ipc::WsIpcClient;
 use crate::ws_registry::WsRegistry;
+
+/// Whether a request asks to become a WebSocket (`Upgrade: websocket`).
+/// The upgrade is a GET, yet it opens a live channel carrying the user's
+/// cookies, so cross-site request protection vets its Origin like an unsafe
+/// method's (cross-site WebSocket hijacking) before this module accepts it.
+pub fn is_upgrade_request(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::UPGRADE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|protocol| protocol.trim().eq_ignore_ascii_case("websocket"))
+}
 
 pub async fn handle_ws_upgrade(
     ws: WebSocketUpgrade,
@@ -118,4 +132,33 @@ async fn run_connection(
     ws_registry.deregister(&conn_id, &route_id);
     ws_ipc.send_ws_disconnect(&conn_id, close_code, &close_reason);
     debug!(conn_id = %conn_id, code = %close_code, reason = %close_reason, "WebSocket disconnected");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn with_upgrade(values: &[&'static str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append(header::UPGRADE, HeaderValue::from_static(value));
+        }
+        headers
+    }
+
+    #[test]
+    fn upgrade_requests_are_recognized_in_any_spelling() {
+        assert!(is_upgrade_request(&with_upgrade(&["websocket"])));
+        assert!(is_upgrade_request(&with_upgrade(&["WebSocket"])));
+        assert!(is_upgrade_request(&with_upgrade(&["h2c, websocket"])));
+        assert!(is_upgrade_request(&with_upgrade(&["h2c", "websocket"])));
+    }
+
+    #[test]
+    fn other_requests_are_not_upgrades() {
+        assert!(!is_upgrade_request(&HeaderMap::new()));
+        assert!(!is_upgrade_request(&with_upgrade(&["h2c"])));
+        assert!(!is_upgrade_request(&with_upgrade(&["websockets"])));
+    }
 }

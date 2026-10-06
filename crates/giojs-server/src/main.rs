@@ -31,6 +31,7 @@ mod metrics;
 mod path_hygiene;
 mod public_files;
 mod rules;
+mod security;
 mod stream_inject;
 mod ws;
 mod ws_ipc;
@@ -263,6 +264,12 @@ struct AppState {
     project_root: Arc<PathBuf>,
     /// public/ files answered at the site root (see public_files.rs).
     public_files: Arc<public_files::PublicFiles>,
+    /// gio.toml [security], compiled (see security.rs).
+    security: Arc<security::SecurityPolicy>,
+    /// Written into every cache entry's deployment-id slot and required on
+    /// lookup: the deployment id, plus the CSP nonce placeholder's
+    /// fingerprint when nonces are on (see `security::cache_epoch`).
+    cache_epoch: Arc<str>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -321,13 +328,47 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     // NODE_ENV, so Rust and Node can never disagree about dev vs production.
     let dev_mode = std::env::var("NODE_ENV").as_deref() == Ok("development");
 
-    info!("Starting Node SSR worker: {node_script}");
-    let ipc = IpcClient::start(&node_script, &ipc_paths, &ipc_token, dev_mode).await?;
-
     let cache_dir = std::env::var("GIO_CACHE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/cache/pages"));
     tokio::fs::create_dir_all(&cache_dir).await?;
+
+    // Before the worker spawns: it renders with the nonce placeholder.
+    let security = match security::SecurityPolicy::new(&cfg.security, cfg.server.tls.enabled) {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("giojs-server: configuration error: {error}");
+            std::process::exit(1);
+        }
+    };
+    let nonce_placeholder = security.uses_nonces().then(|| {
+        // A subdirectory: the cache's eviction and dev clearing only touch
+        // the entry files at the top level.
+        security::load_or_create_nonce_placeholder(&cache_dir.join("meta"))
+    });
+    let security = match &nonce_placeholder {
+        Some(placeholder) => {
+            security::install_nonce_placeholder(placeholder);
+            security.with_nonce_placeholder(placeholder)
+        }
+        None => security,
+    };
+    info!(
+        default_headers = ?security.default_header_names(),
+        csp = security.has_csp(),
+        csp_report_only = security.has_csp_report_only(),
+        csp_nonces = nonce_placeholder.is_some(),
+        csrf = security.csrf().enabled(),
+        csrf_trusted_origins = security.csrf().trusted_origin_count(),
+        csrf_exempt = security.csrf().exempt_count(),
+        "security policy"
+    );
+    let security = Arc::new(security);
+
+    info!("Starting Node SSR worker: {node_script}");
+    let ipc = IpcClient::start(&node_script, &ipc_paths, &ipc_token, dev_mode).await?;
+    let cache_epoch: Arc<str> =
+        security::cache_epoch(ipc.deployment_id(), nonce_placeholder.as_deref()).into();
 
     let cache = Arc::new(PageCache::new(CacheConfig {
         memory_max_entries: NonZeroUsize::new(1000).expect("non-zero"),
@@ -542,6 +583,8 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         devtools: devtools_state,
         project_root: Arc::new(project_root.clone()),
         public_files,
+        security: security.clone(),
+        cache_epoch,
     };
 
     if !dev_mode
@@ -680,6 +723,12 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             state.clone(),
             rules_middleware,
         ))
+        // CSRF before rules, routing, and any body read; inside rate
+        // limiting, so a flood of forged requests still burns budget.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            cross_site_request_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limit_middleware,
@@ -696,6 +745,14 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         // the same escape-normalized path (see path_hygiene.rs).
         .layer(axum::middleware::from_fn(path_hygiene_middleware))
         .layer(axum::middleware::from_fn(cache_status_stamp_middleware))
+        // Security headers and CSP nonce substitution see every response
+        // (path rejections, rule redirects and cache hits included) after
+        // all other layers set theirs - a header already present wins - and
+        // rewrite bodies before compression does.
+        .layer(axum::middleware::from_fn_with_state(
+            security,
+            security::security_headers_middleware,
+        ))
         // Compression is added last so it is the outermost response transform:
         // it must run after i18n injects <html lang>, otherwise it compresses
         // the body first and the lang injection silently no-ops.
@@ -993,6 +1050,64 @@ async fn rate_limit_middleware(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
     }
+}
+
+/// Cross-site request protection (see security.rs): unsafe methods and
+/// WebSocket upgrades to app paths must come from this site, a trusted
+/// origin, or a client that is not a browser page. Decided on headers alone,
+/// before rules, routing, or any body read. Rust's own `/_gio` endpoints
+/// keep their own checks; `[security.csrf] exempt` matches the canonical
+/// path like every other rule.
+async fn cross_site_request_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let csrf = state.security.csrf();
+    let websocket = ws::is_upgrade_request(req.headers());
+    if !csrf.enabled()
+        || !(websocket || security::is_unsafe_method(req.method()))
+        || is_internal_endpoint(&req)
+    {
+        return next.run(req).await;
+    }
+    let path = match path_hygiene::canonical(req.uri().path()) {
+        Ok(canonical) => canonical.into_owned(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if csrf.is_exempt(&path) {
+        return next.run(req).await;
+    }
+    let headers = req.headers();
+    // A present but non-UTF-8 header is not absent: it must not pass as
+    // "no Origin" (which is allowed).
+    let header_str = |name: &str| {
+        headers
+            .get(name)
+            .map(|value| value.to_str().unwrap_or("<invalid>"))
+    };
+    let authority = security::expected_origin_authority(headers, req.uri());
+    let verdict = csrf.check(
+        header_str("sec-fetch-site"),
+        header_str(header::ORIGIN.as_str()),
+        authority.as_deref(),
+    );
+    let Err(rejection) = verdict else {
+        return next.run(req).await;
+    };
+    let what = if websocket {
+        "WebSocket upgrade".to_string()
+    } else {
+        req.method().to_string()
+    };
+    // Each distinct origin is reported once; a page looping forged requests
+    // must not flood the log.
+    if csrf.should_warn(&rejection) {
+        warn!(method = %req.method(), path = %path, ?rejection, "cross-site request blocked (repeats from this origin are logged at debug level)");
+    } else {
+        debug!(method = %req.method(), path = %path, ?rejection, "cross-site request blocked");
+    }
+    security::cross_site_rejection_response(&rejection, &what)
 }
 
 /// Declarative middleware rules (gio.toml + worker middleware.ts), executed
@@ -1359,7 +1474,7 @@ async fn dynamic_handler(
     }
 
     // ── Cache lookup ──────────────────────────────────────────────────────────
-    match state.cache.get(&cache_key, &deployment_id).await {
+    match state.cache.get(&cache_key, &state.cache_epoch).await {
         // PPR shell entries never serve alone: the shell goes out instantly
         // and a skipShell render (with this requester's cookies) streams the
         // holes behind it. Stale shells follow SWR like any other entry.
@@ -1570,7 +1685,7 @@ async fn dynamic_handler(
                                 headers: cacheable_response_headers(&resp.headers),
                                 created_at: std::time::SystemTime::now(),
                                 max_age_secs: resp.cache_max_age,
-                                deployment_id: deployment_id.clone(),
+                                deployment_id: state.cache_epoch.to_string(),
                                 composed,
                                 tags: resp.cache_tags.clone(),
                                 ppr_shell: false,
@@ -1922,7 +2037,7 @@ async fn respond_from_render(
             headers: cacheable_response_headers(&resp.headers),
             created_at: std::time::SystemTime::now(),
             max_age_secs: resp.cache_max_age,
-            deployment_id: deployment_id.to_string(),
+            deployment_id: state.cache_epoch.to_string(),
             composed,
             tags: resp.cache_tags.clone(),
             ppr_shell: false,
@@ -2039,6 +2154,16 @@ fn respond_sse(
 #[derive(Debug, Clone, Copy)]
 struct StreamedBody;
 
+/// The inline script handing the deployment id and default locale to the
+/// client runtime. Carries the CSP nonce placeholder when nonces are on
+/// (substituted per response, see security.rs).
+fn deployment_script(deployment_id: &str, default_locale: &str) -> String {
+    format!(
+        r#"<script{}>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#,
+        security::nonce_attr()
+    )
+}
+
 /// Head snippets spliced into streamed HTML (font preloads + deployment
 /// script). Shared by live stream injection and PPR shell composition so a
 /// cached shell matches the bytes the miss client was served.
@@ -2048,9 +2173,7 @@ fn stream_head_snippets(state: &AppState, deployment_id: &str, default_locale: &
     for snippet in state.font_snippets.iter() {
         head_snippets.push_str(snippet);
     }
-    head_snippets.push_str(&format!(
-        r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
-    ));
+    head_snippets.push_str(&deployment_script(deployment_id, default_locale));
     head_snippets
 }
 
@@ -2121,7 +2244,7 @@ fn respond_stream(
         let head_snippets = stream_head_snippets(state, deployment_id, default_locale);
         let body_snippet = state
             .dev_mode
-            .then(|| dev_overlay::DEV_OVERLAY_SCRIPT.to_string());
+            .then(|| dev_overlay::overlay_script().to_string());
         stream_inject::StreamInjector::new(head_snippets, body_snippet, lang.clone())
     } else {
         stream_inject::StreamInjector::passthrough()
@@ -2138,7 +2261,7 @@ fn respond_stream(
         status: response.status,
         headers: cacheable_response_headers(&response.headers),
         max_age_secs: response.cache_max_age,
-        deployment_id: deployment_id.to_string(),
+        deployment_id: state.cache_epoch.to_string(),
         tags: response.cache_tags.clone(),
         head_snippets: stream_head_snippets(state, deployment_id, default_locale),
         lang,
@@ -2558,7 +2681,7 @@ fn respond_ipc_error(
         let body = inject_before(
             Bytes::from(page),
             b"</body>",
-            &[dev_overlay::DEV_OVERLAY_SCRIPT],
+            &[dev_overlay::overlay_script()],
         );
         Response::builder()
             .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
@@ -2818,12 +2941,29 @@ fn extract_critical_snippet(html: &Bytes, css_cache: &css_assets::CssCache) -> O
     if result.critical.is_empty() {
         return None;
     }
-    Some(format!(
-        "<style>{}</style>\
-         <link rel=\"stylesheet\" href=\"/globals.css\" media=\"print\" onload=\"this.media='all'\">\
-         <noscript><link rel=\"stylesheet\" href=\"/globals.css\"></noscript>",
-        result.critical
+    Some(critical_css_snippet(
+        &result.critical,
+        security::nonce_attr(),
     ))
+}
+
+/// Critical CSS inline, the full stylesheet loaded without blocking render.
+/// Under CSP nonces the `onload` attribute trick is blocked (inline event
+/// handlers cannot carry a nonce), so a nonced script flips the media instead.
+fn critical_css_snippet(critical: &str, nonce_attr: &str) -> String {
+    if nonce_attr.is_empty() {
+        return format!(
+            "<style>{critical}</style>\
+             <link rel=\"stylesheet\" href=\"/globals.css\" media=\"print\" onload=\"this.media='all'\">\
+             <noscript><link rel=\"stylesheet\" href=\"/globals.css\"></noscript>"
+        );
+    }
+    format!(
+        "<style{nonce_attr}>{critical}</style>\
+         <link rel=\"stylesheet\" href=\"/globals.css\" media=\"print\">\
+         <script{nonce_attr}>(function(l){{if(l.sheet){{l.media='all'}}else{{l.addEventListener('load',function(){{l.media='all'}})}}}})(document.currentScript.previousElementSibling)</script>\
+         <noscript><link rel=\"stylesheet\" href=\"/globals.css\"></noscript>"
+    )
 }
 
 /// Byte-scan for `needle` and splice `snippets` immediately before it.
@@ -2845,7 +2985,7 @@ fn inject_before(html: Bytes, needle: &[u8], snippets: &[&str]) -> Bytes {
 fn inject_into_html(html: Bytes, snippets: &[&str], dev_mode: bool) -> Bytes {
     let html = inject_before(html, b"</head>", snippets);
     if dev_mode {
-        inject_before(html, b"</body>", &[dev_overlay::DEV_OVERLAY_SCRIPT])
+        inject_before(html, b"</body>", &[dev_overlay::overlay_script()])
     } else {
         html
     }
@@ -2875,9 +3015,7 @@ fn compose_final_html(
     css_cache: &css_assets::CssCache,
     critical_extraction: bool,
 ) -> Bytes {
-    let script = format!(
-        r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
-    );
+    let script = deployment_script(deployment_id, default_locale);
     let critical_snippet = if critical_extraction {
         extract_critical_snippet(&html, css_cache)
     } else {
@@ -2986,7 +3124,7 @@ async fn build_response_from_entry(
         // Snippets were baked at put time; the dev overlay is per-process and
         // never baked, so splice it in when a prod-written entry is read in dev.
         if dev_mode {
-            inject_before(entry.html, b"</body>", &[dev_overlay::DEV_OVERLAY_SCRIPT])
+            inject_before(entry.html, b"</body>", &[dev_overlay::overlay_script()])
         } else {
             entry.html
         }
@@ -3044,9 +3182,7 @@ fn compose_uncomposed_entry(
     critical_extraction: bool,
     dev_mode: bool,
 ) -> Bytes {
-    let script = format!(
-        r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
-    );
+    let script = deployment_script(deployment_id, default_locale);
     let critical_snippet = if critical_extraction {
         extract_critical_snippet(&html, css_cache)
     } else {
@@ -3085,9 +3221,7 @@ fn build_html_response(
     let body_bytes = if composed || !is_html_content_type(headers) {
         body
     } else {
-        let script = format!(
-            r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
-        );
+        let script = deployment_script(deployment_id, default_locale);
         let critical_snippet = if css_config.critical_extraction && cacheable {
             extract_critical_snippet(&body, css_cache)
         } else {
@@ -3536,7 +3670,7 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                     headers: cacheable_response_headers(&resp.headers),
                     created_at: std::time::SystemTime::now(),
                     max_age_secs: resp.cache_max_age,
-                    deployment_id,
+                    deployment_id: state.cache_epoch.to_string(),
                     composed,
                     tags: resp.cache_tags,
                     ppr_shell: false,
@@ -3567,7 +3701,7 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                             response.status,
                             cacheable_response_headers(&response.headers),
                             response.cache_max_age,
-                            deployment_id,
+                            state.cache_epoch.to_string(),
                             response.cache_tags,
                         )
                         .await;
@@ -3926,6 +4060,26 @@ mod tests {
         let head_pos = s.find("</head>").unwrap();
         assert!(font_pos < script_pos);
         assert!(script_pos < head_pos);
+    }
+
+    #[test]
+    fn critical_css_snippet_without_nonces_keeps_the_onload_swap() {
+        let snippet = critical_css_snippet("a{b:c}", "");
+        assert!(snippet.starts_with("<style>a{b:c}</style>"));
+        assert!(snippet.contains(r#"media="print" onload="this.media='all'""#));
+        assert!(!snippet.contains("<script"));
+    }
+
+    #[test]
+    fn critical_css_snippet_under_csp_nonces_has_no_inline_handler() {
+        // Inline event handlers cannot carry a nonce, so a strict CSP would
+        // leave the full stylesheet stuck at media=print.
+        let snippet = critical_css_snippet("a{b:c}", r#" nonce="P""#);
+        assert!(snippet.starts_with(r#"<style nonce="P">a{b:c}</style>"#));
+        assert!(!snippet.contains("onload"));
+        assert!(snippet.contains(r#"<script nonce="P">(function(l){"#));
+        assert!(snippet.contains("l.media='all'"));
+        assert!(snippet.contains("<noscript>"));
     }
 
     #[test]

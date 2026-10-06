@@ -15,6 +15,7 @@ import {
   type StreamRenderResult,
 } from './ssr.ts';
 import { clearClientBuildErrors, recordClientBuildError } from './client-build-errors.ts';
+import { cspNonce } from './csp.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import type { IPCRequest } from './context.ts';
 import type { RouteModule, LayoutEntry, PageModule, LayoutModule } from './router.ts';
@@ -1520,5 +1521,113 @@ describe('flattenResponseHeaders', () => {
     const { headers, setCookies } = flattenResponseHeaders({ link: [], 'set-cookie': [] });
     expect(headers).toEqual({});
     expect(setCookies).toEqual([]);
+  });
+});
+
+// ─── CSP nonces ───────────────────────────────────────────────────────────────
+
+describe('CSP nonce placeholder', () => {
+  const PLACEHOLDER = '0123456789abcdef0123456789abcdef';
+  const clientScripts = new Map([['/', '/_next/static/chunks/route-index-ABC.js']]);
+
+  beforeEach(() => {
+    process.env.GIO_CSP_NONCE_PLACEHOLDER = PLACEHOLDER;
+  });
+  afterEach(() => {
+    delete process.env.GIO_CSP_NONCE_PLACEHOLDER;
+    delete process.env.GIO_EXPORT;
+  });
+
+  /** Opening tags of every executable script (JSON data blocks excluded). */
+  function executableScriptTags(html: string): string[] {
+    return [...html.matchAll(/<script\b[^>]*>/g)]
+      .map(m => m[0])
+      .filter(tag => !tag.includes('type="application/json"'));
+  }
+
+  /** A page whose Suspense boundary resolves after the shell flushed. */
+  function suspendingRoute(): Map<string, RouteModule> {
+    let resolve: (() => void) | undefined;
+    const ready = new Promise<void>(r => { resolve = r; });
+    setTimeout(() => resolve?.(), 20);
+    function Late(): React.ReactElement {
+      React.use(ready);
+      return React.createElement('p', null, 'LATE_CONTENT');
+    }
+    return makeRoute('/', {
+      default: function Page() {
+        return React.createElement(
+          React.Suspense,
+          { fallback: React.createElement('p', null, 'loading') },
+          React.createElement(Late),
+        );
+      },
+    });
+  }
+
+  it('cspNonce() returns the placeholder only when it is well-formed and not exporting', () => {
+    expect(cspNonce()).toBe(PLACEHOLDER);
+    process.env.GIO_CSP_NONCE_PLACEHOLDER = 'not-a-placeholder';
+    expect(cspNonce()).toBeUndefined();
+    process.env.GIO_CSP_NONCE_PLACEHOLDER = PLACEHOLDER;
+    process.env.GIO_EXPORT = '1';
+    expect(cspNonce()).toBeUndefined();
+    delete process.env.GIO_CSP_NONCE_PLACEHOLDER;
+    delete process.env.GIO_EXPORT;
+    expect(cspNonce()).toBeUndefined();
+  });
+
+  it('every inline and bootstrap script of a buffered render carries the placeholder', async () => {
+    const result = await renderRoute(
+      makeRequest('/'), makeRoute('/', { revalidate: 60 }), noLayouts, undefined, undefined, clientScripts,
+    );
+    const html = bodyOf(result);
+    const tags = executableScriptTags(html);
+    expect(tags.some(tag => tag.includes('route-index-ABC.js'))).toBe(true);
+    expect(tags.length).toBeGreaterThanOrEqual(2); // bootstrap module + observer
+    for (const tag of tags) expect(tag).toContain(`nonce="${PLACEHOLDER}"`);
+  });
+
+  it("streamed renders nonce React's Suspense runtime scripts too", async () => {
+    const result = await renderRoute(
+      makeRequest('/'), suspendingRoute(), noLayouts, undefined, undefined, clientScripts, { streaming: true },
+    );
+    const streamed = expectStream(result);
+    const html = streamed.prefix + (await readStreamToString(streamed.stream)) + streamed.suffix;
+    expect(html).toContain('LATE_CONTENT');
+    const tags = executableScriptTags(html);
+    // bootstrap module, React's reveal script(s), and the document observer
+    expect(tags.length).toBeGreaterThanOrEqual(3);
+    for (const tag of tags) expect(tag).toContain(`nonce="${PLACEHOLDER}"`);
+  });
+
+  it('PPR shell and holes renders use the same placeholder', async () => {
+    const routes = makeRoute('/', { shell: 'cache', revalidate: 60 });
+    const shell = expectStream(await renderRoute(
+      makeRequest('/'), routes, noLayouts, undefined, undefined, clientScripts, { streaming: true },
+    ));
+    const holes = expectStream(await renderRoute(
+      { ...makeRequest('/'), skipShell: true }, routes, noLayouts, undefined, undefined, clientScripts, { streaming: true },
+    ));
+    const shellHtml = shell.prefix + (await readStreamToString(shell.stream)) + shell.suffix;
+    const holesHtml = await readStreamToString(holes.stream);
+    for (const tag of executableScriptTags(shellHtml + holesHtml + holes.suffix)) {
+      expect(tag).toContain(`nonce="${PLACEHOLDER}"`);
+    }
+  });
+
+  it('the built-in 404 nonces its inline style', async () => {
+    const result = await renderRoute(makeRequest('/nope'), new Map(), noLayouts);
+    expect(bodyOf(result)).toContain(`<style nonce="${PLACEHOLDER}">`);
+  });
+
+  it('renders no nonce attributes at all without the placeholder', async () => {
+    delete process.env.GIO_CSP_NONCE_PLACEHOLDER;
+    const result = await renderRoute(
+      makeRequest('/'), makeRoute('/', { revalidate: 60 }), noLayouts, undefined, undefined, clientScripts,
+    );
+    expect(bodyOf(result)).not.toContain('nonce=');
+    const missing = await renderRoute(makeRequest('/nope'), new Map(), noLayouts);
+    expect(bodyOf(missing)).not.toContain('nonce=');
   });
 });

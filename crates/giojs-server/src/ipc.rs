@@ -800,6 +800,12 @@ fn spawn_worker_command(
         .stderr(Stdio::inherit())
         // Reap the worker when the supervisor drops it (panic/unwind paths).
         .kill_on_drop(true);
+    // The CSP nonce placeholder the worker renders with (security.rs). Never
+    // inherited: a value Rust does not substitute would reach clients.
+    match crate::security::nonce_placeholder() {
+        Some(placeholder) => cmd.env(crate::security::NONCE_PLACEHOLDER_ENV, placeholder),
+        None => cmd.env_remove(crate::security::NONCE_PLACEHOLDER_ENV),
+    };
     // Own process group so kill_worker_tree can take the tsx wrapper AND its
     // runtime child together (SIGKILL is never forwarded by the wrapper).
     #[cfg(unix)]

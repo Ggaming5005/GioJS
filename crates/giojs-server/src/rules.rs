@@ -176,6 +176,23 @@ impl Pattern {
     }
 }
 
+/// A rule path pattern used only for membership (no captures, no target),
+/// so other path-scoped settings - `[security.csrf] exempt` - share the
+/// rules' exact syntax and matching semantics.
+#[derive(Debug, Clone)]
+pub struct PathPattern(Pattern);
+
+impl PathPattern {
+    pub fn compile(raw: &str) -> Result<Self, RuleError> {
+        Pattern::compile(raw).map(PathPattern)
+    }
+
+    /// Whether the canonical request `path` matches.
+    pub fn matches(&self, path: &str) -> bool {
+        self.0.match_path(path).is_some()
+    }
+}
+
 #[derive(Debug, Clone)]
 enum TemplatePart {
     Literal(String),

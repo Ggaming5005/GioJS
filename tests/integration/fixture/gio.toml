@@ -43,3 +43,17 @@ path           = "/public/limited/*"
 per_ip         = 2
 window_seconds = 3600
 burst          = 0
+
+# A header rule overrides a [security] default header for its paths, and an
+# empty value removes the default there.
+[[headers]]
+path = "/cached"
+[headers.headers]
+x-frame-options = "DENY"
+referrer-policy = ""
+
+# Cross-site request protection is on by default; a trusted second origin
+# and an exempt webhook path for the CSRF tests.
+[security.csrf]
+trusted_origins = ["https://admin.fixture.test"]
+exempt          = ["/api/webhooks/*rest"]
