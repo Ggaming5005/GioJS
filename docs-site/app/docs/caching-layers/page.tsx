@@ -32,7 +32,7 @@ export default function Page(): React.JSX.Element {
         <li><code>stale; age=&lt;secs&gt;; revalidating</code> - served instantly from the cache past its TTL while one background render refreshes the entry; <code>age</code> is seconds since it was rendered</li>
         <li><code>miss; stored</code> - rendered by the Node worker and stored; the next request for this key is a hit</li>
         <li><code>bypass</code> - rendered (or redirected) but not cached: the page did not declare <code>revalidate</code>, the request was not GET/HEAD, the response varies per user, or it set per-request headers</li>
-        <li><code>static</code> - served by the Rust static file layer (public/ assets, hashed chunks, fonts); never touches the cache or Node</li>
+        <li><code>static</code> - served by the Rust static file layer (public/ assets at the site root or under /public/*, hashed chunks, fonts); never touches the cache or Node</li>
       </ul>
       <p>
         Internal <code>/_gio/*</code> endpoints are not stamped

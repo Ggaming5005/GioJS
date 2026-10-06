@@ -372,6 +372,62 @@ async function main() {
       assert.equal(asset.headers.get('x-gio-cache'), 'static');
     });
 
+    await test('public/ files are served at the site root with revalidating caching', async () => {
+      const expected = await readFile(join(fixtureDir, 'public', 'robots.txt'), 'utf8');
+      const res = await fetch(`${BASE}/robots.txt`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/plain/);
+      const cacheControl = res.headers.get('cache-control') ?? '';
+      assert.match(cacheControl, /must-revalidate/);
+      assert.doesNotMatch(cacheControl, /immutable/);
+      assert.ok(res.headers.get('last-modified'), 'Last-Modified enables revalidation');
+      assert.equal(res.headers.get('x-gio-cache'), 'static');
+      assert.equal(await res.text(), expected);
+
+      const conditional = await fetch(`${BASE}/robots.txt`, {
+        headers: { 'if-modified-since': res.headers.get('last-modified') },
+      });
+      assert.equal(conditional.status, 304);
+
+      const head = await fetch(`${BASE}/robots.txt`, { method: 'HEAD' });
+      assert.equal(head.status, 200);
+      assert.equal(await head.text(), '');
+    });
+
+    await test('public/ files keep working under /public/*', async () => {
+      const res = await fetch(`${BASE}/public/robots.txt`);
+      assert.equal(res.status, 200);
+      assert.match(await res.text(), /FIXTURE_ROBOTS/);
+    });
+
+    await test('root-served public/ files: .well-known yes, dotfiles and traversal no', async () => {
+      const wellKnown = await fetch(`${BASE}/.well-known/security.txt`);
+      assert.equal(wellKnown.status, 200);
+      assert.match(await wellKnown.text(), /^Contact:/);
+
+      const dotfile = await fetch(`${BASE}/.secret-config`);
+      assert.equal(dotfile.status, 404);
+      assert.doesNotMatch(await dotfile.text(), /FIXTURE_DOTFILE_SECRET/);
+
+      for (const path of ['/.well-known/../.secret-config', '/%2e%2e/fixture/gio.toml', '/%2Esecret-config']) {
+        const res = await fetch(`${BASE}${path}`);
+        assert.notEqual(res.status, 200, `${path} must not be served`);
+        assert.doesNotMatch(await res.text(), /FIXTURE_DOTFILE_SECRET|integration-fixture/);
+      }
+    });
+
+    await test('a public/ file shadows a page at the same path', async () => {
+      const res = await fetch(`${BASE}/shadowed`);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-gio-cache'), 'static');
+      assert.equal(await res.text(), 'FIXTURE_PUBLIC_SHADOWS_PAGE\n');
+    });
+
+    await test('rules middleware runs for root-served public/ files', async () => {
+      const res = await fetch(`${BASE}/robots.txt`);
+      assert.equal(res.headers.get('x-fixture-header'), 'public-root');
+    });
+
     await test('gio.toml [[redirects]] issue the configured status with Location', async () => {
       const res = await fetch(`${BASE}/moved`, { redirect: 'manual' });
       assert.equal(res.status, 301);

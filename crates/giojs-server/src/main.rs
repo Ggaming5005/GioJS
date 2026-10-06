@@ -23,6 +23,7 @@ mod dev_overlay;
 mod devtools;
 mod ipc;
 mod metrics;
+mod public_files;
 mod rules;
 mod stream_inject;
 mod ws;
@@ -200,6 +201,8 @@ struct AppState {
     i18n: Option<Arc<config::I18nConfig>>,
     devtools: Arc<devtools::DevtoolsState>,
     project_root: Arc<PathBuf>,
+    /// public/ files answered at the site root (see public_files.rs).
+    public_files: Arc<public_files::PublicFiles>,
 }
 
 #[tokio::main]
@@ -292,8 +295,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| project_root.join(".gio/cache/images"));
     tokio::fs::create_dir_all(&image_cache_dir).await?;
 
-    let public_dir =
-        PathBuf::from(std::env::var("GIO_PUBLIC_DIR").unwrap_or_else(|_| "public".into()));
+    // public/ sits next to app/ like gio.toml does, so a server started from
+    // another directory (GIO_APP_DIR=path/to/app) still finds it.
+    let public_dir = std::env::var("GIO_PUBLIC_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| project_root.join("public"));
     let image_config = giojs_image::ImageConfig {
         allowed_widths: cfg.images.allowed_widths.clone(),
         quality: cfg.images.quality,
@@ -404,6 +410,15 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics_config = cfg.metrics.clone();
 
+    let public_files = Arc::new(public_files::PublicFiles::load(public_dir.clone()));
+    if public_files.len() > 0 {
+        info!(
+            files = public_files.len(),
+            dir = %public_dir.display(),
+            "public/ files indexed for root serving"
+        );
+    }
+
     let state = AppState {
         ipc: Arc::new(ipc),
         cache,
@@ -428,6 +443,7 @@ async fn main() -> anyhow::Result<()> {
         i18n,
         devtools: devtools_state,
         project_root: Arc::new(project_root.clone()),
+        public_files,
     };
 
     if !dev_mode
@@ -518,7 +534,7 @@ async fn main() -> anyhow::Result<()> {
         .nest_service("/public", ServeDir::new(public_dir))
         .nest_service("/_next/static", static_service)
         .nest_service("/_gio/fonts", font_service)
-        .fallback(dynamic_handler)
+        .fallback(root_fallback_handler)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             prefetch_budget_middleware,
@@ -937,6 +953,28 @@ fn inject_html_lang(html: Bytes, locale: &str) -> Bytes {
     out.extend_from_slice(attr.as_bytes());
     out.extend_from_slice(&html[pos + needle.len()..]);
     Bytes::from(out)
+}
+
+/// Router fallback. Files in public/ answer at the site root (/favicon.ico,
+/// /robots.txt, /.well-known/...) ahead of the page cache and the worker, so
+/// a public file shadows a page at the same path - the Next.js precedence.
+/// Being a fallback, it sits behind the same rate-limit / rules middleware
+/// as /public/*. Membership is an in-memory index lookup, not a stat.
+async fn root_fallback_handler(
+    ws_upgrade: Option<WebSocketUpgrade>,
+    State(state): State<AppState>,
+    connect_info: ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    if ws_upgrade.is_none()
+        && (req.method() == axum::http::Method::GET || req.method() == axum::http::Method::HEAD)
+        && state.public_files.contains(req.uri().path())
+    {
+        if let Some(resp) = state.public_files.serve(&req).await {
+            return resp;
+        }
+    }
+    dynamic_handler(ws_upgrade, State(state), connect_info, req).await
 }
 
 async fn dynamic_handler(

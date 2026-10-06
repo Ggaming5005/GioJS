@@ -22,7 +22,13 @@ export default function Page(): React.JSX.Element {
       <h2>The app directory</h2>
       <p>Routes are folders. A page.tsx (or .jsx) makes a folder a route; a layout.tsx wraps the pages beneath it. Dynamic segments use [brackets].</p>
       <h2>public/</h2>
-      <p>Files in public/ are served directly by the Rust layer at /public/* - images, stylesheets, fonts. Static files never touch Node.</p>
+      <p>Files in public/ are served directly by the Rust layer - images, stylesheets, fonts. Static files never touch Node. Every file answers at the site root and under /public/*: public/robots.txt is both /robots.txt and /public/robots.txt, so favicon.ico, manifest.json, apple-touch-icon.png, and .well-known/ files land where browsers and crawlers look for them.</p>
+      <ul>
+        <li>A public file wins over a page with the same path (the Next.js precedence).</li>
+        <li>Dotfiles are never served at the root, except under .well-known/. Directory listings are never served.</li>
+        <li>Root-served files use <code>Cache-Control: public, max-age=0, must-revalidate</code> with Last-Modified, so browsers revalidate instead of keeping an old copy after a deploy.</li>
+        <li>The set of root-served files is indexed at startup, so the request path never pays a filesystem lookup; files added after startup need a restart.</li>
+      </ul>
     </>
   );
 }

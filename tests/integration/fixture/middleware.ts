@@ -11,5 +11,9 @@ export default defineMiddleware({
   redirects: [{ from: '/old-home', to: '/' }],
   rewrites: [{ from: '/alias', to: '/cached' }],
   guards: [{ path: '/admin', requireCookie: 'session', redirectTo: '/' }],
-  headers: [{ path: '/cached', headers: { 'x-fixture-header': 'from-middleware' } }],
+  headers: [
+    { path: '/cached', headers: { 'x-fixture-header': 'from-middleware' } },
+    // Root-served public/ files sit behind the same rules layer as pages.
+    { path: '/robots.txt', headers: { 'x-fixture-header': 'public-root' } },
+  ],
 });

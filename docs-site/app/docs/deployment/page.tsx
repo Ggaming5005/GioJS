@@ -87,6 +87,17 @@ export default function DeploymentPage(): React.JSX.Element {
         </section>
       ))}
 
+      <h2>Static files</h2>
+      <p>
+        Ship <code>public/</code> next to <code>app/</code>. Rust serves every file in it at the
+        site root (<code>/robots.txt</code>, <code>/favicon.ico</code>,{' '}
+        <code>/.well-known/...</code>) and under <code>/public/*</code>, ahead of the page cache
+        and the Node worker. The root-served set is indexed at startup, so add files as part of
+        the deploy - files copied in while the server runs are picked up on the next restart
+        (they are reachable under <code>/public/*</code> immediately). Point{' '}
+        <code>GIO_PUBLIC_DIR</code> elsewhere if your assets live outside the project.
+      </p>
+
       <h2>Health check</h2>
       <p>
         <code>/_gio/health</code> returns JSON and always answers 200 - cached and static
