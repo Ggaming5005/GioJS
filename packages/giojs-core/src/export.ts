@@ -12,7 +12,9 @@
  * Exported pages hydrate like served ones: the client bundles are built in
  * production mode into out/_next/static/chunks/ (the URLs the pages
  * reference) and every page carries the same envelope + bootstrap module the
- * server renders, so GioLink soft navigation works on any static host.
+ * server renders, so GioLink soft navigation works on any static host. The
+ * route stylesheets (CSS imports and CSS Modules) are built into
+ * out/_next/static/css/ and linked exactly as the server links them.
  * GIO_PUBLIC_* values are frozen at export time. A route whose bundle fails
  * (or is rejected for importing server-only code) exports as HTML only, as
  * the server would serve it, and is reported.
@@ -27,6 +29,7 @@ import {
 } from './router.ts';
 import { renderRoute, type RenderExtras } from './ssr.ts';
 import { buildClientBundles, clientBuildErrorFor } from './client-build.ts';
+import { buildRouteStylesheets } from './css-build.ts';
 import { imageConfigFromEnv, installImageConfig } from './image-config.ts';
 import type { IPCRequest, IPCResponse } from './context.ts';
 
@@ -162,19 +165,31 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
   await mkdir(outDir, { recursive: true });
   installImageConfig(imageConfigFromEnv(process.env));
 
-  // Never throws: a route whose bundle fails is simply absent and renders
-  // without hydration.
+  // Neither build throws: a route whose stylesheet fails renders without
+  // it, one whose bundle fails is simply absent and renders without
+  // hydration.
+  const stylesheets = await buildRouteStylesheets({
+    routes,
+    layouts,
+    segmentFiles,
+    projectRoot: dirname(resolve(appDir)),
+    dev: false,
+    staticExportDir: outDir,
+  });
   const clientScripts = await buildClientBundles({
     routes,
     layouts,
     projectRoot: dirname(resolve(appDir)),
     dev: false,
     staticExportDir: outDir,
+    stylesheets: stylesheets.routes,
   });
-  const chunksDir = join(outDir, '_next', 'static', 'chunks');
-  for (const chunk of await readdir(chunksDir).catch(() => [] as string[])) {
-    renderedFiles.add(resolve(chunksDir, chunk));
+  for (const assetDir of [join(outDir, '_next', 'static', 'chunks'), join(outDir, '_next', 'static', 'css')]) {
+    for (const file of await readdir(assetDir).catch(() => [] as string[])) {
+      renderedFiles.add(resolve(assetDir, file));
+    }
   }
+  pageExtras.stylesheets = stylesheets;
 
   for (const [pattern, mod] of routes) {
     let targets: { path: string; params: Record<string, string> }[];
@@ -265,7 +280,7 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
     undefined,
     undefined,
     undefined,
-    { specialPages, segmentFiles },
+    { specialPages, segmentFiles, stylesheets },
   );
   if ('body' in notFoundOut && typeof notFoundOut.body === 'string' && notFoundOut.body !== '') {
     // out/ does not exist yet when no page was written.
