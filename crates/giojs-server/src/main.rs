@@ -529,7 +529,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let app = app
-        .nest_service("/public", ServeDir::new(public_dir))
+        .nest_service(public_files::PUBLIC_URL_PREFIX, ServeDir::new(public_dir))
         .nest_service("/_next/static", static_service)
         .nest_service("/_gio/fonts", font_service)
         .fallback(root_fallback_handler)
@@ -756,7 +756,13 @@ async fn rate_limit_middleware(
 
     state.metrics.record_ratelimit_checked(&path);
 
-    match rl.check(&path, ip, &headers) {
+    // A root-served public/ file is also /public/...: budgets written for
+    // that URL hold for the root alias, charged once per rule.
+    let result = match root_public_alias(&state, &req) {
+        Some(alias) => rl.check_paths(&[path.as_str(), alias.as_str()], ip, &headers),
+        None => rl.check(&path, ip, &headers),
+    };
+    match result {
         RateLimitResult::Allowed { remaining, limit } => {
             let mut resp = next.run(req).await;
             if limit > 0 {
@@ -798,6 +804,12 @@ async fn rate_limit_middleware(
 /// preserved; rewrites mutate the request URI in place so routing and the
 /// cache key both see the rewritten path. Header rules match the requested
 /// (pre-rewrite) path and are stamped on the response. `/_gio/*` is exempt.
+///
+/// A public/ file answered at the site root is the same resource as its
+/// `/public/...` URL: when the requested path's own rules let it through,
+/// guards for that URL run too, and its header rules are stamped (the
+/// requested path's win on a conflicting name). Redirects and rewrites only
+/// ever match the requested URL.
 async fn rules_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     if req.uri().path().starts_with("/_gio/") {
         return next.run(req).await;
@@ -807,6 +819,7 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
     if static_rules.is_empty() && worker_rules.is_empty() {
         return next.run(req).await;
     }
+    let mut public_alias = root_public_alias(&state, &req);
 
     let outcome = {
         let path = req.uri().path();
@@ -814,12 +827,19 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
             .headers()
             .get(header::COOKIE)
             .and_then(|value| value.to_str().ok());
-        if worker_rules.is_empty() {
+        let outcome = if worker_rules.is_empty() {
             static_rules.apply(path, cookie_header)
         } else if static_rules.is_empty() {
             worker_rules.apply(path, cookie_header)
         } else {
             rules::apply_merged(static_rules, &worker_rules, path, cookie_header)
+        };
+        match (outcome, public_alias.as_deref()) {
+            (rules::RuleOutcome::None, Some(alias)) => {
+                rules::check_guards_merged(static_rules, &worker_rules, alias, cookie_header)
+                    .unwrap_or(rules::RuleOutcome::None)
+            }
+            (outcome, _) => outcome,
         }
     };
 
@@ -839,7 +859,11 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
             }
             warn!(location = %location, "rule redirect target is not a valid Location header - rule skipped");
         }
-        rules::RuleOutcome::Rewrite { new_path } => rewrite_request_uri(&mut req, new_path),
+        rules::RuleOutcome::Rewrite { new_path } => {
+            // Routed elsewhere: the public/ file is not what gets served.
+            public_alias = None;
+            rewrite_request_uri(&mut req, new_path);
+        }
         rules::RuleOutcome::None => {}
     }
 
@@ -852,16 +876,30 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
     };
     let mut resp = next.run(req).await;
     if let Some(path) = stamped_path {
-        for (name, value) in state
-            .static_rules
-            .response_headers(&path)
-            .into_iter()
-            .chain(worker_rules.response_headers(&path))
-        {
-            resp.headers_mut().insert(name, value);
+        // The alias's rules first, so the requested path's override them.
+        for path in public_alias.iter().chain(std::iter::once(&path)) {
+            for (name, value) in state
+                .static_rules
+                .response_headers(path)
+                .into_iter()
+                .chain(worker_rules.response_headers(path))
+            {
+                resp.headers_mut().insert(name, value);
+            }
         }
     }
     resp
+}
+
+/// The `/public/...` URL of the public/ file `root_fallback_handler` answers
+/// this request with, if any. Errs on the side of rule coverage: a GET that
+/// the router ends up handing elsewhere (a WebSocket upgrade, a file deleted
+/// since indexing) is only held to the rules of a file at its path.
+fn root_public_alias(state: &AppState, req: &Request) -> Option<String> {
+    if req.method() != axum::http::Method::GET && req.method() != axum::http::Method::HEAD {
+        return None;
+    }
+    state.public_files.public_url(req.uri().path())
 }
 
 /// Build the redirect response for a rule match. Returns `None` when the
@@ -968,8 +1006,10 @@ fn inject_html_lang(html: Bytes, locale: &str) -> Bytes {
 /// Router fallback. Files in public/ answer at the site root (/favicon.ico,
 /// /robots.txt, /.well-known/...) ahead of the page cache and the worker, so
 /// a public file shadows a page at the same path - the Next.js precedence.
-/// Being a fallback, it sits behind the same rate-limit / rules middleware
-/// as /public/*. Membership is an in-memory index lookup, not a stat.
+/// Being a fallback, it sits behind the rate-limit and rules middleware,
+/// which also apply the guards, header rules, and budgets written for the
+/// file's /public/... URL (see `root_public_alias`). Membership is an
+/// in-memory index lookup, not a stat.
 async fn root_fallback_handler(
     ws_upgrade: Option<WebSocketUpgrade>,
     State(state): State<AppState>,

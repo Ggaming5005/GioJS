@@ -428,6 +428,39 @@ async function main() {
       assert.equal(res.headers.get('x-fixture-header'), 'public-root');
     });
 
+    await test('guards and header rules for /public/* also cover the root alias', async () => {
+      // Unguarded before: /members/report.txt served the file the
+      // /public/members/* guard protects.
+      for (const path of ['/public/members/report.txt', '/members/report.txt', '/%6Dembers/report%2Etxt']) {
+        const res = await fetch(`${BASE}${path}`, { redirect: 'manual' });
+        assert.equal(res.status, 302, `${path} must be guarded`);
+        assert.equal(res.headers.get('location'), '/login');
+        assert.doesNotMatch(await res.text(), /FIXTURE_MEMBERS_ONLY/);
+      }
+      const member = await fetch(`${BASE}/members/report.txt`, { headers: { cookie: 'session=abc' } });
+      assert.equal(member.status, 200);
+      assert.equal(await member.text(), 'FIXTURE_MEMBERS_ONLY\n');
+      assert.equal(member.headers.get('x-robots-tag'), 'noindex', '/public/* header rule stamped on the alias');
+    });
+
+    await test('[[rate_limits]] for /public/* also hold for the root alias, one shared budget', async () => {
+      const statuses = [];
+      for (const path of ['/limited/file.txt', '/public/limited/file.txt', '/limited/file.txt']) {
+        statuses.push((await fetch(`${BASE}${path}`)).status);
+      }
+      assert.deepEqual(statuses, [200, 200, 429]);
+    });
+
+    await test('redirects for /public/* URLs do not apply to the root alias', async () => {
+      // A /public/*rest -> /*rest canonicalizing redirect must not loop.
+      const legacy = await fetch(`${BASE}/public/moved-root/file.txt`, { redirect: 'manual' });
+      assert.equal(legacy.status, 301);
+      assert.equal(legacy.headers.get('location'), '/moved-root/file.txt');
+      const root = await fetch(`${BASE}/moved-root/file.txt`, { redirect: 'manual' });
+      assert.equal(root.status, 200);
+      assert.equal(await root.text(), 'FIXTURE_MOVED_ROOT\n');
+    });
+
     await test('unhashed app CSS revalidates with a strong ETag and 304s', async () => {
       const res = await fetch(`${BASE}/globals.css`);
       assert.equal(res.status, 200);

@@ -11,6 +11,10 @@
 //! restart. Only paths found by walking `public/` can match - a request that
 //! is not byte-for-byte an indexed path (`..`, `//`, symlinks, dotfiles) is
 //! never served from here and falls through to the app.
+//!
+//! A root-served file is the same resource as its `/public/...` URL, so the
+//! guards, header rules, and rate limits written for that URL apply to the
+//! root alias too (`public_url`, used by the rules and rate-limit layers).
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -32,6 +36,9 @@ use tracing::warn;
 /// must revalidate (Last-Modified from ServeDir) instead of caching them as
 /// immutable the way content-hashed chunks are.
 pub const PUBLIC_ROOT_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
+
+/// Where the whole directory is also mounted (`.nest_service` in main.rs).
+pub const PUBLIC_URL_PREFIX: &str = "/public";
 
 /// Bound on indexed paths so a stray giant tree under public/ cannot balloon
 /// memory; files past it stay reachable under /public/*.
@@ -74,11 +81,23 @@ impl PublicFiles {
 
     /// True when the raw (percent-encoded) request path names an indexed file.
     pub fn contains(&self, raw_path: &str) -> bool {
+        self.indexed_path(raw_path).is_some()
+    }
+
+    /// The `/public/...` URL of the indexed file a raw request path names.
+    /// Built from the decoded file path, so a percent-encoded spelling of
+    /// the root URL (`/%6Dembers/x`) still maps onto the rules for the file.
+    pub fn public_url(&self, raw_path: &str) -> Option<String> {
+        self.indexed_path(raw_path)
+            .map(|path| format!("{PUBLIC_URL_PREFIX}{path}"))
+    }
+
+    fn indexed_path<'p>(&self, raw_path: &'p str) -> Option<Cow<'p, str>> {
         let files = self.files.read().unwrap_or_else(|e| e.into_inner());
         if files.is_empty() {
-            return false;
+            return None;
         }
-        percent_decode_path(raw_path).is_some_and(|path| files.contains(path.as_ref()))
+        percent_decode_path(raw_path).filter(|path| files.contains(path.as_ref()))
     }
 
     /// Serve an indexed file through ServeDir (content type, Last-Modified,
@@ -302,6 +321,30 @@ mod tests {
         assert!(public.contains("/caf%C3%A9.txt"));
         assert!(!public.contains("/hello%2"));
         assert!(!public.contains("/caf%FF.txt"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn public_url_names_the_file_behind_a_root_path() {
+        let root = temp_public("public_url");
+        write(&root, "members/report.txt", "secret");
+        write(&root, "hello world.txt", "hi");
+        let public = PublicFiles::load(root.clone());
+        assert_eq!(
+            public.public_url("/members/report.txt").as_deref(),
+            Some("/public/members/report.txt")
+        );
+        // Encoded spellings resolve to the same file, so to the same rules.
+        assert_eq!(
+            public.public_url("/%6Dembers/report%2Etxt").as_deref(),
+            Some("/public/members/report.txt")
+        );
+        assert_eq!(
+            public.public_url("/hello%20world.txt").as_deref(),
+            Some("/public/hello world.txt")
+        );
+        assert_eq!(public.public_url("/members"), None);
+        assert_eq!(public.public_url("/missing.txt"), None);
         std::fs::remove_dir_all(root).ok();
     }
 

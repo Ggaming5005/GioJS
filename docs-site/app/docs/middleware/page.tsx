@@ -147,6 +147,34 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         names/values are validated once at load time.
       </p>
 
+      <h2>public/ files at the site root</h2>
+      <p>
+        A file in <code>public/</code> answers at its root URL as well as under{' '}
+        <code>/public/*</code> - <code>public/members/report.pdf</code> is both{' '}
+        <code>/members/report.pdf</code> and <code>/public/members/report.pdf</code>. Rules
+        written for the <code>/public/...</code> URL follow the file to its root URL:
+      </p>
+      <ul>
+        <li>
+          <strong>Guards</strong> for the <code>/public/...</code> URL run after the requested
+          URL&apos;s own rules let the request through, so a guard on{' '}
+          <code>/public/members/*rest</code> also protects <code>/members/report.pdf</code>.
+        </li>
+        <li>
+          <strong>Header rules</strong> for both URLs are stamped; when both set the same
+          header, the rule for the requested URL wins.
+        </li>
+        <li>
+          <strong><code>[[rate_limits]]</code></strong> for both URLs must admit the request,
+          and a rule matching both is charged once.
+        </li>
+        <li>
+          <strong>Redirects and rewrites</strong> match only the URL requested, so a{' '}
+          <code>/public/*rest</code> &rarr; <code>/*rest</code> redirect that moves old links
+          to the root does not loop.
+        </li>
+      </ul>
+
       <div className="callout">
         Internal <code>/_gio/*</code> endpoints (health, metrics, image
         optimization, devtools) are exempt from all middleware rules.
