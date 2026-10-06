@@ -2,8 +2,8 @@
  * giojs-core/src/main.ts
  *
  * Server bootstrap for the source path: loads gio.config, registers node
- * plugins, discovers routes/layouts/WS handlers under app/, builds client
- * bundles, then hands the components to worker-boot.ts to start both IPC
+ * plugins, discovers routes/layouts/WS handlers under app/, builds the
+ * route stylesheets and client bundles, then hands the components to worker-boot.ts to start both IPC
  * servers (HTTP bridge + WebSocket bridge) that Rust connects to.
  */
 import { dirname, join } from 'node:path';
@@ -16,6 +16,7 @@ import {
   assertNoRouteConflicts,
 } from './router.ts';
 import { buildClientBundles } from './client-build.ts';
+import { buildRouteStylesheets } from './css-build.ts';
 import { discoverRouteModules } from './ws-router.ts';
 import { loadGioConfig } from './config-loader.ts';
 import { loadMiddlewareRules } from './middleware-loader.ts';
@@ -72,14 +73,23 @@ export async function runServer(): Promise<void> {
   // Rust in the READY frame and enforced there, before routing.
   const middlewareRules = await loadMiddlewareRules(dirname(appDir));
 
-  // Bundle the hydration entries before accepting requests. buildClientBundles
-  // never throws: routes whose bundle fails render server-only.
+  // Stylesheets first: each hydration entry renders its route's links. Both
+  // builds run before accepting requests and never throw - a route whose CSS
+  // fails renders without it, one whose bundle fails renders server-only.
+  const stylesheets = await buildRouteStylesheets({
+    routes,
+    layouts,
+    segmentFiles,
+    projectRoot: dirname(appDir),
+    dev: isDevMode(),
+  });
   const clientScripts = await buildClientBundles({
     routes,
     layouts,
     segmentFiles,
     projectRoot: dirname(appDir),
     dev: isDevMode(),
+    stylesheets: stylesheets.routes,
   });
 
   startIpcServers({
@@ -90,6 +100,7 @@ export async function runServer(): Promise<void> {
     specialPages,
     segmentFiles,
     clientScripts,
+    stylesheets,
     middlewareRules,
     pluginRegistry: nodePluginRegistry,
   });

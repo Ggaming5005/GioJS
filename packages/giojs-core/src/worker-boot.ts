@@ -21,6 +21,7 @@ import type {
 } from './router.ts';
 import type { WsHandlerFn } from './ws-router.ts';
 import type { WireMiddlewareRules } from './middleware.ts';
+import type { StyleManifest } from './style-manifest.ts';
 
 /** Everything the IPC servers need, produced by discovery or by a registry. */
 export interface WorkerComponents {
@@ -31,6 +32,8 @@ export interface WorkerComponents {
   specialPages: SpecialPages;
   segmentFiles: SegmentFiles;
   clientScripts: Map<string, string>;
+  /** Each page's stylesheets (css-build.ts); absent when none were built. */
+  stylesheets?: StyleManifest;
   middlewareRules: WireMiddlewareRules;
   pluginRegistry: NodePluginRegistry;
 }
@@ -96,6 +99,7 @@ export function startIpcServers(components: WorkerComponents): void {
       handlers: components.handlers,
       specialPages: components.specialPages,
       segmentFiles: components.segmentFiles,
+      ...(components.stylesheets !== undefined ? { stylesheets: components.stylesheets } : {}),
     },
     components.middlewareRules,
   );

@@ -48,7 +48,13 @@ import { logger } from './logger.ts';
 import { clientBuildErrorFor } from './client-build-errors.ts';
 import { createErrorDigest, describeError, isDevMode } from './mode.ts';
 import { isNotFoundError } from './not-found.ts';
-import { buildSegmentTree, type SegmentLevel, type GioErrorProps } from './segment-tree.ts';
+import {
+  buildSegmentTree,
+  withStylesheets,
+  type SegmentLevel,
+  type GioErrorProps,
+} from './segment-tree.ts';
+import { segmentStylesheetKey, type StyleManifest } from './style-manifest.ts';
 import { cspNonce, nonceAttr } from './csp.ts';
 import {
   isJsonContentType,
@@ -118,6 +124,12 @@ export interface RenderExtras {
    * forever. Any error React reported fails the render instead.
    */
   staticExport?: boolean;
+  /**
+   * Each page's stylesheets (css-build.ts), rendered inside #__gio as React
+   * stylesheet resources - hoisted into <head> - exactly as the client
+   * entry renders them.
+   */
+  stylesheets?: StyleManifest;
 }
 
 /** What production responses say instead of the real error message. */
@@ -824,7 +836,11 @@ export async function renderRoute(
     let element: React.ReactNode = React.createElement(
       React.Fragment,
       null,
-      React.createElement('div', { id: '__gio' }, inner),
+      React.createElement(
+        'div',
+        { id: '__gio' },
+        withStylesheets(inner, extras?.stylesheets?.routes.get(pattern) ?? []),
+      ),
       envelopeJson !== null && !deferEnvelope
         ? React.createElement('script', {
             id: '__gio_props',
@@ -1239,6 +1255,8 @@ interface SegmentPageCandidate {
   /** app/-relative folder of the file: selects the layouts it renders in. */
   dir: string;
   load: () => Promise<{ default: React.ComponentType<Record<string, unknown>> }>;
+  /** Its stylesheets (root layout's included), from RenderExtras.stylesheets. */
+  stylesheets: readonly string[];
 }
 
 /**
@@ -1252,11 +1270,19 @@ function segmentPageCandidates(
   extras: RenderExtras | undefined,
 ): SegmentPageCandidate[] {
   const files = extras?.segmentFiles?.[kind];
+  const stylesheets = (fileDir: string): readonly string[] =>
+    extras?.stylesheets?.segmentPages.get(segmentStylesheetKey(kind, fileDir)) ?? [];
   const candidates: SegmentPageCandidate[] =
-    files !== undefined ? nearestSegmentFiles(dir, files) : [];
+    files !== undefined
+      ? nearestSegmentFiles(dir, files).map(file => ({
+          dir: file.dir,
+          load: file.load,
+          stylesheets: stylesheets(file.dir),
+        }))
+      : [];
   const rootFallback = extras?.specialPages?.[kind];
   if (rootFallback !== undefined && !candidates.some(c => c.dir === '')) {
-    candidates.push({ dir: '', load: rootFallback });
+    candidates.push({ dir: '', load: rootFallback, stylesheets: stylesheets('') });
   }
   return candidates;
 }
@@ -1341,7 +1367,11 @@ async function renderSpecialPage(
       const layoutMod = await layoutEntry.load();
       inner = React.createElement(layoutMod.default, { children: inner, path: req.path });
     }
-    let element: React.ReactNode = React.createElement('div', { id: '__gio' }, inner);
+    let element: React.ReactNode = React.createElement(
+      'div',
+      { id: '__gio' },
+      withStylesheets(inner, candidate.stylesheets),
+    );
     if (rootLayoutEntry !== undefined) {
       const rootLayoutMod = await rootLayoutEntry.load();
       element = React.createElement(rootLayoutMod.default, {
