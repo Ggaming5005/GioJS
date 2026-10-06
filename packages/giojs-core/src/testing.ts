@@ -783,6 +783,11 @@ function serverEnv(
   extra: Record<string, string | undefined>,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
+  // The worker is no vitest process even when the test is: VITEST would
+  // switch its module loading to vitest's conventions (load-ts.ts).
+  for (const name of Object.keys(env)) {
+    if (name.startsWith('VITEST')) delete env[name];
+  }
   for (const [name, value] of Object.entries(extra)) {
     if (value === undefined) delete env[name];
     else env[name] = value;

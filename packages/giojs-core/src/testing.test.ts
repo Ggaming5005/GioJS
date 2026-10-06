@@ -462,6 +462,13 @@ describe('createTestServer', () => {
       expect(server.logs()).toContain('GioJS listening on 127.0.0.1:');
     });
 
+    it('runs the worker as a production process, not a vitest one', async () => {
+      // In-process, the handler runs inside this vitest worker.
+      expect(await (await callRoute('/api/runtime', { appDir })).json()).toMatchObject({ vitest: 'true' });
+      const res = await fetch(`${server.url}/api/runtime`);
+      expect(await res.json()).toEqual({ vitest: null, nodeEnv: 'production' });
+    });
+
     it('uses a private cache, so the project cache is never touched', async () => {
       const first = await fetch(`${server.url}/cached`);
       expect(first.headers.get('x-gio-cache')).toMatch(/^miss/);
