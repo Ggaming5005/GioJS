@@ -19,7 +19,7 @@ import type {
   SegmentFiles,
 } from './router.ts';
 import type { WsHandlerFn } from './ws-router.ts';
-import type { MiddlewareRules } from './middleware.ts';
+import type { WireMiddlewareRules } from './middleware.ts';
 
 /** Everything the IPC servers need, produced by discovery or by a registry. */
 export interface WorkerComponents {
@@ -30,7 +30,7 @@ export interface WorkerComponents {
   specialPages: SpecialPages;
   segmentFiles: SegmentFiles;
   clientScripts: Map<string, string>;
-  middlewareRules: MiddlewareRules;
+  middlewareRules: WireMiddlewareRules;
   pluginRegistry: NodePluginRegistry;
 }
 

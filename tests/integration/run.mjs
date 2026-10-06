@@ -16,6 +16,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { createHmac, hkdfSync } from 'node:crypto';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -154,6 +155,38 @@ function assertNoncedResponse(res, html, what) {
     assert.ok(tag.includes(` nonce="${nonce}"`), `${what}: ${tag} must carry the header nonce`);
   }
   return nonce;
+}
+
+/** The fixture's .env.production session secret. */
+const FIXTURE_SESSION_SECRET = 'integration-fixture-session-secret-0123456789';
+
+/**
+ * Re-sign a session token's MAC with a new expiry, independently of
+ * session.ts (format: v1.<exp>.<payload>.<mac>, MAC over
+ * "<cookie>\nv1.<exp>.<payload>" with an HKDF-derived key). The payload's
+ * AES-GCM AAD still names the old expiry, so only the MAC is valid.
+ */
+function resignSession(token, exp, secret = FIXTURE_SESSION_SECRET, cookie = 'gio_session') {
+  const [version, , payload] = token.split('.');
+  const signed = `${version}.${exp}.${payload}`;
+  const key = Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(0), 'gio-session-mac', 32));
+  return `${signed}.${createHmac('sha256', key).update(`${cookie}\n${signed}`).digest('base64url')}`;
+}
+
+/** Log in through the fixture's /api/login; resolves to the response. */
+function loginAs(user, password = 'fixture-password') {
+  return fetch(`${BASE}/api/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ user, password }),
+  });
+}
+
+/** The `gio_session=<token>` pair from a login response. */
+function sessionCookieOf(res) {
+  const cookie = res.headers.getSetCookie().find((c) => c.startsWith('gio_session='));
+  assert.ok(cookie, 'login sets gio_session');
+  return cookie.split(';')[0];
 }
 
 let passed = 0;
@@ -1051,6 +1084,102 @@ async function main() {
       assert.match(await allowed.text(), /INTEGRATION_FIXTURE_ADMIN/);
     });
 
+    await test('session login sets the encrypted session cookie next to another cookie', async () => {
+      const denied = await loginAs('alice', 'wrong');
+      assert.equal(denied.status, 401);
+      assert.deepEqual(denied.headers.getSetCookie(), []);
+
+      const res = await loginAs('alice');
+      assert.equal(res.status, 200);
+      const cookies = res.headers.getSetCookie();
+      assert.equal(cookies.length, 2, `both cookies arrive: ${cookies.join(' | ')}`);
+      assert.match(
+        cookies[0],
+        /^gio_session=v1\.\d+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}; Max-Age=604800; Path=\/; HttpOnly; Secure; SameSite=Lax$/,
+      );
+      assert.doesNotMatch(cookies[0], /alice/, 'session data is encrypted');
+      assert.equal(cookies[1], 'theme=dark; Path=/; Secure; SameSite=Lax');
+    });
+
+    await test('require_session guards verify the session in Rust', async () => {
+      const cookie = sessionCookieOf(await loginAs('alice'));
+      const token = cookie.slice('gio_session='.length);
+      const future = Math.floor(Date.now() / 1000) + 3600;
+      const rejected = {
+        none: undefined,
+        'presence only': 'gio_session=valid',
+        empty: 'gio_session=',
+        expired: `gio_session=${resignSession(token, Math.floor(Date.now() / 1000) - 60)}`,
+        'wrong secret': `gio_session=${resignSession(token, future, 'not-the-fixture-secret-0123456789abcdef')}`,
+        'other cookie name': `gio_session=${resignSession(token, future, FIXTURE_SESSION_SECRET, 'other')}`,
+        'tampered mac': `${cookie.slice(0, -2)}${cookie.at(-2) === 'A' ? 'B' : 'A'}${cookie.at(-1)}`,
+        'right token, wrong cookie': `session=${token}`,
+      };
+      for (const [label, header] of Object.entries(rejected)) {
+        for (const path of ['/session-dashboard', '/session-dashboard/', '/api/me']) {
+          const res = await rawGet(path, header === undefined ? {} : { cookie: header });
+          assert.equal(res.status, 302, `${label}: ${path} must be guarded`);
+          assert.equal(res.headers.location, '/login', `${label}: ${path}`);
+          assert.doesNotMatch(res.body, /INTEGRATION_FIXTURE_DASHBOARD|userId/, label);
+        }
+      }
+
+      const page = await fetch(`${BASE}/session-dashboard`, { headers: { cookie: `theme=dark; ${cookie}` } });
+      assert.equal(page.status, 200);
+      const html = await page.text();
+      assert.match(html, /INTEGRATION_FIXTURE_DASHBOARD user=(<!-- -->)?alice/);
+      // The session module is server-only (*.server.ts) and used only by
+      // getServerSideProps: it is shaken out, so the page still hydrates.
+      assert.match(html, /\/_next\/static\/chunks\/route-session-dashboard-[A-Z0-9]+\.js/);
+      const me = await fetch(`${BASE}/api/me`, { headers: { cookie } });
+      assert.equal(me.status, 200);
+      assert.deepEqual(await me.json(), { userId: 'alice' });
+
+      // A token whose MAC is re-signed (so Rust lets it through) but whose
+      // ciphertext was sealed for another expiry still fails in Node: the
+      // AES-GCM AAD binds the expiry too.
+      const resigned = await fetch(`${BASE}/session-dashboard`, {
+        headers: { cookie: `gio_session=${resignSession(token, future)}` },
+      });
+      assert.equal(resigned.status, 200);
+      assert.match(await resigned.text(), /user=(<!-- -->)?anonymous/);
+    });
+
+    await test('a malformed middleware.ts guard denies every request instead of vanishing', async () => {
+      const session = sessionCookieOf(await loginAs('alice'));
+      for (const cookie of [undefined, session, 'session=int-test']) {
+        for (const path of ['/broken-guard', '/broken-guard/x']) {
+          const res = await rawGet(path, cookie === undefined ? {} : { cookie });
+          assert.equal(res.status, 302, `${path} with ${cookie ?? 'no cookie'} must stay closed`);
+          assert.equal(res.headers.location, '/login', path);
+        }
+      }
+      assert.match(log, /guard for \/broken-guard\/\*rest is malformed \(requireSession must be true or false\)/);
+    });
+
+    await test('session pages are personal: never cached across users', async () => {
+      const alice = sessionCookieOf(await loginAs('alice'));
+      const bob = sessionCookieOf(await loginAs('bob'));
+      for (const [user, cookie] of [['alice', alice], ['bob', bob], ['alice', alice]]) {
+        const res = await fetch(`${BASE}/session-dashboard`, { headers: { cookie } });
+        assert.match(await res.text(), new RegExp(`user=(<!-- -->)?${user}`));
+        assert.equal(res.headers.get('x-gio-cache'), 'bypass', `${user}'s render must not be shared`);
+      }
+    });
+
+    await test('logout destroys the session cookie', async () => {
+      const res = await fetch(`${BASE}/api/logout`, { method: 'POST' });
+      assert.equal(res.status, 204);
+      assert.deepEqual(res.headers.getSetCookie(), [
+        'gio_session=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; HttpOnly; Secure; SameSite=Lax',
+      ]);
+      const after = await fetch(`${BASE}/session-dashboard`, {
+        headers: { cookie: res.headers.getSetCookie()[0].split(';')[0] },
+        redirect: 'manual',
+      });
+      assert.equal(after.status, 302);
+    });
+
     await test('guards hold for every path spelling the router treats alike', async () => {
       for (const path of ['/admin/', '//admin', '/admin//', '/%61dmin', '/%61dmin/']) {
         const res = await rawGet(path);
@@ -1855,6 +1984,19 @@ async function devWatchPhase() {
       assert.match(html, /__gio_dev_overlay_script/);
     });
 
+    let devSessionCookie = '';
+    await test('dev: without GIO_SESSION_SECRET the server and worker share an ephemeral one', async () => {
+      assert.match(log, /GIO_SESSION_SECRET not set - using an ephemeral development session secret/);
+      const res = await loginAs('dev-user');
+      assert.equal(res.status, 200);
+      // Plain-http development: no Secure attribute by default.
+      assert.doesNotMatch(res.headers.getSetCookie()[0], /Secure/);
+      devSessionCookie = sessionCookieOf(res);
+      const page = await fetch(`${BASE}/session-dashboard`, { headers: { cookie: devSessionCookie }, redirect: 'manual' });
+      assert.equal(page.status, 200, 'the Rust guard verifies what the worker signed');
+      assert.match(await page.text(), /user=(<!-- -->)?dev-user/);
+    });
+
     await test('dev watch: editing a page restarts the worker and serves new content', async () => {
       assert.match(await (await fetch(`${BASE}/`)).text(), /INTEGRATION_FIXTURE_HOME/);
       // Prime the cache so the cached-route assertion below proves clearing.
@@ -1895,6 +2037,12 @@ async function devWatchPhase() {
         Promise.resolve(/dev watch: change detected/.test(log)), 15_000);
       await waitFor('worker restart completed', () =>
         Promise.resolve(/dev watch: worker restarted/.test(log)), 90_000);
+    });
+
+    await test('dev: sessions survive a worker restart (the secret lives in the server)', async () => {
+      const page = await fetch(`${BASE}/session-dashboard`, { headers: { cookie: devSessionCookie }, redirect: 'manual' });
+      assert.equal(page.status, 200);
+      assert.match(await page.text(), /user=(<!-- -->)?dev-user/);
     });
 
     await test('dev: dev-only /_gio endpoints still serve in development', async () => {
@@ -2515,7 +2663,52 @@ export function GET(): Response {
   }
 }
 
-await main();
+/**
+ * Phase 0 (no server): a gio.toml guard that would not protect its path
+ * stops the server at startup. A misspelled key used to parse fine and
+ * leave the path open.
+ */
+async function brokenGuardConfigPhase() {
+  const binary = findServerBinary();
+  const projectDir = await mkdtemp(join(tmpdir(), 'gio-int-bad-guard-'));
+  try {
+    await mkdir(join(projectDir, 'app'));
+    const cases = [
+      ['a misspelled key', 'require_sesion = true', /unknown field `require_sesion`/],
+      ['no requirement', '', /invalid \[\[guards\]\] entry for "\/admin\/\*rest"/],
+    ];
+    for (const [label, line, expected] of cases) {
+      await writeFile(
+        join(projectDir, 'gio.toml'),
+        // A port of its own: should the server wrongly start, it must not
+        // collide with the fixture servers.
+        '[server]\nhost = "127.0.0.1"\nport = 39519\n\n' +
+          `[[guards]]\npath = "/admin/*rest"\n${line}\nredirect_to = "/login"\n`,
+      );
+      await test(`gio.toml guard with ${label} stops startup`, async () => {
+        const run = spawnSync(binary, [], {
+          cwd: projectDir,
+          env: { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production' },
+          encoding: 'utf8',
+          timeout: 30_000,
+        });
+        assert.equal(run.status, 1, `exit status ${run.status} (signal ${run.signal}), stderr:\n${run.stderr}`);
+        assert.match(run.stderr, /configuration error/);
+        assert.match(run.stderr, expected);
+      });
+    }
+  } catch (err) {
+    console.error(`\nintegration (gio.toml guards): FAILED\n${err?.stack ?? err}`);
+    process.exitCode = 1;
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+}
+
+await brokenGuardConfigPhase();
+if (process.exitCode !== 1) {
+  await main();
+}
 if (process.exitCode !== 1) {
   await cspPhase();
 }

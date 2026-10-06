@@ -21,3 +21,14 @@ export type {
   MiddlewareHeaderRule,
   MiddlewareGuard,
 } from './middleware.ts';
+export { parseCookies, serializeCookie, signValue, unsignValue } from './cookies.ts';
+export type { CookieOptions } from './cookies.ts';
+export { createSessionStorage } from './session.ts';
+export type {
+  Session,
+  SessionData,
+  SessionSource,
+  SessionStorage,
+  SessionStorageOptions,
+  CommitSessionOptions,
+} from './session.ts';

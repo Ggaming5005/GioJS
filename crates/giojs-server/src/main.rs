@@ -33,6 +33,7 @@ mod path_hygiene;
 mod public_files;
 mod rules;
 mod security;
+mod session_token;
 mod stream_inject;
 mod ws;
 mod ws_ipc;
@@ -328,6 +329,9 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     // The one runtime-mode decision: the worker is spawned with the matching
     // NODE_ENV, so Rust and Node can never disagree about dev vs production.
     let dev_mode = std::env::var("NODE_ENV").as_deref() == Ok("development");
+    // Before the worker spawns (it may receive the dev secret) and before
+    // any rule set compiles (require_session guards verify with it).
+    session_token::init(dev_mode);
 
     let cache_dir = std::env::var("GIO_CACHE_DIR")
         .map(PathBuf::from)
@@ -4490,6 +4494,7 @@ mod tests {
             guards: vec![rules::GuardRule {
                 path: "/api/login".to_string(),
                 require_cookie: "session".to_string(),
+                require_session: false,
                 redirect_to: "/".to_string(),
             }],
             redirects: vec![rules::RedirectRule {

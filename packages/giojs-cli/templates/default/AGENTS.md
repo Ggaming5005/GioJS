@@ -61,6 +61,12 @@ renders React. Full docs: https://giojs.com/llms.txt
   `nonce={cspNonce()}` (from `@gio.js/core`). Keep `style-src 'self'
   'unsafe-inline'` with no nonce: `style` props and the `<Animate>` / `<Link>`
   transition styles carry none.
+- Auth: `createSessionStorage()` from `@gio.js/core` (in a `lib/session.server.ts`)
+  gives encrypted cookie sessions (`getSession(ctx|req)`, `commitSession`,
+  `destroySession`; secret from `GIO_SESSION_SECRET`, required in
+  production). Protect paths with `[[guards]] require_session = true` in
+  gio.toml (verified in Rust). Build other cookies with `serializeCookie`,
+  never by string concatenation.
 - Config is `gio.toml` (server, TLS, images.remote_patterns, rate_limits,
   fonts, i18n, websocket, metrics, security). There is no `[cache]`/redirects/rewrites
   section.

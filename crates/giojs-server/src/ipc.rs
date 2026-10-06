@@ -824,6 +824,7 @@ fn spawn_worker_command(
         .env("GIO_SOCKET_PATH", ipc_path)
         .env("GIO_WS_SOCKET_PATH", ws_path)
         .env("GIO_IPC_TOKEN", token)
+        .envs(crate::session_token::worker_env())
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -1975,6 +1976,29 @@ mod tests {
             rules.apply("/admin", Some("session=x")),
             crate::rules::RuleOutcome::None
         ));
+    }
+
+    #[test]
+    fn ready_guard_without_a_requirement_denies_everything() {
+        // sanitizeMiddlewareRules sends a malformed middleware.ts guard in
+        // this shape so it fails closed instead of disappearing.
+        let ready = serde_json::json!({
+            "type": "ready",
+            "middleware": {
+                "guards": [{"path": "/admin/*rest", "redirectTo": "/login"}],
+            },
+        });
+        let rules = parse_ready_middleware(&ready);
+        for cookies in [None, Some("session=x; gio_session=x")] {
+            assert!(matches!(
+                rules.apply("/admin/users", cookies),
+                crate::rules::RuleOutcome::Redirect { ref location, .. } if location == "/login"
+            ));
+        }
+        assert_eq!(
+            rules.apply("/elsewhere", None),
+            crate::rules::RuleOutcome::None
+        );
     }
 
     #[test]

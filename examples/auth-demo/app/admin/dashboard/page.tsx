@@ -1,16 +1,28 @@
 import React from 'react';
+import { sessions } from '../../../lib/session.server.ts';
 
 interface Props {
-  params: Record<string, string>;
+  name: string;
 }
 
-export default function AdminDashboard({ params: _params }: Props): React.JSX.Element {
+// Reached only with a valid session: the require_session guard in gio.toml
+// checks it in Rust first. Reading it through ctx.cookies marks this render
+// personal, so one user's dashboard is never cached for another.
+export async function getServerSideProps(ctx: { cookies: Record<string, string> }): Promise<{ props: Props }> {
+  const session = sessions.getSession(ctx);
+  return { props: { name: session.get('name') ?? 'unknown' } };
+}
+
+export default function AdminDashboard({ name }: Props): React.JSX.Element {
   return (
     <html>
       <head><title>Admin Dashboard</title></head>
       <body>
         <h1>Admin Dashboard</h1>
-        <p>You are authenticated. Only requests with <code>session=valid</code> cookie reach here.</p>
+        <p>Signed in as <strong>{name}</strong>.</p>
+        <form method="post" action="/api/logout">
+          <button type="submit">Log out</button>
+        </form>
         <p><a href="/">← Back to home</a></p>
       </body>
     </html>
