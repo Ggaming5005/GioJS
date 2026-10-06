@@ -154,6 +154,14 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
           same handler.
         </li>
         <li>
+          <strong>
+            <code>/api/*</code> also covers <code>/api</code> itself
+          </strong>{' '}
+          (<code>/api/</code> is the same path). An exact <code>/api</code>{' '}
+          rule still takes precedence there, whichever order the two rules
+          are listed in.
+        </li>
+        <li>
           <strong>A client is an IPv4 address or an IPv6 /64.</strong> IPv6
           hosts typically control a whole /64, so per-address buckets would let
           one host rotate into unlimited fresh budgets.

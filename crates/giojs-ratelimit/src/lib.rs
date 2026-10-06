@@ -142,23 +142,19 @@ impl RateLimiter {
         self.store.sweep();
     }
 
-    /// Find the most-specific matching rule for `path`.
-    /// Specificity = length of the literal prefix before the first `*`.
+    /// Find the most-specific matching rule for `path` (see `Specificity`).
+    /// Only identical patterns tie; the later one wins, as it always has
+    /// (`max_by_key` returns the last of equal maxima).
     fn find_rule(&self, path: &str) -> Option<(usize, &RateLimitRule)> {
-        let mut best: Option<(usize, &RateLimitRule)> = None;
-        let mut best_specificity: usize = 0;
-
-        for (index, rule) in self.rules.iter().enumerate() {
-            let specificity = match_path_pattern(&rule.path_pattern, path);
-            if let Some(sp) = specificity {
-                if sp >= best_specificity {
-                    best_specificity = sp;
-                    best = Some((index, rule));
-                }
-            }
-        }
-
-        best
+        self.rules
+            .iter()
+            .enumerate()
+            .filter_map(|(index, rule)| {
+                match_path_pattern(&rule.path_pattern, path)
+                    .map(|specificity| (specificity, index, rule))
+            })
+            .max_by_key(|&(specificity, ..)| specificity)
+            .map(|(_, index, rule)| (index, rule))
     }
 
     /// The bucket for the matched rule. Header-keyed rules always compound
@@ -225,28 +221,54 @@ fn client_key(ip: IpAddr) -> String {
 
 // ── Path pattern matching ─────────────────────────────────────────────────────
 
-/// Match `pattern` against the canonical `path`. Returns the specificity
-/// (length of the literal prefix before `*`) on success, or `None` if no match.
+/// How specifically a pattern matched a path; the greatest wins. Fields
+/// compare in declaration order:
+///   1. `matched` - how much of the path the pattern's literal text covered
+///      (the documented "longest literal prefix wins"),
+///   2. `exact` - on equal coverage an exact pattern beats a wildcard, so an
+///      exact "/auth" rule keeps "/auth" even though "/auth/*" covers the
+///      bare "/auth" too,
+///   3. `literal` - then the longer literal: on "/auth", "/auth/*" (only
+///      "/auth" and below) beats the broader "/auth*" (also "/authors").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Specificity {
+    matched: usize,
+    exact: bool,
+    literal: usize,
+}
+
+/// Match `pattern` against the canonical `path`. Returns how specific the
+/// match is, or `None` if there is no match.
 ///
 /// Rules:
 ///   - Exact match: "/api/auth" matches only "/api/auth"
 ///   - Wildcard: "/api/*" matches "/api" and anything below it - the router
-///     serves "/api/" (canonically "/api") from the same handler as "/api"
+///     serves "/api/" (canonically "/api") from the same handler as "/api".
+///     The bare "/api" is covered by the "/api" part of the literal only, so
+///     that match scores like an exact "/api" rule would, never higher.
 ///   - No wildcard means exact match required
-fn match_path_pattern(pattern: &str, path: &str) -> Option<usize> {
+fn match_path_pattern(pattern: &str, path: &str) -> Option<Specificity> {
     if let Some(prefix) = pattern.strip_suffix('*') {
-        let bare_prefix = prefix.strip_suffix('/').filter(|bare| !bare.is_empty());
-        if path.starts_with(prefix) || bare_prefix == Some(path) {
-            return Some(prefix.len());
+        let wildcard = |matched: usize| Specificity {
+            matched,
+            exact: false,
+            literal: prefix.len(),
+        };
+        if path.starts_with(prefix) {
+            return Some(wildcard(prefix.len()));
         }
-        None
+        match prefix.strip_suffix('/') {
+            Some(bare) if !bare.is_empty() && bare == path => Some(wildcard(bare.len())),
+            _ => None,
+        }
+    } else if pattern == path {
+        Some(Specificity {
+            matched: pattern.len(),
+            exact: true,
+            literal: pattern.len(),
+        })
     } else {
-        // Exact match
-        if pattern == path {
-            Some(pattern.len())
-        } else {
-            None
-        }
+        None
     }
 }
 
@@ -546,7 +568,7 @@ mod tests {
 
     // ── client identity ──────────────────────────────────────────────────────
 
-    fn exact_rule(path: &str, per_ip: u64) -> RateLimitRule {
+    fn hourly_rule(path: &str, per_ip: u64) -> RateLimitRule {
         RateLimitRule {
             path_pattern: path.to_string(),
             per_ip,
@@ -558,7 +580,7 @@ mod tests {
 
     #[test]
     fn ipv6_clients_share_one_bucket_per_64() {
-        let rl = make_limiter(vec![exact_rule("/api/login", 2)]);
+        let rl = make_limiter(vec![hourly_rule("/api/login", 2)]);
         // Rotating the interface identifier inside one /64 buys nothing.
         for host in [
             "2001:db8:1:2::1",
@@ -590,7 +612,7 @@ mod tests {
     fn ipv4_mapped_ipv6_clients_stay_per_ipv4_address() {
         // A dual-stack listener reports IPv4 peers as ::ffff:a.b.c.d; masking
         // those to a /64 would lump every IPv4 client into one bucket.
-        let rl = make_limiter(vec![exact_rule("/api/login", 1)]);
+        let rl = make_limiter(vec![hourly_rule("/api/login", 1)]);
         let first: IpAddr = "::ffff:192.0.2.1".parse().unwrap();
         let second: IpAddr = "::ffff:192.0.2.2".parse().unwrap();
         assert!(matches!(
@@ -623,7 +645,7 @@ mod tests {
 
     #[test]
     fn rotating_source_addresses_cannot_grow_the_store_past_its_cap() {
-        let rl = RateLimiter::with_max_buckets(vec![exact_rule("/api/login", 5)], 100);
+        let rl = RateLimiter::with_max_buckets(vec![hourly_rule("/api/login", 5)], 100);
         for i in 0..5_000u32 {
             let ip = IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i));
             let _ = rl.check("/api/login", ip, &empty_headers());
@@ -635,7 +657,7 @@ mod tests {
     fn sweep_keeps_drained_buckets_so_long_windows_hold() {
         // Idle eviction used to reset a 1-per-hour bucket after 5 idle
         // minutes; the sweep only drops buckets that are full again.
-        let rl = make_limiter(vec![exact_rule("/api/login", 1)]);
+        let rl = make_limiter(vec![hourly_rule("/api/login", 1)]);
         assert!(matches!(
             rl.check("/api/login", LOCAL, &empty_headers()),
             RateLimitResult::Allowed { .. }
@@ -668,6 +690,56 @@ mod tests {
     }
 
     #[test]
+    fn exact_rule_beats_wildcard_on_bare_prefix_in_either_order() {
+        // "/auth/*" also covers "/auth", but a stricter exact "/auth" rule
+        // must keep it - whichever of the two is listed first.
+        let exact = || hourly_rule("/auth", 1);
+        let wildcard = || hourly_rule("/auth/*", 100);
+        for rules in [vec![exact(), wildcard()], vec![wildcard(), exact()]] {
+            let rl = make_limiter(rules);
+            assert!(matches!(
+                rl.check("/auth", LOCAL, &empty_headers()),
+                RateLimitResult::Allowed { limit: 1, .. }
+            ));
+            assert!(matches!(
+                rl.check("/auth", LOCAL, &empty_headers()),
+                RateLimitResult::Rejected { limit: 1, .. }
+            ));
+            // Below the prefix the wildcard is the only match.
+            assert!(matches!(
+                rl.check("/auth/login", LOCAL, &empty_headers()),
+                RateLimitResult::Allowed { limit: 100, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn bare_prefix_ties_break_toward_the_narrower_wildcard() {
+        // On "/api", "/api/*" covers four literal bytes, like "/api*". Its
+        // separator only breaks that tie (the narrower pattern wins); it
+        // never makes the bare match count as longer than it is.
+        let narrow = || hourly_rule("/api/*", 1);
+        let broad = || hourly_rule("/api*", 100);
+        for rules in [vec![narrow(), broad()], vec![broad(), narrow()]] {
+            let rl = make_limiter(rules);
+            assert!(matches!(
+                rl.check("/api", LOCAL, &empty_headers()),
+                RateLimitResult::Allowed { limit: 1, .. }
+            ));
+            assert!(matches!(
+                rl.check("/apiary", LOCAL, &empty_headers()),
+                RateLimitResult::Allowed { limit: 100, .. }
+            ));
+        }
+        assert_eq!(
+            match_path_pattern("/api/*", "/api").map(|s| s.matched),
+            match_path_pattern("/api", "/api").map(|s| s.matched)
+        );
+        assert!(match_path_pattern("/api", "/api") > match_path_pattern("/api/*", "/api"));
+        assert!(match_path_pattern("/api/*", "/api/x") > match_path_pattern("/api*", "/api/x"));
+    }
+
+    #[test]
     fn configured_patterns_are_canonicalized() {
         assert_eq!(canonical_pattern("/api/login/"), "/api/login");
         assert_eq!(canonical_pattern("//api//login"), "/api/login");
@@ -678,7 +750,7 @@ mod tests {
         assert_eq!(canonical_pattern("/*"), "/*");
         assert_eq!(canonical_pattern("*"), "*");
 
-        let rl = make_limiter(vec![exact_rule("/api/login/", 1)]);
+        let rl = make_limiter(vec![hourly_rule("/api/login/", 1)]);
         assert!(matches!(
             rl.check("/api/login", LOCAL, &empty_headers()),
             RateLimitResult::Allowed { limit: 1, .. }
