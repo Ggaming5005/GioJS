@@ -58,6 +58,23 @@ describe('createSessionStorage', () => {
     expect(restored.data).toEqual({ userId: 'u_1', roles: ['admin'] });
   });
 
+  it('accepts an interface as the session shape and types get/set by key', () => {
+    interface User {
+      userId: string;
+      visits?: number;
+    }
+    const storage = createSessionStorage<User>({ secrets: SECRET });
+    const session = storage.getSession(null);
+    session.set('userId', 'u_9');
+    session.set('visits', 2);
+    // @ts-expect-error - wrong value type for the key
+    session.set('visits', 'two');
+    // @ts-expect-error - unknown key
+    session.get('role');
+    const userId: string | undefined = session.get('userId');
+    expect(userId).toBe('u_9');
+  });
+
   it('supports has, unset and set(undefined)', () => {
     const storage = createSessionStorage({ secrets: SECRET });
     const session = storage.getSession(null);

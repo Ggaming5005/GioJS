@@ -51,9 +51,13 @@ const TAG_BYTES = 16;
 const MAC_BYTES = 32;
 const EXP_PATTERN = /^[1-9][0-9]{0,14}$/;
 
+/**
+ * The default session shape. A storage's type parameter may be any object
+ * type - interfaces included - whose values are JSON-serializable.
+ */
 export type SessionData = Record<string, unknown>;
 
-export interface Session<Data extends SessionData = SessionData> {
+export interface Session<Data extends object = SessionData> {
   /** True when the request carried no valid session (absent, expired, or tampered). */
   readonly isNew: boolean;
   /** A shallow copy of the current data. */
@@ -98,7 +102,7 @@ export type SessionSource =
   | null
   | undefined;
 
-export interface SessionStorage<Data extends SessionData = SessionData> {
+export interface SessionStorage<Data extends object = SessionData> {
   readonly cookieName: string;
   /** Read the request's session. Never throws for bad cookies: those yield an empty new session. */
   getSession(source: SessionSource): Session<Data>;
@@ -113,7 +117,7 @@ interface DerivedKeys {
   mac: Buffer;
 }
 
-class CookieSession<Data extends SessionData> implements Session<Data> {
+class CookieSession<Data extends object> implements Session<Data> {
   // A Map, not an object: keys like "__proto__" stay plain data.
   readonly #values: Map<string, unknown>;
   readonly isNew: boolean;
@@ -295,7 +299,7 @@ function resolveSecrets(option: string | readonly string[] | undefined): string[
  * a missing secret in production, a secret under 32 bytes, an invalid
  * cookie name, or cookie options that browsers would reject.
  */
-export function createSessionStorage<Data extends SessionData = SessionData>(
+export function createSessionStorage<Data extends object = SessionData>(
   options: SessionStorageOptions = {},
 ): SessionStorage<Data> {
   const cookieName = options.cookieName ?? DEFAULT_COOKIE_NAME;
