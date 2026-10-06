@@ -770,3 +770,204 @@ describe('error details by mode', () => {
     expect(line?.['error']).toBe('handler secret');
   });
 });
+
+// ─── personalized renders (dynamic detection) ─────────────────────────────────
+
+interface GsspContextLike {
+  path: string;
+  query: Record<string, string>;
+  headers: Record<string, string>;
+  cookies: Record<string, string>;
+}
+
+describe('credential reads make a revalidate page uncacheable', () => {
+  const credentialRequest = (path = '/'): IPCRequest => ({
+    ...makeRequest(path),
+    headers: { cookie: 'session=u1', authorization: 'Bearer t', 'x-thing': 'v', 'accept-language': 'fr' },
+  });
+
+  function gsspRoute(
+    pattern: string,
+    read: (ctx: GsspContextLike) => unknown,
+    overrides: Partial<PageModule> = {},
+  ): Map<string, RouteModule> {
+    return makeRoute(pattern, {
+      revalidate: 60,
+      getServerSideProps: async (ctx) => ({ props: { v: String(read(ctx as GsspContextLike)) } }),
+      ...overrides,
+    });
+  }
+
+  async function cacheFields(
+    routes: Map<string, RouteModule>,
+    req: IPCRequest = credentialRequest(),
+    registry?: NodePluginRegistry,
+  ): Promise<{ cacheable: unknown; cacheMaxAge: unknown }> {
+    const result = await renderRoute(req, routes, noLayouts, registry);
+    return {
+      cacheable: 'cacheable' in result ? result.cacheable : undefined,
+      cacheMaxAge: 'cacheMaxAge' in result ? result.cacheMaxAge : undefined,
+    };
+  }
+
+  const PERSONAL = { cacheable: false, cacheMaxAge: 0 };
+  const SHARED = { cacheable: true, cacheMaxAge: 60 };
+
+  it('reading ctx.cookies makes the render personal', async () => {
+    expect(await cacheFields(gsspRoute('/', ctx => ctx.cookies['session']))).toEqual(PERSONAL);
+  });
+
+  it('reading the cookie or authorization header makes the render personal', async () => {
+    expect(await cacheFields(gsspRoute('/', ctx => ctx.headers['cookie']))).toEqual(PERSONAL);
+    expect(await cacheFields(gsspRoute('/', ctx => ctx.headers['authorization']))).toEqual(PERSONAL);
+  });
+
+  it('probing or enumerating the headers counts as a read', async () => {
+    expect(await cacheFields(gsspRoute('/', ctx => 'cookie' in ctx.headers))).toEqual(PERSONAL);
+    expect(await cacheFields(gsspRoute('/', ctx => JSON.stringify({ ...ctx.headers })))).toEqual(PERSONAL);
+  });
+
+  it('a read counts even when the request carries no credentials (the anonymous variant)', async () => {
+    const routes = gsspRoute('/', ctx => ctx.cookies['session'] ?? 'anon');
+    expect(await cacheFields(routes, makeRequest('/'))).toEqual(PERSONAL);
+  });
+
+  it('reading non-credential headers keeps the page cacheable', async () => {
+    const routes = gsspRoute('/', ctx => `${ctx.headers['x-thing']}-${ctx.headers['accept-language']}`);
+    expect(await cacheFields(routes)).toEqual(SHARED);
+  });
+
+  it('a page that never reads credentials stays cacheable even when they are sent', async () => {
+    expect(await cacheFields(gsspRoute('/', ctx => ctx.path))).toEqual(SHARED);
+    expect(await cacheFields(makeRoute('/', { revalidate: 60 }))).toEqual(SHARED);
+  });
+
+  it('framework reads of the request (hydration envelope included) never trigger it', async () => {
+    const routes = gsspRoute('/', ctx => ctx.query['q'] ?? 'none');
+    const clientScripts = new Map([['/', '/e.js']]);
+    const result = await renderRoute(
+      credentialRequest(), routes, noLayouts, undefined, undefined, clientScripts,
+    );
+    expect('body' in result && result.body).toContain('__gio_props');
+    expect('cacheable' in result && result.cacheable).toBe(true);
+  });
+
+  it('credentials carried into the render through props are caught before caching', async () => {
+    const routes = makeRoute('/', {
+      revalidate: 60,
+      getServerSideProps: async (ctx) => ({ props: { headers: ctx.headers } }),
+      default: function Page(props: Record<string, unknown>) {
+        const headers = props['headers'] as Record<string, string>;
+        return React.createElement('b', null, headers['cookie'] ?? 'anon');
+      },
+    });
+    const result = await renderRoute(credentialRequest(), routes, noLayouts);
+    expect('body' in result && result.body).toContain('session=u1');
+    expect('cacheable' in result && result.cacheable).toBe(false);
+  });
+
+  it('headers derived by an onRequest plugin count as credentials', async () => {
+    const registry = new NodePluginRegistry();
+    registry.register({
+      name: 'auth',
+      version: '1.0.0',
+      onRequest: async (req) => {
+        req.headers['x-user-id'] = req.headers['cookie'] === 'session=u1' ? 'u1' : 'anon';
+        return req;
+      },
+    });
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['x-user-id']), credentialRequest(), registry),
+    ).toEqual(PERSONAL);
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['x-thing']), credentialRequest(), registry),
+    ).toEqual(SHARED);
+  });
+
+  it('warns once per route with the way out', async () => {
+    const logs = captureLogs();
+    try {
+      const routes = gsspRoute('/warn-once', ctx => ctx.cookies['session']);
+      await cacheFields(routes, credentialRequest('/warn-once'));
+      await cacheFields(routes, credentialRequest('/warn-once'));
+    } finally {
+      logs.restore();
+    }
+    const warnings = logs.lines().filter(l => String(l['msg']).includes('read request credentials'));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.['route']).toBe('/warn-once');
+    expect(String(warnings[0]?.['msg'])).toContain("shell = 'cache'");
+  });
+
+  it('pages without revalidate are unaffected and do not warn', async () => {
+    const logs = captureLogs();
+    let fields;
+    try {
+      fields = await cacheFields(
+        makeRoute('/no-revalidate', {
+          getServerSideProps: async (ctx) => ({ props: { v: ctx.cookies['session'] } }),
+        }),
+        credentialRequest('/no-revalidate'),
+      );
+    } finally {
+      logs.restore();
+    }
+    expect(fields).toEqual(PERSONAL);
+    expect(logs.lines().some(l => String(l['msg']).includes('read request credentials'))).toBe(false);
+  });
+
+  describe('PPR (shell=cache)', () => {
+    const streamingExtras = { streaming: true };
+    const clientScripts = new Map([['/', '/e.js']]);
+    const pprRoute = gsspRoute('/', ctx => ctx.cookies['session'], { shell: 'cache' });
+
+    it('keeps the shell cacheable and moves the per-request envelope out of it', async () => {
+      const result = await renderRoute(
+        credentialRequest(), pprRoute, noLayouts, undefined, undefined, clientScripts, streamingExtras,
+      );
+      const streamed = expectStream(result);
+      expect(streamed.head.pprShell).toBe(true);
+      expect(streamed.head.cacheable).toBe(true);
+      expect(streamed.shellBoundary).toBe('mark');
+      // The props (u1's session) travel in the deferred envelope, not the React stream.
+      expect(streamed.envelope).toContain('id="__gio_props"');
+      expect(streamed.envelope).toContain('"v":"u1"');
+      const html = await readStreamToString(streamed.stream);
+      expect(html).not.toContain('__gio_props');
+      expect(html).not.toContain('u1');
+      // The bootstrap module stays in the shell - it is the same for everyone.
+      expect(html).toContain('/e.js');
+    });
+
+    it('skipShell (holes) renders carry their own envelope for the boundary', async () => {
+      const req = { ...credentialRequest(), skipShell: true };
+      const streamed = expectStream(
+        await renderRoute(req, pprRoute, noLayouts, undefined, undefined, clientScripts, streamingExtras),
+      );
+      expect(streamed.shellBoundary).toBe('discard');
+      expect(streamed.envelope).toContain('"v":"u1"');
+    });
+
+    it('plain (non-PPR) streams keep the envelope inline', async () => {
+      const routes = makeRoute('/', {
+        getServerSideProps: async (ctx) => ({ props: { v: ctx.cookies['session'] } }),
+      });
+      const streamed = expectStream(
+        await renderRoute(
+          credentialRequest(), routes, noLayouts, undefined, undefined, clientScripts, streamingExtras,
+        ),
+      );
+      expect(streamed.envelope).toBeUndefined();
+      expect(await readStreamToString(streamed.stream)).toContain('__gio_props');
+    });
+
+    it('a PPR page rendered without a shell boundary (HEAD) is never cached whole', async () => {
+      const req = { ...credentialRequest(), method: 'HEAD' };
+      const result = await renderRoute(
+        req, pprRoute, noLayouts, undefined, undefined, clientScripts, streamingExtras,
+      );
+      expect('type' in result).toBe(false);
+      expect('cacheable' in result && result.cacheable).toBe(false);
+    });
+  });
+});

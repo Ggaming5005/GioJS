@@ -52,6 +52,19 @@ Plugins run in **registration order** for `onRequest`/`onResponse`/`onStartup`. 
 
 **Error behaviour:** If any hook throws, the error is caught, logged to stderr, and a `500 Internal Server Error` is returned. The Node process never crashes due to a plugin error.
 
+**Caching and personalization:** the Rust page cache keys renders by method, path (locale included),
+and query - never by anything an `onRequest` plugin derives from the visitor. GioJS protects the common case:
+request headers a plugin adds or changes (e.g. an auth plugin setting `x-user-id` from the session
+cookie) count as credentials, so a page whose `getServerSideProps` reads them is rendered per
+request and never cached, exactly like reading `ctx.cookies`. Two things stay the plugin's
+responsibility:
+
+- An `IPCResponse` returned from `onRequest` is sent as-is, including its `cacheable` /
+  `cacheMaxAge`. Set `cacheable: false` on anything that depends on the visitor.
+- Rewriting `req.path` or `req.query` per visitor (A/B buckets, per-user redirects) is invisible
+  to the cache key; a page reached that way that exports `revalidate` would be cached under the
+  original URL for everyone. Route per visitor with a redirect, or keep such pages uncached.
+
 ---
 
 ## Registering Plugins via `gio.config.ts`

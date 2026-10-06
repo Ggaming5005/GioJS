@@ -24,6 +24,7 @@ type BuildFn = (props: Record<string, unknown>, path: string) => React.ReactNode
 const routeBuilders = new Map<string, BuildFn>();
 let activeRoot: Root | null = null;
 let listenerInstalled = false;
+let waitingForDocument = false;
 
 function readEnvelope(): GioEnvelope | null {
   const el = document.getElementById('__gio_props');
@@ -78,6 +79,15 @@ export function registerRoute(pattern: string, build: BuildFn): void {
   if (!listenerInstalled) {
     listenerInstalled = true;
     window.addEventListener('gio:navigated', mount);
+  }
+  // PPR pages stream the envelope after the cached shell, so an entry module
+  // (async) can run before it has arrived - finish parsing first.
+  if (document.readyState === 'loading' && readEnvelope() === null) {
+    if (!waitingForDocument) {
+      waitingForDocument = true;
+      document.addEventListener('DOMContentLoaded', mount, { once: true });
+    }
+    return;
   }
   mount();
 }

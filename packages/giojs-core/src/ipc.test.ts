@@ -416,6 +416,48 @@ describe('pumpRenderStream PPR shell boundary', () => {
     expect(types.indexOf('shell_end')).toBeLessThan(types.indexOf('chunk_end'));
   });
 
+  const ENVELOPE = '<script id="__gio_props" type="application/json">{"props":{"who":"alice"}}</script>';
+
+  it("'mark' writes the deferred envelope after shell_end, outside the cached shell", async () => {
+    const sink = makeStreamSink();
+    const stream = suspenseLikeStream('<div>shell</div>', '<div>hole</div>');
+    await pumpRenderStream(sink, 'r1', {
+      ...renderResult(stream, 'PRE', 'SUF', 'mark'),
+      envelope: ENVELOPE,
+    });
+    const frames = sink.frames();
+    const boundary = frames.findIndex(f => f['type'] === 'shell_end');
+    const shell = frames.slice(0, boundary).map(f => f['data']).join('');
+    expect(shell).toBe('PRE<div>shell</div>');
+    expect(frames[boundary + 1]).toEqual({ type: 'chunk', id: 'r1', data: ENVELOPE });
+    const body = frames.filter(f => f['type'] === 'chunk').map(f => f['data']).join('');
+    expect(body).toBe(`PRE<div>shell</div>${ENVELOPE}<div>hole</div>SUF`);
+  });
+
+  it("'discard' forwards the deferred envelope first, at the same document position", async () => {
+    const sink = makeStreamSink();
+    const stream = suspenseLikeStream('<div>shell</div>', '<div>hole</div>');
+    await pumpRenderStream(sink, 'r1', {
+      ...renderResult(stream, 'PRE', 'SUF', 'discard'),
+      envelope: ENVELOPE,
+    });
+    const body = sink.frames().filter(f => f['type'] === 'chunk').map(f => f['data']).join('');
+    expect(body).toBe(`${ENVELOPE}<div>hole</div>SUF`);
+  });
+
+  it('writes the deferred envelope after shell_end when the whole page flushes with the shell', async () => {
+    const sink = makeStreamSink();
+    const stream = byteStream([new TextEncoder().encode('<div>all-shell</div>')]);
+    await pumpRenderStream(sink, 'r1', {
+      ...renderResult(stream, '', 'SUF', 'mark'),
+      envelope: ENVELOPE,
+    });
+    const frames = sink.frames();
+    const boundary = frames.findIndex(f => f['type'] === 'shell_end');
+    expect(frames.slice(0, boundary).map(f => f['data']).join('')).toBe('<div>all-shell</div>');
+    expect(frames[boundary + 1]?.['data']).toBe(ENVELOPE);
+  });
+
   it('plain streams never emit shell_end', async () => {
     const sink = makeStreamSink();
     const stream = suspenseLikeStream('<p>a</p>', '<p>b</p>');

@@ -276,6 +276,20 @@ async function main() {
       ), 5_000);
     });
 
+    await test('a revalidate page that reads cookies is never cached for everyone', async () => {
+      const as = (who) => fetch(`${BASE}/personal`, { headers: { cookie: `who=${who}` } });
+      const alice = await as('alice');
+      assert.match(await alice.text(), /PERSONAL_FIXTURE who=alice/);
+      assert.equal(alice.headers.get('x-gio-cache'), 'bypass');
+      const bob = await as('bob');
+      assert.match(await bob.text(), /PERSONAL_FIXTURE who=bob/, 'second visitor must get their own page');
+      assert.equal(bob.headers.get('x-gio-cache'), 'bypass');
+      const anon = await (await fetch(`${BASE}/personal`)).text();
+      assert.match(anon, /PERSONAL_FIXTURE who=anon/);
+      await waitFor('personal-render warning logged', () =>
+        Promise.resolve(/read request credentials/.test(log)), 5_000);
+    });
+
     await test('streaming SSR: first bytes arrive before suspended content resolves', async () => {
       // accept-encoding: identity keeps the compression layer from buffering
       // chunks, so the timing below measures the server, not the encoder.
@@ -384,6 +398,24 @@ async function main() {
       const deployPos = html.indexOf('__GIO_DEPLOYMENT_ID__');
       assert.ok(deployPos !== -1 && deployPos < html.indexOf('</head>'));
       assert.match(html, /<\/html>/, 'holes render must close the document');
+    });
+
+    await test('PPR: the cached shell never carries the first visitor\'s props', async () => {
+      // The shell was stored from alice's render; her gSSP props (the
+      // hydration envelope) must have stayed out of it.
+      const res = await fetch(`${BASE}/ppr`, {
+        headers: { 'accept-encoding': 'identity', cookie: 'who=dave' },
+      });
+      assert.equal(res.headers.get('x-gio-cache'), 'ppr; shell=hit');
+      const html = await res.text();
+      assert.doesNotMatch(html, /alice|bob|carol/, 'no earlier visitor data may come out of the shell cache');
+      const envelopes = html.match(/<script id="__gio_props"[^>]*>[^<]*<\/script>/g) ?? [];
+      assert.equal(envelopes.length, 1, 'exactly one hydration envelope - this visitor\'s');
+      assert.match(envelopes[0], /"who":"dave"/);
+      assert.ok(
+        html.indexOf('id="__gio_props"') > html.indexOf('PPR_FIXTURE_SHELL'),
+        'the envelope streams after the shell',
+      );
     });
 
     await test('X-Gio-Cache labels bypass and static tiers', async () => {
