@@ -246,6 +246,10 @@ pub struct IpcResponse {
     /// frame; everything before it is the cacheable static shell.
     #[serde(rename = "pprShell", default)]
     pub ppr_shell: bool,
+    /// Never on the wire: set on the error page built from a worker error
+    /// frame, whose body embeds the error message and, in dev, its stack.
+    #[serde(skip)]
+    pub worker_error: bool,
 }
 
 /// Materialize a response body: base64-decoded when the worker flagged it
@@ -932,31 +936,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                         // ── Normal IpcResponse / IpcError ─────────
                         let id = val["id"].as_str().unwrap_or("").to_string();
                         let resp = if val.get("error").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            let code = val["code"].as_str().unwrap_or("INTERNAL");
-                            let status = if code == "NOT_FOUND" { 404u16 } else { 500u16 };
-                            let msg = val["message"].as_str().unwrap_or("Internal Server Error");
-                            // stack is only present on dev frames (ssr.ts strips it in prod)
-                            let stack = val.get("stack").and_then(|v| v.as_str());
-                            error!("Node render error [{code}]: {msg}");
-                            IpcResponse {
-                                id: id.clone(),
-                                status,
-                                headers: [(
-                                    "content-type".into(),
-                                    "text/html; charset=utf-8".into(),
-                                )]
-                                .into(),
-                                body: crate::dev_overlay::error_page_html(status, msg, stack),
-                                cacheable: false,
-                                cache_max_age: 0,
-                                swr_window_secs: 0,
-                                deployment_id: String::new(),
-                                body_base64: false,
-                                vary: Vec::new(),
-                                cache_tags: Vec::new(),
-                                streaming: false,
-                                ppr_shell: false,
-                            }
+                            error_frame_response(&id, &val)
                         } else {
                             match serde_json::from_value::<IpcResponse>(val) {
                                 Ok(r) => r,
@@ -1035,6 +1015,32 @@ fn send_sse_close_frame(inner: &IpcClientInner, req_id: &str) {
     send_cancel_like_frame(inner, "sse_close", req_id);
 }
 
+/// The error page for a worker error frame (`{"error": true, ...}`).
+fn error_frame_response(id: &str, val: &serde_json::Value) -> IpcResponse {
+    let code = val["code"].as_str().unwrap_or("INTERNAL");
+    let status = if code == "NOT_FOUND" { 404u16 } else { 500u16 };
+    let msg = val["message"].as_str().unwrap_or("Internal Server Error");
+    // stack is only present on dev frames (ssr.ts strips it in prod)
+    let stack = val.get("stack").and_then(|v| v.as_str());
+    error!("Node render error [{code}]: {msg}");
+    IpcResponse {
+        id: id.to_string(),
+        status,
+        headers: [("content-type".into(), "text/html; charset=utf-8".into())].into(),
+        body: crate::dev_overlay::error_page_html(status, msg, stack),
+        cacheable: false,
+        cache_max_age: 0,
+        swr_window_secs: 0,
+        deployment_id: String::new(),
+        body_base64: false,
+        vary: Vec::new(),
+        cache_tags: Vec::new(),
+        streaming: false,
+        ppr_shell: false,
+        worker_error: true,
+    }
+}
+
 fn unavailable_response(id: &str) -> IpcResponse {
     IpcResponse {
         id: id.to_string(),
@@ -1050,6 +1056,7 @@ fn unavailable_response(id: &str) -> IpcResponse {
         body_base64: false,
         streaming: false,
         ppr_shell: false,
+        worker_error: false,
     }
 }
 
@@ -1297,6 +1304,32 @@ pub fn test_client_with_write_channel() -> (IpcClient, mpsc::Receiver<Bytes>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_frames_become_flagged_error_pages() {
+        let frame = serde_json::json!({
+            "id": "r1",
+            "error": true,
+            "code": "RENDER_ERROR",
+            "message": "boom",
+            "stack": "Error: boom\n    at Page (/home/dev/app/page.tsx:3:9)",
+        });
+        let resp = error_frame_response("r1", &frame);
+        assert_eq!(resp.status, 500);
+        assert!(
+            resp.worker_error,
+            "main.rs hides these details from untrusted dev hosts"
+        );
+        assert!(resp.body.contains("/home/dev/app/page.tsx"));
+        assert!(!unavailable_response("r2").worker_error);
+        // A worker can never set the flag itself.
+        let normal: IpcResponse = serde_json::from_value(serde_json::json!({
+            "id": "r3", "status": 200, "headers": {}, "body": "", "cacheable": false,
+            "worker_error": true, "workerError": true,
+        }))
+        .unwrap();
+        assert!(!normal.worker_error);
+    }
 
     #[tokio::test]
     async fn read_frame_rejects_oversized_length_prefix() {

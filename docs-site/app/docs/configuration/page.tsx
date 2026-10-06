@@ -97,7 +97,10 @@ detect_from = ["path", "accept-language", "cookie"]
 [metrics]
 enabled = false         # expose /_gio/metrics (Prometheus); off when this section is absent
 token = ""              # require "Authorization: Bearer <token>" when set
-ip_allowlist = []       # restrict by client IP, e.g. ["10.0.0.5"]`} />
+ip_allowlist = []       # restrict by client IP, e.g. ["10.0.0.5"]
+
+[dev]                   # only read when NODE_ENV=development
+allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer to`} />
 
       <h2>Connection limits</h2>
       <p>
@@ -177,6 +180,73 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
         logs a warning at startup when neither <code>token</code> nor
         <code>ip_allowlist</code> is set - unauthenticated metrics are fine on
         localhost but should never face the public internet.
+      </div>
+
+      <h2>Dev endpoints &amp; allowed hosts</h2>
+      <p>
+        In development the server also serves <code>/_gio/devtools</code> and
+        its sub-endpoints: the dashboard, its state and event stream (which also
+        drives live reload), error-overlay codeframes that return project
+        source, and open-in-editor. Because the starter binds{' '}
+        <code>0.0.0.0</code>, they are locked down against browser-based
+        attacks:
+      </p>
+      <ul>
+        <li>
+          They only answer requests whose <code>Host</code> is{' '}
+          <code>localhost</code>, <code>*.localhost</code>, a loopback IP
+          (<code>127.0.0.1</code>, <code>[::1]</code>), the{' '}
+          <code>[server] host</code> when it names a specific address, or an
+          entry in <code>[dev] allowed_hosts</code>. Anything else gets a{' '}
+          <code>403</code> - this defeats DNS rebinding, where a malicious site
+          re-points its own domain at your machine.
+        </li>
+        <li>
+          The state, stream and codeframe reads refuse requests a browser marks{' '}
+          <code>Sec-Fetch-Site: cross-site</code>, and requests whose{' '}
+          <code>Origin</code> is neither the requested host nor a host in{' '}
+          <code>allowed_hosts</code> (the latter covers tunnels and port
+          forwarders that rewrite <code>Host</code> to localhost).
+        </li>
+        <li>
+          open-in-editor accepts <code>POST</code> only, also refuses{' '}
+          <code>Sec-Fetch-Site: same-site</code> (only same-origin calls
+          pass), and applies the same <code>Origin</code> rule, so a link,
+          form or{' '}
+          <code>&lt;img&gt;</code> on another site cannot launch your editor.
+        </li>
+        <li>
+          The dashboard page itself only checks <code>Host</code>: following a
+          link to it is harmless, and another site cannot read it.
+        </li>
+        <li>
+          SSR error pages served to any other host leave out the error message
+          and stack, which name files and code on your machine.
+        </li>
+      </ul>
+      <p>
+        If you browse the dev server from another machine or through a name -
+        a VM, a container host, a phone on your LAN, a tunnel - add the
+        hostname or IP you type in the address bar:
+      </p>
+      <CodeBlock lang="toml" code={`[dev]
+allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or "." = any subdomain`} />
+      <p>
+        Entries are hostnames or IPs; a port or a pasted{' '}
+        <code>http(s)://</code> prefix is ignored, and an entry that is not a
+        host is skipped with a startup warning naming it. Pages themselves
+        are unaffected; without the entry only the overlay codeframes,
+        open-in-editor, live reload, the dashboard, and the details on SSR
+        error pages stop working from that host. When bound to{' '}
+        <code>0.0.0.0</code> with no <code>allowed_hosts</code>, the server
+        logs a reminder at startup. Blocked requests are logged once per
+        distinct host or origin.
+      </p>
+      <div className="callout">
+        These checks stop websites you visit, not people on your network: a
+        client that can reach the port directly can send any headers. On an
+        untrusted network, bind the dev server to <code>127.0.0.1</code> (or
+        publish the container port to <code>127.0.0.1</code> only).
       </div>
 
       <h2>Environment variables</h2>

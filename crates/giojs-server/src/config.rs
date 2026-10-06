@@ -31,6 +31,17 @@ pub struct MetricsConfig {
     pub ip_allowlist: Vec<String>,
 }
 
+/// `[dev]`: settings that only apply when NODE_ENV=development.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct DevConfig {
+    /// Extra Host names the /_gio/devtools* endpoints answer to besides
+    /// localhost, loopback IPs, and a specific `server.host` (DNS rebinding
+    /// protection). A leading `.` or `*.` matches subdomains; entries that
+    /// are not a hostname or IP are ignored with a startup warning.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+}
+
 // app is parsed from gio.toml but consumed by the Node layer, not by Rust server code.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Default)]
@@ -61,6 +72,8 @@ pub struct GioConfig {
     pub headers: Vec<crate::rules::HeaderRule>,
     #[serde(default)]
     pub guards: Vec<crate::rules::GuardRule>,
+    #[serde(default)]
+    pub dev: DevConfig,
 }
 
 impl GioConfig {
@@ -600,6 +613,23 @@ redirect_to    = "/"
         assert!(config.rewrites.is_empty());
         assert!(config.headers.is_empty());
         assert!(config.guards.is_empty());
+    }
+
+    #[test]
+    fn dev_allowed_hosts_parse_and_default_to_empty() {
+        let missing = GioConfig::load_from_path(&unique_temp_path("no_dev.toml")).unwrap();
+        assert!(missing.dev.allowed_hosts.is_empty());
+
+        let path = unique_temp_path("dev.toml");
+        std::fs::write(
+            &path,
+            "[dev]\nallowed_hosts = [\"192.168.1.20\", \"myvm.local\"]\n",
+        )
+        .unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let config = result.unwrap();
+        assert_eq!(config.dev.allowed_hosts, vec!["192.168.1.20", "myvm.local"]);
     }
 
     #[test]
