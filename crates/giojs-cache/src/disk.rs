@@ -96,23 +96,71 @@ impl DiskLayer {
     }
 
     /// Write entry to disk in a spawned task so the caller is never blocked.
-    pub(crate) fn write_background(&self, key: String, entry: &CacheEntry) {
+    ///
+    /// `still_live` is asked before writing and again after the rename: an
+    /// invalidation can land while the write is queued or in flight, and a
+    /// file written for a purged entry would come back on the next disk
+    /// promotion. When the write is skipped, fails, or is undone,
+    /// `abandoned` runs so the caller stops expecting the file.
+    pub(crate) fn write_background(
+        &self,
+        key: String,
+        entry: &CacheEntry,
+        still_live: impl Fn() -> bool + Send + 'static,
+        abandoned: impl FnOnce() + Send + 'static,
+    ) {
         let path = self.path_for(&key);
         let disk_entry = DiskEntry::from(entry);
         tokio::spawn(async move {
-            match write_entry(&path, &disk_entry).await {
-                Ok(()) => {}
-                Err(e) => warn!(key = %key, error = %e, "disk cache write failed"),
+            if !still_live() {
+                abandoned();
+                return;
+            }
+            if let Err(e) = write_entry(&path, &disk_entry).await {
+                warn!(key = %key, error = %e, "disk cache write failed");
+                abandoned();
+                return;
+            }
+            if !still_live() {
+                remove_file_logged(&path, &key).await;
+                abandoned();
             }
         });
     }
 
     /// Remove one entry's file. Best-effort.
     pub(crate) async fn remove(&self, key: &str) {
-        let path = self.path_for(key);
-        if let Err(e) = tokio::fs::remove_file(&path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                warn!(key = %key, error = %e, "disk cache remove failed");
+        remove_file_logged(&self.path_for(key), key).await;
+    }
+
+    /// Visit the key, deployment id and tags of every entry file without
+    /// keeping the bodies around (index rebuild at startup). Files `visit`
+    /// returns false for are deleted; unreadable files are skipped.
+    pub(crate) async fn scan_tags(&self, mut visit: impl FnMut(&str, &str, &[String]) -> bool) {
+        /// Only what the index needs; serde skips the rest of the file.
+        #[derive(Deserialize)]
+        struct EntryTags {
+            deployment_id: String,
+            #[serde(default)]
+            tags: Vec<String>,
+        }
+
+        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let Some(key) = entry_key(&path) else {
+                continue;
+            };
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            let Ok(meta) = serde_json::from_slice::<EntryTags>(&bytes) else {
+                continue;
+            };
+            if !visit(&key, &meta.deployment_id, &meta.tags) {
+                remove_file_logged(&path, &key).await;
             }
         }
     }
@@ -138,12 +186,14 @@ impl DiskLayer {
 
     /// Evict the oldest files until total directory size is within `max_bytes`.
     /// Errors on individual files are logged and skipped - eviction is best-effort.
-    pub(crate) async fn enforce_limit(&self, max_bytes: u64) {
+    /// Returns the keys whose entry files were evicted.
+    pub(crate) async fn enforce_limit(&self, max_bytes: u64) -> Vec<String> {
         let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
         let mut total: u64 = 0;
+        let mut evicted = Vec::new();
 
         let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
-            return;
+            return evicted;
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
             let Ok(meta) = entry.metadata().await else {
@@ -159,7 +209,7 @@ impl DiskLayer {
         }
 
         if total <= max_bytes {
-            return;
+            return evicted;
         }
 
         // Oldest first, so the least-recently-written entries are evicted.
@@ -169,9 +219,30 @@ impl DiskLayer {
                 break;
             }
             match tokio::fs::remove_file(&path).await {
-                Ok(()) => total = total.saturating_sub(len),
+                Ok(()) => {
+                    total = total.saturating_sub(len);
+                    evicted.extend(entry_key(&path));
+                }
                 Err(e) => warn!(path = %path.display(), error = %e, "disk cache eviction failed"),
             }
+        }
+        evicted
+    }
+}
+
+/// The cache key of an entry file (`<key>.json`); None for temp files and
+/// anything else in the directory.
+fn entry_key(path: &Path) -> Option<String> {
+    if path.extension()? != "json" {
+        return None;
+    }
+    Some(path.file_stem()?.to_str()?.to_string())
+}
+
+async fn remove_file_logged(path: &Path, key: &str) {
+    if let Err(e) = tokio::fs::remove_file(path).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!(key = %key, error = %e, "disk cache remove failed");
         }
     }
 }
