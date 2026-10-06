@@ -32,6 +32,7 @@ http2_keep_alive_interval_secs = 20 # PING HTTP/2 peers this often...
 http2_keep_alive_timeout_secs = 20  # ...and drop them if the ack takes longer
 trusted_proxies = []    # reverse proxies whose forwarding headers count (see Reverse proxies)
 proxy_headers = "x-forwarded"       # "x-forwarded" (X-Forwarded-*) or "forwarded" (RFC 7239)
+accept_request_id = true            # keep a trusted proxy's X-Request-Id (false = always generate)
 
 [server.tls]
 enabled = false         # set true to terminate TLS in GioJS directly
@@ -157,15 +158,22 @@ trusted_proxies = ["127.0.0.1", "::1", "10.0.0.0/8"]   # IPs and CIDR blocks, IP
         stops the server at startup. With trusted proxies configured, the client IP is
         found by walking <code>X-Forwarded-For</code> from right to left, skipping every
         trusted address; the first untrusted one is the client (if every hop is trusted,
-        the leftmost). Entries left of it were written by the client and are never read,
-        so a spoofed <code>X-Forwarded-For</code> changes nothing. A malformed value falls
-        back to the connecting address.
+        the leftmost). Entries left of it were written by the client and are never read -
+        not even checked for being well-formed - so nothing a client sends there (a
+        spoofed address, junk bytes, kilobytes of padding) changes the answer. Only when a
+        hop a trusted proxy wrote is not an address (say, <code>unknown</code>) is the
+        client unknown: the connecting address stands in for it in rate limits and{' '}
+        <code>req.ip</code>, and the metrics allowlist refuses the request.
       </p>
       <p>
         From a trusted peer, <code>X-Forwarded-Proto</code> sets the scheme (otherwise{' '}
         <code>https</code> when <code>[server.tls]</code> is on, else <code>http</code>) and{' '}
         <code>X-Forwarded-Host</code> sets the host (otherwise the <code>Host</code>{' '}
-        header). Set <code>proxy_headers = &quot;forwarded&quot;</code> if your proxy sends
+        header). GioJS reads the value the nearest proxy wrote - the last one - so a proxy
+        that appends to these headers instead of replacing them (HAProxy&apos;s{' '}
+        <code>add-header</code>) is safe; behind a chain of proxies, have the inner one
+        pass the outer one&apos;s value on. Set{' '}
+        <code>proxy_headers = &quot;forwarded&quot;</code> if your proxy sends
         the standard RFC 7239 <code>Forwarded: for=...;proto=...;host=...</code> header
         instead; exactly one header family is read, because a proxy that manages one
         passes a client&apos;s copy of the other straight through.
@@ -181,9 +189,13 @@ trusted_proxies = ["127.0.0.1", "::1", "10.0.0.0/8"]   # IPs and CIDR blocks, IP
         </li>
       </ul>
       <div className="callout">
-        Only list proxies you control, and make sure each one <em>overwrites</em>{' '}
+        Only list proxies you control, and make sure each one <em>sets</em>{' '}
         <code>X-Forwarded-Proto</code> and <code>X-Forwarded-Host</code> (or strips them)
-        rather than passing a client&apos;s values through. Never trust a range your
+        rather than passing a client&apos;s values through. Some cannot: AWS ALB and
+        Google Cloud&apos;s load balancer forward a client&apos;s{' '}
+        <code>X-Forwarded-Host</code> untouched, as they do <code>Host</code>. The host
+        is client-supplied unless your proxy pins it, so never use <code>req.host</code>{' '}
+        / <code>ctx.host</code> to make a security decision. Never trust a range your
         visitors can connect from - with <code>0.0.0.0/0</code> every client picks its own
         IP. The <a href="/docs/deployment">deployment guide</a> has per-proxy settings.
       </div>
@@ -199,10 +211,18 @@ trusted_proxies = ["127.0.0.1", "::1", "10.0.0.0/8"]   # IPs and CIDR blocks, IP
       </p>
       <p>
         An incoming <code>X-Request-Id</code> is kept only when it comes from a trusted
-        proxy and matches <code>^[A-Za-z0-9._:-]{'{'}1,128{'}'}$</code>, so a load
-        balancer&apos;s trace id follows the request through. Otherwise GioJS generates a
-        UUID; a client cannot pick its own id.
+        proxy and matches <code>^[A-Za-z0-9._:-]{'{'}1,128{'}'}$</code>, so a proxy&apos;s
+        id follows the request through. Otherwise GioJS generates a UUID, so a client
+        talking to GioJS directly cannot pick its own id. Behind a proxy, it is the proxy
+        that decides: nginx with <code>proxy_set_header X-Request-Id $request_id</code>{' '}
+        always sets its own, but many proxies pass a client&apos;s header through unchanged
+        (Traefik, Caddy unless told otherwise, AWS ALB, Google Cloud&apos;s load balancer,
+        Cloudflare), and ingress-nginx reuses an incoming one on purpose. Behind those,
+        have the proxy set or strip the header, or turn adoption off and GioJS generates
+        every id itself:
       </p>
+      <CodeBlock lang="toml" code={`[server]
+accept_request_id = false   # ignore incoming X-Request-Id, even from trusted proxies`} />
 
       <h2>Health &amp; metrics</h2>
       <p>

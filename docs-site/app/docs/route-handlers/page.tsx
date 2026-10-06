@@ -41,7 +41,9 @@ export async function POST(req: GioRequest) {
         <code>[server] trusted_proxies</code> - otherwise <code>ip</code> is the proxy&apos;s
         address (see <a href="/docs/configuration">Configuration</a>). Use{' '}
         <code>req.ip</code>, never the <code>x-forwarded-for</code> header: any client can
-        send that header, while <code>req.ip</code> only honors it from trusted proxies.
+        send that header, while <code>req.ip</code> only honors it from trusted proxies.{' '}
+        <code>req.host</code>, on the other hand, is whatever the client sent unless your
+        proxy pins it - fine for display, never for a security decision.
       </p>
       <CodeBlock lang="ts" code={`// app/api/audit/route.ts
 import type { GioRequest } from '@gio.js/core';

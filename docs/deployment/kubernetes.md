@@ -155,9 +155,10 @@ Every request reaches the pod from the ingress controller, so trust it in the sa
 ```toml
 [server]
 trusted_proxies = ["10.244.0.0/16"]
+accept_request_id = false   # ingress-nginx reuses a client's own X-Request-ID
 ```
 
-ingress-nginx sends `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and an `X-Request-ID`, which GioJS keeps as the request's id. See [Client IPs, HTTPS and request IDs](README.md#client-ips-https-and-request-ids).
+ingress-nginx sends `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and an `X-Request-ID`. That id is the client's own when the client sent one, so with `accept_request_id = false` GioJS generates every id instead; leave it on (the default) only if a client-chosen id is acceptable in your logs, in exchange for one id across the controller's and GioJS's logs. See [Client IPs, HTTPS and request IDs](README.md#client-ips-https-and-request-ids).
 
 ---
 

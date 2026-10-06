@@ -23,7 +23,9 @@ token = "a-long-random-secret"   # secure it for production`} />
         on every response - pages, cache hits, static files, redirects and errors. The same
         id ties together both processes&apos; logs. The Rust server (filtered by{' '}
         <code>RUST_LOG</code>) emits each line for the request inside a{' '}
-        <code>request</code> span:
+        <code>request</code> span, which no level filter drops - at{' '}
+        <code>RUST_LOG=warn</code> or <code>error</code> the warnings and errors still
+        carry the id:
       </p>
       <CodeBlock lang="bash" code={`INFO request{request_id=0b8e3c52-7a1d-4f0e-9c3b-5d2a6e8f1a47}: giojs_server: request completed method=GET path=/posts/7 status=500 cache="miss"
 ERROR giojs_server::ipc: Node render error [RENDER_ERROR]: Internal Server Error digest=3f9a1c0b7e2d request_id=0b8e3c52-7a1d-4f0e-9c3b-5d2a6e8f1a47`} />
@@ -39,8 +41,10 @@ ERROR giojs_server::ipc: Node render error [RENDER_ERROR]: Internal Server Error
         <code>getServerSideProps</code> can read the id as <code>req.requestId</code> /{' '}
         <code>ctx.requestId</code> to pass it to downstream services. Behind a trusted proxy
         (<code>[server] trusted_proxies</code>), a valid incoming <code>X-Request-Id</code>{' '}
-        - nginx&apos;s <code>$request_id</code>, ingress-nginx&apos;s - is kept, so one id
-        spans the proxy&apos;s access log too; from anyone else it is replaced. See{' '}
+        - nginx&apos;s <code>$request_id</code>, say - is kept, so one id spans the
+        proxy&apos;s access log too; from anyone else it is replaced. Many proxies pass a
+        client&apos;s own header through rather than setting one; behind those, set{' '}
+        <code>accept_request_id = false</code> and GioJS generates every id. See{' '}
         <a href="/docs/configuration">Configuration</a>.
       </p>
       <h2>Dev dashboard</h2>

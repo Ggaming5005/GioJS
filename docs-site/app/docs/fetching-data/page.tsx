@@ -68,15 +68,25 @@ export async function getServerSideProps() {
         personalized exactly like reading a cookie - a page that varies by IP (geo, an
         allowlist) must never be cached and served to everyone - and so does reading the raw{' '}
         <code>x-forwarded-for</code>, <code>forwarded</code> or <code>x-real-ip</code>{' '}
-        headers. <code>ctx.requestId</code> (the response&apos;s <code>X-Request-Id</code>,
-        for logs and downstream calls), <code>ctx.scheme</code> and <code>ctx.host</code>{' '}
-        do not mark the render: they never single out the visitor.
+        headers.
+      </p>
+      <p>
+        <code>ctx.host</code> and <code>ctx.scheme</code> (the host and scheme the client
+        used) mark the render too, as do the raw <code>host</code>,{' '}
+        <code>x-forwarded-host</code> and <code>x-forwarded-proto</code> headers. The host is
+        whatever the client sent unless your proxy pins it: a cached page that printed it -
+        an absolute link, a canonical URL - would hand one request&apos;s{' '}
+        <code>Host: evil.example</code> to every later visitor. For absolute URLs on cached
+        pages, use an origin you configure (an environment variable) instead. Only{' '}
+        <code>ctx.requestId</code> (the response&apos;s <code>X-Request-Id</code>, for logs
+        and downstream calls) does not mark the render: it never shapes the page.
       </p>
       <CodeBlock lang="tsx" code={`export const revalidate = 60;
 
 export async function getServerSideProps(ctx) {
   const posts = await db.posts.latest({ requestId: ctx.requestId }); // still cached
-  return { props: { posts } };
+  const canonical = \`\${process.env.SITE_URL}/posts\`;              // not ctx.host
+  return { props: { posts, canonical } };
 }`} />
       <p>
         <code>ctx.headers</code> is a tracked view of the request headers (a Proxy), so{' '}
