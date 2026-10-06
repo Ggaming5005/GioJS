@@ -48,8 +48,23 @@ export function defineMiddleware(rules: MiddlewareRules): MiddlewareRules {
   return rules;
 }
 
+/**
+ * Wire-only: a guard that names no requirement, which Rust compiles to
+ * deny-all. sanitizeMiddlewareRules sends it in place of a malformed guard,
+ * so a broken guard keeps its path closed instead of being dropped.
+ */
+export interface DenyAllGuard {
+  path: string;
+  redirectTo: string;
+}
+
+/** The rules as they travel in the READY frame. */
+export interface WireMiddlewareRules extends Omit<MiddlewareRules, 'guards'> {
+  guards?: Array<MiddlewareGuard | DenyAllGuard>;
+}
+
 export interface SanitizedMiddleware {
-  rules: MiddlewareRules;
+  rules: WireMiddlewareRules;
   warnings: string[];
 }
 
@@ -95,15 +110,40 @@ function sanitizeList<T>(
   return parsed;
 }
 
+const GUARD_KEYS: ReadonlySet<string> = new Set(['path', 'requireCookie', 'requireSession', 'redirectTo']);
+
+type GuardRequirement = { requireSession: true; requireCookie?: string } | { requireCookie: string };
+
+/** A guard entry's requirement, or why it is malformed. */
+function guardRequirement(entry: Record<string, unknown>): GuardRequirement | string {
+  const unknownKeys = Object.keys(entry).filter(key => !GUARD_KEYS.has(key));
+  if (unknownKeys.length > 0) return `unknown key ${unknownKeys.join(', ')}`;
+  const requireCookie = entry['requireCookie'];
+  const requireSession = entry['requireSession'];
+  if (requireSession !== undefined && typeof requireSession !== 'boolean') {
+    return 'requireSession must be true or false';
+  }
+  if (requireCookie !== undefined && !isNonEmptyString(requireCookie)) {
+    return 'requireCookie must be a non-empty string';
+  }
+  if (requireSession === true) {
+    return requireCookie === undefined ? { requireSession: true } : { requireSession: true, requireCookie };
+  }
+  if (requireCookie === undefined) return 'no requirement: set requireSession: true or requireCookie';
+  return { requireCookie };
+}
+
 /**
  * Defensively validate an untrusted middleware.ts default export. Malformed
  * sections and entries are dropped with a warning instead of throwing -
- * middleware problems must never kill the worker. Rust re-validates patterns
- * and header values at compile time; this pass guarantees only the shape.
+ * middleware problems must never kill the worker - except guards, which
+ * fail closed: a malformed guard becomes a deny-all guard on its path. Rust
+ * re-validates patterns and header values at compile time; this pass
+ * guarantees only the shape.
  */
 export function sanitizeMiddlewareRules(value: unknown): SanitizedMiddleware {
   const warnings: string[] = [];
-  const rules: MiddlewareRules = {};
+  const rules: WireMiddlewareRules = {};
   if (!isRecord(value)) {
     if (value !== undefined && value !== null) {
       warnings.push('middleware default export must be an object - all rules ignored');
@@ -141,21 +181,24 @@ export function sanitizeMiddlewareRules(value: unknown): SanitizedMiddleware {
   });
   if (headers.length > 0) rules.headers = headers;
 
-  const guards = sanitizeList<MiddlewareGuard>(value['guards'], 'guards', warnings, entry => {
+  // A guard with a path is never dropped: anything else wrong with it turns
+  // it into a deny-all guard, so a typo cannot leave the path open (gio.toml
+  // refuses to start on the same mistakes).
+  const guards = sanitizeList<MiddlewareGuard | DenyAllGuard>(value['guards'], 'guards', warnings, entry => {
     const path = entry['path'];
+    if (!isNonEmptyString(path)) return null;
     const redirectTo = entry['redirectTo'];
-    const requireCookie = entry['requireCookie'];
-    const requireSession = entry['requireSession'];
-    if (!isNonEmptyString(path) || !isNonEmptyString(redirectTo)) return null;
-    if (requireCookie !== undefined && !isNonEmptyString(requireCookie)) return null;
-    if (requireSession !== undefined && typeof requireSession !== 'boolean') return null;
-    if (requireSession === true) {
-      return requireCookie === undefined
-        ? { path, requireSession: true, redirectTo }
-        : { path, requireSession: true, requireCookie, redirectTo };
+    const target = isNonEmptyString(redirectTo) && redirectTo.startsWith('/') ? redirectTo : null;
+    const requirement = guardRequirement(entry);
+    if (target !== null && typeof requirement !== 'string') {
+      return { path, ...requirement, redirectTo: target };
     }
-    if (requireCookie === undefined) return null;
-    return { path, requireCookie, redirectTo };
+    const problem = typeof requirement === 'string' ? requirement : 'redirectTo must be a path starting with "/"';
+    warnings.push(
+      `middleware guard for ${path} is malformed (${problem}) - ` +
+        `it denies every request, redirecting to ${target ?? '/'}, until fixed`,
+    );
+    return { path, redirectTo: target ?? '/' };
   });
   if (guards.length > 0) rules.guards = guards;
 

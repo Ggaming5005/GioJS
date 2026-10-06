@@ -21,7 +21,7 @@ import {
 import type { SseStream } from './sse.ts';
 import type { WsHandlerFn } from './ws-router.ts';
 import type { NodePluginRegistry } from './plugin.ts';
-import type { MiddlewareRules } from './middleware.ts';
+import type { WireMiddlewareRules } from './middleware.ts';
 import { logger } from './logger.ts';
 import { createErrorDigest, describeError, isDevMode } from './mode.ts';
 
@@ -77,7 +77,7 @@ export function createIPCServer(
   registry?: NodePluginRegistry,
   clientScripts?: Map<string, string>,
   extras?: RenderExtras,
-  middleware?: MiddlewareRules,
+  middleware?: WireMiddlewareRules,
 ): net.Server {
   const routeList = [...routes.keys()].map(pattern => ({
     pattern,

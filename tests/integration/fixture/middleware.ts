@@ -6,7 +6,7 @@
  * session), and response headers (one site-wide) the integration tests
  * assert are enforced by the Rust HTTP layer before any Node code runs.
  */
-import { defineMiddleware } from '../../../packages/giojs-core/src/middleware.ts';
+import { defineMiddleware, type MiddlewareGuard } from '../../../packages/giojs-core/src/middleware.ts';
 
 export default defineMiddleware({
   redirects: [{ from: '/old-home', to: '/' }],
@@ -16,6 +16,9 @@ export default defineMiddleware({
     { path: '/:org/settings', requireCookie: 'session', redirectTo: '/' },
     // Verified in Rust: a signed, unexpired gio_session token, not just a cookie.
     { path: '/dashboard/*rest', requireSession: true, redirectTo: '/login' },
+    // Malformed on purpose (a string, as plain JS allows): it must deny
+    // every request, not be dropped and leave the path open.
+    { path: '/broken-guard/*rest', requireSession: 'true', redirectTo: '/login' } as unknown as MiddlewareGuard,
   ],
   headers: [
     { path: '/cached', headers: { 'x-fixture-header': 'from-middleware' } },

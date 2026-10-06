@@ -1900,6 +1900,29 @@ mod tests {
     }
 
     #[test]
+    fn ready_guard_without_a_requirement_denies_everything() {
+        // sanitizeMiddlewareRules sends a malformed middleware.ts guard in
+        // this shape so it fails closed instead of disappearing.
+        let ready = serde_json::json!({
+            "type": "ready",
+            "middleware": {
+                "guards": [{"path": "/admin/*rest", "redirectTo": "/login"}],
+            },
+        });
+        let rules = parse_ready_middleware(&ready);
+        for cookies in [None, Some("session=x; gio_session=x")] {
+            assert!(matches!(
+                rules.apply("/admin/users", cookies),
+                crate::rules::RuleOutcome::Redirect { ref location, .. } if location == "/login"
+            ));
+        }
+        assert_eq!(
+            rules.apply("/elsewhere", None),
+            crate::rules::RuleOutcome::None
+        );
+    }
+
+    #[test]
     fn malformed_ready_middleware_is_ignored_not_fatal() {
         let ready = serde_json::json!({
             "type": "ready",

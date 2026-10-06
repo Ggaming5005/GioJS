@@ -10,12 +10,12 @@ import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadTsModule } from './load-ts.ts';
-import { sanitizeMiddlewareRules, type MiddlewareRules } from './middleware.ts';
+import { sanitizeMiddlewareRules, type WireMiddlewareRules } from './middleware.ts';
 import { logger } from './logger.ts';
 
 const MIDDLEWARE_NAMES = ['middleware.ts', 'middleware.js'] as const;
 
-export async function loadMiddlewareRules(projectRoot: string): Promise<MiddlewareRules> {
+export async function loadMiddlewareRules(projectRoot: string): Promise<WireMiddlewareRules> {
   for (const name of MIDDLEWARE_NAMES) {
     const middlewarePath = join(projectRoot, name);
     try {

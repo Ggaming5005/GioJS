@@ -3,6 +3,8 @@
 //! gio.toml parsing into typed config structs with serde defaults.
 //! A missing file falls back to defaults; a file that exists but cannot be
 //! read or parsed is a startup-time failure: print the error and exit(1).
+//! So is a `[[guards]]` entry that would not protect its path - other rules
+//! are skipped with a warning, but a skipped guard leaves its path open.
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -18,6 +20,12 @@ pub enum ConfigError {
     Parse {
         path: String,
         source: toml::de::Error,
+    },
+    #[error("invalid [[guards]] entry for \"{guard}\" in {path}: {source}")]
+    InvalidGuard {
+        path: String,
+        guard: String,
+        source: crate::rules::RuleError,
     },
 }
 
@@ -431,10 +439,20 @@ impl GioConfig {
             path: path.display().to_string(),
             source,
         })?;
-        toml::from_str(&raw).map_err(|source| ConfigError::Parse {
+        let config: Self = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
             path: path.display().to_string(),
             source,
-        })
+        })?;
+        for guard in &config.guards {
+            guard
+                .validate()
+                .map_err(|source| ConfigError::InvalidGuard {
+                    path: path.display().to_string(),
+                    guard: guard.path.clone(),
+                    source,
+                })?;
+        }
+        Ok(config)
     }
 
     /// Path to the project root directory (parent of GIO_APP_DIR or CWD).
@@ -643,6 +661,67 @@ redirect_to    = "/"
         let result = GioConfig::load_from_path(&path);
         let _ = std::fs::remove_file(&path);
         assert!(matches!(result, Err(ConfigError::Parse { .. })));
+    }
+
+    fn load_guard_toml(name: &str, guard_body: &str) -> Result<GioConfig, ConfigError> {
+        let path = unique_temp_path(name);
+        std::fs::write(&path, format!("[[guards]]\n{guard_body}")).unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        result
+    }
+
+    #[test]
+    fn misspelled_guard_requirement_stops_startup() {
+        // A guard that loaded with the typo ignored would leave /admin open.
+        for typo in ["require_sesion", "require-session", "requireSesion"] {
+            let result = load_guard_toml(
+                &format!("guard_typo_{typo}.toml"),
+                &format!("path = \"/admin/*rest\"\n{typo} = true\nredirect_to = \"/login\"\n"),
+            );
+            assert!(
+                matches!(result, Err(ConfigError::Parse { .. })),
+                "{typo}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_that_would_not_protect_its_path_stops_startup() {
+        for (name, body) in [
+            (
+                "guard_none.toml",
+                "path = \"/admin/*rest\"\nredirect_to = \"/login\"\n",
+            ),
+            (
+                "guard_session_false.toml",
+                "path = \"/admin\"\nrequire_session = false\nredirect_to = \"/\"\n",
+            ),
+            (
+                "guard_empty_cookie.toml",
+                "path = \"/admin\"\nrequire_cookie = \"\"\nredirect_to = \"/\"\n",
+            ),
+            (
+                "guard_relative.toml",
+                "path = \"admin\"\nrequire_session = true\nredirect_to = \"/\"\n",
+            ),
+            (
+                "guard_relative_target.toml",
+                "path = \"/admin\"\nrequire_session = true\nredirect_to = \"login\"\n",
+            ),
+        ] {
+            let result = load_guard_toml(name, body);
+            assert!(
+                matches!(result, Err(ConfigError::InvalidGuard { .. })),
+                "{name}: {result:?}"
+            );
+        }
+        let ok = load_guard_toml(
+            "guard_session_ok.toml",
+            "path = \"/admin/*rest\"\nrequire_session = true\nredirect_to = \"/login\"\n",
+        )
+        .expect("a valid session guard loads");
+        assert!(ok.guards[0].require_session);
     }
 
     #[test]

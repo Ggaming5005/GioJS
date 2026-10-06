@@ -126,6 +126,18 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         invalid header name/value causes that rule to be skipped with a
         warning in the server log.
       </p>
+      <p>
+        Guards are stricter, because a skipped guard would leave its path
+        open. A <code>gio.toml</code> guard that is invalid, names no
+        requirement, or has a key the server does not know (a misspelled{' '}
+        <code>require_session</code>) stops the server at startup with the
+        reason. In <code>middleware.ts</code>, a guard whose requirement is
+        missing or malformed (<code>requireSession: &apos;true&apos;</code>, an
+        unknown key, a <code>redirectTo</code> that is not a path) denies
+        every request to its path until it is fixed - redirecting to its{' '}
+        <code>redirectTo</code>, or <code>/</code> - and the worker logs a
+        warning saying why.
+      </p>
 
       <h2>Evaluation order</h2>
       <p>Per request, the short-circuiting phases run in a fixed order:</p>

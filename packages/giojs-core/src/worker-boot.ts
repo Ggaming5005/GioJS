@@ -13,7 +13,7 @@ import { NodePluginRegistry, type GioNodePlugin } from './plugin.ts';
 import { logger } from './logger.ts';
 import type { RouteModule, LayoutEntry, HandlerEntry, SpecialPages } from './router.ts';
 import type { WsHandlerFn } from './ws-router.ts';
-import type { MiddlewareRules } from './middleware.ts';
+import type { WireMiddlewareRules } from './middleware.ts';
 
 /** Everything the IPC servers need, produced by discovery or by a registry. */
 export interface WorkerComponents {
@@ -23,7 +23,7 @@ export interface WorkerComponents {
   handlers: Map<string, HandlerEntry>;
   specialPages: SpecialPages;
   clientScripts: Map<string, string>;
-  middlewareRules: MiddlewareRules;
+  middlewareRules: WireMiddlewareRules;
   pluginRegistry: NodePluginRegistry;
 }
 

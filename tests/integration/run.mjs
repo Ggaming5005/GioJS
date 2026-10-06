@@ -966,6 +966,18 @@ async function main() {
       assert.match(await resigned.text(), /user=(<!-- -->)?anonymous/);
     });
 
+    await test('a malformed middleware.ts guard denies every request instead of vanishing', async () => {
+      const session = sessionCookieOf(await loginAs('alice'));
+      for (const cookie of [undefined, session, 'session=int-test']) {
+        for (const path of ['/broken-guard', '/broken-guard/x']) {
+          const res = await rawGet(path, cookie === undefined ? {} : { cookie });
+          assert.equal(res.status, 302, `${path} with ${cookie ?? 'no cookie'} must stay closed`);
+          assert.equal(res.headers.location, '/login', path);
+        }
+      }
+      assert.match(log, /guard for \/broken-guard\/\*rest is malformed \(requireSession must be true or false\)/);
+    });
+
     await test('session pages are personal: never cached across users', async () => {
       const alice = sessionCookieOf(await loginAs('alice'));
       const bob = sessionCookieOf(await loginAs('bob'));
@@ -1795,7 +1807,52 @@ async function standalonePhase() {
   }
 }
 
-await main();
+/**
+ * Phase 0 (no server): a gio.toml guard that would not protect its path
+ * stops the server at startup. A misspelled key used to parse fine and
+ * leave the path open.
+ */
+async function brokenGuardConfigPhase() {
+  const binary = findServerBinary();
+  const projectDir = await mkdtemp(join(tmpdir(), 'gio-int-bad-guard-'));
+  try {
+    await mkdir(join(projectDir, 'app'));
+    const cases = [
+      ['a misspelled key', 'require_sesion = true', /unknown field `require_sesion`/],
+      ['no requirement', '', /invalid \[\[guards\]\] entry for "\/admin\/\*rest"/],
+    ];
+    for (const [label, line, expected] of cases) {
+      await writeFile(
+        join(projectDir, 'gio.toml'),
+        // A port of its own: should the server wrongly start, it must not
+        // collide with the fixture servers.
+        '[server]\nhost = "127.0.0.1"\nport = 39519\n\n' +
+          `[[guards]]\npath = "/admin/*rest"\n${line}\nredirect_to = "/login"\n`,
+      );
+      await test(`gio.toml guard with ${label} stops startup`, async () => {
+        const run = spawnSync(binary, [], {
+          cwd: projectDir,
+          env: { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production' },
+          encoding: 'utf8',
+          timeout: 30_000,
+        });
+        assert.equal(run.status, 1, `exit status ${run.status} (signal ${run.signal}), stderr:\n${run.stderr}`);
+        assert.match(run.stderr, /configuration error/);
+        assert.match(run.stderr, expected);
+      });
+    }
+  } catch (err) {
+    console.error(`\nintegration (gio.toml guards): FAILED\n${err?.stack ?? err}`);
+    process.exitCode = 1;
+  } finally {
+    await rm(projectDir, { recursive: true, force: true });
+  }
+}
+
+await brokenGuardConfigPhase();
+if (process.exitCode !== 1) {
+  await main();
+}
 if (process.exitCode !== 1) {
   await unsetNodeEnvPhase();
 }

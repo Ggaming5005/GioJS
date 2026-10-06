@@ -57,9 +57,10 @@ describe('sanitizeMiddlewareRules', () => {
   it('drops entries missing required string fields', () => {
     const { rules, warnings } = sanitizeMiddlewareRules({
       rewrites: [{ from: '/only-from' }, { from: '/ok', to: '/target' }],
-      guards: [{ path: '/admin', requireCookie: '', redirectTo: '/' }],
+      guards: [{ requireCookie: 'session', redirectTo: '/' }],
     });
     expect(rules.rewrites).toEqual([{ from: '/ok', to: '/target' }]);
+    // A guard without a path has nothing to protect.
     expect(rules.guards).toBeUndefined();
     expect(warnings).toHaveLength(2);
   });
@@ -80,17 +81,57 @@ describe('sanitizeMiddlewareRules', () => {
     ]);
   });
 
-  it('drops guards with neither credential or a non-boolean requireSession', () => {
+  it('turns a guard with a malformed requirement into a deny-all guard, never dropping it', () => {
+    // Rust compiles a guard that names no requirement to deny-all, so each of
+    // these keeps its path closed instead of leaving it open.
     const { rules, warnings } = sanitizeMiddlewareRules({
       guards: [
-        { path: '/a', redirectTo: '/' },
-        { path: '/b', requireSession: false, redirectTo: '/' },
-        { path: '/c', requireSession: 'yes', requireCookie: 'x', redirectTo: '/' },
-        { path: '/d', requireSession: true, requireCookie: '', redirectTo: '/' },
+        { path: '/a', redirectTo: '/login' },
+        { path: '/b', requireSession: false, redirectTo: '/login' },
+        { path: '/c', requireSession: 'true', redirectTo: '/login' },
+        { path: '/d', requireSession: true, requireCookie: '', redirectTo: '/login' },
+        { path: '/e', requireCookie: 42, redirectTo: '/login' },
+        { path: '/f', requireCookie: '', redirectTo: '/login' },
       ],
     });
-    expect(rules.guards).toBeUndefined();
-    expect(warnings).toHaveLength(4);
+    expect(rules.guards).toEqual(
+      ['/a', '/b', '/c', '/d', '/e', '/f'].map(path => ({ path, redirectTo: '/login' })),
+    );
+    expect(warnings).toHaveLength(6);
+    for (const warning of warnings) expect(warning).toMatch(/denies every request/);
+    expect(warnings[2]).toMatch(/requireSession must be true or false/);
+  });
+
+  it('treats unknown guard keys as a typo that fails closed', () => {
+    const { rules, warnings } = sanitizeMiddlewareRules({
+      guards: [
+        { path: '/admin/*rest', requireSesion: true, redirectTo: '/login' },
+        // The typo would otherwise downgrade a session check to cookie presence.
+        { path: '/staff', requireCookie: 'staff', require_session: true, redirectTo: '/login' },
+      ],
+    });
+    expect(rules.guards).toEqual([
+      { path: '/admin/*rest', redirectTo: '/login' },
+      { path: '/staff', redirectTo: '/login' },
+    ]);
+    expect(warnings[0]).toMatch(/unknown key requireSesion/);
+    expect(warnings[1]).toMatch(/unknown key require_session/);
+  });
+
+  it('fails closed to "/" when redirectTo is missing or not a path', () => {
+    const { rules, warnings } = sanitizeMiddlewareRules({
+      guards: [
+        { path: '/a', requireSession: true, redirect_to: '/login' },
+        { path: '/b', requireSession: true, redirectTo: 'login' },
+        { path: '/c', requireSession: true },
+      ],
+    });
+    expect(rules.guards).toEqual([
+      { path: '/a', redirectTo: '/' },
+      { path: '/b', redirectTo: '/' },
+      { path: '/c', redirectTo: '/' },
+    ]);
+    expect(warnings).toHaveLength(3);
   });
 
   it('ignores a section that is not an array', () => {
