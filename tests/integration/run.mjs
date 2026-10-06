@@ -170,7 +170,7 @@ async function copyFixtureForDev() {
   const devDir = join(repoRoot, 'tests', 'integration', '.dev-fixture');
   await rm(devDir, { recursive: true, force: true });
   const items = [
-    'app', 'lib', 'gio.toml', 'gio.config.ts', 'middleware.ts', 'package.json',
+    'app', 'lib', 'components', 'public', 'gio.toml', 'gio.config.ts', 'middleware.ts', 'package.json',
     '.env', '.env.development', '.env.production',
   ];
   for (const item of items) {
@@ -731,6 +731,116 @@ async function main() {
       assert.equal(asset.headers.get('x-gio-cache'), 'static');
     });
 
+    await test('public/ files are served at the site root with revalidating caching', async () => {
+      const expected = await readFile(join(fixtureDir, 'public', 'robots.txt'), 'utf8');
+      const res = await fetch(`${BASE}/robots.txt`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/plain/);
+      const cacheControl = res.headers.get('cache-control') ?? '';
+      assert.match(cacheControl, /must-revalidate/);
+      assert.doesNotMatch(cacheControl, /immutable/);
+      assert.ok(res.headers.get('last-modified'), 'Last-Modified enables revalidation');
+      assert.equal(res.headers.get('x-gio-cache'), 'static');
+      assert.equal(await res.text(), expected);
+
+      const conditional = await fetch(`${BASE}/robots.txt`, {
+        headers: { 'if-modified-since': res.headers.get('last-modified') },
+      });
+      assert.equal(conditional.status, 304);
+
+      const head = await fetch(`${BASE}/robots.txt`, { method: 'HEAD' });
+      assert.equal(head.status, 200);
+      assert.equal(await head.text(), '');
+    });
+
+    await test('public/ files keep working under /public/*', async () => {
+      const res = await fetch(`${BASE}/public/robots.txt`);
+      assert.equal(res.status, 200);
+      assert.match(await res.text(), /FIXTURE_ROBOTS/);
+    });
+
+    await test('root-served public/ files: .well-known yes, dotfiles and traversal no', async () => {
+      const wellKnown = await fetch(`${BASE}/.well-known/security.txt`);
+      assert.equal(wellKnown.status, 200);
+      assert.match(await wellKnown.text(), /^Contact:/);
+
+      const dotfile = await fetch(`${BASE}/.secret-config`);
+      assert.equal(dotfile.status, 404);
+      assert.doesNotMatch(await dotfile.text(), /FIXTURE_DOTFILE_SECRET/);
+
+      for (const path of ['/.well-known/../.secret-config', '/%2e%2e/fixture/gio.toml', '/%2Esecret-config']) {
+        const res = await fetch(`${BASE}${path}`);
+        assert.notEqual(res.status, 200, `${path} must not be served`);
+        assert.doesNotMatch(await res.text(), /FIXTURE_DOTFILE_SECRET|integration-fixture/);
+      }
+    });
+
+    await test('a public/ file shadows a page at the same path', async () => {
+      const res = await fetch(`${BASE}/shadowed`);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-gio-cache'), 'static');
+      assert.equal(await res.text(), 'FIXTURE_PUBLIC_SHADOWS_PAGE\n');
+    });
+
+    await test('rules middleware runs for root-served public/ files', async () => {
+      const res = await fetch(`${BASE}/robots.txt`);
+      assert.equal(res.headers.get('x-fixture-header'), 'public-root');
+    });
+
+    await test('guards and header rules for /public/* also cover the root alias', async () => {
+      // Unguarded before: /members/report.txt served the file the
+      // /public/members/* guard protects.
+      for (const path of ['/public/members/report.txt', '/members/report.txt', '/%6Dembers/report%2Etxt']) {
+        const res = await fetch(`${BASE}${path}`, { redirect: 'manual' });
+        assert.equal(res.status, 302, `${path} must be guarded`);
+        assert.equal(res.headers.get('location'), '/login');
+        assert.doesNotMatch(await res.text(), /FIXTURE_MEMBERS_ONLY/);
+      }
+      const member = await fetch(`${BASE}/members/report.txt`, { headers: { cookie: 'session=abc' } });
+      assert.equal(member.status, 200);
+      assert.equal(await member.text(), 'FIXTURE_MEMBERS_ONLY\n');
+      assert.equal(member.headers.get('x-robots-tag'), 'noindex', '/public/* header rule stamped on the alias');
+    });
+
+    await test('[[rate_limits]] for /public/* also hold for the root alias, one shared budget', async () => {
+      const statuses = [];
+      for (const path of ['/limited/file.txt', '/public/limited/file.txt', '/limited/file.txt']) {
+        statuses.push((await fetch(`${BASE}${path}`)).status);
+      }
+      assert.deepEqual(statuses, [200, 200, 429]);
+    });
+
+    await test('redirects for /public/* URLs do not apply to the root alias', async () => {
+      // A /public/*rest -> /*rest canonicalizing redirect must not loop.
+      const legacy = await fetch(`${BASE}/public/moved-root/file.txt`, { redirect: 'manual' });
+      assert.equal(legacy.status, 301);
+      assert.equal(legacy.headers.get('location'), '/moved-root/file.txt');
+      const root = await fetch(`${BASE}/moved-root/file.txt`, { redirect: 'manual' });
+      assert.equal(root.status, 200);
+      assert.equal(await root.text(), 'FIXTURE_MOVED_ROOT\n');
+    });
+
+    await test('unhashed app CSS revalidates with a strong ETag and 304s', async () => {
+      const res = await fetch(`${BASE}/globals.css`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/css/);
+      const cacheControl = res.headers.get('cache-control') ?? '';
+      assert.match(cacheControl, /must-revalidate/);
+      assert.doesNotMatch(cacheControl, /immutable/, 'an unhashed URL must not be cached for a year');
+      const etag = res.headers.get('etag') ?? '';
+      assert.match(etag, /^"[0-9a-f]+"$/, 'strong, quoted ETag');
+      assert.match(await res.text(), /fixture-css-marker/);
+
+      const revalidated = await fetch(`${BASE}/globals.css`, { headers: { 'if-none-match': etag } });
+      assert.equal(revalidated.status, 304);
+      assert.equal(revalidated.headers.get('etag'), etag);
+      assert.equal(await revalidated.text(), '');
+
+      const stale = await fetch(`${BASE}/globals.css`, { headers: { 'if-none-match': '"stale"' } });
+      assert.equal(stale.status, 200);
+      assert.match(await stale.text(), /fixture-css-marker/);
+    });
+
     await test('gio.toml [[redirects]] issue the configured status with Location', async () => {
       const res = await fetch(`${BASE}/moved`, { redirect: 'manual' });
       assert.equal(res.status, 301);
@@ -1032,6 +1142,27 @@ async function inheritedModePhase() {
   }
 }
 
+/**
+ * Rewrite (or create) `file` and wait until `probe` sees the effect. CI runners sometimes
+ * drop the very first watch event under load, so the file is re-touched
+ * every 30s (at most twice) while nothing has happened yet.
+ */
+async function editAndWait(what, file, edit, probe, timeoutMs = 90_000) {
+  const current = await readFile(file, 'utf8').catch(() => '');
+  await writeFile(file, edit(current));
+  const started = Date.now();
+  let retouches = 0;
+  await waitFor(what, async () => {
+    if (await probe()) return true;
+    if (Date.now() - started > 30_000 * (retouches + 1) && retouches < 2) {
+      retouches++;
+      console.log(`  (re-touching ${file} - watch event likely dropped, attempt ${retouches})`);
+      await writeFile(file, await readFile(file, 'utf8'));
+    }
+    return false;
+  }, timeoutMs);
+}
+
 /** Phase 2 (dev mode): file watching restarts the worker and reloads pages. */
 async function devWatchPhase() {
   const binary = findServerBinary();
@@ -1253,6 +1384,70 @@ async function devWatchPhase() {
         const html = await (await fetch(`${BASE}/cached`)).text();
         return html.includes('WATCH_UPDATED_CACHED');
       }, 30_000);
+    });
+
+    const restartCount = () => (log.match(/dev watch: worker restarted/g) ?? []).length;
+    const changeCount = () => (log.match(/dev watch: change detected/g) ?? []).length;
+
+    await test('dev watch: editing a module outside app/ restarts the worker', async () => {
+      assert.match(await (await fetch(`${BASE}/with-component`)).text(), /FIXTURE_COMPONENT_ORIGINAL/);
+      const restartsBefore = restartCount();
+      await editAndWait(
+        'components/ edit to be served',
+        join(devDir, 'components', 'Banner.tsx'),
+        (src) => src.replace('FIXTURE_COMPONENT_ORIGINAL', 'WATCH_UPDATED_COMPONENT'),
+        async () => (await (await fetch(`${BASE}/with-component`)).text()).includes('WATCH_UPDATED_COMPONENT'),
+      );
+      await waitFor('component-triggered restart completed', () =>
+        Promise.resolve(restartCount() > restartsBefore), 90_000);
+    });
+
+    await test('dev watch: public/ changes refresh root serving without a worker restart', async () => {
+      const restartsBefore = restartCount();
+      const added = join(devDir, 'public', 'added-in-dev.txt');
+      assert.equal((await fetch(`${BASE}/added-in-dev.txt`)).status, 404);
+      await editAndWait(
+        'new public/ file to be served at the root',
+        added,
+        () => 'ADDED_IN_DEV\n',
+        async () => {
+          const res = await fetch(`${BASE}/added-in-dev.txt`);
+          return res.status === 200 && (await res.text()) === 'ADDED_IN_DEV\n';
+        },
+      );
+      assert.match(log, /dev watch: public\/ index refreshed/);
+      assert.equal(restartCount(), restartsBefore, 'public/ edits must not restart the worker');
+    });
+
+    await test('dev watch: the worker writing .gio/ output does not retrigger the watcher', async () => {
+      // The restarts above rebuilt .gio/build and .gio/routes.d.ts inside the
+      // watched root; a feedback loop would show up as further restarts.
+      const changesBefore = changeCount();
+      await sleep(3_000);
+      assert.equal(changeCount(), changesBefore, 'no change may be detected while idle');
+    });
+
+    await test('dev watch: a new top-level directory during an event burst keeps the watcher alive', async () => {
+      // New top-level directories used to be registered by the task that
+      // drains the watcher's bounded channel. A burst arriving while that
+      // task awaited a worker restart (a git checkout, say) filled the
+      // channel, and both sides then waited on each other for good.
+      const banner = join(devDir, 'components', 'Banner.tsx');
+      const changesBefore = changeCount();
+      await writeFile(banner, (await readFile(banner, 'utf8')) + '\n// burst\n');
+      await waitFor('the restart to begin', () => Promise.resolve(changeCount() > changesBefore), 60_000);
+      // A name the fixture copy never contains (it already has lib/).
+      await mkdir(join(devDir, 'burst-new-dir'));
+      for (let i = 0; i < 500; i++) {
+        await writeFile(join(devDir, 'components', `burst-${i}.json`), '{}\n');
+      }
+      await waitFor('burst-new-dir/ to be watched', () => Promise.resolve(/watching new directory/.test(log)), 30_000);
+      await editAndWait(
+        'an edit after the burst to be served',
+        banner,
+        (src) => src.replace('WATCH_UPDATED_COMPONENT', 'AFTER_BURST_COMPONENT'),
+        async () => (await (await fetch(`${BASE}/with-component`)).text()).includes('AFTER_BURST_COMPONENT'),
+      );
     });
   } catch (err) {
     console.error('\nintegration (dev watch): FAILED');

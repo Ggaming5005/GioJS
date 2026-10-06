@@ -20,5 +20,7 @@ export default defineMiddleware({
     { path: '/*rest', headers: { 'x-fixture-sitewide': 'on' } },
     // Rule cookies join the response's own cookies instead of replacing them.
     { path: '/rule-cookies', headers: { 'set-cookie': 'consent=1; Path=/' } },
+    // Root-served public/ files sit behind the same rules layer as pages.
+    { path: '/robots.txt', headers: { 'x-fixture-header': 'public-root' } },
   ],
 });

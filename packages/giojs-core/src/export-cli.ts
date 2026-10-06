@@ -41,7 +41,7 @@ console.log(`\n[giojs] rendered ${written.length} page(s):`);
 for (const w of written.sort()) console.log(`   ✓ ${w === '/' ? '/ (index)' : w}`);
 
 if (skipped.length > 0) {
-  console.log(`\n[giojs] skipped ${skipped.length} (server-only):`);
+  console.log(`\n[giojs] skipped ${skipped.length}:`);
   for (const s of skipped) console.log(`   - ${s.route}  -  ${s.reason}`);
 }
 

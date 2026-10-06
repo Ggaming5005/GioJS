@@ -487,6 +487,23 @@ pub fn apply_merged(
     RuleOutcome::None
 }
 
+/// Only the guard phase, across both sets in the same order as
+/// `apply_merged`. For a second URL of the same resource - a public/ file
+/// answered at the site root is also `/public/...` - access control follows
+/// the resource, while redirects and rewrites stay about the URL that was
+/// requested: a `/public/*rest` -> `/*rest` redirect canonicalizing old URLs
+/// must not fire for (and loop on) its own target.
+pub fn check_guards_merged(
+    static_rules: &RuleSet,
+    worker_rules: &RuleSet,
+    path: &str,
+    cookie_header: Option<&str>,
+) -> Option<RuleOutcome> {
+    [static_rules, worker_rules]
+        .into_iter()
+        .find_map(|rules| rules.check_guards(path, cookie_header))
+}
+
 /// Append the original query string verbatim to a redirect/rewrite target.
 pub fn with_query(target: String, query: Option<&str>) -> String {
     match query {
@@ -886,6 +903,46 @@ mod tests {
                 location: "/from-worker-guard".to_string(),
                 status: StatusCode::FOUND
             }
+        );
+    }
+
+    #[test]
+    fn guard_only_evaluation_ignores_redirects_and_rewrites() {
+        let static_rules = RuleSet::compile(&MiddlewareRules {
+            redirects: vec![redirect("/public/*rest", "/*rest", 301)],
+            rewrites: vec![RewriteRule {
+                from: "/public/old/*rest".to_string(),
+                to: "/public/new/*rest".to_string(),
+            }],
+            ..Default::default()
+        });
+        let worker_rules = RuleSet::compile(&MiddlewareRules {
+            guards: vec![guard("/public/members/*rest", "session", "/login")],
+            ..Default::default()
+        });
+        assert_eq!(
+            check_guards_merged(&static_rules, &worker_rules, "/public/members/a.txt", None),
+            Some(RuleOutcome::Redirect {
+                location: "/login".to_string(),
+                status: StatusCode::FOUND
+            })
+        );
+        assert_eq!(
+            check_guards_merged(
+                &static_rules,
+                &worker_rules,
+                "/public/members/a.txt",
+                Some("session=abc")
+            ),
+            None
+        );
+        assert_eq!(
+            check_guards_merged(&static_rules, &worker_rules, "/public/old/a.txt", None),
+            None
+        );
+        assert_eq!(
+            check_guards_merged(&static_rules, &worker_rules, "/public/robots.txt", None),
+            None
         );
     }
 

@@ -20,3 +20,26 @@ path           = "/api/limited"
 per_ip         = 2
 window_seconds = 3600
 burst          = 0
+
+# Rules written for a public/ file's /public/... URL also cover the root URL
+# it is served at; redirects stay about the URL that was requested.
+[[guards]]
+path           = "/public/members/*rest"
+require_cookie = "session"
+redirect_to    = "/login"
+
+[[headers]]
+path = "/public/members/*rest"
+[headers.headers]
+x-robots-tag = "noindex"
+
+[[redirects]]
+from   = "/public/moved-root/*rest"
+to     = "/moved-root/*rest"
+status = 301
+
+[[rate_limits]]
+path           = "/public/limited/*"
+per_ip         = 2
+window_seconds = 3600
+burst          = 0

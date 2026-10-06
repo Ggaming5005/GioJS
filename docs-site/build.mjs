@@ -6,7 +6,7 @@
  * Run via `npm run export`.
  */
 import { tsImport } from 'tsx/esm/api';
-import { cp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative, sep } from 'node:path';
@@ -27,16 +27,8 @@ process.env.GIO_ASSET_VERSION = createHash('sha256').update(cssBytes).digest('he
 const { exportSite } = await tsImport('../packages/giojs-core/src/export.ts', import.meta.url);
 const { written, skipped } = await exportSite(join(here, 'app'), join(here, 'out'));
 
-// Favicon set + manifest are requested at the site root (not under /public/),
-// so copy them there. (public/ itself is already exported to out/public/.)
-const ROOT_ASSETS = [
-  'favicon.ico', 'favicon-16x16.png', 'favicon-32x32.png',
-  'apple-touch-icon.png', 'android-chrome-192x192.png',
-  'android-chrome-512x512.png', 'site.webmanifest',
-];
-for (const f of ROOT_ASSETS) {
-  await cp(join(here, 'public', f), join(here, 'out', f)).catch(() => {});
-}
+// The exporter copies public/ to the site root as well as out/public/, so the
+// favicon set and manifest already sit where browsers request them.
 
 await writeLlmsTxt(join(here, 'out'), process.env.GIO_SITE_URL);
 

@@ -437,21 +437,25 @@ impl GioConfig {
         })
     }
 
-    /// Absolute path to the project root directory (parent of GIO_APP_DIR or CWD).
+    /// Path to the project root directory (parent of GIO_APP_DIR or CWD).
     pub fn project_root() -> std::path::PathBuf {
-        std::env::var("GIO_APP_DIR")
-            .ok()
-            .and_then(|app_dir| {
-                std::path::Path::new(&app_dir)
-                    .parent()
-                    .map(|p| p.to_path_buf())
-            })
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
+        project_root_of(std::env::var("GIO_APP_DIR").ok().as_deref())
     }
 
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.server.host, self.server.port)
     }
+}
+
+/// The parent of `app_dir`, or `.`. A single relative segment
+/// (`GIO_APP_DIR=app`) has the empty path as its parent, which
+/// canonicalize() and friends reject - it means the CWD.
+fn project_root_of(app_dir: Option<&str>) -> std::path::PathBuf {
+    app_dir
+        .and_then(|app_dir| std::path::Path::new(app_dir).parent())
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 #[cfg(test)]
@@ -639,5 +643,24 @@ redirect_to    = "/"
         let result = GioConfig::load_from_path(&path);
         let _ = std::fs::remove_file(&path);
         assert!(matches!(result, Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn project_root_is_never_the_empty_path() {
+        use std::path::{Path, PathBuf};
+        // `GIO_APP_DIR=app` used to yield "", which canonicalize() rejects -
+        // the dev watcher then watched nothing at all.
+        for app_dir in ["app", "app/"] {
+            let root = project_root_of(Some(app_dir));
+            assert_eq!(root, PathBuf::from("."), "{app_dir}");
+            assert!(std::fs::canonicalize(&root).is_ok());
+        }
+        assert_eq!(project_root_of(None), PathBuf::from("."));
+        assert_eq!(project_root_of(Some("/")), PathBuf::from("."));
+        assert_eq!(project_root_of(Some("site/app")), Path::new("site"));
+        assert_eq!(
+            project_root_of(Some("/srv/site/app")),
+            Path::new("/srv/site")
+        );
     }
 }

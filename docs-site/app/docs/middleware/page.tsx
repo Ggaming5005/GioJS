@@ -79,10 +79,11 @@ export default defineMiddleware({
       <p>
         These rules travel to the Rust server inside the worker&apos;s READY
         frame and refresh whenever the worker restarts. In development the
-        watcher restarts the worker on changes under <code>app/</code> and to{' '}
-        <code>gio.toml</code> / <code>gio.config.*</code>, so middleware edits
-        are picked up with the next restart. <code>gio.toml</code> rules are
-        compiled once at server startup.
+        watcher restarts the worker on source changes anywhere in the project,
+        including <code>middleware.ts</code>, <code>gio.toml</code>, and{' '}
+        <code>gio.config.*</code>, so middleware edits are picked up with the
+        next restart. <code>gio.toml</code> rules are compiled once at server
+        startup.
       </p>
 
       <h2>Pattern language</h2>
@@ -168,6 +169,34 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         header, except <code>set-cookie</code>: a rule cookie is added next to
         the cookies the page or route handler set, never in place of them.
       </p>
+
+      <h2>public/ files at the site root</h2>
+      <p>
+        A file in <code>public/</code> answers at its root URL as well as under{' '}
+        <code>/public/*</code> - <code>public/members/report.pdf</code> is both{' '}
+        <code>/members/report.pdf</code> and <code>/public/members/report.pdf</code>. Rules
+        written for the <code>/public/...</code> URL follow the file to its root URL:
+      </p>
+      <ul>
+        <li>
+          <strong>Guards</strong> for the <code>/public/...</code> URL run after the requested
+          URL&apos;s own rules let the request through, so a guard on{' '}
+          <code>/public/members/*rest</code> also protects <code>/members/report.pdf</code>.
+        </li>
+        <li>
+          <strong>Header rules</strong> for both URLs are stamped; when both set the same
+          header, the rule for the requested URL wins.
+        </li>
+        <li>
+          <strong><code>[[rate_limits]]</code></strong> for both URLs must admit the request,
+          and a rule matching both is charged once.
+        </li>
+        <li>
+          <strong>Redirects and rewrites</strong> match only the URL requested, so a{' '}
+          <code>/public/*rest</code> &rarr; <code>/*rest</code> redirect that moves old links
+          to the root does not loop.
+        </li>
+      </ul>
 
       <div className="callout">
         GioJS&apos;s own <code>/_gio</code> endpoints (health, metrics, image

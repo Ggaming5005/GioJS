@@ -19,14 +19,17 @@
 
 mod config;
 mod conn;
+mod css_assets;
 mod dev_codeframe;
 mod dev_guard;
 mod dev_overlay;
+mod dev_watch;
 mod devtools;
 mod env_files;
 mod ipc;
 mod metrics;
 mod path_hygiene;
+mod public_files;
 mod rules;
 mod stream_inject;
 mod ws;
@@ -239,7 +242,7 @@ struct AppState {
     prefetch: Arc<PrefetchBudgets>,
     font_snippets: Arc<Vec<String>>,
     image: Arc<giojs_image::ImageHandler>,
-    css_cache: Arc<DashMap<String, Bytes>>,
+    css_cache: Arc<css_assets::CssCache>,
     css_config: config::CssConfig,
     http2: bool,
     tls_enabled: bool,
@@ -258,6 +261,8 @@ struct AppState {
     i18n: Option<Arc<config::I18nConfig>>,
     devtools: Arc<devtools::DevtoolsState>,
     project_root: Arc<PathBuf>,
+    /// public/ files answered at the site root (see public_files.rs).
+    public_files: Arc<public_files::PublicFiles>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -388,8 +393,11 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         .unwrap_or_else(|_| project_root.join(".gio/cache/images"));
     tokio::fs::create_dir_all(&image_cache_dir).await?;
 
-    let public_dir =
-        PathBuf::from(std::env::var("GIO_PUBLIC_DIR").unwrap_or_else(|_| "public".into()));
+    // public/ sits next to app/ like gio.toml does, so a server started from
+    // another directory (GIO_APP_DIR=path/to/app) still finds it.
+    let public_dir = std::env::var("GIO_PUBLIC_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| project_root.join("public"));
     let image_config = giojs_image::ImageConfig {
         allowed_widths: cfg.images.allowed_widths.clone(),
         quality: cfg.images.quality,
@@ -414,7 +422,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let tls_enabled = cfg.server.tls.enabled;
 
     let app_dir = std::env::var("GIO_APP_DIR").unwrap_or_else(|_| "app".to_string());
-    let css_cache: Arc<DashMap<String, Bytes>> = Arc::new(DashMap::new());
+    let css_cache: Arc<css_assets::CssCache> = Arc::new(DashMap::new());
     if cfg.css.enabled {
         load_css_cache(&css_cache, &app_dir, !dev_mode && cfg.css.minify).await;
     }
@@ -499,6 +507,15 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
 
     let metrics_config = cfg.metrics.clone();
 
+    let public_files = Arc::new(public_files::PublicFiles::load(public_dir.clone()));
+    if public_files.len() > 0 {
+        info!(
+            files = public_files.len(),
+            dir = %public_dir.display(),
+            "public/ files indexed for root serving"
+        );
+    }
+
     let state = AppState {
         ipc: Arc::new(ipc),
         cache,
@@ -524,6 +541,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         i18n,
         devtools: devtools_state,
         project_root: Arc::new(project_root.clone()),
+        public_files,
     };
 
     if !dev_mode
@@ -572,19 +590,15 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/build/static"));
 
-    let immutable_header = HeaderValue::from_static("public, max-age=31536000, immutable");
     let static_service = ServiceBuilder::new()
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
-            immutable_header.clone(),
+            HeaderValue::from_static(css_assets::IMMUTABLE_CACHE_CONTROL),
         ))
         .service(ServeDir::new(static_dir));
 
     let font_service = ServiceBuilder::new()
-        .layer(SetResponseHeaderLayer::if_not_present(
-            header::CACHE_CONTROL,
-            immutable_header,
-        ))
+        .layer(axum::middleware::from_fn(font_cache_control_middleware))
         .service(ServeDir::new(fonts_dir));
 
     let compression = CompressionLayer::new().compress_when(
@@ -641,10 +655,10 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     }
 
     let mut app = app
-        .nest_service("/public", ServeDir::new(public_dir))
+        .nest_service(public_files::PUBLIC_URL_PREFIX, ServeDir::new(public_dir))
         .nest_service("/_next/static", static_service)
         .nest_service("/_gio/fonts", font_service)
-        .fallback(dynamic_handler);
+        .fallback(root_fallback_handler);
     if let Some(dev_hosts) = dev_hosts {
         // Innermost, so it swaps the handler's body before any response
         // transform (i18n, compression) touches it.
@@ -716,6 +730,18 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// fonts.css is regenerated from gio.toml at every start under a fixed URL,
+/// so it revalidates; the .woff2 files keep immutable caching. Chosen by
+/// request path so 304s carry the same policy as the 200s they refresh.
+async fn font_cache_control_middleware(req: Request, next: Next) -> Response {
+    let cache_control = css_assets::font_cache_control(req.uri().path());
+    let mut resp = next.run(req).await;
+    resp.headers_mut()
+        .entry(header::CACHE_CONTROL)
+        .or_insert(cache_control);
+    resp
 }
 
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -928,7 +954,13 @@ async fn rate_limit_middleware(
 
     state.metrics.record_ratelimit_checked(&path);
 
-    match rl.check(&path, ip, &headers) {
+    // A root-served public/ file is also /public/...: budgets written for
+    // that URL hold for the root alias, charged once per rule.
+    let result = match root_public_alias(&state, &req) {
+        Some(alias) => rl.check_paths(&[path.as_str(), alias.as_str()], ip, &headers),
+        None => rl.check(&path, ip, &headers),
+    };
+    match result {
         RateLimitResult::Allowed { remaining, limit } => {
             let mut resp = next.run(req).await;
             if limit > 0 {
@@ -973,6 +1005,12 @@ async fn rate_limit_middleware(
 /// see the rewritten path. Header rules match the requested (pre-rewrite)
 /// path and are stamped on every response, rule redirects included. Rust's
 /// own `/_gio` endpoints are exempt.
+///
+/// A public/ file answered at the site root is the same resource as its
+/// `/public/...` URL: when the requested path's own rules let it through,
+/// guards for that URL run too, and its header rules are stamped (the
+/// requested path's win on a conflicting name). Redirects and rewrites only
+/// ever match the requested URL.
 async fn rules_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     if is_internal_endpoint(&req) {
         return next.run(req).await;
@@ -982,6 +1020,7 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
     if static_rules.is_empty() && worker_rules.is_empty() {
         return next.run(req).await;
     }
+    let mut public_alias = root_public_alias(&state, &req);
 
     let path = match path_hygiene::canonical(req.uri().path()) {
         Ok(canonical) => canonical.into_owned(),
@@ -992,12 +1031,19 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
             .headers()
             .get(header::COOKIE)
             .and_then(|value| value.to_str().ok());
-        if worker_rules.is_empty() {
+        let outcome = if worker_rules.is_empty() {
             static_rules.apply(&path, cookie_header)
         } else if static_rules.is_empty() {
             worker_rules.apply(&path, cookie_header)
         } else {
             rules::apply_merged(static_rules, &worker_rules, &path, cookie_header)
+        };
+        match (outcome, public_alias.as_deref()) {
+            (rules::RuleOutcome::None, Some(alias)) => {
+                rules::check_guards_merged(static_rules, &worker_rules, alias, cookie_header)
+                    .unwrap_or(rules::RuleOutcome::None)
+            }
+            (outcome, _) => outcome,
         }
     };
     // Collected before a rewrite replaces the URI, and before the redirect
@@ -1022,11 +1068,22 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
             }
             warn!(location = %location, "rule redirect target is not a valid Location header - rule skipped");
         }
-        rules::RuleOutcome::Rewrite { new_path } => rewrite_request_uri(&mut req, new_path),
+        rules::RuleOutcome::Rewrite { new_path } => {
+            // Routed elsewhere: the public/ file is not what gets served.
+            public_alias = None;
+            rewrite_request_uri(&mut req, new_path);
+        }
         rules::RuleOutcome::None => {}
     }
 
     let mut resp = next.run(req).await;
+    // The alias's rules first, so the requested path's override them.
+    if let Some(alias) = public_alias.as_deref() {
+        stamp_rule_headers(
+            resp.headers_mut(),
+            rule_response_headers(static_rules, &worker_rules, alias),
+        );
+    }
     stamp_rule_headers(resp.headers_mut(), rule_headers);
     resp
 }
@@ -1044,6 +1101,17 @@ fn rule_response_headers(
     let mut collected = static_rules.response_headers(path);
     collected.extend(worker_rules.response_headers(path));
     collected
+}
+
+/// The `/public/...` URL of the public/ file `root_fallback_handler` answers
+/// this request with, if any. Errs on the side of rule coverage: a GET that
+/// the router ends up handing elsewhere (a WebSocket upgrade, a file deleted
+/// since indexing) is only held to the rules of a file at its path.
+fn root_public_alias(state: &AppState, req: &Request) -> Option<String> {
+    if req.method() != axum::http::Method::GET && req.method() != axum::http::Method::HEAD {
+        return None;
+    }
+    state.public_files.public_url(req.uri().path())
 }
 
 /// Build the redirect response for a rule match. Returns `None` when the
@@ -1147,6 +1215,30 @@ fn inject_html_lang(html: Bytes, locale: &str) -> Bytes {
     Bytes::from(out)
 }
 
+/// Router fallback. Files in public/ answer at the site root (/favicon.ico,
+/// /robots.txt, /.well-known/...) ahead of the page cache and the worker, so
+/// a public file shadows a page at the same path - the Next.js precedence.
+/// Being a fallback, it sits behind the rate-limit and rules middleware,
+/// which also apply the guards, header rules, and budgets written for the
+/// file's /public/... URL (see `root_public_alias`). Membership is an
+/// in-memory index lookup, not a stat.
+async fn root_fallback_handler(
+    ws_upgrade: Option<WebSocketUpgrade>,
+    State(state): State<AppState>,
+    connect_info: ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    if ws_upgrade.is_none()
+        && (req.method() == axum::http::Method::GET || req.method() == axum::http::Method::HEAD)
+        && state.public_files.contains(req.uri().path())
+    {
+        if let Some(resp) = state.public_files.serve(&req).await {
+            return resp;
+        }
+    }
+    dynamic_handler(ws_upgrade, State(state), connect_info, req).await
+}
+
 async fn dynamic_handler(
     ws_upgrade: Option<WebSocketUpgrade>,
     State(state): State<AppState>,
@@ -1201,12 +1293,8 @@ async fn dynamic_handler(
 
     // Serve pre-transformed CSS directly from startup cache
     if path.ends_with(".css") {
-        if let Some(css_bytes) = state.css_cache.get(&path) {
-            return Response::builder()
-                .header(header::CONTENT_TYPE, "text/css; charset=utf-8")
-                .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-                .body(axum::body::Body::from(css_bytes.clone()))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        if let Some(css) = state.css_cache.get(&path) {
+            return css_assets::css_response(&css, req.headers());
         }
     }
 
@@ -2576,63 +2664,57 @@ async fn image_handler_route(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Dev watch: on app-source changes, clear the page cache, re-transform CSS,
-/// restart the Node worker (fresh module cache, route discovery, and client
-/// bundles), and tell connected browsers to reload over the devtools SSE
-/// stream once the IPC connection is restored. Dev mode only.
+/// Dev watch: on source changes anywhere in the project (app/, components/,
+/// lib/, config files - dev_watch.rs decides what counts), clear the page
+/// cache, re-transform CSS, restart the Node worker (fresh module cache,
+/// route discovery, and client bundles), and tell connected browsers to
+/// reload over the devtools SSE stream once the IPC connection is restored.
+/// public/-only changes refresh the root-serving index and reload browsers
+/// without a restart - nothing the worker holds depends on them. Dev only.
 fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
-    use notify::Watcher;
-
-    let (fs_tx, mut fs_rx) = tokio::sync::mpsc::channel::<()>(16);
-    let mut watcher =
-        match notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
-            if let Ok(event) = result {
-                if watch_event_is_relevant(&event) {
-                    let _ = fs_tx.blocking_send(());
-                }
-            }
-        }) {
-            Ok(watcher) => watcher,
-            Err(e) => {
-                warn!(error = %e, "dev watch unavailable");
-                return;
-            }
-        };
-    if let Err(e) = watcher.watch(
-        std::path::Path::new(&app_dir),
-        notify::RecursiveMode::Recursive,
-    ) {
-        warn!(error = %e, app_dir = %app_dir, "dev watch: cannot watch app dir");
-        return;
-    }
-    for config_name in [
-        "gio.toml",
-        "gio.config.ts",
-        "gio.config.js",
-        "middleware.ts",
-        "middleware.js",
-    ] {
-        let config_path = project_root.join(config_name);
-        if config_path.exists() {
-            let _ = watcher.watch(&config_path, notify::RecursiveMode::NonRecursive);
+    // Classification is prefix-based and event paths come back absolute (on
+    // macOS through /private), so compare against canonical paths.
+    let root = match std::fs::canonicalize(&project_root) {
+        Ok(root) => root,
+        Err(e) => {
+            warn!(error = %e, root = %project_root.display(), "dev watch: cannot resolve project root");
+            return;
         }
-    }
+    };
+    let app_path = dev_watch::resolve_dir(std::path::Path::new(&app_dir));
+    let public_dir = dev_watch::resolve_dir(state.public_files.root());
+    let watch = match dev_watch::DevWatch::start(root.clone(), app_path, public_dir) {
+        Ok(watch) => watch,
+        Err(e) => {
+            warn!(error = %e, root = %root.display(), "dev watch unavailable");
+            return;
+        }
+    };
 
     tokio::spawn(async move {
-        // The watcher stops when dropped; it lives as long as this task.
-        let _keep_watching = watcher;
-        info!(app_dir = %app_dir, "dev watch active");
+        // The watch stops when dropped; it lives as long as this task.
+        let watch = watch;
+        info!(root = %root.display(), app_dir = %app_dir, "dev watch active");
         loop {
-            if fs_rx.recv().await.is_none() {
-                return;
-            }
-            // Debounce bursts - editors emit several events per save.
-            loop {
-                match tokio::time::timeout(Duration::from_millis(300), fs_rx.recv()).await {
-                    Ok(Some(())) => continue,
-                    Ok(None) => return,
-                    Err(_) => break,
+            // Changes made while a batch is processed (a worker restart can
+            // take seconds) are kept and form the next batch.
+            let batch = watch.changes().next_batch(Duration::from_millis(300)).await;
+            if batch.public {
+                let public_files = state.public_files.clone();
+                match tokio::task::spawn_blocking(move || public_files.refresh()).await {
+                    Ok(files) => info!(files, "dev watch: public/ index refreshed"),
+                    Err(e) => warn!(error = %e, "dev watch: public/ index refresh failed"),
                 }
+            }
+            if !batch.source {
+                if batch.public {
+                    let _ = state
+                        .devtools
+                        .log_tx
+                        .send("event: reload\ndata: {}\n\n".to_string());
+                    info!("dev watch: public/ changed - browsers reloading");
+                }
+                continue;
             }
             info!("dev watch: change detected - restarting worker, clearing caches");
             state.cache.clear().await;
@@ -2672,22 +2754,10 @@ async fn await_restart_then_reclear(
     }
 }
 
-fn watch_event_is_relevant(event: &notify::Event) -> bool {
-    if matches!(event.kind, notify::EventKind::Access(_)) {
-        return false;
-    }
-    // Build outputs under .gio/ change as a *result* of restarts; reacting to
-    // them would loop forever.
-    event.paths.iter().any(|path| {
-        let text = path.to_string_lossy();
-        !text.contains("/.gio/") && !text.contains("\\.gio\\") && !text.contains("node_modules")
-    })
-}
-
 /// Transform every `.css` under `app_dir` into `css_cache` (URL-keyed).
 /// Runs at startup and again on dev-watch changes; existing entries are
 /// replaced so deleted files also disappear.
-async fn load_css_cache(css_cache: &DashMap<String, Bytes>, app_dir: &str, minify: bool) {
+async fn load_css_cache(css_cache: &css_assets::CssCache, app_dir: &str, minify: bool) {
     let transformer = giojs_css::CssTransformer { minify };
     let css_files = scan_css_files(std::path::PathBuf::from(app_dir)).await;
     let app_path = std::path::Path::new(app_dir);
@@ -2707,7 +2777,7 @@ async fn load_css_cache(css_cache: &DashMap<String, Bytes>, app_dir: &str, minif
         match transformer.transform(&source, css_path.to_str().unwrap_or("")) {
             Ok(result) => {
                 info!(path = %url_key, "CSS transformed");
-                css_cache.insert(url_key, Bytes::from(result.code));
+                css_cache.insert(url_key, css_assets::CssAsset::new(Bytes::from(result.code)));
             }
             Err(e) => warn!(path = %url_key, error = %e, "CSS transform failed"),
         }
@@ -2740,10 +2810,10 @@ async fn scan_css_files(root: std::path::PathBuf) -> Vec<PathBuf> {
 
 /// Extract critical CSS for `html` using the pre-transformed `/globals.css` from the cache.
 /// Returns a ready-to-inject HTML snippet, or `None` if extraction produces nothing useful.
-fn extract_critical_snippet(html: &Bytes, css_cache: &DashMap<String, Bytes>) -> Option<String> {
+fn extract_critical_snippet(html: &Bytes, css_cache: &css_assets::CssCache) -> Option<String> {
     let html_str = std::str::from_utf8(html).ok()?;
     let css_entry = css_cache.get("/globals.css")?;
-    let css_str = std::str::from_utf8(&css_entry).ok()?;
+    let css_str = std::str::from_utf8(&css_entry.code).ok()?;
     let result = giojs_css::extract_critical(html_str, css_str).ok()?;
     if result.critical.is_empty() {
         return None;
@@ -2802,7 +2872,7 @@ fn compose_final_html(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[String],
-    css_cache: &DashMap<String, Bytes>,
+    css_cache: &css_assets::CssCache,
     critical_extraction: bool,
 ) -> Bytes {
     let script = format!(
@@ -2906,7 +2976,7 @@ async fn build_response_from_entry(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[&str],
-    css_cache: &Arc<DashMap<String, Bytes>>,
+    css_cache: &Arc<css_assets::CssCache>,
     css_config: &config::CssConfig,
     dev_mode: bool,
 ) -> Response {
@@ -2970,7 +3040,7 @@ fn compose_uncomposed_entry(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[String],
-    css_cache: &DashMap<String, Bytes>,
+    css_cache: &css_assets::CssCache,
     critical_extraction: bool,
     dev_mode: bool,
 ) -> Bytes {
@@ -3008,7 +3078,7 @@ fn build_html_response(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[&str],
-    css_cache: &DashMap<String, Bytes>,
+    css_cache: &css_assets::CssCache,
     css_config: &config::CssConfig,
     dev_mode: bool,
 ) -> Response {

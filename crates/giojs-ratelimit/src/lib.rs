@@ -107,13 +107,58 @@ impl RateLimiter {
         ip: IpAddr,
         headers: &HashMap<String, String>,
     ) -> RateLimitResult {
-        let Some((rule_index, rule)) = self.find_rule(path) else {
-            return RateLimitResult::Allowed {
+        self.check_paths(&[path], ip, headers)
+    }
+
+    /// Check a request that answers to more than one path - a public/ file
+    /// served at the site root is also `/public/...`, and rules written for
+    /// either URL must hold. The most specific rule for each path must admit
+    /// the request; a rule matched through several paths is charged once, so
+    /// a catch-all rule does not count the request twice. `Allowed` reports
+    /// the tightest budget among the matched rules.
+    pub fn check_paths(
+        &self,
+        paths: &[&str],
+        ip: IpAddr,
+        headers: &HashMap<String, String>,
+    ) -> RateLimitResult {
+        let mut matched: Vec<(usize, &RateLimitRule)> = Vec::with_capacity(paths.len());
+        for path in paths {
+            if let Some((rule_index, rule)) = self.find_rule(path) {
+                if !matched.iter().any(|(seen, _)| *seen == rule_index) {
+                    matched.push((rule_index, rule));
+                }
+            }
+        }
+
+        let mut tightest: Option<(u64, u64)> = None;
+        for (rule_index, rule) in matched {
+            match self.consume(rule_index, rule, ip, headers) {
+                RateLimitResult::Allowed { remaining, limit } => {
+                    if tightest.is_none_or(|(best, _)| remaining < best) {
+                        tightest = Some((remaining, limit));
+                    }
+                }
+                rejected @ RateLimitResult::Rejected { .. } => return rejected,
+            }
+        }
+        match tightest {
+            Some((remaining, limit)) => RateLimitResult::Allowed { remaining, limit },
+            None => RateLimitResult::Allowed {
                 remaining: u64::MAX,
                 limit: 0,
-            };
-        };
+            },
+        }
+    }
 
+    /// Take one token from `rule`'s bucket for this client.
+    fn consume(
+        &self,
+        rule_index: usize,
+        rule: &RateLimitRule,
+        ip: IpAddr,
+        headers: &HashMap<String, String>,
+    ) -> RateLimitResult {
         let bucket = self.bucket_for(rule_index, ip, rule, headers);
 
         if bucket.try_consume() {
@@ -385,6 +430,74 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn rule(path_pattern: &str, per_ip: u64) -> RateLimitRule {
+        RateLimitRule {
+            path_pattern: path_pattern.to_string(),
+            per_ip,
+            window_seconds: 3600,
+            burst: 0,
+            key_header: None,
+        }
+    }
+
+    #[test]
+    fn every_path_of_a_request_must_pass_its_rule() {
+        // /members/report.txt is also /public/members/report.txt: the
+        // /public/* budget must hold for the root URL too, and both URLs
+        // drain the same bucket.
+        let rl = make_limiter(vec![rule("/public/members/*", 2)]);
+        let paths = ["/members/report.txt", "/public/members/report.txt"];
+        assert!(matches!(
+            rl.check_paths(&paths, LOCAL, &empty_headers()),
+            RateLimitResult::Allowed {
+                remaining: 1,
+                limit: 2
+            }
+        ));
+        assert!(matches!(
+            rl.check("/public/members/report.txt", LOCAL, &empty_headers()),
+            RateLimitResult::Allowed { .. }
+        ));
+        assert!(matches!(
+            rl.check_paths(&paths, LOCAL, &empty_headers()),
+            RateLimitResult::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn a_rule_matched_through_several_paths_is_charged_once() {
+        let rl = make_limiter(vec![rule("/*", 2)]);
+        let paths = ["/robots.txt", "/public/robots.txt"];
+        for _ in 0..2 {
+            assert!(matches!(
+                rl.check_paths(&paths, LOCAL, &empty_headers()),
+                RateLimitResult::Allowed { .. }
+            ));
+        }
+        assert!(matches!(
+            rl.check_paths(&paths, LOCAL, &empty_headers()),
+            RateLimitResult::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn the_tightest_matched_budget_is_reported() {
+        let rl = make_limiter(vec![rule("/*", 100), rule("/public/*", 5)]);
+        let paths = ["/robots.txt", "/public/robots.txt"];
+        let RateLimitResult::Allowed { remaining, limit } =
+            rl.check_paths(&paths, LOCAL, &empty_headers())
+        else {
+            panic!("first request must be allowed");
+        };
+        assert_eq!((remaining, limit), (4, 5));
+        // Each distinct rule was charged: /* has 99 left before this one.
+        let RateLimitResult::Allowed { remaining, .. } = rl.check("/page", LOCAL, &empty_headers())
+        else {
+            panic!("must be allowed");
+        };
+        assert_eq!(remaining, 98);
     }
 
     fn keyed_rule(per_ip: u64, window_seconds: u64) -> RateLimitRule {

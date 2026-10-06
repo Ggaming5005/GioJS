@@ -54,6 +54,31 @@ export default function Page(): React.JSX.Element {
         message and stack.
       </p>
 
+      <h2>public/ and robots.txt</h2>
+      <p>
+        <code>public/</code> is copied into <code>out/</code> twice, matching the server: at
+        the site root, so <code>/favicon.ico</code>, <code>/robots.txt</code>,{' '}
+        <code>/manifest.json</code>, and <code>/.well-known/...</code> resolve on any static
+        host, and under <code>out/public/</code> for links written as{' '}
+        <code>/public/...</code>.
+      </p>
+      <ul>
+        <li>
+          The root copy skips what the server never serves at the root: dotfiles (except
+          under <code>.well-known/</code>), symlinks, and a top-level <code>_gio/</code>.
+        </li>
+        <li>
+          A rendered page keeps its output file: <code>public/index.html</code> next to{' '}
+          <code>app/page.tsx</code> stays at <code>/public/index.html</code> only, and the
+          exporter lists it as skipped.
+        </li>
+        <li>
+          The exporter writes <code>robots.txt</code> (and <code>sitemap.xml</code> when{' '}
+          <code>GIO_SITE_URL</code> is set) only when <code>public/</code> has no file of that
+          name - your own always wins.
+        </li>
+      </ul>
+
       <h2>Dynamic routes</h2>
       <p>
         A dynamic route like <code>app/posts/[id]/page.tsx</code> needs to know which
