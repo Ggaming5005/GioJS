@@ -52,7 +52,15 @@ export interface PrefetchCache {
 
 const MAX_PREFETCH_ENTRIES = 50;
 
-// Sentinel value '' marks an in-flight prefetch; non-empty string is cached HTML.
+/**
+ * Prefetch cache value for a URL whose response cannot be swapped in (a 404
+ * or 500). Remembering it keeps every later hover from refetching the page;
+ * a click on it goes straight to a full browser load, which fetches it fresh.
+ */
+export const PREFETCH_NOT_SWAPPABLE = '\0gio:not-swappable';
+
+// Sentinel value '' marks an in-flight prefetch, PREFETCH_NOT_SWAPPABLE a
+// page the browser must load itself; any other string is cached HTML.
 function createPrefetchCache(maxEntries: number): PrefetchCache {
   const entries = new Map<string, string>();
   return {
@@ -162,6 +170,11 @@ export async function navigateTo(
   const cached = prefetchCache.get(href);
   let html: string;
 
+  if (cached === PREFETCH_NOT_SWAPPABLE) {
+    // The prefetch saw a 404/500: the browser loads (and shows) it itself.
+    window.location.href = href;
+    return;
+  }
   if (cached) {
     html = cached;
   } else {

@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "node --test test/copy-template.test.ts"
+    "test": "node --test test/copy-template.test.ts test/templates.test.ts"
   },
   "files": [
     "dist",

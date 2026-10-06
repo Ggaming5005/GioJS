@@ -21,6 +21,14 @@ export default function Page(): React.JSX.Element {
         multi-instance deployments, set <code>GIO_DEPLOYMENT_ID</code> to the same value on
         every instance so their caches agree on the deployment ID.
       </p>
+      <p>
+        Persisted entries survive a restart only while the deployment ID stays the same. The
+        derived ID covers the build and the gio.toml settings pages render with
+        (<code>[images]</code> decides every <code>GioImage</code> srcset), so changing
+        those settings starts with an empty cache instead of serving pages built for the
+        old ones. A pinned <code>GIO_DEPLOYMENT_ID</code> is used as given: change it
+        whenever you deploy a gio.toml change.
+      </p>
       <h2>Observing the cache: X-Gio-Cache</h2>
       <p>
         Every response carries an <code>X-Gio-Cache</code> header saying which tier

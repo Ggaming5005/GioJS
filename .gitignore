@@ -54,6 +54,7 @@ platform/*/bin/*
 /SPEC2.md
 /OPEN_QUESTIONS.md
 tests/integration/.dev-fixture/
+tests/integration/.image-cache-fixture/
 
 # stray local probe file
 probe.tmp

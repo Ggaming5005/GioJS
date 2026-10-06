@@ -34,8 +34,10 @@ export default function PostPage({ post }: PostPageProps): React.JSX.Element {
         <div className="gio-article__body">
           <p>{post.body}</p>
           <p>
-            This page is rendered server-side via <code>getServerSideProps</code>. The post
-            ID comes from the URL parameter - try changing it in the address bar.
+            The post ID comes from the URL. On the GioJS server,{' '}
+            <code>getServerSideProps</code> renders any ID on demand - try changing it in
+            the address bar. A static export (<code>gio export</code>) pre-renders only the
+            IDs <code>getStaticPaths</code> lists (1-3), with their data as of the export.
           </p>
         </div>
       </article>

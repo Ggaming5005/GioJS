@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -162,12 +162,13 @@ async function linkFixtureDeps(targetDir = fixtureDir) {
 }
 
 /**
- * Dev-watch needs a fixture it can mutate. The copy lives at the same
+ * Dev-watch (and the gio.toml-change phase) need a fixture they can mutate,
+ * each in its own `name`d copy. The copy lives at the same
  * directory depth as the original so the fixture's relative
  * `../../../packages/` imports keep resolving.
  */
-async function copyFixtureForDev() {
-  const devDir = join(repoRoot, 'tests', 'integration', '.dev-fixture');
+async function copyFixtureForDev(name = '.dev-fixture') {
+  const devDir = join(repoRoot, 'tests', 'integration', name);
   await rm(devDir, { recursive: true, force: true });
   const items = [
     'app', 'lib', 'components', 'public', 'gio.toml', 'gio.config.ts', 'middleware.ts', 'package.json',
@@ -1182,6 +1183,127 @@ async function inheritedModePhase() {
 }
 
 /**
+ * Phase 1c (persisted page cache vs gio.toml): cached HTML bakes in the
+ * [images] widths, and the disk cache outlives restarts. A restart with
+ * different allowed_widths must not serve pages whose srcsets the optimizer
+ * now rejects - the deployment ID covers the settings the worker renders with.
+ */
+async function imageConfigCachePhase() {
+  const binary = findServerBinary();
+  const appRoot = await copyFixtureForDev('.image-cache-fixture');
+  await mkdir(join(appRoot, 'app', 'image-cached'), { recursive: true });
+  await writeFile(
+    join(appRoot, 'app', 'image-cached', 'page.tsx'),
+    [
+      "import React from 'react';",
+      "import { GioImage } from '../../../../../packages/giojs-react/src/Image.tsx';",
+      '',
+      'export const revalidate = 3600;',
+      '',
+      'export default function CachedImage() {',
+      '  return (',
+      '    <main>',
+      '      <h1>CACHED_IMAGE_FIXTURE</h1>',
+      '      <GioImage src="/gio-test.png" width={120} height={60} alt="cached" sizes="50vw" />',
+      '    </main>',
+      '  );',
+      '}',
+      '',
+    ].join('\n'),
+  );
+  const tomlPath = join(appRoot, 'gio.toml');
+  const toml = await readFile(tomlPath, 'utf8');
+  assert.match(toml, /^allowed_widths\s*=/m, 'fixture gio.toml sets allowed_widths');
+  const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-imgcache-'));
+  const srcsetUrls = (html) =>
+    (html.match(/<img [^>]*\ssrcSet="([^"]*)"/)?.[1] ?? '')
+      .replace(/&amp;/g, '&')
+      .split(', ')
+      .map((candidate) => candidate.split(' ')[0])
+      .filter(Boolean);
+  const hasWidth = (urls, w) => urls.some((u) => new URL(u, BASE).searchParams.get('w') === String(w));
+
+  try {
+    for (const [run, widths] of [[1, '[96, 48, 640]'], [2, '[96, 48, 828]']]) {
+      await writeFile(tomlPath, toml.replace(/^allowed_widths\s*=.*$/m, `allowed_widths = ${widths}`));
+
+      let log = '';
+      const server = spawn(binary, [], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          GIO_APP_DIR: join(appRoot, 'app'),
+          // Shared by both runs: entries persist across the restart.
+          GIO_CACHE_DIR: cacheDir,
+          RUST_LOG: 'info',
+          NODE_ENV: 'production',
+        },
+      });
+      server.stdout.on('data', (d) => { log += d.toString(); });
+      server.stderr.on('data', (d) => { log += d.toString(); });
+      let serverGone = false;
+      const serverExited = new Promise((r) =>
+        server.on('exit', () => { serverGone = true; r(); }),
+      );
+      try {
+        await waitFor(`server health (gio.toml run ${run})`, async () => {
+          const res = await fetch(`${BASE}/_gio/health`);
+          return res.ok && (await res.json()).nodeReady === true;
+        }, 30_000);
+
+        if (run === 1) {
+          const res = await fetch(`${BASE}/image-cached`);
+          assert.equal(res.status, 200);
+          assert.match(res.headers.get('x-gio-cache') ?? '', /^miss; stored$/);
+          const urls = srcsetUrls(await res.text());
+          assert.ok(hasWidth(urls, 640), `run 1 renders w=640: ${urls}`);
+          // The disk write is a background task: wait until it has landed.
+          await waitFor('page persisted to the disk cache', async () => {
+            const files = await readdir(cacheDir, { recursive: true });
+            return files.some((f) => f.endsWith('.json'));
+          }, 10_000);
+          continue;
+        }
+
+        await test('a gio.toml [images] change invalidates pages persisted with the old widths', async () => {
+          const res = await fetch(`${BASE}/image-cached`);
+          assert.equal(res.status, 200);
+          assert.match(
+            res.headers.get('x-gio-cache') ?? '',
+            /^miss; stored$/,
+            'a page rendered with the old allowed_widths must not be served after the restart',
+          );
+          const html = await res.text();
+          const urls = srcsetUrls(html);
+          assert.ok(!hasWidth(urls, 640), `stale width in srcset: ${urls}`);
+          assert.ok(hasWidth(urls, 828), `new width missing from srcset: ${urls}`);
+          const envelope = JSON.parse(html.match(/<script id="__gio_props" type="application\/json">([^<]*)</)[1]);
+          assert.deepEqual(envelope.images.widths, [48, 96, 828]);
+          for (const url of urls) {
+            const image = await fetch(`${BASE}${url}`, { headers: { accept: 'image/webp' } });
+            assert.equal(image.status, 200, `${url} must be servable`);
+            await image.arrayBuffer();
+          }
+        });
+      } catch (err) {
+        console.error(`\nintegration (gio.toml change, run ${run}): FAILED`);
+        console.error(err);
+        console.error('\n── server log tail ──');
+        console.error(significantLogTail(log));
+        process.exitCode = 1;
+      } finally {
+        if (!serverGone) server.kill();
+        await serverExited;
+      }
+      if (process.exitCode === 1) return;
+    }
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+    await rm(appRoot, { recursive: true, force: true });
+  }
+}
+
+/**
  * Rewrite (or create) `file` and wait until `probe` sees the effect. CI runners sometimes
  * drop the very first watch event under load, so the file is re-touched
  * every 30s (at most twice) while nothing has happened yet.
@@ -1524,10 +1646,27 @@ async function standalonePhase() {
 
   try {
     await mkdir(join(workDir, 'app', 'api', 'hello'), { recursive: true });
+    // An interactive control for hydrate-export.mjs: its text shows whether
+    // React mounted (an effect ran) and whether a click reached the handler.
+    const probe = (label) =>
+      '  const [mounted, setMounted] = React.useState(false);\n' +
+      '  const [clicks, setClicks] = React.useState(0);\n' +
+      '  React.useEffect(() => setMounted(true), []);\n' +
+      '  const probe = <button data-probe="" onClick={() => setClicks((n) => n + 1)}>' +
+      `{\`${label} mounted=\${mounted} clicks=\${clicks}\`}</button>;\n`;
+    // GioLink's source, copied in: a path into the repo would not be a
+    // relative import (another drive on Windows CI) or a resolvable package.
+    await mkdir(join(workDir, 'components'), { recursive: true });
+    for (const file of ['Link.tsx', 'navigation.ts']) {
+      await cp(join(repoRoot, 'packages', 'giojs-react', 'src', file), join(workDir, 'components', file));
+    }
     await writeFile(
       join(workDir, 'app', 'page.tsx'),
-      "import React from 'react';\n\nexport default function Home() {\n" +
-        '  return <h1>STANDALONE_FIXTURE_HOME {process.env.GIO_PUBLIC_STANDALONE_GREETING}</h1>;\n}\n',
+      "import React from 'react';\nimport { GioLink } from '../components/Link.tsx';\n\nexport default function Home() {\n" +
+        probe('HOME') +
+        '  return (\n    <main>\n' +
+        '      <h1>STANDALONE_FIXTURE_HOME {process.env.GIO_PUBLIC_STANDALONE_GREETING}</h1>\n' +
+        '      {probe}\n      <GioLink href="/posts/7">post 7</GioLink>\n    </main>\n  );\n}\n',
     );
     await writeFile(
       join(workDir, 'app', 'api', 'hello', 'route.ts'),
@@ -1552,7 +1691,9 @@ async function standalonePhase() {
     );
     await writeFile(
       join(workDir, 'app', '(blog)', 'posts', '[id]', 'page.tsx'),
-      "import React from 'react';\n\nexport default function Post({ params }) {\n  return <p>{`STANDALONE_POST id=[${params.id}]`}</p>;\n}\n" +
+      "import React from 'react';\n\nexport default function Post({ params }) {\n" +
+        probe('POST') +
+        '  return <><p>{`STANDALONE_POST id=[${params.id}]`}</p>{probe}</>;\n}\n' +
         // For `gio export`; the server must ignore it (any id renders).
         "\nexport function getStaticPaths() {\n  return { paths: [{ params: { id: '7' } }] };\n}\n",
     );
@@ -1623,6 +1764,33 @@ async function standalonePhase() {
         }
       }
       assert.ok(existsSync(join(exportOut, '404.html')));
+    });
+
+    await test('static export: the shipped bundle hydrates, and GioLink navigates the out/ file layout', async () => {
+      const exportOut = join(workDir, 'out');
+      const browser = spawnSync(
+        process.execPath,
+        [join(repoRoot, 'tests', 'integration', 'hydrate-export.mjs'), exportOut, '/', '/posts/7'],
+        { encoding: 'utf8', timeout: 60_000 },
+      );
+      let report;
+      try {
+        report = JSON.parse((browser.stdout ?? '').trim().split('\n').at(-1));
+      } catch {
+        assert.fail(`hydrate-export printed no report (exit ${browser.status}):\n${browser.stdout}\n${browser.stderr}`);
+      }
+      assert.deepEqual(report.errors, [], 'no hydration or runtime errors');
+      assert.equal(browser.status, 0);
+      // The exported page hydrated from out/_next/static/chunks.
+      assert.equal(report.start.mounted, 'HOME mounted=true clicks=0');
+      assert.equal(report.start.afterClick, 'HOME mounted=true clicks=1');
+      // The click fetched the static file, swapped it in, and mounted its route.
+      assert.deepEqual(report.fetched, ['/posts/7']);
+      assert.equal(report.nav.pathname, '/posts/7');
+      assert.equal(report.nav.envelopePath, '/posts/7');
+      assert.match(report.nav.content, /STANDALONE_POST id=\[7\]/);
+      assert.equal(report.nav.mounted, 'POST mounted=true clicks=0');
+      assert.equal(report.nav.afterClick, 'POST mounted=true clicks=1');
     });
 
     // Runtime env lives in the deploy dir: run.mjs starts the server there.
@@ -1741,6 +1909,9 @@ if (process.exitCode !== 1) {
 }
 if (process.exitCode !== 1) {
   await inheritedModePhase();
+}
+if (process.exitCode !== 1) {
+  await imageConfigCachePhase();
 }
 if (process.exitCode !== 1) {
   await devWatchPhase();

@@ -19,6 +19,7 @@ import {
   navigateTo,
   initPopstateHandler,
   prefetchCache,
+  PREFETCH_NOT_SWAPPABLE,
   type TransitionPreset,
 } from './navigation.js';
 
@@ -68,7 +69,10 @@ function isClientNavigableHref(href: string): boolean {
   return href.startsWith('/') && !href.startsWith('//');
 }
 
-/** Fetch a page into the prefetch cache; '' marks an in-flight request. */
+/**
+ * Fetch a page into the prefetch cache; '' marks an in-flight request and
+ * PREFETCH_NOT_SWAPPABLE a page the browser must load itself.
+ */
 function prefetchHref(href: string): void {
   if (prefetchCache.has(href) || !isClientNavigableHref(href)) return;
   prefetchCache.set(href, '');
@@ -83,8 +87,9 @@ function prefetchHref(href: string): void {
         return undefined;
       }
       if (!isSwappableResponse(r)) {
-        // Not cached: the click then fetches it and falls back to a full load.
-        prefetchCache.delete(href);
+        // Remembered, not deleted: later hovers must not refetch it, and a
+        // click goes straight to a full load.
+        prefetchCache.set(href, PREFETCH_NOT_SWAPPABLE);
         return undefined;
       }
       return r.text();

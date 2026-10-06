@@ -348,7 +348,8 @@ struct NodeWorker {
     token: String,
     dev_mode: bool,
     /// Server settings the worker renders with (e.g. GIO_IMAGE_CONFIG),
-    /// handed to every respawn too.
+    /// handed to every respawn too. Those named in
+    /// `config::WORKER_RENDER_SETTINGS_ENV` also feed the deployment ID.
     extra_env: Vec<(String, String)>,
 }
 
@@ -385,7 +386,7 @@ impl IpcClient {
         let spawned_pid = child.id();
         info!("Node process spawned (pid {:?})", spawned_pid);
 
-        let deployment_id = generate_deployment_id();
+        let deployment_id = generate_deployment_id(&worker.extra_env);
 
         let connection = match connect_and_handshake(
             &worker.ipc_path,
@@ -624,8 +625,7 @@ async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> anyhow::Result<B
 
 // ── Deployment ID ────────────────────────────────────────────────────────────
 
-fn generate_deployment_id() -> String {
-    use sha2::{Digest, Sha256};
+fn generate_deployment_id(worker_env: &[(String, String)]) -> String {
     // Content-derived, never time-derived: a restart of the same build must
     // keep the same ID or the entire persisted disk cache becomes dead weight
     // (and every pod in a multi-instance deployment would disagree).
@@ -637,8 +637,31 @@ fn generate_deployment_id() -> String {
         }
     }
     let manifest = std::fs::read(".gio/manifest.json").unwrap_or_default();
+    derive_deployment_id(&manifest, worker_env)
+}
+
+/// The build manifest alone does not describe the rendered HTML: the worker
+/// also renders with server settings handed to it in its environment (e.g.
+/// `[images]` decides every `<GioImage>` srcset). Those are hashed in too, so
+/// a gio.toml change invalidates persisted pages that were rendered with the
+/// old settings instead of serving them - and their now-rejected image URLs -
+/// until they expire. Only the variables listed in
+/// `config::WORKER_RENDER_SETTINGS_ENV` count: anything else the worker gets
+/// (a secret, a per-boot value) stays out of this public, restart-stable ID.
+fn derive_deployment_id(manifest: &[u8], worker_env: &[(String, String)]) -> String {
+    use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(&manifest);
+    h.update(manifest);
+    let render_settings = worker_env
+        .iter()
+        .filter(|(key, _)| crate::config::WORKER_RENDER_SETTINGS_ENV.contains(&key.as_str()));
+    for (key, value) in render_settings {
+        // Length-prefixed so no two different settings lists hash alike.
+        for part in [key, value] {
+            h.update((part.len() as u64).to_le_bytes());
+            h.update(part.as_bytes());
+        }
+    }
     // 16 hex chars (64 bits) - human-readable, collision-resistant for deployment tracking
     h.finalize()
         .iter()
@@ -1588,6 +1611,48 @@ mod tests {
         assert_eq!(get("GIO_IPC_TOKEN").unwrap(), "real-token");
         assert_eq!(get("NODE_ENV").unwrap(), "production");
         assert_eq!(get("GIO_SOCKET_PATH").unwrap(), "/tmp/ipc");
+    }
+
+    #[test]
+    fn deployment_id_changes_with_the_settings_the_worker_renders_with() {
+        // Persisted pages are only dropped when the deployment ID changes, and
+        // their HTML bakes in the [images] widths: a gio.toml edit must not
+        // leave srcsets the optimizer now rejects in the disk cache.
+        let render_env = |widths: Vec<u32>| {
+            let images = crate::config::ImageConfig {
+                allowed_widths: widths,
+                ..Default::default()
+            };
+            vec![(
+                crate::config::WORKER_IMAGE_CONFIG_ENV.to_string(),
+                images.worker_json(),
+            )]
+        };
+        let manifest = br#"{"routes":[]}"#;
+        let before = derive_deployment_id(manifest, &render_env(vec![640]));
+        assert_eq!(before.len(), 16);
+        assert_eq!(
+            before,
+            derive_deployment_id(manifest, &render_env(vec![640])),
+            "same build + same settings must keep the ID (and the warm disk cache)"
+        );
+        assert_ne!(
+            before,
+            derive_deployment_id(manifest, &render_env(vec![828])),
+            "changing [images] allowed_widths must invalidate cached pages"
+        );
+        assert_ne!(before, derive_deployment_id(b"", &render_env(vec![640])));
+        // Only listed render settings count: a secret or per-boot value handed
+        // to the worker must neither leak into the public ID nor change it on
+        // every restart.
+        let mut with_secret = render_env(vec![640]);
+        with_secret.push(("GIO_SESSION_SECRET".into(), "s3cret".into()));
+        assert_eq!(before, derive_deployment_id(manifest, &with_secret));
+        // No render settings at all: the manifest hash alone, as before.
+        assert_eq!(
+            derive_deployment_id(manifest, &[]),
+            derive_deployment_id(manifest, &[("OTHER".into(), "x".into())])
+        );
     }
 
     #[test]

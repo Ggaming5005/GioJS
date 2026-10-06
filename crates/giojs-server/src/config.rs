@@ -252,6 +252,13 @@ impl Default for ImageConfig {
 /// Env var the Node worker reads its `[images]` settings from.
 pub const WORKER_IMAGE_CONFIG_ENV: &str = "GIO_IMAGE_CONFIG";
 
+/// Worker env vars whose values change the rendered HTML. They are hashed
+/// into the derived deployment ID, so a restart with different values never
+/// serves persisted pages rendered with the old ones. Never list a secret or
+/// a per-boot value here: the ID is public, and must stay stable across
+/// restarts of the same build and config.
+pub const WORKER_RENDER_SETTINGS_ENV: &[&str] = &[WORKER_IMAGE_CONFIG_ENV];
+
 impl ImageConfig {
     /// The `[images]` settings `<GioImage>` renders with, as JSON for the
     /// worker: srcset candidates must be widths `/_gio/image` accepts (any

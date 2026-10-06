@@ -322,7 +322,10 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let dev_mode = std::env::var("NODE_ENV").as_deref() == Ok("development");
 
     info!("Starting Node SSR worker: {node_script}");
-    // <GioImage> must only emit srcset widths /_gio/image accepts.
+    // <GioImage> must only emit srcset widths /_gio/image accepts. Settings
+    // the HTML depends on are listed in config::WORKER_RENDER_SETTINGS_ENV,
+    // which hashes them into the derived deployment ID: changing them drops
+    // persisted pages.
     let worker_env = vec![(
         config::WORKER_IMAGE_CONFIG_ENV.to_string(),
         cfg.images.worker_json(),
