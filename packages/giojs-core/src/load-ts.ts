@@ -11,6 +11,7 @@
  * tsx itself is imported lazily so standalone bundles (which never call
  * loadTsModule) can mark it external and run without node_modules.
  */
+import { fileURLToPath } from 'node:url';
 import { logger } from './logger.ts';
 
 let hooksReady: Promise<void> | null = null;
@@ -32,7 +33,19 @@ function ensureTransformHooks(): Promise<void> {
   return hooksReady;
 }
 
+/**
+ * vitest's module runner takes a file: URL without percent-decoding it, so
+ * app/posts/[id]/page.tsx (`%5Bid%5D`) - or any path with a space - "does
+ * not exist" there; it resolves plain paths. Node's own loader keeps the
+ * URL (a Windows drive path is no valid import specifier).
+ */
+function importSpecifier(fileUrl: string): string {
+  return process.env.VITEST !== undefined && fileUrl.startsWith('file:')
+    ? fileURLToPath(fileUrl)
+    : fileUrl;
+}
+
 export async function loadTsModule<T>(fileUrl: string): Promise<T> {
   await ensureTransformHooks();
-  return import(fileUrl) as Promise<T>;
+  return import(importSpecifier(fileUrl)) as Promise<T>;
 }
