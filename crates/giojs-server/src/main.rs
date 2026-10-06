@@ -257,8 +257,12 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let ipc_paths = ipc::IpcPaths::resolve();
     let ipc_token = ipc::generate_token();
 
+    // The one runtime-mode decision: the worker is spawned with the matching
+    // NODE_ENV, so Rust and Node can never disagree about dev vs production.
+    let dev_mode = std::env::var("NODE_ENV").as_deref() == Ok("development");
+
     info!("Starting Node SSR worker: {node_script}");
-    let ipc = IpcClient::start(&node_script, &ipc_paths, &ipc_token).await?;
+    let ipc = IpcClient::start(&node_script, &ipc_paths, &ipc_token, dev_mode).await?;
 
     let cache_dir = std::env::var("GIO_CACHE_DIR")
         .map(PathBuf::from)
@@ -353,7 +357,6 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
 
     let http2 = cfg.server.http2;
     let tls_enabled = cfg.server.tls.enabled;
-    let dev_mode = std::env::var("NODE_ENV").as_deref() == Ok("development");
 
     let app_dir = std::env::var("GIO_APP_DIR").unwrap_or_else(|_| "app".to_string());
     let css_cache: Arc<DashMap<String, Bytes>> = Arc::new(DashMap::new());

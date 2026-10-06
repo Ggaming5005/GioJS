@@ -7,8 +7,14 @@
  * project's .env files itself (same precedence rules) before rendering.
  */
 import { dirname, join } from 'node:path';
-import { exportSite } from './export.ts';
 import { loadEnvFiles } from './env-files.ts';
+
+// Same mode rule as the Rust server: dev iff NODE_ENV=development. It must
+// hold before React loads (hence the dynamic import of export.ts below) -
+// React picks its build from NODE_ENV once, and the dev build writes a failed
+// Suspense boundary's error message and stack into the HTML of a publicly
+// hosted page. It must also hold before the .env files are chosen.
+if (process.env.NODE_ENV !== 'development') process.env.NODE_ENV = 'production';
 
 const appDir = process.env.GIO_APP_DIR ?? join(process.cwd(), 'app');
 const outDir = process.env.GIO_OUT_DIR ?? join(process.cwd(), 'out');
@@ -24,6 +30,8 @@ try {
   console.error(`[giojs] ${envError instanceof Error ? envError.message : String(envError)}`);
   process.exit(1);
 }
+
+const { exportSite } = await import('./export.ts');
 
 console.log(`[giojs] static export: ${appDir} → ${outDir}`);
 

@@ -6,7 +6,7 @@
  *   2. getServerSideProps returning {redirect} should produce a 301/302
  *   3. layout.tsx wrappers are applied outermost-first around the page
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { renderRoute, serializeEnvelope, type StreamRenderResult } from './ssr.ts';
 import { clearClientBuildErrors, recordClientBuildError } from './client-build-errors.ts';
@@ -113,6 +113,15 @@ describe('getServerSideProps redirect', () => {
 // ─── getServerSideProps props extraction ─────────────────────────────────────
 
 describe('getServerSideProps props extraction', () => {
+  // The contract errors below are about the dev-mode message; production
+  // replaces it with a generic one (see 'error details by mode').
+  beforeEach(() => {
+    vi.stubEnv('NODE_ENV', 'development');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('extracts props from { props: {...} } wrapper (Next.js convention)', async () => {
     const routes = makeRoute('/', {
       getServerSideProps: async () => ({ props: { title: 'hello' } }),
@@ -655,7 +664,23 @@ describe('special pages', () => {
     expect('cacheable' in result && result.cacheable).toBe(false);
   });
 
-  it('renders app/error with the failure message when a page render throws', async () => {
+  it('renders app/error with the failure message in dev mode', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    try {
+      const routes = makeRoute('/', {
+        getServerSideProps: async () => { throw new Error('db exploded'); },
+      });
+      const result = await renderRoute(
+        makeRequest('/'), routes, noLayouts, undefined, undefined, undefined, { specialPages },
+      );
+      expect('status' in result && result.status).toBe(500);
+      expect('body' in result && result.body).toContain('CUSTOM_500 db exploded');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('renders app/error with a generic message outside dev mode', async () => {
     const routes = makeRoute('/', {
       getServerSideProps: async () => { throw new Error('db exploded'); },
     });
@@ -663,7 +688,8 @@ describe('special pages', () => {
       makeRequest('/'), routes, noLayouts, undefined, undefined, undefined, { specialPages },
     );
     expect('status' in result && result.status).toBe(500);
-    expect('body' in result && result.body).toContain('CUSTOM_500 db exploded');
+    expect('body' in result && result.body).toContain('CUSTOM_500 Internal Server Error');
+    expect('body' in result && result.body).not.toContain('db exploded');
   });
 
   it('falls back to the built-in 404 when no not-found page exists', async () => {
@@ -671,5 +697,390 @@ describe('special pages', () => {
     expect('status' in result && result.status).toBe(404);
     expect('body' in result && result.body).toContain('HTTP 404');
     expect('body' in result && result.body).toContain('Page not found');
+  });
+});
+
+// ─── error details by mode ────────────────────────────────────────────────────
+
+/** Capture the logger's JSON lines (it writes to stderr). */
+function captureLogs(): { lines: () => Record<string, unknown>[]; restore: () => void } {
+  const written: string[] = [];
+  const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+    written.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    return true;
+  });
+  return {
+    lines: () =>
+      written
+        .join('')
+        .split('\n')
+        .filter(line => line.startsWith('{'))
+        .map(line => JSON.parse(line) as Record<string, unknown>),
+    restore: () => spy.mockRestore(),
+  };
+}
+
+const DIGEST = /^[0-9a-f]{12}$/;
+
+describe('error details by mode', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function throwingRoute(): Map<string, RouteModule> {
+    return makeRoute('/', {
+      getServerSideProps: async () => { throw new Error('secret db password in message'); },
+    });
+  }
+
+  it('production error frames carry a generic message and a digest, never the stack', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    const logs = captureLogs();
+    let result;
+    try {
+      result = await renderRoute(makeRequest('/'), throwingRoute(), noLayouts);
+    } finally {
+      logs.restore();
+    }
+    expect('error' in result && result.error).toBe(true);
+    expect('message' in result && result.message).toBe('Internal Server Error');
+    expect('stack' in result).toBe(false);
+    const digest = 'digest' in result ? result.digest : undefined;
+    expect(digest).toMatch(DIGEST);
+    // The operator-facing log line carries the real message + stack under the same digest.
+    const line = logs.lines().find(l => l['msg'] === 'ssr render failed');
+    expect(line?.['digest']).toBe(digest);
+    expect(line?.['error']).toBe('secret db password in message');
+    expect(String(line?.['stack'])).toContain('secret db password in message');
+  });
+
+  it('an unset or test NODE_ENV is production, not dev', async () => {
+    for (const value of ['', 'test']) {
+      vi.stubEnv('NODE_ENV', value);
+      const result = await renderRoute(makeRequest('/'), throwingRoute(), noLayouts);
+      expect('message' in result && result.message).toBe('Internal Server Error');
+    }
+  });
+
+  it('dev error frames keep the real message and stack, plus the digest', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const result = await renderRoute(makeRequest('/'), throwingRoute(), noLayouts);
+    expect('message' in result && result.message).toBe('secret db password in message');
+    expect('stack' in result && result.stack).toContain('secret db password in message');
+    expect('digest' in result && result.digest).toMatch(DIGEST);
+  });
+
+  it('app/error receives { message, digest } - generic in production, real in dev', async () => {
+    let seen: { message: string; digest?: string } | undefined;
+    const specialPages = {
+      error: async () => ({
+        default: function ErrorPage(props: Record<string, unknown>) {
+          const error = props['error'] as { message: string; digest?: string };
+          seen = error;
+          return React.createElement('h1', null, `ref ${error.digest ?? ''}`);
+        },
+      }),
+    };
+    const render = () => renderRoute(
+      makeRequest('/'), throwingRoute(), noLayouts, undefined, undefined, undefined, { specialPages },
+    );
+
+    vi.stubEnv('NODE_ENV', 'production');
+    const prod = await render();
+    expect(seen?.message).toBe('Internal Server Error');
+    expect(seen?.digest).toMatch(DIGEST);
+    expect('body' in prod && prod.body).toContain(`ref ${seen?.digest}`);
+    expect('body' in prod && prod.body).not.toContain('secret');
+
+    vi.stubEnv('NODE_ENV', 'development');
+    await render();
+    expect(seen?.message).toBe('secret db password in message');
+    expect(seen?.digest).toMatch(DIGEST);
+  });
+
+  it('route handler failures return a generic JSON body with the logged digest', async () => {
+    const handlers = makeHandlers('/api/boom', {
+      GET: () => { throw new Error('handler secret'); },
+    });
+    const logs = captureLogs();
+    let result;
+    try {
+      result = await renderRoute(
+        makeRequest('/api/boom'), new Map(), noLayouts, undefined, undefined, undefined, { handlers },
+      );
+    } finally {
+      logs.restore();
+    }
+    expect('status' in result && result.status).toBe(500);
+    const body = JSON.parse('body' in result ? result.body : '{}') as Record<string, unknown>;
+    expect(body['error']).toBe('Internal Server Error');
+    expect(body['digest']).toMatch(DIGEST);
+    expect(JSON.stringify(body)).not.toContain('handler secret');
+    const line = logs.lines().find(l => l['msg'] === 'route handler failed');
+    expect(line?.['digest']).toBe(body['digest']);
+    expect(line?.['error']).toBe('handler secret');
+  });
+});
+
+// ─── personalized renders (dynamic detection) ─────────────────────────────────
+
+interface GsspContextLike {
+  path: string;
+  query: Record<string, string>;
+  headers: Record<string, string>;
+  cookies: Record<string, string>;
+}
+
+describe('credential reads make a revalidate page uncacheable', () => {
+  const credentialRequest = (path = '/'): IPCRequest => ({
+    ...makeRequest(path),
+    headers: { cookie: 'session=u1', authorization: 'Bearer t', 'x-thing': 'v', 'accept-language': 'fr' },
+  });
+
+  function gsspRoute(
+    pattern: string,
+    read: (ctx: GsspContextLike) => unknown,
+    overrides: Partial<PageModule> = {},
+  ): Map<string, RouteModule> {
+    return makeRoute(pattern, {
+      revalidate: 60,
+      getServerSideProps: async (ctx) => ({ props: { v: String(read(ctx as GsspContextLike)) } }),
+      ...overrides,
+    });
+  }
+
+  async function cacheFields(
+    routes: Map<string, RouteModule>,
+    req: IPCRequest = credentialRequest(),
+    registry?: NodePluginRegistry,
+  ): Promise<{ cacheable: unknown; cacheMaxAge: unknown }> {
+    const result = await renderRoute(req, routes, noLayouts, registry);
+    return {
+      cacheable: 'cacheable' in result ? result.cacheable : undefined,
+      cacheMaxAge: 'cacheMaxAge' in result ? result.cacheMaxAge : undefined,
+    };
+  }
+
+  const PERSONAL = { cacheable: false, cacheMaxAge: 0 };
+  const SHARED = { cacheable: true, cacheMaxAge: 60 };
+
+  it('reading ctx.cookies makes the render personal', async () => {
+    expect(await cacheFields(gsspRoute('/', ctx => ctx.cookies['session']))).toEqual(PERSONAL);
+  });
+
+  it('reading the cookie or authorization header makes the render personal', async () => {
+    expect(await cacheFields(gsspRoute('/', ctx => ctx.headers['cookie']))).toEqual(PERSONAL);
+    expect(await cacheFields(gsspRoute('/', ctx => ctx.headers['authorization']))).toEqual(PERSONAL);
+  });
+
+  it('probing or enumerating the headers counts as a read', async () => {
+    expect(await cacheFields(gsspRoute('/', ctx => 'cookie' in ctx.headers))).toEqual(PERSONAL);
+    expect(await cacheFields(gsspRoute('/', ctx => JSON.stringify({ ...ctx.headers })))).toEqual(PERSONAL);
+  });
+
+  it('listing the header names counts as a read (ownKeys)', async () => {
+    const reads: ((ctx: GsspContextLike) => unknown)[] = [
+      ctx => Object.getOwnPropertyNames(ctx.headers).includes('cookie'),
+      ctx => Reflect.ownKeys(ctx.headers).includes('authorization'),
+      ctx => Object.keys(ctx.headers).length,
+      ctx => {
+        const names: string[] = [];
+        for (const name in ctx.headers) names.push(name);
+        return names.join(',');
+      },
+    ];
+    for (const read of reads) {
+      expect(await cacheFields(gsspRoute('/', read))).toEqual(PERSONAL);
+    }
+  });
+
+  it('a read counts even when the request carries no credentials (the anonymous variant)', async () => {
+    const routes = gsspRoute('/', ctx => ctx.cookies['session'] ?? 'anon');
+    expect(await cacheFields(routes, makeRequest('/'))).toEqual(PERSONAL);
+    // No cookie descriptor is ever touched here - the enumeration decides.
+    const anonymous: ((ctx: GsspContextLike) => unknown)[] = [
+      ctx => ({ ...ctx.headers })['cookie'] !== undefined ? 'IN' : 'ANON',
+      ctx => Object.keys(ctx.headers).includes('cookie'),
+      ctx => JSON.stringify(ctx.headers),
+    ];
+    for (const read of anonymous) {
+      expect(await cacheFields(gsspRoute('/', read), makeRequest('/'))).toEqual(PERSONAL);
+    }
+  });
+
+  it('a copy of the headers is a plain, cloneable object (and counts as a read)', async () => {
+    const routes = gsspRoute('/', ctx => structuredClone({ ...ctx.headers })['x-thing']);
+    const result = await renderRoute(credentialRequest(), routes, noLayouts);
+    expect('body' in result && result.body).toContain('page content');
+    expect('cacheable' in result && result.cacheable).toBe(false);
+  });
+
+  it('reading non-credential headers keeps the page cacheable', async () => {
+    const routes = gsspRoute('/', ctx => `${ctx.headers['x-thing']}-${ctx.headers['accept-language']}`);
+    expect(await cacheFields(routes)).toEqual(SHARED);
+  });
+
+  it('a page that never reads credentials stays cacheable even when they are sent', async () => {
+    expect(await cacheFields(gsspRoute('/', ctx => ctx.path))).toEqual(SHARED);
+    expect(await cacheFields(makeRoute('/', { revalidate: 60 }))).toEqual(SHARED);
+  });
+
+  it('framework reads of the request (hydration envelope included) never trigger it', async () => {
+    const routes = gsspRoute('/', ctx => ctx.query['q'] ?? 'none');
+    const clientScripts = new Map([['/', '/e.js']]);
+    const result = await renderRoute(
+      credentialRequest(), routes, noLayouts, undefined, undefined, clientScripts,
+    );
+    expect('body' in result && result.body).toContain('__gio_props');
+    expect('cacheable' in result && result.cacheable).toBe(true);
+  });
+
+  it('credentials carried into the render through props are caught before caching', async () => {
+    const routes = makeRoute('/', {
+      revalidate: 60,
+      getServerSideProps: async (ctx) => ({ props: { headers: ctx.headers } }),
+      default: function Page(props: Record<string, unknown>) {
+        const headers = props['headers'] as Record<string, string>;
+        return React.createElement('b', null, headers['cookie'] ?? 'anon');
+      },
+    });
+    const result = await renderRoute(credentialRequest(), routes, noLayouts);
+    expect('body' in result && result.body).toContain('session=u1');
+    expect('cacheable' in result && result.cacheable).toBe(false);
+  });
+
+  it('headers derived by an onRequest plugin count as credentials', async () => {
+    const registry = new NodePluginRegistry();
+    registry.register({
+      name: 'auth',
+      version: '1.0.0',
+      onRequest: async (req) => {
+        req.headers['x-user-id'] = req.headers['cookie'] === 'session=u1' ? 'u1' : 'anon';
+        return req;
+      },
+    });
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['x-user-id']), credentialRequest(), registry),
+    ).toEqual(PERSONAL);
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['x-thing']), credentialRequest(), registry),
+    ).toEqual(SHARED);
+  });
+
+  it('plugin-set header names match regardless of case, and removals count too', async () => {
+    const registry = new NodePluginRegistry();
+    registry.register({
+      name: 'auth',
+      version: '1.0.0',
+      onRequest: async (req) => {
+        req.headers['X-User-Id'] = req.headers['cookie'] === 'session=u1' ? 'u1' : 'anon';
+        if (req.headers['cookie'] === undefined) delete req.headers['x-thing'];
+        return req;
+      },
+    });
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['X-User-Id']), credentialRequest(), registry),
+    ).toEqual(PERSONAL);
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['x-user-id']), credentialRequest(), registry),
+    ).toEqual(PERSONAL);
+    expect(
+      await cacheFields(gsspRoute('/', ctx => 'X-USER-ID' in ctx.headers), credentialRequest(), registry),
+    ).toEqual(PERSONAL);
+    const anonymous = { ...makeRequest('/'), headers: { 'x-thing': 'v' } };
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['x-thing'] ?? 'gone'), anonymous, registry),
+    ).toEqual(PERSONAL);
+    // Untouched headers stay shareable.
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['accept-language']), credentialRequest(), registry),
+    ).toEqual(SHARED);
+  });
+
+  it('warns once per route with the way out', async () => {
+    const logs = captureLogs();
+    try {
+      const routes = gsspRoute('/warn-once', ctx => ctx.cookies['session']);
+      await cacheFields(routes, credentialRequest('/warn-once'));
+      await cacheFields(routes, credentialRequest('/warn-once'));
+    } finally {
+      logs.restore();
+    }
+    const warnings = logs.lines().filter(l => String(l['msg']).includes('read request credentials'));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.['route']).toBe('/warn-once');
+    expect(String(warnings[0]?.['msg'])).toContain("shell = 'cache'");
+  });
+
+  it('pages without revalidate are unaffected and do not warn', async () => {
+    const logs = captureLogs();
+    let fields;
+    try {
+      fields = await cacheFields(
+        makeRoute('/no-revalidate', {
+          getServerSideProps: async (ctx) => ({ props: { v: ctx.cookies['session'] } }),
+        }),
+        credentialRequest('/no-revalidate'),
+      );
+    } finally {
+      logs.restore();
+    }
+    expect(fields).toEqual(PERSONAL);
+    expect(logs.lines().some(l => String(l['msg']).includes('read request credentials'))).toBe(false);
+  });
+
+  describe('PPR (shell=cache)', () => {
+    const streamingExtras = { streaming: true };
+    const clientScripts = new Map([['/', '/e.js']]);
+    const pprRoute = gsspRoute('/', ctx => ctx.cookies['session'], { shell: 'cache' });
+
+    it('keeps the shell cacheable and moves the per-request envelope out of it', async () => {
+      const result = await renderRoute(
+        credentialRequest(), pprRoute, noLayouts, undefined, undefined, clientScripts, streamingExtras,
+      );
+      const streamed = expectStream(result);
+      expect(streamed.head.pprShell).toBe(true);
+      expect(streamed.head.cacheable).toBe(true);
+      expect(streamed.shellBoundary).toBe('mark');
+      // The props (u1's session) travel in the deferred envelope, not the React stream.
+      expect(streamed.envelope).toContain('id="__gio_props"');
+      expect(streamed.envelope).toContain('"v":"u1"');
+      const html = await readStreamToString(streamed.stream);
+      expect(html).not.toContain('__gio_props');
+      expect(html).not.toContain('u1');
+      // The bootstrap module stays in the shell - it is the same for everyone.
+      expect(html).toContain('/e.js');
+    });
+
+    it('skipShell (holes) renders carry their own envelope for the boundary', async () => {
+      const req = { ...credentialRequest(), skipShell: true };
+      const streamed = expectStream(
+        await renderRoute(req, pprRoute, noLayouts, undefined, undefined, clientScripts, streamingExtras),
+      );
+      expect(streamed.shellBoundary).toBe('discard');
+      expect(streamed.envelope).toContain('"v":"u1"');
+    });
+
+    it('plain (non-PPR) streams keep the envelope inline', async () => {
+      const routes = makeRoute('/', {
+        getServerSideProps: async (ctx) => ({ props: { v: ctx.cookies['session'] } }),
+      });
+      const streamed = expectStream(
+        await renderRoute(
+          credentialRequest(), routes, noLayouts, undefined, undefined, clientScripts, streamingExtras,
+        ),
+      );
+      expect(streamed.envelope).toBeUndefined();
+      expect(await readStreamToString(streamed.stream)).toContain('__gio_props');
+    });
+
+    it('a PPR page rendered without a shell boundary (HEAD) is never cached whole', async () => {
+      const req = { ...credentialRequest(), method: 'HEAD' };
+      const result = await renderRoute(
+        req, pprRoute, noLayouts, undefined, undefined, clientScripts, streamingExtras,
+      );
+      expect('type' in result).toBe(false);
+      expect('cacheable' in result && result.cacheable).toBe(false);
+    });
   });
 });

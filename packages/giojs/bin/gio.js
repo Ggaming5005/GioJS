@@ -117,6 +117,10 @@ function runStaticExport() {
   const env = Object.assign({}, process.env);
   env.GIO_APP_DIR = env.GIO_APP_DIR || join(process.cwd(), 'app');
   env.GIO_OUT_DIR = env.GIO_OUT_DIR || join(process.cwd(), 'out');
+  // Same mode rule as the Rust server sets on its worker: dev iff
+  // NODE_ENV=development. An unset NODE_ENV would load React's dev build,
+  // which writes Suspense error messages and stacks into the exported HTML.
+  env.NODE_ENV = env.NODE_ENV === 'development' ? 'development' : 'production';
   const r = spawnSync(process.execPath, [tsxCli, exportCli], { stdio: 'inherit', env });
   process.exit(r.status == null ? 1 : r.status);
 }

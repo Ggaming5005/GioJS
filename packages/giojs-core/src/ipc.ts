@@ -23,6 +23,7 @@ import type { WsHandlerFn } from './ws-router.ts';
 import type { NodePluginRegistry } from './plugin.ts';
 import type { MiddlewareRules } from './middleware.ts';
 import { logger } from './logger.ts';
+import { createErrorDigest, describeError, isDevMode } from './mode.ts';
 
 const IS_WINDOWS = process.platform === 'win32';
 // Rust resolves a per-instance path (unique pipe name on Windows) and passes
@@ -186,16 +187,21 @@ export function createIPCServer(
       try {
         await handleRequest(req);
       } catch (requestError) {
+        const digest = createErrorDigest();
         logger.error('request handling failed', {
           id: req.id,
           path: req.path,
-          error: requestError instanceof Error ? requestError.message : String(requestError),
+          digest,
+          ...describeError(requestError),
         });
         writeFrame(socket, {
           id: req.id,
           error: true,
           code: 'INTERNAL',
-          message: requestError instanceof Error ? requestError.message : String(requestError),
+          message: isDevMode()
+            ? requestError instanceof Error ? requestError.message : String(requestError)
+            : 'Internal Server Error',
+          digest,
         } satisfies IPCError);
       }
     }
@@ -373,7 +379,9 @@ function shellFlushTick(): Promise<typeof SHELL_FLUSHED> {
  * 'discard' drops everything before it (prefix included) and forwards only
  * the hole chunks. Both passes detect the boundary identically, so a cached
  * shell and a later holes render concatenate without gaps or overlaps as long
- * as the shell renders deterministically (the PPR contract).
+ * as the shell renders deterministically (the PPR contract). A deferred
+ * hydration envelope goes out right after the boundary in both passes, so it
+ * is never part of the cached shell yet sits at the same document position.
  */
 export async function pumpRenderStream(
   socket: StreamFrameSink,
@@ -384,6 +392,15 @@ export async function pumpRenderStream(
   const reader = render.stream.getReader();
   const boundary = render.shellBoundary;
   let inShell = boundary !== undefined;
+  const leaveShell = (): void => {
+    inShell = false;
+    if (boundary === 'mark') {
+      writeFrame(socket, { type: 'shell_end', id: reqId });
+    }
+    if (render.envelope !== undefined) {
+      writeFrame(socket, { type: 'chunk', id: reqId, data: render.envelope });
+    }
+  };
   try {
     if (socket.destroyed) {
       await reader.cancel();
@@ -397,10 +414,7 @@ export async function pumpRenderStream(
       if (inShell) {
         const raced = await Promise.race([pending, shellFlushTick()]);
         if (raced === SHELL_FLUSHED) {
-          inShell = false;
-          if (boundary === 'mark') {
-            writeFrame(socket, { type: 'shell_end', id: reqId });
-          }
+          leaveShell();
         }
       }
       const { done, value } = await pending;
@@ -417,8 +431,8 @@ export async function pumpRenderStream(
     }
     // A page whose whole output flushed with the shell still marks the
     // boundary, so Rust stores the shell (its holes render is just empty).
-    if (inShell && boundary === 'mark') {
-      writeFrame(socket, { type: 'shell_end', id: reqId });
+    if (inShell) {
+      leaveShell();
     }
     const closing = decoder.decode() + render.suffix;
     if (closing !== '') {

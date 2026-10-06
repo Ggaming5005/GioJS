@@ -31,7 +31,7 @@ export default function Page(): React.JSX.Element {
         <li><code>hit; ttl=&lt;secs&gt;</code> - served from the Rust page cache without touching Node; <code>ttl</code> is the seconds until the entry goes stale</li>
         <li><code>stale; age=&lt;secs&gt;; revalidating</code> - served instantly from the cache past its TTL while one background render refreshes the entry; <code>age</code> is seconds since it was rendered</li>
         <li><code>miss; stored</code> - rendered by the Node worker and stored; the next request for this key is a hit</li>
-        <li><code>bypass</code> - rendered (or redirected) but not cached: the page did not declare <code>revalidate</code>, the request was not GET/HEAD, the response varies per user, or it set per-request headers</li>
+        <li><code>bypass</code> - rendered (or redirected) but not cached: the page did not declare <code>revalidate</code>, the request was not GET/HEAD, the response varies per user, it set per-request headers, or its <code>getServerSideProps</code> read the visitor&apos;s cookies or authorization header</li>
         <li><code>static</code> - served by the Rust static file layer (public/ assets, hashed chunks, fonts); never touches the cache or Node</li>
       </ul>
       <p>
@@ -95,6 +95,14 @@ export async function getServerSideProps(ctx: GsspContext) {
         per visitor would mismatch. The page must also be shareable in the usual sense
         (<code>revalidate</code> set, no per-request response headers, no vary); a page that
         isn't falls back to plain streaming with a warning.
+      </p>
+      <p>
+        Reading cookies in <code>getServerSideProps</code> is expected here and keeps the shell
+        cached: the props it returns never become part of the shell. The hydration envelope
+        (the serialized props) is streamed right after the shell boundary on every response,
+        so each visitor hydrates with their own props. Rendering those props{' '}
+        <em>outside</em> a Suspense boundary breaks the contract - the first visitor&apos;s
+        values would be cached in the shell.
       </p>
       <p>
         PPR degrades gracefully: if the holes render fails or times out, the body simply ends

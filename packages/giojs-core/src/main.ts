@@ -20,6 +20,7 @@ import { loadMiddlewareRules } from './middleware-loader.ts';
 import { writeRouteTypes } from './typed-routes.ts';
 import { installProcessGuards, startPluginRegistry, startIpcServers } from './worker-boot.ts';
 import { logger } from './logger.ts';
+import { isDevMode } from './mode.ts';
 
 export async function runServer(): Promise<void> {
   installProcessGuards();
@@ -70,7 +71,7 @@ export async function runServer(): Promise<void> {
     routes,
     layouts,
     projectRoot: dirname(appDir),
-    dev: process.env.NODE_ENV !== 'production',
+    dev: isDevMode(),
   });
 
   startIpcServers({

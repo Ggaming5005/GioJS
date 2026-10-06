@@ -22,6 +22,20 @@ export async function getServerSideProps(ctx) {
       <p>Return a redirect instead of props to send the visitor elsewhere.</p>
       <CodeBlock lang="tsx" code={`return { redirect: { destination: '/login', permanent: false } };`} />
       <div className="callout">Never fetch data inside the component body - it runs during SSR and inflates time-to-first-byte. Use getServerSideProps.</div>
+      <h2>Cookies and caching</h2>
+      <p>
+        <code>ctx.cookies</code> and <code>ctx.headers</code> carry the visitor&apos;s request.
+        Reading <code>ctx.cookies</code> or the <code>cookie</code>/<code>authorization</code>{' '}
+        headers marks the render as personalized, so a page that also exports{' '}
+        <code>revalidate</code> is not cached for that request - see{' '}
+        <a href="/docs/caching">Caching</a>.
+      </p>
+      <p>
+        <code>ctx.headers</code> is a tracked view of the request headers (a Proxy), so{' '}
+        <code>structuredClone</code>, <code>postMessage</code> and worker threads reject it.
+        Pass a plain copy instead - <code>{'{ ...ctx.headers }'}</code> - which, like any
+        enumeration of the headers, counts as reading them.
+      </p>
     </>
   );
 }

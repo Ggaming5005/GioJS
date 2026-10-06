@@ -46,6 +46,13 @@ export default function Page(): React.JSX.Element {
         page - so static hosts return a real 404 for unknown URLs instead of
         falling back to the home page.
       </p>
+      <p>
+        The export runs in production mode, like the server: React&apos;s production
+        build, and no error messages or stacks in the HTML (dev mode only with{' '}
+        <code>NODE_ENV=development</code>). A page that fails to render is skipped
+        and listed with an error reference; the matching log line on stderr has the
+        message and stack.
+      </p>
 
       <h2>Dynamic routes</h2>
       <p>

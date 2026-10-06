@@ -24,6 +24,7 @@ type BuildFn = (props: Record<string, unknown>, path: string) => React.ReactNode
 const routeBuilders = new Map<string, BuildFn>();
 let activeRoot: Root | null = null;
 let listenerInstalled = false;
+let waitingForEnvelope = false;
 
 function readEnvelope(): GioEnvelope | null {
   const el = document.getElementById('__gio_props');
@@ -79,5 +80,40 @@ export function registerRoute(pattern: string, build: BuildFn): void {
     listenerInstalled = true;
     window.addEventListener('gio:navigated', mount);
   }
+  if (document.readyState === 'loading' && readEnvelope() === null) {
+    waitForEnvelope();
+    return;
+  }
   mount();
+}
+
+/**
+ * PPR pages stream the envelope after the cached shell, so an entry module
+ * (async) can run before it has arrived. Mount the moment it is parsed: the
+ * Suspense holes behind it can take far longer, and DOMContentLoaded waits
+ * for all of them. DOMContentLoaded stays as the fallback (no
+ * MutationObserver, or no envelope at all), and whichever fires first mounts
+ * exactly once.
+ */
+function waitForEnvelope(): void {
+  if (waitingForEnvelope) return;
+  waitingForEnvelope = true;
+  let observer: MutationObserver | null = null;
+  const ready = (): void => {
+    if (!waitingForEnvelope) return;
+    waitingForEnvelope = false;
+    observer?.disconnect();
+    document.removeEventListener('DOMContentLoaded', ready);
+    mount();
+  };
+  if (typeof MutationObserver === 'function') {
+    // characterData too: a large envelope's text can arrive in several
+    // network chunks, appended to the same text node. readEnvelope() only
+    // succeeds once the JSON is complete.
+    observer = new MutationObserver(() => {
+      if (readEnvelope() !== null) ready();
+    });
+    observer.observe(document, { childList: true, subtree: true, characterData: true });
+  }
+  document.addEventListener('DOMContentLoaded', ready);
 }

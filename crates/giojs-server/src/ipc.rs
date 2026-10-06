@@ -296,6 +296,9 @@ struct IpcClientInner {
     generation: tokio::sync::watch::Sender<u64>,
     /// True while the worker connection is live (health/readiness signal).
     connected: std::sync::atomic::AtomicBool,
+    /// Server runtime mode: worker error frames become the full dev error
+    /// page in dev, and a generic page with only an error reference otherwise.
+    dev_mode: bool,
 }
 
 /// Everything needed to (re)spawn the Node worker with the right environment.
@@ -304,21 +307,34 @@ struct NodeWorker {
     ipc_path: String,
     ws_path: String,
     token: String,
+    dev_mode: bool,
 }
 
 impl NodeWorker {
     fn spawn(&self) -> anyhow::Result<tokio::process::Child> {
-        spawn_node_tsx(&self.script, &self.ipc_path, &self.ws_path, &self.token)
+        spawn_node_tsx(
+            &self.script,
+            &self.ipc_path,
+            &self.ws_path,
+            &self.token,
+            self.dev_mode,
+        )
     }
 }
 
 impl IpcClient {
-    pub async fn start(node_script: &str, paths: &IpcPaths, token: &str) -> anyhow::Result<Self> {
+    pub async fn start(
+        node_script: &str,
+        paths: &IpcPaths,
+        token: &str,
+        dev_mode: bool,
+    ) -> anyhow::Result<Self> {
         let worker = NodeWorker {
             script: node_script.to_string(),
             ipc_path: paths.http.clone(),
             ws_path: paths.ws.clone(),
             token: token.to_string(),
+            dev_mode,
         };
         let mut child = worker.spawn()?;
         let spawned_pid = child.id();
@@ -363,6 +379,7 @@ impl IpcClient {
                 restart_tx,
                 generation,
                 connected: std::sync::atomic::AtomicBool::new(true),
+                dev_mode,
             }),
         };
 
@@ -651,12 +668,13 @@ fn spawn_node_tsx(
     ipc_path: &str,
     ws_path: &str,
     token: &str,
+    dev_mode: bool,
 ) -> anyhow::Result<tokio::process::Child> {
     if worker_runs_without_tsx(node_script, std::env::var("GIO_STANDALONE").ok().as_deref()) {
         tracing::debug!("spawning prebuilt worker directly: node {node_script}");
         let mut cmd = Command::new("node");
         cmd.arg(node_script);
-        return spawn_worker_command(cmd, ipc_path, ws_path, token);
+        return spawn_worker_command(cmd, ipc_path, ws_path, token, dev_mode);
     }
     // Find the tsx package directory: the directory that contains dist/cli.mjs
     let tsx_pkg_dir = std::env::var("GIO_TSX_PKG").unwrap_or_else(|_| {
@@ -709,7 +727,20 @@ fn spawn_node_tsx(
     cmd.arg(&cli_mjs)
         .arg(node_script)
         .env("NODE_PATH", node_path);
-    spawn_worker_command(cmd, ipc_path, ws_path, token)
+    spawn_worker_command(cmd, ipc_path, ws_path, token, dev_mode)
+}
+
+/// NODE_ENV for the worker. Rust's mode is the single source of truth: the
+/// inherited value is overridden, because the worker (and React, and the
+/// client bundler) would otherwise read an unset or `test` NODE_ENV their own
+/// way - a production server running a dev worker with dev bundles and error
+/// details.
+fn worker_node_env(dev_mode: bool) -> &'static str {
+    if dev_mode {
+        "development"
+    } else {
+        "production"
+    }
 }
 
 /// Environment, stdio, and orphan protection shared by both worker launch
@@ -719,8 +750,10 @@ fn spawn_worker_command(
     ipc_path: &str,
     ws_path: &str,
     token: &str,
+    dev_mode: bool,
 ) -> anyhow::Result<tokio::process::Child> {
-    cmd.env("GIO_SOCKET_PATH", ipc_path)
+    cmd.env("NODE_ENV", worker_node_env(dev_mode))
+        .env("GIO_SOCKET_PATH", ipc_path)
         .env("GIO_WS_SOCKET_PATH", ws_path)
         .env("GIO_IPC_TOKEN", token)
         .stdin(Stdio::null())
@@ -936,7 +969,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                         // ── Normal IpcResponse / IpcError ─────────
                         let id = val["id"].as_str().unwrap_or("").to_string();
                         let resp = if val.get("error").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            error_frame_response(&id, &val)
+                            error_frame_response(&id, &val, inner.dev_mode)
                         } else {
                             match serde_json::from_value::<IpcResponse>(val) {
                                 Ok(r) => r,
@@ -1016,18 +1049,26 @@ fn send_sse_close_frame(inner: &IpcClientInner, req_id: &str) {
 }
 
 /// The error page for a worker error frame (`{"error": true, ...}`).
-fn error_frame_response(id: &str, val: &serde_json::Value) -> IpcResponse {
+fn error_frame_response(id: &str, val: &serde_json::Value, dev_mode: bool) -> IpcResponse {
     let code = val["code"].as_str().unwrap_or("INTERNAL");
     let status = if code == "NOT_FOUND" { 404u16 } else { 500u16 };
     let msg = val["message"].as_str().unwrap_or("Internal Server Error");
     // stack is only present on dev frames (ssr.ts strips it in prod)
     let stack = val.get("stack").and_then(|v| v.as_str());
-    error!("Node render error [{code}]: {msg}");
+    let digest = error_digest(val.get("digest").and_then(|v| v.as_str()));
+    error!(digest = %digest, "Node render error [{code}]: {msg}");
+    // Production never echoes the worker's message: the page names only the
+    // digest the logs are keyed by.
+    let body = if dev_mode {
+        crate::dev_overlay::error_page_html(status, msg, stack)
+    } else {
+        crate::dev_overlay::production_error_page_html(status, &digest)
+    };
     IpcResponse {
         id: id.to_string(),
         status,
         headers: [("content-type".into(), "text/html; charset=utf-8".into())].into(),
-        body: crate::dev_overlay::error_page_html(status, msg, stack),
+        body,
         cacheable: false,
         cache_max_age: 0,
         swr_window_secs: 0,
@@ -1279,10 +1320,33 @@ async fn fail_queued_writes(
     }
 }
 
+/// Error reference for a worker error frame: the worker's own digest (it
+/// logged the real message and stack under it), or a fresh one for frames
+/// from workers that send none. Anything but a short token is replaced, so
+/// the value is always safe to log and to put on a page.
+fn error_digest(from_worker: Option<&str>) -> String {
+    match from_worker {
+        Some(d)
+            if !d.is_empty()
+                && d.len() <= 64
+                && d.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') =>
+        {
+            d.to_string()
+        }
+        _ => uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
+    }
+}
+
 /// Test-only IpcClient wired to an in-memory write channel, so main.rs tests
 /// can exercise streaming body plumbing without a real worker.
 #[cfg(test)]
 pub fn test_client_with_write_channel() -> (IpcClient, mpsc::Receiver<Bytes>) {
+    test_client_with_mode(false)
+}
+
+/// `test_client_with_write_channel` in an explicit runtime mode.
+#[cfg(test)]
+pub fn test_client_with_mode(dev_mode: bool) -> (IpcClient, mpsc::Receiver<Bytes>) {
     let (write_tx, write_rx) = mpsc::channel::<Bytes>(64);
     let client = IpcClient {
         inner: Arc::new(IpcClientInner {
@@ -1296,6 +1360,7 @@ pub fn test_client_with_write_channel() -> (IpcClient, mpsc::Receiver<Bytes>) {
             restart_tx: mpsc::channel(1).0,
             generation: tokio::sync::watch::channel(1u64).0,
             connected: std::sync::atomic::AtomicBool::new(true),
+            dev_mode,
         }),
     };
     (client, write_rx)
@@ -1314,7 +1379,7 @@ mod tests {
             "message": "boom",
             "stack": "Error: boom\n    at Page (/home/dev/app/page.tsx:3:9)",
         });
-        let resp = error_frame_response("r1", &frame);
+        let resp = error_frame_response("r1", &frame, true);
         assert_eq!(resp.status, 500);
         assert!(
             resp.worker_error,
@@ -1429,6 +1494,94 @@ mod tests {
         )
         .expect("valid ppr head frame");
         assert!(ppr.ppr_shell);
+    }
+
+    #[test]
+    fn worker_node_env_follows_the_server_mode() {
+        assert_eq!(worker_node_env(true), "development");
+        assert_eq!(worker_node_env(false), "production");
+    }
+
+    #[test]
+    fn error_digest_keeps_worker_tokens_and_replaces_anything_else() {
+        assert_eq!(error_digest(Some("a1b2c3d4e5f6")), "a1b2c3d4e5f6");
+        for bad in [None, Some(""), Some("<script>"), Some("a b")] {
+            let generated = error_digest(bad);
+            assert_eq!(generated.len(), 12, "for {bad:?}");
+            assert!(generated.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+        assert_eq!(error_digest(Some(&"x".repeat(65))).len(), 12);
+    }
+
+    /// Feed one worker error frame through the reader loop and return the
+    /// response it resolves to.
+    async fn resolve_error_frame(dev_mode: bool, frame: serde_json::Value) -> IpcResponse {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client, _write_rx) = test_client_with_mode(dev_mode);
+        let (tx, rx) = oneshot::channel();
+        client.inner.pending.insert("req-e".into(), tx);
+        let (read_half, _keep_write_open) = tokio::io::split(server_io);
+        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), client.inner.clone()));
+        let (_r, mut node_writer) = tokio::io::split(client_io);
+        write_frame(&mut node_writer, &serde_json::to_vec(&frame).unwrap())
+            .await
+            .unwrap();
+        let IpcSendResult::Response(resp) = rx.await.unwrap() else {
+            panic!("error frames resolve to a plain response");
+        };
+        reader_task.abort();
+        resp
+    }
+
+    #[tokio::test]
+    async fn production_error_frames_never_echo_the_worker_message() {
+        // Even a worker that sends the real message and stack (older or
+        // custom workers) must not get them onto a production page.
+        let resp = resolve_error_frame(
+            false,
+            serde_json::json!({
+                "id": "req-e", "error": true, "code": "RENDER_ERROR",
+                "message": "ENOENT /srv/app/secret.json", "stack": "at load (/srv/app/x.ts:1)",
+                "digest": "0123456789ab",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status, 500);
+        assert!(!resp.cacheable);
+        assert!(!resp.body.contains("secret.json"));
+        assert!(!resp.body.contains("/srv/app"));
+        assert!(!resp.body.contains("__GIO_SSR_ERROR__"));
+        assert!(resp.body.contains("0123456789ab"));
+        assert!(resp.body.contains("Internal Server Error"));
+    }
+
+    #[tokio::test]
+    async fn production_error_frames_without_digest_get_one() {
+        let resp = resolve_error_frame(
+            false,
+            serde_json::json!({"id": "req-e", "error": true, "code": "NOT_FOUND", "message": "nope"}),
+        )
+        .await;
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains("Not Found"));
+        assert!(resp.body.contains("Error reference: <code>"));
+        assert!(!resp.body.contains("nope"));
+    }
+
+    #[tokio::test]
+    async fn dev_error_frames_keep_the_full_overlay_page() {
+        let resp = resolve_error_frame(
+            true,
+            serde_json::json!({
+                "id": "req-e", "error": true, "code": "RENDER_ERROR",
+                "message": "db exploded", "stack": "at page (/app/page.tsx:3)", "digest": "0123456789ab",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status, 500);
+        assert!(resp.body.contains("<pre>db exploded</pre>"));
+        assert!(resp.body.contains("__GIO_SSR_ERROR__"));
+        assert!(resp.body.contains("/app/page.tsx:3"));
     }
 
     #[test]

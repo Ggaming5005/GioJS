@@ -14,6 +14,9 @@ import { dirname, join, relative, sep } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 
 process.env.GIO_SITE_URL = process.env.GIO_SITE_URL || 'https://giojs.com';
+// Production mode like `gio export` (dev iff NODE_ENV=development), set before
+// the exporter loads React: its dev build writes error stacks into the HTML.
+if (process.env.NODE_ENV !== 'development') process.env.NODE_ENV = 'production';
 
 // Cache-bust globals.css: its URL is unhashed, so a stale copy would linger in
 // the CDN/browser across deploys. A content hash in the query string makes each

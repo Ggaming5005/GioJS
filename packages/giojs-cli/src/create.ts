@@ -63,7 +63,7 @@ async function patchPackageJson(destDir: string, mode: Mode): Promise<void> {
     delete deps['@gio.js/server'];
     deps['@gio.js/react'] = 'file:../../packages/giojs-react';
     scripts['dev'] = 'cross-env NODE_ENV=development cargo run --manifest-path ../../Cargo.toml -p giojs-server';
-    scripts['start'] = 'cargo run --release --manifest-path ../../Cargo.toml -p giojs-server';
+    scripts['start'] = 'cross-env NODE_ENV=production cargo run --release --manifest-path ../../Cargo.toml -p giojs-server';
   }
   // Published mode keeps the template's pinned @gio.js/* version ranges as-is.
 

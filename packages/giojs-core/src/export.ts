@@ -87,7 +87,10 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
         continue;
       }
       if ('error' in out && out.error) {
-        skipped.push({ route: target.path, reason: `render error: ${out.message}` });
+        // Outside dev the message is generic; the digest points at the
+        // 'ssr render failed' log line (stderr) with the real message + stack.
+        const ref = out.digest !== undefined ? ` (ref ${out.digest}, details in the error log)` : '';
+        skipped.push({ route: target.path, reason: `render error: ${out.message}${ref}` });
         continue;
       }
 

@@ -12,7 +12,8 @@
  * requester's cookies) but forward only the post-shell hole chunks. The PPR
  * contract: the SHELL portion must render identically for every visitor (same
  * tree structure and bytes for the shared request) - the holes are the only
- * personalized part.
+ * personalized part. The hydration envelope carries per-request props, so on
+ * these renders it streams right after the shell instead of inside it.
  */
 import { isUtf8 } from 'node:buffer';
 import React from 'react';
@@ -31,6 +32,7 @@ import { GioEventStream, isGioEventStream } from './sse.ts';
 import type { NodePluginRegistry } from './plugin.ts';
 import { logger } from './logger.ts';
 import { clientBuildErrorFor } from './client-build-errors.ts';
+import { createErrorDigest, describeError, isDevMode } from './mode.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -54,6 +56,13 @@ export interface StreamRenderResult {
    * boundary and forwards only the hole chunks (skipShell renders).
    */
   shellBoundary?: 'mark' | 'discard';
+  /**
+   * PPR renders only: the hydration envelope script, written right after the
+   * shell boundary instead of inside the shell. Its props come from this
+   * request's getServerSideProps (cookies included), so it must never become
+   * part of the shell Rust caches and replays to every visitor.
+   */
+  envelope?: string;
 }
 
 /** Optional render inputs beyond pages/layouts. */
@@ -69,7 +78,19 @@ export interface RenderExtras {
   streaming?: boolean;
 }
 
-const DEV = process.env.NODE_ENV !== 'production';
+/** What production responses say instead of the real error message. */
+const GENERIC_ERROR_MESSAGE = 'Internal Server Error';
+
+/**
+ * Request headers that identify the visitor - the same set Rust folds into
+ * the coalesce key and strips from shared SWR refreshes. Other headers
+ * (accept-language, user-agent, ...) only pick a variant of public content
+ * and stay readable without making a render personal.
+ */
+const CREDENTIAL_HEADERS: readonly string[] = ['cookie', 'authorization'];
+
+/** Routes already warned about credential reads (one warning per route). */
+const warnedDynamicRoutes = new Set<string>();
 
 /**
  * Whether build diagnostics may be written into page HTML for the error
@@ -147,6 +168,84 @@ function makeGioRequest(req: IPCRequest, params: Record<string, string>): GioReq
     },
     locale: req.locale,
   };
+}
+
+/**
+ * Build the getServerSideProps context with Next.js-style dynamic detection:
+ * touching `ctx.cookies`, reading or probing one of the `tracked` headers
+ * (lowercase names) on `ctx.headers`, or enumerating the headers at all,
+ * marks the render as personalized. Detection is per access, not per value -
+ * an absent cookie read still decides the output (the anonymous variant), so
+ * it counts too. Only the user-facing context is instrumented; framework code
+ * reads `req.headers` directly and never trips it.
+ *
+ * `ctx.headers` is a Proxy, so structuredClone/postMessage reject it; a copy
+ * (`{ ...ctx.headers }`) is a plain object - and counts as a read.
+ */
+function makeGsspContext(
+  req: IPCRequest,
+  params: Record<string, string>,
+  tracked: ReadonlySet<string>,
+): { ctx: GsspContext; credentialsRead: () => boolean } {
+  let read = false;
+  const isTracked = (key: string | symbol): boolean =>
+    typeof key === 'string' && tracked.has(key.toLowerCase());
+  const headers = new Proxy(
+    { ...req.headers },
+    {
+      get(target, key, receiver) {
+        if (isTracked(key)) read = true;
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+      has(target, key) {
+        if (isTracked(key)) read = true;
+        return Reflect.has(target, key);
+      },
+      getOwnPropertyDescriptor(target, key) {
+        if (isTracked(key)) read = true;
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+      // Every enumeration (spread, Object.keys, JSON.stringify, for...in,
+      // getOwnPropertyNames) lists the keys first, and the list alone tells
+      // whether credentials were sent - a read with or without them.
+      ownKeys(target) {
+        read = true;
+        return Reflect.ownKeys(target);
+      },
+    },
+  );
+  let cookies: Record<string, string> | undefined;
+  const ctx: GsspContext = {
+    method: req.method,
+    path: req.path,
+    params,
+    query: req.query,
+    headers,
+    get cookies() {
+      read = true;
+      cookies ??= parseCookies(req.headers['cookie']);
+      return cookies;
+    },
+    ...(req.locale !== '' ? { locale: req.locale } : {}),
+  };
+  return { ctx, credentialsRead: () => read };
+}
+
+/**
+ * Headers an onRequest plugin added, changed or removed, as lowercase names
+ * (the tracked set is matched case-insensitively; plugins may write
+ * `X-User-Id`). They are derived per request (typically from the session
+ * cookie - an auth plugin setting x-user-id), so reading them is as personal
+ * as reading the cookie itself.
+ */
+function pluginDerivedHeaders(
+  before: Record<string, string>,
+  after: Record<string, string>,
+): string[] {
+  const names = new Set([...Object.keys(before), ...Object.keys(after)]);
+  return [...names]
+    .filter(name => before[name] !== after[name])
+    .map(name => name.toLowerCase());
 }
 
 /** Rank a single segment: literal (2) > dynamic (1) > catch-all (0). */
@@ -309,12 +408,18 @@ export async function renderRoute(
   clientScripts?: Map<string, string>,
   extras?: RenderExtras,
 ): Promise<IPCOutbound | SseRouteResult | StreamRenderResult> {
+  const credentialHeaders = new Set(CREDENTIAL_HEADERS);
   if (registry !== undefined && !registry.isEmpty) {
+    // Snapshot first: plugins may mutate req.headers in place.
+    const incomingHeaders = { ...req.headers };
     const intercepted = await registry.interceptRequest(req);
     if (isPluginResponse(intercepted)) {
       return intercepted;
     }
     req = intercepted;
+    for (const name of pluginDerivedHeaders(incomingHeaders, req.headers)) {
+      credentialHeaders.add(name);
+    }
   }
 
   // ── route.ts method handlers (API routes + SSE) ───────────────────────────
@@ -377,17 +482,11 @@ export async function renderRoute(
 
     let props: Record<string, unknown> = {};
     let gsspHeaders: Record<string, string> | null = null;
+    let credentialsRead = (): boolean => false;
     if (pageModule.getServerSideProps) {
-      const ctx: GsspContext = {
-        method: req.method,
-        path: req.path,
-        params: match.params,
-        query: req.query,
-        headers: req.headers,
-        cookies: parseCookies(req.headers['cookie']),
-        ...(req.locale !== '' ? { locale: req.locale } : {}),
-      };
-      const result = await pageModule.getServerSideProps(ctx);
+      const gssp = makeGsspContext(req, match.params, credentialHeaders);
+      credentialsRead = gssp.credentialsRead;
+      const result = await pageModule.getServerSideProps(gssp.ctx);
       if (isRedirect(result)) {
         return {
           id: req.id,
@@ -455,31 +554,6 @@ export async function renderRoute(
     const clientBuildError =
       entryScript === undefined && devOverlayHandOff() ? clientBuildErrorFor(pattern) : undefined;
 
-    let element: React.ReactNode = React.createElement(
-      React.Fragment,
-      null,
-      React.createElement('div', { id: '__gio' }, inner),
-      envelopeJson !== null
-        ? React.createElement('script', {
-            id: '__gio_props',
-            type: 'application/json',
-            dangerouslySetInnerHTML: { __html: envelopeJson },
-          })
-        : null,
-      clientBuildError !== undefined
-        ? React.createElement('script', {
-            dangerouslySetInnerHTML: { __html: devOverlayErrorScript(clientBuildError) },
-          })
-        : null,
-    );
-    if (rootLayoutEntry !== undefined) {
-      const rootLayoutMod = await rootLayoutEntry.load();
-      element = React.createElement(rootLayoutMod.default, {
-        children: element,
-        path: req.path,
-      });
-    }
-
     let cacheable = pageModule.revalidate !== undefined;
     if (gsspHeaders !== null && cacheable) {
       // Response headers from gSSP are per-request (set-cookie above all);
@@ -490,7 +564,7 @@ export async function renderRoute(
       cacheable = false;
     }
     // revalidate=false means "cache forever"; false??0 would coerce to 0 so check explicitly.
-    const cacheMaxAge = !cacheable
+    let cacheMaxAge = !cacheable
       ? 0
       : pageModule.revalidate === false
         ? 31536000
@@ -511,7 +585,7 @@ export async function renderRoute(
     // boundary). The shell must be shareable - a page that fails the
     // shareability test falls back to plain streaming. skipShell requests
     // (Rust re-rendering only the holes for a shell cache hit) always stream.
-    const shareable = cacheable && cacheMaxAge > 0;
+    let shareable = cacheable && cacheMaxAge > 0;
     const streamingAvailable =
       extras?.streaming === true &&
       req.method === 'GET' &&
@@ -525,7 +599,49 @@ export async function renderRoute(
       );
     }
     const pprShell = pageModule.shell === 'cache' && shareable && streamingAvailable;
+
+    // A render that read request credentials is personal: caching it under
+    // the shared key would serve the first visitor's page to everyone. PPR
+    // keeps its cache - Rust stores only the shell, which the PPR contract
+    // keeps visitor-independent, and the per-request props stream after it.
+    const makePersonal = (): void => {
+      warnPersonalRender(pattern, req.path);
+      cacheable = false;
+      cacheMaxAge = 0;
+      shareable = false;
+    };
+    if (shareable && !pprShell && credentialsRead()) {
+      makePersonal();
+    }
     const shouldStream = streamingAvailable && (!shareable || pprShell || skipShell);
+    // With a shell boundary, the envelope must stream after it (pumped by
+    // ipc.ts) - inside the shell it would be cached with this request's props.
+    const deferEnvelope = shouldStream && (pprShell || skipShell);
+
+    let element: React.ReactNode = React.createElement(
+      React.Fragment,
+      null,
+      React.createElement('div', { id: '__gio' }, inner),
+      envelopeJson !== null && !deferEnvelope
+        ? React.createElement('script', {
+            id: '__gio_props',
+            type: 'application/json',
+            dangerouslySetInnerHTML: { __html: envelopeJson },
+          })
+        : null,
+      clientBuildError !== undefined
+        ? React.createElement('script', {
+            dangerouslySetInnerHTML: { __html: devOverlayErrorScript(clientBuildError) },
+          })
+        : null,
+    );
+    if (rootLayoutEntry !== undefined) {
+      const rootLayoutMod = await rootLayoutEntry.load();
+      element = React.createElement(rootLayoutMod.default, {
+        children: element,
+        path: req.path,
+      });
+    }
 
     // Resolves once React's shell is ready; Suspense content streams later.
     const stream = await renderToReadableStream(element, {
@@ -534,10 +650,11 @@ export async function renderRoute(
       // render instead of finishing output nobody will read.
       ...(signal !== undefined ? { signal } : {}),
       onError(streamError) {
-        logger.error('ssr stream error', {
-          path: req.path,
-          error: streamError instanceof Error ? streamError.message : String(streamError),
-        });
+        // The returned digest is what React puts in the HTML in place of the
+        // message (production builds); the log line carries the details.
+        const digest = createErrorDigest();
+        logger.error('ssr stream error', { path: req.path, digest, ...describeError(streamError) });
+        return digest;
       },
     });
 
@@ -563,11 +680,19 @@ export async function renderRoute(
           : pprShell
             ? { shellBoundary: 'mark' as const }
             : {}),
+        ...(deferEnvelope && envelopeJson !== null
+          ? { envelope: envelopeScript(envelopeJson) }
+          : {}),
       };
     }
 
     await stream.allReady;
     const html = await streamToString(stream);
+    // Props can carry ctx.headers into the render itself; catch reads that
+    // happened while rendering, before the response is offered to the cache.
+    if (shareable && credentialsRead()) {
+      makePersonal();
+    }
 
     // Root layout provides <html>/<body>, so skip the document wrapper.
     const body = rootLayoutEntry !== undefined ? html : wrapWithDocument(html);
@@ -586,15 +711,17 @@ export async function renderRoute(
     }
     return ssrResponse;
   } catch (err) {
-    logger.error('ssr render failed', {
-      path: req.path,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    // Production responses carry only a generic message and the digest; the
+    // details live in this log line under the same digest.
+    const digest = createErrorDigest();
+    logger.error('ssr render failed', { path: req.path, digest, ...describeError(err) });
+    const dev = isDevMode();
+    const message = dev ? (err instanceof Error ? err.message : String(err)) : GENERIC_ERROR_MESSAGE;
     const errorPage = await renderSpecialPage(
       req,
       layouts,
       extras?.specialPages?.error,
-      { error: { message: err instanceof Error ? err.message : String(err) } },
+      { error: { message, digest } },
       500,
       signal,
     );
@@ -603,10 +730,33 @@ export async function renderRoute(
       id: req.id,
       error: true,
       code: 'RENDER_ERROR',
-      message: err instanceof Error ? err.message : String(err),
-      ...(DEV && err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
+      message,
+      digest,
+      ...(dev && err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
     };
   }
+}
+
+/** The `#__gio_props` element as raw HTML (the deferred PPR envelope). */
+function envelopeScript(envelopeJson: string): string {
+  return `<script id="__gio_props" type="application/json">${envelopeJson}</script>`;
+}
+
+/**
+ * Explain once per route why a page exporting `revalidate` is not cached.
+ * Each later render of the route stays uncacheable, just silently.
+ */
+function warnPersonalRender(pattern: string, path: string): void {
+  if (warnedDynamicRoutes.has(pattern)) return;
+  warnedDynamicRoutes.add(pattern);
+  logger.warn(
+    'getServerSideProps read request credentials (ctx.cookies, the cookie/authorization ' +
+      'header, or a header an onRequest plugin set) - this render is personalized, so it is ' +
+      'not cached even though the page ' +
+      "exports revalidate. Remove `revalidate`, or keep `revalidate` + `shell = 'cache'` " +
+      'and render the personalized parts inside <Suspense> holes',
+    { route: pattern, path },
+  );
 }
 
 // ── route.ts handler dispatch ─────────────────────────────────────────────────
@@ -676,16 +826,18 @@ async function runRouteHandler(
       body: JSON.stringify(result),
     };
   } catch (err) {
+    const digest = createErrorDigest();
     logger.error('route handler failed', {
       path: req.path,
       method: req.method,
-      error: err instanceof Error ? err.message : String(err),
+      digest,
+      ...describeError(err),
     });
     return {
       ...base,
       status: 500,
       headers: { 'content-type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({ error: 'Internal Server Error' }),
+      body: JSON.stringify({ error: GENERIC_ERROR_MESSAGE, digest }),
     };
   }
 }
