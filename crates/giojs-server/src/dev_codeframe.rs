@@ -46,7 +46,11 @@ pub struct CodeframeLine {
 }
 
 /// Resolve `requested` (absolute, or relative to `root`) to a canonical path
-/// that is provably inside `root` and has a source-file extension.
+/// that is provably inside `root` and is a regular file with a source-file
+/// extension. Every check runs on the resolved path: checking the requested
+/// name instead would let a symlink called `x.ts` expose `.env` or a file
+/// outside the project. Files under `node_modules` inside the root are
+/// allowed (library frames make useful codeframes); nothing outside is.
 pub fn validate_project_path(root: &Path, requested: &str) -> Result<PathBuf, CodeframeError> {
     if requested.trim().is_empty() {
         return Err(CodeframeError::InvalidPath);
@@ -57,17 +61,6 @@ pub fn validate_project_path(root: &Path, requested: &str) -> Result<PathBuf, Co
     } else {
         root.join(requested_path)
     };
-    let extension_allowed = joined
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            SOURCE_EXTENSIONS
-                .iter()
-                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
-        });
-    if !extension_allowed {
-        return Err(CodeframeError::NotSourceFile);
-    }
     // Canonicalizing both sides makes prefix comparison sound on Windows,
     // where canonical paths carry the \\?\ verbatim prefix.
     let canonical_root = root
@@ -78,6 +71,17 @@ pub fn validate_project_path(root: &Path, requested: &str) -> Result<PathBuf, Co
         .map_err(|_| CodeframeError::NotFound)?;
     if !canonical.starts_with(&canonical_root) {
         return Err(CodeframeError::OutsideRoot);
+    }
+    let extension_allowed = canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            SOURCE_EXTENSIONS
+                .iter()
+                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+        });
+    if !extension_allowed || !canonical.is_file() {
+        return Err(CodeframeError::NotSourceFile);
     }
     Ok(canonical)
 }
@@ -190,6 +194,67 @@ mod tests {
         let root = temp_project_root("env");
         let result = validate_project_path(&root, "app/secret.env");
         assert!(matches!(result, Err(CodeframeError::NotSourceFile)));
+    }
+
+    #[test]
+    fn directory_with_source_extension_is_rejected() {
+        let root = temp_project_root("dir_ext");
+        std::fs::create_dir_all(root.join("app/folder.ts")).unwrap();
+        assert!(matches!(
+            validate_project_path(&root, "app/folder.ts"),
+            Err(CodeframeError::NotSourceFile)
+        ));
+    }
+
+    #[test]
+    fn node_modules_inside_root_is_accepted() {
+        let root = temp_project_root("node_modules");
+        std::fs::create_dir_all(root.join("node_modules/lib")).unwrap();
+        std::fs::write(
+            root.join("node_modules/lib/index.js"),
+            "module.exports = 1;\n",
+        )
+        .unwrap();
+        assert!(validate_project_path(&root, "node_modules/lib/index.js").is_ok());
+    }
+
+    // Creating symlinks needs Developer Mode or admin rights on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_with_source_name_to_non_source_file_is_rejected() {
+        let root = temp_project_root("symlink_ext");
+        let link = root.join("app/env-link.ts");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(root.join("app/secret.env"), &link).unwrap();
+        assert!(matches!(
+            validate_project_path(&root, "app/env-link.ts"),
+            Err(CodeframeError::NotSourceFile)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_inside_root_to_file_outside_is_rejected() {
+        let outside = temp_project_root("symlink_outside_target");
+        let root = temp_project_root("symlink_outside");
+        let link = root.join("app/escape.ts");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(outside.join("outside.ts"), &link).unwrap();
+        assert!(matches!(
+            validate_project_path(&root, "app/escape.ts"),
+            Err(CodeframeError::OutsideRoot)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_source_file_inside_root_is_accepted() {
+        let root = temp_project_root("symlink_ok");
+        let link = root.join("app/alias.ts");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(root.join("app/page.tsx"), &link).unwrap();
+        let resolved = validate_project_path(&root, "app/alias.ts").unwrap();
+        assert!(resolved.ends_with("page.tsx"));
     }
 
     #[test]
