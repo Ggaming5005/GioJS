@@ -52,3 +52,5 @@ reqwest            = { version = "0.12", default-features = false, features = ["
 hyper              = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util         = { version = "0.1", features = ["tokio", "server-auto"] }
 lightningcss       = { version = "1.0.0-alpha.71", features = ["bundler"] }
+# .env loading at server startup (parser semantics shared with core env-files.ts).
+dotenvy            = "0.15"

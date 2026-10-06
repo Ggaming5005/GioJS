@@ -62,6 +62,16 @@ export default function Page(): React.JSX.Element {
         the folder), forwards <code>SIGINT</code>/<code>SIGTERM</code> for clean shutdown,
         and passes any extra arguments through to the server.
       </p>
+      <h2>Environment variables</h2>
+      <p>
+        The build loads the project's production <code>.env</code> files, and{' '}
+        <code>GIO_PUBLIC_*</code> values are frozen into the hydration chunks and{' '}
+        <code>worker.js</code> at build time - changing one needs a rebuild. Nothing else is
+        baked in and no <code>.env</code> file is copied into the output: server-side
+        variables are read at runtime from the environment, or from <code>.env</code> files
+        you place inside the deploy folder (the server loads them at startup with the usual{' '}
+        <a href="/docs/configuration">precedence</a>; real environment variables win).
+      </p>
       <p>As a systemd service, the whole unit is one line of ExecStart:</p>
       <CodeBlock lang="ini" code={`[Service]
 ExecStart=node /srv/app/run.mjs

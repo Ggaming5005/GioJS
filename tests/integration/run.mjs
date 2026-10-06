@@ -97,7 +97,11 @@ async function linkFixtureDeps(targetDir = fixtureDir) {
 async function copyFixtureForDev() {
   const devDir = join(repoRoot, 'tests', 'integration', '.dev-fixture');
   await rm(devDir, { recursive: true, force: true });
-  for (const item of ['app', 'gio.toml', 'gio.config.ts', 'middleware.ts', 'package.json']) {
+  const items = [
+    'app', 'lib', 'gio.toml', 'gio.config.ts', 'middleware.ts', 'package.json',
+    '.env', '.env.development', '.env.production',
+  ];
+  for (const item of items) {
     await cp(join(fixtureDir, item), join(devDir, item), { recursive: true });
   }
   await linkFixtureDeps(devDir);
@@ -119,6 +123,8 @@ async function main() {
       GIO_CACHE_DIR: cacheDir,
       RUST_LOG: 'info',
       NODE_ENV: 'production',
+      // Also set in fixture/.env: the real environment must win.
+      GIO_FIXTURE_PROCESS_WINS: 'from-process',
     },
   });
   server.stdout.on('data', (d) => { log += d.toString(); });
@@ -156,6 +162,56 @@ async function main() {
       const res = await fetch(`${BASE}${chunk}`);
       assert.equal(res.status, 200);
       assert.match(res.headers.get('cache-control') ?? '', /immutable/);
+    });
+
+    await test('.env files load at startup and the worker inherits them', async () => {
+      const res = await fetch(`${BASE}/api/env`);
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), {
+        dotenv: 'from-dotenv',
+        // NODE_ENV=production: .env.production beats .env, and
+        // .env.development never loads.
+        precedence: 'from-env-production',
+        processWins: 'from-process',
+      });
+      // File names are logged (from the project root, not the cwd); values never.
+      assert.match(log, /loaded \.env files.*\.env\.production, \.env/);
+      assert.doesNotMatch(log, /FIXTURE_PRIVATE_VALUE/);
+    });
+
+    await test('GIO_PUBLIC_* vars are inlined into client chunks, others never', async () => {
+      const res = await fetch(`${BASE}/env`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.match(html, /ENV_FIXTURE greeting=(<!-- -->)?FIXTURE_PUBLIC_VALUE/);
+      const chunk = html.match(/\/_next\/static\/chunks\/route-env-[A-Z0-9]+\.js/)?.[0];
+      assert.ok(chunk, 'env page has a hydration chunk');
+      const js = await (await fetch(`${BASE}${chunk}`)).text();
+      assert.match(js, /FIXTURE_PUBLIC_VALUE/, 'public value inlined at build time');
+      assert.doesNotMatch(js, /FIXTURE_PRIVATE_VALUE/, 'non-public value must never ship');
+    });
+
+    await test('server-only imports in client code: page SSRs but never hydrates', async () => {
+      const res = await fetch(`${BASE}/server-only-leak`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.match(html, /SERVER_ONLY_LEAK_FIXTURE key=(<!-- -->)?FIXTURE_SERVER_ONLY_VALUE/);
+      assert.doesNotMatch(html, /route-server-only-leak-/, 'no bundle for the leaking route');
+      assert.doesNotMatch(html, /id="__gio_props"/);
+      assert.doesNotMatch(html, /__GIO_SSR_ERROR__/, 'the overlay hand-off is dev-only');
+      assert.match(
+        log,
+        /imports server-only code.*app\/server-only-leak\/page\.tsx -> lib\/fixture-keys\.server\.ts/,
+      );
+    });
+
+    await test('the rejected route does not cost the others their shared chunks', async () => {
+      const html = await (await fetch(`${BASE}/`)).text();
+      const chunk = html.match(/\/_next\/static\/chunks\/route-index-[A-Z0-9]+\.js/)?.[0];
+      assert.ok(chunk, 'home page still hydrates');
+      const js = await (await fetch(`${BASE}${chunk}`)).text();
+      // Per-route fallback bundles would each carry their own React.
+      assert.match(js, /\.\/shared-[A-Z0-9]+\.js/, 'entry imports a shared chunk');
     });
 
     await test('POST bodies are forwarded to Node', async () => {
@@ -473,6 +529,60 @@ async function main() {
   }
 }
 
+/**
+ * Phase 1b (NODE_ENV unset - the template's `npm start`): Rust runs in
+ * production mode, so the worker must not write build diagnostics into
+ * public HTML either - no overlay is there to read them.
+ */
+async function unsetNodeEnvPhase() {
+  const binary = findServerBinary();
+  const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-unset-cache-'));
+  const env = {
+    ...process.env,
+    GIO_APP_DIR: join(fixtureDir, 'app'),
+    GIO_CACHE_DIR: cacheDir,
+    RUST_LOG: 'info',
+  };
+  delete env.NODE_ENV;
+
+  let log = '';
+  const server = spawn(binary, [], { cwd: repoRoot, env });
+  server.stdout.on('data', (d) => { log += d.toString(); });
+  server.stderr.on('data', (d) => { log += d.toString(); });
+  let serverGone = false;
+  const serverExited = new Promise((r) =>
+    server.on('exit', () => { serverGone = true; r(); }),
+  );
+
+  try {
+    await waitFor('server health (NODE_ENV unset)', async () => {
+      const res = await fetch(`${BASE}/_gio/health`);
+      return res.ok && (await res.json()).nodeReady === true;
+    }, 30_000);
+
+    await test('NODE_ENV unset: rejected bundles stay out of public HTML', async () => {
+      assert.match(log, /loaded \.env files.*"production"/);
+      const html = await (await fetch(`${BASE}/server-only-leak`)).text();
+      assert.match(html, /SERVER_ONLY_LEAK_FIXTURE/);
+      assert.doesNotMatch(html, /__gio_dev_overlay_script/, 'production mode: no overlay');
+      assert.doesNotMatch(html, /__GIO_SSR_ERROR__/);
+      assert.doesNotMatch(html, /imports server-only code|fixture-keys\.server/);
+      // The diagnostic still reaches the server log.
+      assert.match(log, /imports server-only code/);
+    });
+  } catch (err) {
+    console.error('\nintegration (NODE_ENV unset): FAILED');
+    console.error(err);
+    console.error('\n── server log tail ──');
+    console.error(significantLogTail(log));
+    process.exitCode = 1;
+  } finally {
+    if (!serverGone) server.kill();
+    await serverExited;
+    await rm(cacheDir, { recursive: true, force: true });
+  }
+}
+
 /** Phase 2 (dev mode): file watching restarts the worker and reloads pages. */
 async function devWatchPhase() {
   const binary = findServerBinary();
@@ -502,6 +612,21 @@ async function devWatchPhase() {
       const res = await fetch(`${BASE}/_gio/health`);
       return res.ok;
     }, 30_000);
+
+    await test('dev: NODE_ENV=development loads .env.development, not .env.production', async () => {
+      const body = await (await fetch(`${BASE}/api/env`)).json();
+      assert.equal(body.precedence, 'from-env-development');
+    });
+
+    await test('dev: a rejected client bundle is handed to the error overlay', async () => {
+      const html = await (await fetch(`${BASE}/server-only-leak`)).text();
+      assert.match(html, /SERVER_ONLY_LEAK_FIXTURE/);
+      assert.match(
+        html,
+        /window\.__GIO_SSR_ERROR__=\{"message":"client bundle for route \\"\/server-only-leak\\" imports server-only code/,
+      );
+      assert.match(html, /__gio_dev_overlay_script/);
+    });
 
     await test('dev watch: editing a page restarts the worker and serves new content', async () => {
       assert.match(await (await fetch(`${BASE}/`)).text(), /INTEGRATION_FIXTURE_HOME/);
@@ -587,11 +712,22 @@ async function standalonePhase() {
     await mkdir(join(workDir, 'app', 'api', 'hello'), { recursive: true });
     await writeFile(
       join(workDir, 'app', 'page.tsx'),
-      "import React from 'react';\n\nexport default function Home() {\n  return <h1>STANDALONE_FIXTURE_HOME</h1>;\n}\n",
+      "import React from 'react';\n\nexport default function Home() {\n" +
+        '  return <h1>STANDALONE_FIXTURE_HOME {process.env.GIO_PUBLIC_STANDALONE_GREETING}</h1>;\n}\n',
     );
     await writeFile(
       join(workDir, 'app', 'api', 'hello', 'route.ts'),
-      "export function GET() {\n  return { ok: true, source: 'standalone' };\n}\n",
+      'export function GET() {\n' +
+        '  const { GIO_PUBLIC_STANDALONE_GREETING } = process.env;\n' +
+        "  return { ok: true, source: 'standalone', dotenv: process.env.GIO_STANDALONE_DOTENV ?? null,\n" +
+        '    buildOnly: process.env.GIO_STANDALONE_BUILD_ONLY ?? null,\n' +
+        '    publicDestructured: GIO_PUBLIC_STANDALONE_GREETING ?? null };\n}\n',
+    );
+    // Build-time env: the public value is frozen into the bundles; the
+    // server-only one must not travel into the deploy dir.
+    await writeFile(
+      join(workDir, '.env.production'),
+      'GIO_PUBLIC_STANDALONE_GREETING=STANDALONE_PUBLIC_VALUE\nGIO_STANDALONE_BUILD_ONLY=build-machine\n',
     );
     await writeFile(
       join(workDir, 'gio.toml'),
@@ -627,7 +763,12 @@ async function standalonePhase() {
       assert.ok(!existsSync(join(outDir, 'node_modules')), 'output must not need node_modules');
       const worker = await readFile(join(outDir, 'worker.js'), 'utf8');
       assert.match(worker, /STANDALONE_FIXTURE_HOME/, 'page component bundled into worker.js');
+      assert.match(build.stdout, /env: {4}\.env\.production/);
+      assert.ok(!existsSync(join(outDir, '.env.production')), 'build-time .env files are not copied');
     });
+
+    // Runtime env lives in the deploy dir: run.mjs starts the server there.
+    await writeFile(join(outDir, '.env'), 'GIO_STANDALONE_DOTENV=from-deploy-dir\n');
 
     // The output must be self-contained: delete the app sources and the
     // node_modules the build used before booting it.
@@ -660,13 +801,27 @@ async function standalonePhase() {
       const chunkRes = await fetch(`${STANDALONE_BASE}${chunk}`);
       assert.equal(chunkRes.status, 200);
       assert.match(chunkRes.headers.get('cache-control') ?? '', /immutable/);
+      // GIO_PUBLIC_* frozen at build time into both the chunk and the SSR
+      // render, so hydration sees the same value the server rendered.
+      assert.match(await chunkRes.text(), /STANDALONE_PUBLIC_VALUE/);
+      assert.match(html, /STANDALONE_FIXTURE_HOME (<!-- -->)?STANDALONE_PUBLIC_VALUE/);
     });
 
     await test('standalone: route.ts API handler responds from the bundle', async () => {
       const res = await fetch(`${STANDALONE_BASE}/api/hello`);
       assert.equal(res.status, 200);
       assert.match(res.headers.get('content-type') ?? '', /application\/json/);
-      assert.deepEqual(await res.json(), { ok: true, source: 'standalone' });
+      assert.deepEqual(await res.json(), {
+        ok: true,
+        source: 'standalone',
+        // Loaded by the server from the deploy dir at startup...
+        dotenv: 'from-deploy-dir',
+        // ...while the build machine's server variables stay behind.
+        buildOnly: null,
+        // Frozen GIO_PUBLIC_* values hold for destructured reads too, as
+        // they do in the client chunks.
+        publicDestructured: 'STANDALONE_PUBLIC_VALUE',
+      });
     });
 
     await test('standalone: stopping the launcher leaves no orphaned worker', async () => {
@@ -711,6 +866,9 @@ async function standalonePhase() {
 }
 
 await main();
+if (process.exitCode !== 1) {
+  await unsetNodeEnvPhase();
+}
 if (process.exitCode !== 1) {
   await devWatchPhase();
 }

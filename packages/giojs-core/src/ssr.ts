@@ -30,6 +30,7 @@ import type {
 import { GioEventStream, isGioEventStream } from './sse.ts';
 import type { NodePluginRegistry } from './plugin.ts';
 import { logger } from './logger.ts';
+import { clientBuildErrorFor } from './client-build-errors.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -69,6 +70,18 @@ export interface RenderExtras {
 }
 
 const DEV = process.env.NODE_ENV !== 'production';
+
+/**
+ * Whether build diagnostics may be written into page HTML for the error
+ * overlay. Uses Rust's dev-mode rule (main.rs), which also decides whether
+ * the overlay is injected at all: only NODE_ENV=development. An unset
+ * NODE_ENV - a plain `giojs-server` start - is production there, and the
+ * diagnostics (import chains, esbuild errors with file paths) must not reach
+ * public responses. Read per render so tests can switch it.
+ */
+function devOverlayHandOff(): boolean {
+  return process.env.NODE_ENV === 'development' && process.env.GIO_EXPORT !== '1';
+}
 
 /** Match a URL path against pattern-keyed entries (mirrors the Rust trie logic). */
 function matchIn<T>(
@@ -216,6 +229,19 @@ const DOCUMENT_SUFFIX = `${OBSERVER_SCRIPT}</body></html>`;
 
 function wrapWithDocument(inner: string): string {
   return `${DOCUMENT_PREFIX}${inner}${DOCUMENT_SUFFIX}`;
+}
+
+/**
+ * Inline script handing `message` to the dev overlay, which picks up
+ * `window.__GIO_SSR_ERROR__` when it loads. Escaped like the envelope so
+ * the message can never close the script element.
+ */
+export function devOverlayErrorScript(message: string): string {
+  const payload = JSON.stringify({ message, stack: '' })
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+  return `window.__GIO_SSR_ERROR__=${payload};`;
 }
 
 /**
@@ -424,6 +450,10 @@ export async function renderRoute(
         path: req.path,
       });
     }
+    // Dev: a route whose client bundle was rejected says so in the error
+    // overlay - otherwise the only symptom is a page that never hydrates.
+    const clientBuildError =
+      entryScript === undefined && devOverlayHandOff() ? clientBuildErrorFor(pattern) : undefined;
 
     let element: React.ReactNode = React.createElement(
       React.Fragment,
@@ -434,6 +464,11 @@ export async function renderRoute(
             id: '__gio_props',
             type: 'application/json',
             dangerouslySetInnerHTML: { __html: envelopeJson },
+          })
+        : null,
+      clientBuildError !== undefined
+        ? React.createElement('script', {
+            dangerouslySetInnerHTML: { __html: devOverlayErrorScript(clientBuildError) },
           })
         : null,
     );

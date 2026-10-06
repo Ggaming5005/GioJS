@@ -24,6 +24,14 @@ renders React. Full docs: https://giojs.com/llms.txt
 - Config is `gio.toml` (server, TLS, images.remote_patterns, rate_limits,
   fonts, i18n, websocket, metrics). There is no `[cache]`/redirects/rewrites
   section.
+- Env: `.env.{mode}.local`, `.env.local`, `.env.{mode}`, `.env` load at server
+  start (first wins; real env vars always win; restart after editing). Only
+  `GIO_PUBLIC_*` variables reach client code (not `NEXT_PUBLIC_*`); any other
+  `process.env.X` is `undefined` in the browser.
+- Server-only modules: `import '@gio.js/core/server-only'` or name the file
+  `*.server.js`. Using one from getServerSideProps/route handlers is fine;
+  importing it from client code rejects that route's bundle (page renders but
+  never hydrates).
 
 ## Commands
 

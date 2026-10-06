@@ -21,6 +21,7 @@ mod config;
 mod dev_codeframe;
 mod dev_overlay;
 mod devtools;
+mod env_files;
 mod ipc;
 mod metrics;
 mod rules;
@@ -202,11 +203,45 @@ struct AppState {
     project_root: Arc<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // .env files load before the tokio runtime exists: mutating the process
+    // environment is only sound while no other thread can be reading it. A
+    // file that exists but cannot be parsed is a config error, like gio.toml.
+    let env_files = match env_files::load_for_startup() {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("giojs-server: configuration error: {error}");
+            std::process::exit(1);
+        }
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(env_files))
+}
+
+async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
         .init();
+    if !env_files.files.is_empty() {
+        info!(
+            mode = env_files.mode.as_str(),
+            files = %env_files.files.join(", "),
+            "loaded .env files"
+        );
+    }
+    if !env_files.skipped.is_empty() {
+        warn!(
+            files = %env_files.skipped.join(", "),
+            "skipped .env candidates that are not regular files"
+        );
+    }
+    if env_files.ignored_node_env {
+        warn!(
+            "NODE_ENV in .env files is ignored - set it in the environment that starts the server"
+        );
+    }
 
     let cfg = config::GioConfig::load();
     let bind_addr: SocketAddr = cfg.bind_addr().parse()?;
