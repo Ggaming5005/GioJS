@@ -201,10 +201,11 @@ async function main() {
     console.log(`  env:    skipped ${envFiles.skipped.join(', ')} (not a regular file)`);
   }
 
-  const [routes, layouts, routeFiles] = await Promise.all([
+  const [routes, layouts, routeFiles, segmentFiles] = await Promise.all([
     router.discoverRoutes(appDir),
     router.discoverLayouts(appDir),
     router.discoverRouteFiles(appDir),
+    router.discoverSegmentFiles(appDir),
   ]);
   router.assertNoRouteConflicts(appDir, routes, routeFiles);
   if (routes.size === 0 && routeFiles.length === 0) {
@@ -216,6 +217,7 @@ async function main() {
   const clientManifest = await buildClientBundles({
     routes,
     layouts,
+    segmentFiles,
     projectRoot,
     dev: false,
   });
@@ -232,6 +234,9 @@ async function main() {
       pattern: f.urlPattern,
       filePath: fileURLToPath(f.filePath),
     })),
+    segmentFiles: [segmentFiles.notFound, segmentFiles.error, segmentFiles.loading].flatMap(
+      (files) => [...files.values()].map((f) => ({ kind: f.kind, dir: f.dir, filePath: f.filePath })),
+    ),
     clientScripts: Object.fromEntries(clientManifest),
   };
   const notFoundPath = pickExisting(appDir, 'not-found', ['tsx', 'jsx', 'js']);

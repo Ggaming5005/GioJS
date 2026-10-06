@@ -3,7 +3,8 @@
  *
  * Prebuilt-registry entrypoint for `gio build standalone` bundles. The
  * generated entry statically imports every discovered app module (pages,
- * layouts, route files, gio.config, middleware) and hands them over here, so
+ * layouts, not-found/error/loading files, route files, gio.config,
+ * middleware) and hands them over here, so
  * boot performs no filesystem discovery, no tsx transform, and no esbuild
  * client build - the bundle runs on a bare Node install.
  */
@@ -14,8 +15,11 @@ import type {
   LayoutModule,
   PageModule,
   RouteModule,
+  SegmentFileKind,
+  SegmentFileModule,
   SpecialPages,
 } from './router.ts';
+import { emptySegmentFiles } from './router.ts';
 import { sanitizeMiddlewareRules } from './middleware.ts';
 import { registerRouteModule, type RouteFileModule, type WsHandlerFn } from './ws-router.ts';
 import { installProcessGuards, startPluginRegistry, startIpcServers } from './worker-boot.ts';
@@ -38,6 +42,14 @@ export interface StandaloneLayoutEntry {
   module: LayoutModule;
 }
 
+export interface StandaloneSegmentFileEntry {
+  kind: SegmentFileKind;
+  /** app/-relative directory holding the file, '' for app/ itself (SegmentFileEntry.dir). */
+  dir: string;
+  filePath: string;
+  module: SegmentFileModule;
+}
+
 export interface StandaloneRouteFileEntry {
   pattern: string;
   filePath: string;
@@ -49,6 +61,8 @@ export interface StandaloneRegistry {
   layouts: StandaloneLayoutEntry[];
   routeFiles: StandaloneRouteFileEntry[];
   specialPages?: { notFound?: PageModule; error?: PageModule };
+  /** Per-folder not-found.*, error.* and loading.* files. */
+  segmentFiles?: StandaloneSegmentFileEntry[];
   config?: GioConfig | undefined;
   /** Raw default export of middleware.ts; sanitized here at boot. */
   middleware?: unknown;
@@ -97,6 +111,17 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     specialPages.error = () => Promise.resolve(errorModule);
   }
 
+  const segmentFiles = emptySegmentFiles();
+  const segmentMapKey = { 'not-found': 'notFound', error: 'error', loading: 'loading' } as const;
+  for (const entry of registry.segmentFiles ?? []) {
+    segmentFiles[segmentMapKey[entry.kind]].set(entry.dir, {
+      kind: entry.kind,
+      filePath: entry.filePath,
+      dir: entry.dir,
+      load: () => Promise.resolve(entry.module),
+    });
+  }
+
   const { rules: middlewareRules, warnings } = sanitizeMiddlewareRules(registry.middleware);
   for (const warning of warnings) {
     logger.warn(warning, { source: 'standalone registry' });
@@ -118,6 +143,7 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     wsHandlers,
     handlers,
     specialPages,
+    segmentFiles,
     clientScripts,
     middlewareRules,
     pluginRegistry,

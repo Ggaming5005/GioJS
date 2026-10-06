@@ -8,6 +8,7 @@
  * resolve identically on Windows and POSIX.
  */
 import { resolve, sep } from 'node:path';
+import type { SegmentFileKind } from './router.ts';
 
 export interface StandaloneEntrySpec {
   /** Absolute path to giojs-core's standalone-entry.ts. */
@@ -15,6 +16,8 @@ export interface StandaloneEntrySpec {
   routes: Array<{ pattern: string; dir: string; filePath: string }>;
   layouts: Array<{ dir: string; filePath: string }>;
   routeFiles: Array<{ pattern: string; filePath: string }>;
+  /** Per-folder not-found.*, error.* and loading.* files. */
+  segmentFiles?: Array<{ kind: SegmentFileKind; dir: string; filePath: string }>;
   notFoundPath?: string;
   errorPath?: string;
   configPath?: string;
@@ -55,6 +58,14 @@ export function generateStandaloneEntry(spec: StandaloneEntrySpec): string {
     );
   });
 
+  const segmentFileEntries: string[] = [];
+  (spec.segmentFiles ?? []).forEach((file, index) => {
+    imports.push(`import * as gioSegment${index} from ${moduleSpecifier(file.filePath)};`);
+    segmentFileEntries.push(
+      `    { kind: ${JSON.stringify(file.kind)}, dir: ${JSON.stringify(file.dir)}, filePath: ${JSON.stringify(file.filePath)}, module: gioSegment${index} },`,
+    );
+  });
+
   const specialPageFields: string[] = [];
   if (spec.notFoundPath !== undefined) {
     imports.push(`import * as gioNotFound from ${moduleSpecifier(spec.notFoundPath)};`);
@@ -72,6 +83,9 @@ export function generateStandaloneEntry(spec: StandaloneEntrySpec): string {
   ];
   if (specialPageFields.length > 0) {
     registryFields.push(`  specialPages: { ${specialPageFields.join(', ')} },`);
+  }
+  if (segmentFileEntries.length > 0) {
+    registryFields.push(`  segmentFiles: [\n${segmentFileEntries.join('\n')}\n  ],`);
   }
   if (spec.configPath !== undefined) {
     imports.push(`import * as gioConfig from ${moduleSpecifier(spec.configPath)};`);

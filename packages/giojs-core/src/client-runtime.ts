@@ -6,10 +6,15 @@
  * and re-mounts after soft navigation swaps (the `gio:navigated` event),
  * dynamically importing the new route's entry chunk when it isn't loaded yet.
  * Everything outside #__gio (root layout, Rust-injected head tags, the dev
- * overlay) is server HTML that React never touches.
+ * overlay) is server HTML that React never touches. Inside it, every folder's
+ * error.* is a React error boundary, so an error thrown while rendering in
+ * the browser replaces only that segment instead of unmounting the page.
  */
 import React from 'react';
 import { hydrateRoot, createRoot, type Root } from 'react-dom/client';
+
+// Generated entries build their tree with the same function the server used.
+export { buildSegmentTree } from './segment-tree.ts';
 
 /** Payload of the `#__gio_props` JSON script emitted by the SSR renderer. */
 export interface GioEnvelope {

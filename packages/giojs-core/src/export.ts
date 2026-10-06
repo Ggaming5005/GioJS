@@ -6,12 +6,18 @@
  * getServerSideProps at build time, expands dynamic routes via an exported
  * getStaticPaths(), and copies public/ into the output - at the site root and
  * under /public/*, as the server serves it. Server-only routes (route
- * handlers, SSE, WebSockets) are skipped with a warning.
+ * handlers, SSE, WebSockets) and pages that call notFound() are skipped with
+ * a warning.
  */
 import { mkdir, writeFile, cp, access, lstat } from 'node:fs/promises';
 import { join, dirname, relative, resolve, isAbsolute, sep } from 'node:path';
-import { discoverRoutes, discoverLayouts, discoverSpecialPages } from './router.ts';
-import { renderRoute } from './ssr.ts';
+import {
+  discoverRoutes,
+  discoverLayouts,
+  discoverSpecialPages,
+  discoverSegmentFiles,
+} from './router.ts';
+import { renderRoute, type RenderExtras } from './ssr.ts';
 import type { IPCRequest, IPCResponse } from './context.ts';
 
 // Tells the SSR pipeline this is a static build - no client bundle to hydrate,
@@ -117,10 +123,15 @@ export function isRootServable(relPath: string): boolean {
 }
 
 export async function exportSite(appDir: string, outDir: string): Promise<ExportResult> {
-  const [routes, layouts] = await Promise.all([
+  const [routes, layouts, segmentFiles] = await Promise.all([
     discoverRoutes(appDir),
     discoverLayouts(appDir),
+    discoverSegmentFiles(appDir),
   ]);
+  // Pages render inside their loading.* and error.* boundaries, as served.
+  // A failure is reported (with its digest) rather than exported as an
+  // error page, and notFound() pages are skipped: nothing is written.
+  const pageExtras: RenderExtras = { segmentFiles: { ...segmentFiles, error: new Map() } };
 
   const written: string[] = [];
   const skipped: { route: string; reason: string }[] = [];
@@ -152,7 +163,15 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
     }
 
     for (const target of targets) {
-      const out = await renderRoute(makeRequest(target.path, target.params), routes, layouts);
+      const out = await renderRoute(
+        makeRequest(target.path, target.params),
+        routes,
+        layouts,
+        undefined,
+        undefined,
+        undefined,
+        pageExtras,
+      );
 
       if ('type' in out && out.type === 'sse') {
         skipped.push({ route: target.path, reason: 'streaming/SSE route - server only' });
@@ -179,6 +198,8 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
         written.push(target.path);
       } else if (res.status >= 300 && res.status < 400) {
         skipped.push({ route: target.path, reason: `redirect (${res.status}) - server only` });
+      } else if (res.status === 404) {
+        skipped.push({ route: target.path, reason: 'notFound() - nothing written' });
       } else {
         skipped.push({ route: target.path, reason: `status ${res.status}` });
       }
@@ -199,7 +220,7 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
     undefined,
     undefined,
     undefined,
-    { specialPages },
+    { specialPages, segmentFiles },
   );
   if ('body' in notFoundOut && typeof notFoundOut.body === 'string' && notFoundOut.body !== '') {
     await writeFile(join(outDir, '404.html'), notFoundOut.body, 'utf8');

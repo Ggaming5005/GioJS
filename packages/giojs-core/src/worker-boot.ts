@@ -11,7 +11,13 @@ import { createIPCServer } from './ipc.ts';
 import { createWsIpcServer } from './ws-ipc.ts';
 import { NodePluginRegistry, type GioNodePlugin } from './plugin.ts';
 import { logger } from './logger.ts';
-import type { RouteModule, LayoutEntry, HandlerEntry, SpecialPages } from './router.ts';
+import type {
+  RouteModule,
+  LayoutEntry,
+  HandlerEntry,
+  SpecialPages,
+  SegmentFiles,
+} from './router.ts';
 import type { WsHandlerFn } from './ws-router.ts';
 import type { MiddlewareRules } from './middleware.ts';
 
@@ -22,6 +28,7 @@ export interface WorkerComponents {
   wsHandlers: Map<string, WsHandlerFn>;
   handlers: Map<string, HandlerEntry>;
   specialPages: SpecialPages;
+  segmentFiles: SegmentFiles;
   clientScripts: Map<string, string>;
   middlewareRules: MiddlewareRules;
   pluginRegistry: NodePluginRegistry;
@@ -82,7 +89,11 @@ export function startIpcServers(components: WorkerComponents): void {
     components.wsHandlers,
     components.pluginRegistry,
     components.clientScripts,
-    { handlers: components.handlers, specialPages: components.specialPages },
+    {
+      handlers: components.handlers,
+      specialPages: components.specialPages,
+      segmentFiles: components.segmentFiles,
+    },
     components.middlewareRules,
   );
   createWsIpcServer(components.wsHandlers);

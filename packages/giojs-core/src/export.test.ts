@@ -97,6 +97,59 @@ describe('exportSite 404.html', () => {
   });
 });
 
+describe('exportSite notFound()', () => {
+  afterAll(async () => {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  });
+
+  it('writes nothing for pages that call notFound(), and 404.html stays the root not-found', async () => {
+    const appDir = join(fixtureRoot, 'not-found-calls', 'app');
+    const outDir = join(fixtureRoot, 'not-found-calls', 'out');
+    await mkdir(join(appDir, 'gone'), { recursive: true });
+    await mkdir(join(appDir, 'items', '[id]'), { recursive: true });
+    await writeFile(join(appDir, 'page.tsx'), PAGE);
+    await writeFile(join(appDir, 'not-found.tsx'), NOT_FOUND);
+    await writeFile(
+      join(appDir, 'gone', 'page.tsx'),
+      `${PAGE}export async function getServerSideProps() { return { notFound: true }; }\n`,
+    );
+    // A nested not-found.* answers for its folder at runtime; 404.html is
+    // for unmatched URLs, which only the root file serves.
+    await writeFile(
+      join(appDir, 'items', 'not-found.tsx'),
+      `import React from 'react';
+export default function ItemMissing() { return React.createElement('h1', null, 'ITEM_404'); }
+`,
+    );
+    const notFoundModule = join(packageDir, 'src', 'not-found.ts');
+    await writeFile(
+      join(appDir, 'items', '[id]', 'page.tsx'),
+      `import React from 'react';
+import { notFound } from ${JSON.stringify(notFoundModule)};
+export default function Item({ params }) {
+  if (params.id === 'b') notFound();
+  return React.createElement('p', null, 'ITEM ' + params.id);
+}
+export function getStaticPaths() { return { paths: [{ params: { id: 'a' } }, { params: { id: 'b' } }] }; }
+`,
+    );
+
+    const { written, skipped } = await exportSite(appDir, outDir);
+    expect(written.sort()).toEqual(['/', '/items/a']);
+    expect(skipped).toEqual(
+      expect.arrayContaining([
+        { route: '/gone', reason: 'notFound() - nothing written' },
+        { route: '/items/b', reason: 'notFound() - nothing written' },
+      ]),
+    );
+    expect(await exists(join(outDir, 'gone', 'index.html'))).toBe(false);
+    expect(await exists(join(outDir, 'items', 'b', 'index.html'))).toBe(false);
+    const html = await readFile(join(outDir, '404.html'), 'utf8');
+    expect(html).toContain('EXPORT_CUSTOM_404');
+    expect(html).not.toContain('ITEM_404');
+  });
+});
+
 // Prints one param so the exported HTML shows what the page received.
 function PARAMS_PAGE(name: string, staticPaths = ''): string {
   return `import React from 'react';
