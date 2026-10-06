@@ -428,6 +428,27 @@ async function main() {
       assert.equal(res.headers.get('x-fixture-header'), 'public-root');
     });
 
+    await test('unhashed app CSS revalidates with a strong ETag and 304s', async () => {
+      const res = await fetch(`${BASE}/globals.css`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/css/);
+      const cacheControl = res.headers.get('cache-control') ?? '';
+      assert.match(cacheControl, /must-revalidate/);
+      assert.doesNotMatch(cacheControl, /immutable/, 'an unhashed URL must not be cached for a year');
+      const etag = res.headers.get('etag') ?? '';
+      assert.match(etag, /^"[0-9a-f]+"$/, 'strong, quoted ETag');
+      assert.match(await res.text(), /fixture-css-marker/);
+
+      const revalidated = await fetch(`${BASE}/globals.css`, { headers: { 'if-none-match': etag } });
+      assert.equal(revalidated.status, 304);
+      assert.equal(revalidated.headers.get('etag'), etag);
+      assert.equal(await revalidated.text(), '');
+
+      const stale = await fetch(`${BASE}/globals.css`, { headers: { 'if-none-match': '"stale"' } });
+      assert.equal(stale.status, 200);
+      assert.match(await stale.text(), /fixture-css-marker/);
+    });
+
     await test('gio.toml [[redirects]] issue the configured status with Location', async () => {
       const res = await fetch(`${BASE}/moved`, { redirect: 'manual' });
       assert.equal(res.status, 301);

@@ -18,6 +18,7 @@
 //! shell with personalized holes is the point.
 
 mod config;
+mod css_assets;
 mod dev_codeframe;
 mod dev_overlay;
 mod devtools;
@@ -183,7 +184,7 @@ struct AppState {
     prefetch: Arc<PrefetchBudgets>,
     font_snippets: Arc<Vec<String>>,
     image: Arc<giojs_image::ImageHandler>,
-    css_cache: Arc<DashMap<String, Bytes>>,
+    css_cache: Arc<css_assets::CssCache>,
     css_config: config::CssConfig,
     http2: bool,
     tls_enabled: bool,
@@ -325,7 +326,7 @@ async fn main() -> anyhow::Result<()> {
     let dev_mode = std::env::var("NODE_ENV").as_deref() == Ok("development");
 
     let app_dir = std::env::var("GIO_APP_DIR").unwrap_or_else(|_| "app".to_string());
-    let css_cache: Arc<DashMap<String, Bytes>> = Arc::new(DashMap::new());
+    let css_cache: Arc<css_assets::CssCache> = Arc::new(DashMap::new());
     if cfg.css.enabled {
         load_css_cache(&css_cache, &app_dir, !dev_mode && cfg.css.minify).await;
     }
@@ -492,19 +493,15 @@ async fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/build/static"));
 
-    let immutable_header = HeaderValue::from_static("public, max-age=31536000, immutable");
     let static_service = ServiceBuilder::new()
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
-            immutable_header.clone(),
+            HeaderValue::from_static(css_assets::IMMUTABLE_CACHE_CONTROL),
         ))
         .service(ServeDir::new(static_dir));
 
     let font_service = ServiceBuilder::new()
-        .layer(SetResponseHeaderLayer::if_not_present(
-            header::CACHE_CONTROL,
-            immutable_header,
-        ))
+        .layer(axum::middleware::from_fn(font_cache_control_middleware))
         .service(ServeDir::new(fonts_dir));
 
     let compression = CompressionLayer::new().compress_when(
@@ -586,6 +583,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// fonts.css is regenerated from gio.toml at every start under a fixed URL,
+/// so it revalidates; the .woff2 files keep immutable caching. Chosen by
+/// request path so 304s carry the same policy as the 200s they refresh.
+async fn font_cache_control_middleware(req: Request, next: Next) -> Response {
+    let cache_control = css_assets::font_cache_control(req.uri().path());
+    let mut resp = next.run(req).await;
+    resp.headers_mut()
+        .entry(header::CACHE_CONTROL)
+        .or_insert(cache_control);
+    resp
 }
 
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -1025,12 +1034,8 @@ async fn dynamic_handler(
 
     // Serve pre-transformed CSS directly from startup cache
     if path.ends_with(".css") {
-        if let Some(css_bytes) = state.css_cache.get(&path) {
-            return Response::builder()
-                .header(header::CONTENT_TYPE, "text/css; charset=utf-8")
-                .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-                .body(axum::body::Body::from(css_bytes.clone()))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        if let Some(css) = state.css_cache.get(&path) {
+            return css_assets::css_response(&css, req.headers());
         }
     }
 
@@ -2483,7 +2488,7 @@ fn watch_event_is_relevant(event: &notify::Event) -> bool {
 /// Transform every `.css` under `app_dir` into `css_cache` (URL-keyed).
 /// Runs at startup and again on dev-watch changes; existing entries are
 /// replaced so deleted files also disappear.
-async fn load_css_cache(css_cache: &DashMap<String, Bytes>, app_dir: &str, minify: bool) {
+async fn load_css_cache(css_cache: &css_assets::CssCache, app_dir: &str, minify: bool) {
     let transformer = giojs_css::CssTransformer { minify };
     let css_files = scan_css_files(std::path::PathBuf::from(app_dir)).await;
     let app_path = std::path::Path::new(app_dir);
@@ -2503,7 +2508,7 @@ async fn load_css_cache(css_cache: &DashMap<String, Bytes>, app_dir: &str, minif
         match transformer.transform(&source, css_path.to_str().unwrap_or("")) {
             Ok(result) => {
                 info!(path = %url_key, "CSS transformed");
-                css_cache.insert(url_key, Bytes::from(result.code));
+                css_cache.insert(url_key, css_assets::CssAsset::new(Bytes::from(result.code)));
             }
             Err(e) => warn!(path = %url_key, error = %e, "CSS transform failed"),
         }
@@ -2536,10 +2541,10 @@ async fn scan_css_files(root: std::path::PathBuf) -> Vec<PathBuf> {
 
 /// Extract critical CSS for `html` using the pre-transformed `/globals.css` from the cache.
 /// Returns a ready-to-inject HTML snippet, or `None` if extraction produces nothing useful.
-fn extract_critical_snippet(html: &Bytes, css_cache: &DashMap<String, Bytes>) -> Option<String> {
+fn extract_critical_snippet(html: &Bytes, css_cache: &css_assets::CssCache) -> Option<String> {
     let html_str = std::str::from_utf8(html).ok()?;
     let css_entry = css_cache.get("/globals.css")?;
-    let css_str = std::str::from_utf8(&css_entry).ok()?;
+    let css_str = std::str::from_utf8(&css_entry.code).ok()?;
     let result = giojs_css::extract_critical(html_str, css_str).ok()?;
     if result.critical.is_empty() {
         return None;
@@ -2598,7 +2603,7 @@ fn compose_final_html(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[String],
-    css_cache: &DashMap<String, Bytes>,
+    css_cache: &css_assets::CssCache,
     critical_extraction: bool,
 ) -> Bytes {
     let script = format!(
@@ -2702,7 +2707,7 @@ async fn build_response_from_entry(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[&str],
-    css_cache: &Arc<DashMap<String, Bytes>>,
+    css_cache: &Arc<css_assets::CssCache>,
     css_config: &config::CssConfig,
     dev_mode: bool,
 ) -> Response {
@@ -2766,7 +2771,7 @@ fn compose_uncomposed_entry(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[String],
-    css_cache: &DashMap<String, Bytes>,
+    css_cache: &css_assets::CssCache,
     critical_extraction: bool,
     dev_mode: bool,
 ) -> Bytes {
@@ -2804,7 +2809,7 @@ fn build_html_response(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[&str],
-    css_cache: &DashMap<String, Bytes>,
+    css_cache: &css_assets::CssCache,
     css_config: &config::CssConfig,
     dev_mode: bool,
 ) -> Response {
