@@ -36,7 +36,7 @@ FROM rust:1.78 AS rust-builder
 WORKDIR /app
 COPY crates/ ./crates/
 COPY Cargo.toml Cargo.lock ./
-RUN cargo build --release -p giojs-server
+RUN cargo build --release --locked -p giojs-server
 
 # Dependency stage: Node modules for the SSR worker (no compile step)
 FROM node:20-slim AS node-deps

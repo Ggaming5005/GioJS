@@ -2,7 +2,8 @@
 /target/
 crates/*/target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is committed on purpose: release binaries must build from the
+# exact crate versions CI tested (`--locked`), not whatever resolves that day.
 
 # Node
 node_modules/
