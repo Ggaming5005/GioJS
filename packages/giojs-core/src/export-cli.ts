@@ -1,7 +1,8 @@
 /**
  * giojs-core/src/export-cli.ts
  *
- * Entry point for `gio export`. Renders the app to static HTML under out/.
+ * Entry point for `gio export`. Renders the app to static HTML under out/,
+ * with the client chunks that hydrate it.
  * APP_DIR comes from GIO_APP_DIR (default ./app); output from GIO_OUT_DIR
  * (default ./out). The export never starts the Rust server, so it loads the
  * project's .env files itself (same precedence rules) before rendering.
@@ -35,10 +36,15 @@ const { exportSite } = await import('./export.ts');
 
 console.log(`[giojs] static export: ${appDir} → ${outDir}`);
 
-const { written, skipped } = await exportSite(appDir, outDir);
+const { written, skipped, unhydrated } = await exportSite(appDir, outDir);
 
 console.log(`\n[giojs] rendered ${written.length} page(s):`);
 for (const w of written.sort()) console.log(`   ✓ ${w === '/' ? '/ (index)' : w}`);
+
+if (unhydrated.length > 0) {
+  console.log(`\n[giojs] ${unhydrated.length} page(s) exported as HTML only (no client JS):`);
+  for (const u of unhydrated) console.log(`   ! ${u.route}  -  ${u.reason}`);
+}
 
 if (skipped.length > 0) {
   console.log(`\n[giojs] skipped ${skipped.length}:`);

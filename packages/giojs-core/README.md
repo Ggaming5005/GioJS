@@ -15,7 +15,7 @@ Internal Node runtime for [**GioJS**](https://giojs.com) - the React SSR bridge 
 - Discovers `page` / `layout` / `route` files (`.tsx` / `.jsx` / `.js`) under `app/`.
 - Renders routes to HTML via `renderToReadableStream`, running `getServerSideProps`.
 - Bridges to the Rust server over a length-prefixed IPC protocol.
-- Pre-renders to static HTML (`gio export`), generating `robots.txt` + `sitemap.xml`.
+- Pre-renders to static HTML (`gio export`) that hydrates from client bundles written alongside it, generating `robots.txt` + `sitemap.xml`.
 
 ## Links
 

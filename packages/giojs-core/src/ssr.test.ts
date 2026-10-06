@@ -445,6 +445,20 @@ describe('hydration envelope', () => {
     }
   });
 
+  it('a static export (GIO_EXPORT=1) still hydrates with the manifest it is given', async () => {
+    vi.stubEnv('GIO_EXPORT', '1');
+    try {
+      const result = await renderRoute(
+        makeRequest('/'), makeRoute('/'), noLayouts, undefined, undefined, new Map([['/', '/e.js']]),
+      );
+      const body = 'body' in result ? result.body : '';
+      expect(body).toContain('id="__gio_props"');
+      expect(body).toContain('<script type="module" src="/e.js"');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('omits the envelope and bootstrap script when the route has no bundle', async () => {
     const routes = makeRoute('/');
     const result = await renderRoute(makeRequest('/'), routes, noLayouts);

@@ -7,15 +7,25 @@
  * getStaticPaths(), and copies public/ into the output - at the site root and
  * under /public/*, as the server serves it. Server-only routes (route
  * handlers, SSE, WebSockets) are skipped with a warning.
+ *
+ * Exported pages hydrate like served ones: the client bundles are built in
+ * production mode into out/_next/static/chunks/ (the URLs the pages
+ * reference) and every page carries the same envelope + bootstrap module the
+ * server renders, so GioLink soft navigation works on any static host.
+ * GIO_PUBLIC_* values are frozen at export time. A route whose bundle fails
+ * (or is rejected for importing server-only code) exports as HTML only, as
+ * the server would serve it, and is reported.
  */
-import { mkdir, writeFile, cp, access, lstat } from 'node:fs/promises';
+import { mkdir, writeFile, cp, access, lstat, readdir } from 'node:fs/promises';
 import { join, dirname, relative, resolve, isAbsolute, sep } from 'node:path';
 import { discoverRoutes, discoverLayouts, discoverSpecialPages } from './router.ts';
 import { renderRoute } from './ssr.ts';
+import { buildClientBundles, clientBuildErrorFor } from './client-build.ts';
+import { imageConfigFromEnv, installImageConfig } from './image-config.ts';
 import type { IPCRequest, IPCResponse } from './context.ts';
 
-// Tells the SSR pipeline this is a static build - no client bundle to hydrate,
-// so no /_next bootstrap script is injected.
+// Tells the SSR pipeline this is a static build: no streaming, no dev
+// overlay hand-off, and no image optimizer (<GioImage> renders plain src).
 process.env.GIO_EXPORT = '1';
 
 /**
@@ -27,6 +37,8 @@ interface StaticPath { params: Record<string, string | string[] | undefined>; }
 interface ExportResult {
   written: string[];
   skipped: { route: string; reason: string }[];
+  /** Written pages that ship without client JS, and why. */
+  unhydrated: { route: string; reason: string }[];
 }
 
 function isDynamic(pattern: string): boolean {
@@ -124,9 +136,29 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
 
   const written: string[] = [];
   const skipped: { route: string; reason: string }[] = [];
-  // Output files this export rendered (pages, 404.html) - public/ never
-  // overwrites them.
+  const unhydrated: { route: string; reason: string }[] = [];
+  // Output files this export generated (pages, 404.html, client chunks) -
+  // public/ never overwrites them.
   const renderedFiles = new Set<string>();
+
+  // Up front: 404.html, robots.txt and the chunks are written even when no
+  // page is.
+  await mkdir(outDir, { recursive: true });
+  installImageConfig(imageConfigFromEnv(process.env));
+
+  // Never throws: a route whose bundle fails is simply absent and renders
+  // without hydration.
+  const clientScripts = await buildClientBundles({
+    routes,
+    layouts,
+    projectRoot: dirname(resolve(appDir)),
+    dev: false,
+    staticExportDir: outDir,
+  });
+  const chunksDir = join(outDir, '_next', 'static', 'chunks');
+  for (const chunk of await readdir(chunksDir).catch(() => [] as string[])) {
+    renderedFiles.add(resolve(chunksDir, chunk));
+  }
 
   for (const [pattern, mod] of routes) {
     let targets: { path: string; params: Record<string, string> }[];
@@ -152,7 +184,14 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
     }
 
     for (const target of targets) {
-      const out = await renderRoute(makeRequest(target.path, target.params), routes, layouts);
+      const out = await renderRoute(
+        makeRequest(target.path, target.params),
+        routes,
+        layouts,
+        undefined,
+        undefined,
+        clientScripts,
+      );
 
       if ('type' in out && out.type === 'sse') {
         skipped.push({ route: target.path, reason: 'streaming/SSE route - server only' });
@@ -177,6 +216,14 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
         await writeFile(file, res.body, 'utf8');
         renderedFiles.add(resolve(file));
         written.push(target.path);
+        if (!res.body.includes('<script id="__gio_props"')) {
+          unhydrated.push({
+            route: target.path,
+            reason: clientScripts.has(pattern)
+              ? 'props are not JSON-serializable'
+              : (clientBuildErrorFor(pattern) ?? 'client bundle failed to build'),
+          });
+        }
       } else if (res.status >= 300 && res.status < 400) {
         skipped.push({ route: target.path, reason: `redirect (${res.status}) - server only` });
       } else {
@@ -263,5 +310,5 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
     await writeFile(join(outDir, 'sitemap.xml'), sitemap, 'utf8');
   }
 
-  return { written, skipped };
+  return { written, skipped, unhydrated };
 }

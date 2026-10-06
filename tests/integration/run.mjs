@@ -1508,6 +1508,8 @@ async function devWatchPhase() {
  * prebuilt hydration chunks, and API routes all serve - and that tearing the
  * launcher down leaves no orphaned worker. A generated app (not the fixture)
  * keeps the bundle graph free of the fixture's monorepo-relative imports.
+ * The same app is also `gio export`ed: static pages must ship the chunks
+ * they hydrate from.
  */
 async function standalonePhase() {
   const binary = findServerBinary();
@@ -1550,7 +1552,9 @@ async function standalonePhase() {
     );
     await writeFile(
       join(workDir, 'app', '(blog)', 'posts', '[id]', 'page.tsx'),
-      "import React from 'react';\n\nexport default function Post({ params }) {\n  return <p>{`STANDALONE_POST id=[${params.id}]`}</p>;\n}\n",
+      "import React from 'react';\n\nexport default function Post({ params }) {\n  return <p>{`STANDALONE_POST id=[${params.id}]`}</p>;\n}\n" +
+        // For `gio export`; the server must ignore it (any id renders).
+        "\nexport function getStaticPaths() {\n  return { paths: [{ params: { id: '7' } }] };\n}\n",
     );
     await writeFile(
       join(workDir, 'gio.toml'),
@@ -1588,6 +1592,37 @@ async function standalonePhase() {
       assert.match(worker, /STANDALONE_FIXTURE_HOME/, 'page component bundled into worker.js');
       assert.match(build.stdout, /env: {4}\.env\.production/);
       assert.ok(!existsSync(join(outDir, '.env.production')), 'build-time .env files are not copied');
+    });
+
+    await test('static export: pages hydrate from chunks shipped in out/', async () => {
+      const exportOut = join(workDir, 'out');
+      const result = spawnSync(
+        process.execPath,
+        [join(repoRoot, 'packages', 'giojs', 'bin', 'gio.js'), 'export'],
+        { cwd: workDir, env: { ...process.env, GIO_OUT_DIR: exportOut }, encoding: 'utf8', timeout: 120_000 },
+      );
+      assert.equal(result.status, 0, `gio export failed:\n${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+      assert.doesNotMatch(result.stdout, /no client JS/, 'every page hydrates');
+      const envelopeOf = (html) =>
+        JSON.parse(html.match(/<script id="__gio_props" type="application\/json">([^<]*)</)?.[1] ?? 'null');
+      for (const [page, marker] of [['index.html', 'STANDALONE_FIXTURE_HOME'], ['posts/7/index.html', 'STANDALONE_POST']]) {
+        const html = await readFile(join(exportOut, ...page.split('/')), 'utf8');
+        assert.match(html, new RegExp(marker));
+        const envelope = envelopeOf(html);
+        assert.ok(envelope, `${page} carries the hydration envelope`);
+        assert.equal(envelope.images.unoptimized, true, 'no image optimizer on a static host');
+        assert.ok(html.includes(`<script type="module" src="${envelope.entry}"`), `${page} bootstraps its entry`);
+        const entryFile = join(exportOut, ...envelope.entry.split('/').filter(Boolean));
+        assert.ok(existsSync(entryFile), `${envelope.entry} exists in out/`);
+        const entryJs = await readFile(entryFile, 'utf8');
+        for (const [, shared] of entryJs.matchAll(/["'](\.\/shared-[A-Z0-9]+\.js)["']/g)) {
+          assert.ok(existsSync(join(dirname(entryFile), shared)), `${shared} exists next to the entry`);
+        }
+        if (page === 'index.html') {
+          assert.match(entryJs, /STANDALONE_PUBLIC_VALUE/, 'GIO_PUBLIC_* frozen at export time');
+        }
+      }
+      assert.ok(existsSync(join(exportOut, '404.html')));
     });
 
     // Runtime env lives in the deploy dir: run.mjs starts the server there.
@@ -1652,6 +1687,8 @@ async function standalonePhase() {
       assert.equal(res.status, 200);
       const html = await res.text();
       assert.match(html, /STANDALONE_POST id=\[7\]/);
+      // getStaticPaths is export-only: the server renders any id.
+      assert.match(await (await fetch(`${STANDALONE_BASE}/posts/8`)).text(), /STANDALONE_POST id=\[8\]/);
       assert.ok(html.indexOf('STANDALONE_BLOG_LAYOUT') !== -1, 'the (blog) layout must apply');
       assert.ok(html.indexOf('STANDALONE_BLOG_LAYOUT') < html.indexOf('STANDALONE_POST'));
       assert.doesNotMatch(await (await fetch(`${STANDALONE_BASE}/`)).text(), /STANDALONE_BLOG_LAYOUT/);

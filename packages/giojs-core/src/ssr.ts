@@ -624,8 +624,8 @@ export async function renderRoute(
     const pattern = match.module.urlPattern;
     // Installed before rendering: <GioImage> reads it during the render.
     const images = installedImageConfig();
-    const entryScript =
-      process.env.GIO_EXPORT === '1' ? undefined : clientScripts?.get(pattern);
+    // Static export passes the manifest of its own build (export.ts).
+    const entryScript = clientScripts?.get(pattern);
     const envelopeJson =
       entryScript !== undefined
         ? serializeEnvelope({

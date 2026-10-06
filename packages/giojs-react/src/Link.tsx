@@ -14,6 +14,7 @@ import React from 'react';
 import {
   getDeploymentId,
   isHardReloadResponse,
+  isSwappableResponse,
   handleHardReload,
   navigateTo,
   initPopstateHandler,
@@ -79,6 +80,11 @@ function prefetchHref(href: string): void {
       if (isHardReloadResponse(r)) {
         prefetchCache.delete(href);
         handleHardReload();
+        return undefined;
+      }
+      if (!isSwappableResponse(r)) {
+        // Not cached: the click then fetches it and falls back to a full load.
+        prefetchCache.delete(href);
         return undefined;
       }
       return r.text();

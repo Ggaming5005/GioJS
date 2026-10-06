@@ -58,6 +58,27 @@ describe('navigateTo sequencing', () => {
     expect(pushSpy).toHaveBeenCalledWith({ gio: true }, '', '/only');
   });
 
+  it('a non-2xx response (static host 404.html) falls back to a full load', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 404,
+      headers: { get: (): string | null => null },
+      text: async (): Promise<string> => '<html><body><h1>404</h1></body></html>',
+    }) as unknown as Response));
+    const assigned: string[] = [];
+    vi.stubGlobal('location', {
+      set href(value: string) {
+        assigned.push(value);
+      },
+    });
+    const pushSpy = vi.spyOn(history, 'pushState');
+
+    await navigateTo('/never-exported', false);
+
+    expect(assigned).toEqual(['/never-exported']);
+    expect(document.getElementById('__gio')?.textContent).toBe('initial');
+    expect(pushSpy).not.toHaveBeenCalled();
+  });
+
   it('a slow superseded navigation never overwrites the newer page or history', async () => {
     const slow = deferredFetch();
     const fast = deferredFetch();

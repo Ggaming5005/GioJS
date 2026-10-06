@@ -29,6 +29,16 @@ export function isHardReloadResponse(resp: Response): boolean {
   return resp.status === 409 && resp.headers.get('x-gio-action') === 'hard-reload';
 }
 
+/**
+ * Only a 2xx page is swapped in. Anything else (a static host's 404.html
+ * for a path that was never exported, a 500) is left to a full browser
+ * load, which shows that page with its real status instead of swapping a
+ * document without a #__gio boundary under the new URL.
+ */
+export function isSwappableResponse(resp: Response): boolean {
+  return resp.status >= 200 && resp.status < 300;
+}
+
 export function handleHardReload(): void {
   window.location.reload();
 }
@@ -95,13 +105,16 @@ function swapContent(html: string): void {
   window.dispatchEvent(new Event('gio:navigated'));
 }
 
-/** Fetch a page for client navigation. Returns null when a hard reload was triggered. */
+/**
+ * Fetch a page for client navigation. Returns null when the browser must
+ * load the URL itself (deployment skew, or a response that cannot be swapped).
+ */
 async function fetchPageHtml(href: string): Promise<string | null> {
   const deployId = getDeploymentId();
   const fetchHeaders: Record<string, string> = { Accept: 'text/html' };
   if (deployId) fetchHeaders['x-deployment-id'] = deployId;
   const res = await fetch(href, { headers: fetchHeaders });
-  if (isHardReloadResponse(res)) {
+  if (isHardReloadResponse(res) || !isSwappableResponse(res)) {
     return null;
   }
   return res.text();
@@ -155,7 +168,7 @@ export async function navigateTo(
     const fetched = await fetchPageHtml(href);
     if (!isCurrentNavigation(seq)) return;
     if (fetched === null) {
-      // Deployment changed - navigate to the new URL with a fresh load.
+      // Deployment changed, or not a swappable page: let the browser load it.
       window.location.href = href;
       return;
     }

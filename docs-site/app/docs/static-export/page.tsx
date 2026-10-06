@@ -54,6 +54,39 @@ export default function Page(): React.JSX.Element {
         message and stack.
       </p>
 
+      <h2>Interactive pages</h2>
+      <p>
+        Exported pages hydrate exactly like served ones. The exporter builds the
+        client bundles in production mode into <code>out/_next/static/chunks/</code> and
+        every page carries the same hydration envelope and bootstrap script the server
+        renders, so state, effects, event handlers, and <code>GioLink</code> soft
+        navigation all work on a static host.
+      </p>
+      <ul>
+        <li>
+          <code>GIO_PUBLIC_*</code> values are frozen into the bundles (and the HTML) at
+          export time - re-export after changing them.
+        </li>
+        <li>
+          Props come from the build-time <code>getServerSideProps</code> run; they ship in
+          the page as JSON, so never return secrets from it.
+        </li>
+        <li>
+          A route whose bundle fails to build, or is rejected for importing server-only
+          code, still exports as plain HTML (no client JS), and the exporter lists it with
+          the reason.
+        </li>
+        <li>
+          Soft navigation fetches the target page&apos;s HTML (<code>/about</code> →{' '}
+          <code>out/about/index.html</code>); a URL that was never exported falls back to a
+          full page load, so the host&apos;s <code>404.html</code> shows with a real 404.
+        </li>
+        <li>
+          Serve <code>out/</code> at the domain root: pages reference their chunks as{' '}
+          <code>/_next/static/chunks/...</code>.
+        </li>
+      </ul>
+
       <h2>public/ and robots.txt</h2>
       <p>
         <code>public/</code> is copied into <code>out/</code> twice, matching the server: at
@@ -119,7 +152,11 @@ export function getStaticPaths() {
         <li><code>route.ts</code> handlers and Server-Sent Events</li>
         <li>WebSocket (<code>wsHandler</code>) routes</li>
         <li>ISR revalidation (<code>export const revalidate</code> - there's no server to revalidate on)</li>
-        <li>Runtime image optimization via <code>/_gio/image</code> (use pre-sized images)</li>
+        <li>
+          Runtime image optimization via <code>/_gio/image</code>: <code>GioImage</code>{' '}
+          renders its plain <code>src</code> in an export (no <code>srcset</code>), so ship
+          pre-sized images
+        </li>
       </ul>
       <p>If you need any of those, use <strong>Server</strong> mode instead.</p>
 
