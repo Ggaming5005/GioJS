@@ -19,6 +19,7 @@
 
 mod config;
 mod dev_codeframe;
+mod dev_guard;
 mod dev_overlay;
 mod devtools;
 mod ipc;
@@ -43,7 +44,7 @@ use axum::{
     http::{header, HeaderName, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use bytes::{Bytes, BytesMut};
@@ -503,15 +504,37 @@ async fn main() -> anyhow::Result<()> {
         .route("/_gio/image", get(image_handler_route));
 
     if dev_mode {
-        app = app
+        let dev_hosts = Arc::new(dev_guard::DevHostPolicy::new(
+            &cfg.server.host,
+            &cfg.dev.allowed_hosts,
+        ));
+        if !dev_hosts.allowed_hosts().is_empty() {
+            info!(allowed_hosts = ?dev_hosts.allowed_hosts(), "dev endpoints also answer to [dev] allowed_hosts");
+        } else if dev_guard::binds_all_interfaces(&cfg.server.host) {
+            warn!(
+                "dev server is bound to {} - /_gio/devtools endpoints (error overlay codeframes, \
+                 open-in-editor, live reload) only answer to localhost hosts; add other hostnames \
+                 or IPs you browse from to [dev] allowed_hosts in gio.toml",
+                cfg.server.host
+            );
+        }
+        // route_layer: the guard runs only for matched dev routes, before
+        // method routing, so a trusted GET to open-in-editor still gets 405.
+        let dev_routes = Router::new()
             .route("/_gio/devtools", get(devtools_handler))
             .route("/_gio/devtools/state", get(devtools_state_handler))
             .route("/_gio/devtools/stream", get(devtools_stream_handler))
             .route("/_gio/devtools/codeframe", get(devtools_codeframe_handler))
+            // POST-only: a GET is triggerable cross-site by a bare <img src>.
             .route(
                 "/_gio/devtools/open-in-editor",
-                get(devtools_open_editor_handler).post(devtools_open_editor_handler),
-            );
+                post(devtools_open_editor_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                dev_hosts,
+                dev_endpoint_guard,
+            ));
+        app = app.merge(dev_routes);
     }
 
     let app = app
@@ -2886,6 +2909,39 @@ fn extract_headers(req: &Request) -> HashMap<String, String> {
         .collect()
 }
 
+/// Host / Origin / Sec-Fetch-Site vetting for every /_gio/devtools* route
+/// (see dev_guard.rs): defeats DNS rebinding and cross-site requests.
+async fn dev_endpoint_guard(
+    State(policy): State<Arc<dev_guard::DevHostPolicy>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let headers = req.headers();
+    let header_str = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    // HTTP/2 carries the host in :authority instead of a Host header.
+    let host = header_str(header::HOST.as_str())
+        .map(str::to_string)
+        .or_else(|| req.uri().authority().map(|a| a.as_str().to_string()));
+    let verdict = policy.check(
+        dev_guard::DevEndpointKind::for_path(req.uri().path()),
+        host.as_deref(),
+        header_str(header::ORIGIN.as_str()),
+        header_str("sec-fetch-site"),
+    );
+    match verdict {
+        Ok(()) => next.run(req).await,
+        Err(rejection) => {
+            warn!(path = %req.uri().path(), ?rejection, "dev endpoint request blocked");
+            Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .header(header::CACHE_CONTROL, "no-store")
+                .body(axum::body::Body::from(rejection.message()))
+                .unwrap_or_else(|_| StatusCode::FORBIDDEN.into_response())
+        }
+    }
+}
+
 async fn devtools_handler(State(state): State<AppState>) -> Response {
     let snap = devtools::build_snapshot_json(
         &state.devtools,
@@ -4113,6 +4169,102 @@ mod tests {
             body.extend_from_slice(&bytes);
         }
         assert_eq!(body, b"<p>shell</p>", "failed holes must not hang the body");
+    }
+
+    // ── dev endpoint guard ────────────────────────────────────────────────────
+
+    /// Same layering as the real dev routes, with stub handlers.
+    fn guarded_dev_router() -> Router {
+        Router::new()
+            .route("/_gio/devtools/codeframe", get(|| async { "frame" }))
+            .route("/_gio/devtools/open-in-editor", post(|| async { "opened" }))
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::new(dev_guard::DevHostPolicy::new("0.0.0.0", &[])),
+                dev_endpoint_guard,
+            ))
+    }
+
+    async fn dev_request(method: &str, path: &str, headers: &[(&str, &str)]) -> StatusCode {
+        let mut builder = Request::builder().method(method).uri(path);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        guarded_dev_router()
+            .call(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn dev_guard_rejects_untrusted_host_before_routing() {
+        let status = dev_request(
+            "GET",
+            "/_gio/devtools/codeframe",
+            &[("host", "evil.example:3000")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let status = dev_request(
+            "POST",
+            "/_gio/devtools/open-in-editor",
+            &[("host", "evil.example:3000")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn dev_guard_admits_localhost_and_keeps_method_routing() {
+        let host = ("host", "127.0.0.1:3000");
+        assert_eq!(
+            dev_request("GET", "/_gio/devtools/codeframe", &[host]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            dev_request("GET", "/_gio/devtools/open-in-editor", &[host]).await,
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            dev_request(
+                "POST",
+                "/_gio/devtools/open-in-editor",
+                &[
+                    host,
+                    ("origin", "http://127.0.0.1:3000"),
+                    ("sec-fetch-site", "same-origin")
+                ],
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn dev_guard_rejects_cross_site_editor_post() {
+        let status = dev_request(
+            "POST",
+            "/_gio/devtools/open-in-editor",
+            &[
+                ("host", "localhost:3000"),
+                ("origin", "https://evil.example"),
+                ("sec-fetch-site", "cross-site"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn dev_guard_uses_http2_authority_when_host_is_absent() {
+        assert_eq!(
+            dev_request("GET", "http://localhost:3000/_gio/devtools/codeframe", &[]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            dev_request("GET", "/_gio/devtools/codeframe", &[]).await,
+            StatusCode::FORBIDDEN
+        );
     }
 
     // ── TLS error paths ───────────────────────────────────────────────────────

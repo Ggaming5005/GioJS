@@ -48,8 +48,11 @@ pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
       !/^https?:/.test(f.file);
   }
 
+  // The dev endpoints refuse cross-origin callers and open-in-editor takes
+  // POST only; mode 'same-origin' also fails fast rather than following a
+  // redirect to another origin.
   function openInEditor(file, line) {
-    fetch('/_gio/devtools/open-in-editor?file=' + encodeURIComponent(file) + '&line=' + encodeURIComponent(line), { method: 'POST' }).catch(function(){});
+    fetch('/_gio/devtools/open-in-editor?file=' + encodeURIComponent(file) + '&line=' + encodeURIComponent(line), { method: 'POST', mode: 'same-origin', credentials: 'same-origin' }).catch(function(){});
   }
 
   function fileLink(f) {
@@ -60,7 +63,7 @@ pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
   }
 
   function renderCodeframe(container, frame) {
-    fetch('/_gio/devtools/codeframe?file=' + encodeURIComponent(frame.file) + '&line=' + frame.line)
+    fetch('/_gio/devtools/codeframe?file=' + encodeURIComponent(frame.file) + '&line=' + frame.line, { mode: 'same-origin', credentials: 'same-origin' })
       .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(data) {
         if (!data || !data.lines || !data.lines.length) return;
@@ -217,5 +220,14 @@ mod tests {
         assert!(DEV_OVERLAY_SCRIPT.contains("/_gio/devtools/open-in-editor"));
         assert!(DEV_OVERLAY_SCRIPT.contains("__GIO_SSR_ERROR__"));
         assert!(DEV_OVERLAY_SCRIPT.contains("node_modules"));
+    }
+
+    #[test]
+    fn overlay_script_calls_dev_endpoints_same_origin_and_posts_to_editor() {
+        // The server routes open-in-editor for POST only (see dev_guard.rs).
+        assert!(DEV_OVERLAY_SCRIPT
+            .contains("{ method: 'POST', mode: 'same-origin', credentials: 'same-origin' }"));
+        assert!(DEV_OVERLAY_SCRIPT
+            .contains("frame.line, { mode: 'same-origin', credentials: 'same-origin' })"));
     }
 }

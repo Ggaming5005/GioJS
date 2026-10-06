@@ -14,6 +14,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -45,6 +46,34 @@ function significantLogTail(log) {
     .filter((line) => !line.includes('request completed'))
     .slice(-80)
     .join('\n');
+}
+
+/**
+ * Raw HTTP request against BASE with full control of Host / Origin /
+ * Sec-Fetch-Site (fetch treats those as browser-owned). Resolves with the
+ * status and body; event streams resolve on headers and are torn down.
+ */
+function rawRequest(method, path, headers = {}) {
+  const url = new URL(path, BASE);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { method, hostname: url.hostname, port: url.port, path: url.pathname + url.search, headers },
+      (res) => {
+        if (String(res.headers['content-type'] ?? '').startsWith('text/event-stream')) {
+          resolve({ status: res.statusCode, body: '' });
+          res.destroy();
+          return;
+        }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+        res.on('error', reject);
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 let passed = 0;
@@ -488,6 +517,8 @@ async function devWatchPhase() {
       GIO_CACHE_DIR: cacheDir,
       RUST_LOG: 'info',
       NODE_ENV: 'development',
+      // open-in-editor runs this instead of a real editor.
+      GIO_EDITOR: 'node -e 0',
     },
   });
   server.stdout.on('data', (d) => { log += d.toString(); });
@@ -502,6 +533,91 @@ async function devWatchPhase() {
       const res = await fetch(`${BASE}/_gio/health`);
       return res.ok;
     }, 30_000);
+
+    const trustedHost = new URL(BASE).host;
+    const codeframePath = '/_gio/devtools/codeframe?file=app%2Fpage.tsx&line=1';
+    const editorPath = '/_gio/devtools/open-in-editor?file=app%2Fpage.tsx&line=1';
+
+    await test('dev endpoints: a foreign Host (DNS rebinding) is refused with a fix hint', async () => {
+      for (const path of ['/_gio/devtools', '/_gio/devtools/state', '/_gio/devtools/stream', codeframePath]) {
+        const res = await rawRequest('GET', path, { host: 'evil.example' });
+        assert.equal(res.status, 403, `${path} must refuse Host: evil.example`);
+        assert.match(res.body, /allowed_hosts/);
+      }
+      const post = await rawRequest('POST', editorPath, { host: 'evil.example' });
+      assert.equal(post.status, 403);
+    });
+
+    await test('dev endpoints: localhost hosts are served, including the reload stream', async () => {
+      const page = await rawRequest('GET', '/_gio/devtools', { host: trustedHost });
+      assert.equal(page.status, 200);
+      const frame = await rawRequest('GET', codeframePath, { host: trustedHost });
+      assert.equal(frame.status, 200);
+      assert.match(frame.body, /INTEGRATION_FIXTURE_HOME|import React/);
+      const stream = await rawRequest('GET', '/_gio/devtools/stream', {
+        host: trustedHost,
+        'sec-fetch-site': 'same-origin',
+      });
+      assert.equal(stream.status, 200);
+      const localhostName = await rawRequest('GET', '/_gio/devtools/state', {
+        host: `localhost:${new URL(BASE).port}`,
+      });
+      assert.equal(localhostName.status, 200);
+    });
+
+    await test('dev endpoints: cross-site reads of source are refused', async () => {
+      const crossSite = await rawRequest('GET', codeframePath, {
+        host: trustedHost,
+        'sec-fetch-site': 'cross-site',
+      });
+      assert.equal(crossSite.status, 403);
+      const foreignOrigin = await rawRequest('GET', codeframePath, {
+        host: trustedHost,
+        origin: 'https://evil.example',
+      });
+      assert.equal(foreignOrigin.status, 403);
+    });
+
+    await test('dev endpoints: open-in-editor is same-origin POST only', async () => {
+      const viaGet = await rawRequest('GET', editorPath, { host: trustedHost });
+      assert.equal(viaGet.status, 405, 'a GET is triggerable by <img src> and must not open anything');
+      const crossSite = await rawRequest('POST', editorPath, {
+        host: trustedHost,
+        origin: 'https://evil.example',
+        'sec-fetch-site': 'cross-site',
+      });
+      assert.equal(crossSite.status, 403);
+      const sameSite = await rawRequest('POST', editorPath, {
+        host: trustedHost,
+        'sec-fetch-site': 'same-site',
+      });
+      assert.equal(sameSite.status, 403);
+      const sameOrigin = await rawRequest('POST', editorPath, {
+        host: trustedHost,
+        origin: BASE,
+        'sec-fetch-site': 'same-origin',
+      });
+      assert.equal(sameOrigin.status, 200, sameOrigin.body);
+    });
+
+    await test('dev endpoints: a symlink named like source cannot expose other files', async () => {
+      // Outside app/ so the dev watcher does not restart the worker under
+      // the watch tests below.
+      await writeFile(join(devDir, 'secret.env'), 'TOKEN=integration-secret\n');
+      // Symlinks need Developer Mode / admin rights on Windows.
+      if (process.platform !== 'win32') {
+        await symlink(join(devDir, 'secret.env'), join(devDir, 'leak.ts'));
+        const res = await rawRequest('GET', '/_gio/devtools/codeframe?file=leak.ts&line=1', {
+          host: trustedHost,
+        });
+        assert.equal(res.status, 400);
+        assert.doesNotMatch(res.body, /integration-secret/);
+      }
+      const direct = await rawRequest('GET', '/_gio/devtools/codeframe?file=secret.env&line=1', {
+        host: trustedHost,
+      });
+      assert.equal(direct.status, 400);
+    });
 
     await test('dev watch: editing a page restarts the worker and serves new content', async () => {
       assert.match(await (await fetch(`${BASE}/`)).text(), /INTEGRATION_FIXTURE_HOME/);
