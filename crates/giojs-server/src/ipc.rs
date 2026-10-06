@@ -795,6 +795,7 @@ fn spawn_worker_command(
         .env("GIO_SOCKET_PATH", ipc_path)
         .env("GIO_WS_SOCKET_PATH", ws_path)
         .env("GIO_IPC_TOKEN", token)
+        .envs(crate::session_token::worker_env())
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

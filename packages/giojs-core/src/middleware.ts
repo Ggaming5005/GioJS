@@ -26,11 +26,15 @@ export interface MiddlewareHeaderRule {
   headers: Record<string, string>;
 }
 
-export interface MiddlewareGuard {
-  path: string;
-  requireCookie: string;
-  redirectTo: string;
-}
+/**
+ * Redirects (302) requests to `path` that lack the credential, before they
+ * reach Node. `requireCookie` alone is a presence check. `requireSession`
+ * verifies a createSessionStorage cookie's signature and expiry with
+ * GIO_SESSION_SECRET - the cookie named by `requireCookie`, or `gio_session`.
+ */
+export type MiddlewareGuard =
+  | { path: string; requireCookie: string; requireSession?: false; redirectTo: string }
+  | { path: string; requireSession: true; requireCookie?: string; redirectTo: string };
 
 export interface MiddlewareRules {
   redirects?: MiddlewareRedirect[];
@@ -138,18 +142,20 @@ export function sanitizeMiddlewareRules(value: unknown): SanitizedMiddleware {
   if (headers.length > 0) rules.headers = headers;
 
   const guards = sanitizeList<MiddlewareGuard>(value['guards'], 'guards', warnings, entry => {
-    if (
-      !isNonEmptyString(entry['path']) ||
-      !isNonEmptyString(entry['requireCookie']) ||
-      !isNonEmptyString(entry['redirectTo'])
-    ) {
-      return null;
+    const path = entry['path'];
+    const redirectTo = entry['redirectTo'];
+    const requireCookie = entry['requireCookie'];
+    const requireSession = entry['requireSession'];
+    if (!isNonEmptyString(path) || !isNonEmptyString(redirectTo)) return null;
+    if (requireCookie !== undefined && !isNonEmptyString(requireCookie)) return null;
+    if (requireSession !== undefined && typeof requireSession !== 'boolean') return null;
+    if (requireSession === true) {
+      return requireCookie === undefined
+        ? { path, requireSession: true, redirectTo }
+        : { path, requireSession: true, requireCookie, redirectTo };
     }
-    return {
-      path: entry['path'],
-      requireCookie: entry['requireCookie'],
-      redirectTo: entry['redirectTo'],
-    };
+    if (requireCookie === undefined) return null;
+    return { path, requireCookie, redirectTo };
   });
   if (guards.length > 0) rules.guards = guards;
 

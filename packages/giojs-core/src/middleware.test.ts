@@ -64,6 +64,35 @@ describe('sanitizeMiddlewareRules', () => {
     expect(warnings).toHaveLength(2);
   });
 
+  it('accepts session guards with and without a cookie name', () => {
+    const { rules, warnings } = sanitizeMiddlewareRules({
+      guards: [
+        { path: '/admin/*rest', requireSession: true, redirectTo: '/login' },
+        { path: '/staff', requireSession: true, requireCookie: 'staff_session', redirectTo: '/' },
+        { path: '/beta', requireSession: false, requireCookie: 'beta', redirectTo: '/' },
+      ],
+    });
+    expect(warnings).toEqual([]);
+    expect(rules.guards).toEqual([
+      { path: '/admin/*rest', requireSession: true, redirectTo: '/login' },
+      { path: '/staff', requireSession: true, requireCookie: 'staff_session', redirectTo: '/' },
+      { path: '/beta', requireCookie: 'beta', redirectTo: '/' },
+    ]);
+  });
+
+  it('drops guards with neither credential or a non-boolean requireSession', () => {
+    const { rules, warnings } = sanitizeMiddlewareRules({
+      guards: [
+        { path: '/a', redirectTo: '/' },
+        { path: '/b', requireSession: false, redirectTo: '/' },
+        { path: '/c', requireSession: 'yes', requireCookie: 'x', redirectTo: '/' },
+        { path: '/d', requireSession: true, requireCookie: '', redirectTo: '/' },
+      ],
+    });
+    expect(rules.guards).toBeUndefined();
+    expect(warnings).toHaveLength(4);
+  });
+
   it('ignores a section that is not an array', () => {
     const { rules, warnings } = sanitizeMiddlewareRules({ headers: { path: '/x' } });
     expect(rules.headers).toBeUndefined();
