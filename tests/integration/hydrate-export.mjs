@@ -9,8 +9,10 @@
  *   1. the page hydrates: its `button[data-probe]` reads `mounted=true`
  *      (set by an effect) and a click reaches its handler (`clicks=1`);
  *   2. clicking the GioLink `a[href=<nav>]` soft-navigates: the target page
- *      is fetched from out/, swapped in, its route chunk imported, and the
- *      new route mounted and interactive the same way.
+ *      is fetched from out/, its stylesheets loaded (served from
+ *      out/_next/static/css like any static host would), swapped in, its
+ *      route chunk imported, and the new route mounted and interactive the
+ *      same way.
  *
  * Run by run.mjs in a child process (it installs DOM globals and a module
  * resolve hook):
@@ -25,7 +27,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const [outDir, startPath, navPath] = process.argv.slice(2);
 const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-const { JSDOM } = createRequire(join(repoRoot, 'packages', 'giojs-react', 'package.json'))('jsdom');
+const { JSDOM, ResourceLoader } = createRequire(join(repoRoot, 'packages', 'giojs-react', 'package.json'))('jsdom');
 const ORIGIN = 'http://static.test';
 
 // Chunks import each other relatively, but soft navigation imports the next
@@ -48,7 +50,7 @@ function fileFor(path) {
   return existsSync(file) ? file : null;
 }
 
-const report = { errors: [], fetched: [], start: {}, nav: {} };
+const report = { errors: [], fetched: [], stylesheetsLoaded: [], start: {}, nav: {} };
 const finish = (code = 0) => {
   console.log(JSON.stringify(report));
   process.exit(code);
@@ -59,9 +61,19 @@ if (startFile === null) {
   report.errors.push(`no exported page for ${startPath}`);
   finish(1);
 }
+// Stylesheets load (and fire `load`) from out/, as on a static host.
+class OutResources extends ResourceLoader {
+  fetch(url) {
+    const { pathname } = new URL(url);
+    if (!pathname.startsWith('/_next/static/css/')) return null;
+    report.stylesheetsLoaded.push(pathname);
+    return readFile(join(outDir, ...pathname.split('/').filter(Boolean)));
+  }
+}
 const dom = new JSDOM(await readFile(startFile, 'utf8'), {
   url: ORIGIN + startPath,
   pretendToBeVisual: true,
+  resources: new OutResources(),
 });
 const { window } = dom;
 
@@ -156,4 +168,5 @@ report.nav.pathname = window.location.pathname;
 await exercise(report.nav);
 report.nav.content = document.getElementById('__gio')?.textContent ?? null;
 report.nav.envelopePath = JSON.parse(document.getElementById('__gio_props')?.textContent ?? '{}').path ?? null;
+report.nav.stylesheets = [...document.head.querySelectorAll('link[rel="stylesheet"]')].map((l) => l.getAttribute('href'));
 finish(0);
