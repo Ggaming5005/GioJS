@@ -199,6 +199,45 @@ describe('buildRouteStylesheets in production', () => {
   }, 60_000);
 });
 
+// The shape of Tailwind v4 CLI output: cascade layers, @property, nesting,
+// oklch colors and custom properties.
+const TAILWIND_OUTPUT = `/*! tailwindcss v4.1.0 | MIT License | https://tailwindcss.com */
+@layer properties;
+@layer theme, base, components, utilities;
+@layer theme {
+  :root, :host { --color-blue-500: oklch(62.3% 0.214 259.815); --spacing: 0.25rem; }
+}
+@layer base { *, ::after, ::before { box-sizing: border-box; margin: 0; } }
+@layer utilities {
+  .p-4 { padding: calc(var(--spacing) * 4); }
+  .text-blue-500 { color: var(--color-blue-500); }
+  .hover\\:underline { &:hover { @media (hover: hover) { text-decoration-line: underline; } } }
+}
+@property --tw-shadow { syntax: "*"; inherits: false; initial-value: 0 0 #0000; }
+`;
+
+describe('Tailwind CLI output imported from the root layout', () => {
+  it('ships with its layers, @property rules and escaped class names intact', async () => {
+    const root = await writeProject('gio-css-tailwind-', {
+      ...FIXTURE,
+      'app/layout.tsx': component('RootLayout', `import './tailwind.out.css';`),
+      'app/tailwind.out.css': TAILWIND_OUTPUT,
+    });
+    try {
+      const manifest = await buildRouteStylesheets({ ...(await discover(root)), projectRoot: root, dev: false });
+      const url = manifest.routes.get('/')?.[0] ?? '';
+      const css = await readFile(join(root, '.gio', 'build', 'static', 'css', url.split('/').pop() ?? ''), 'utf8');
+      expect(css).toContain('@layer theme,base,components,utilities');
+      expect(css).toContain('@property --tw-shadow');
+      expect(css).toContain('.hover\\:underline');
+      expect(css).toContain('.text-blue-500{color:var(--color-blue-500)}');
+      expect(css).toContain('oklch(');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
 describe('a stylesheet that fails to build', () => {
   it('costs only its own route its stylesheet', async () => {
     const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
