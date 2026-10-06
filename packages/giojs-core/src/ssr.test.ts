@@ -694,6 +694,22 @@ describe('getServerSideProps context', () => {
     expect('setCookies' in result).toBe(false);
   });
 
+  it('keeps the page cacheable when the returned headers flatten to nothing', async () => {
+    // Cookies set only sometimes: an empty array sends no header, so it must
+    // not cost a revalidate page its cache entry.
+    const routes = makeRoute('/', {
+      revalidate: 60,
+      getServerSideProps: async () => ({
+        props: {},
+        headers: { 'set-cookie': [] as string[], link: [] as string[] },
+      }),
+    });
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+    expect('setCookies' in result).toBe(false);
+    expect('cacheable' in result && result.cacheable).toBe(true);
+    expect('cacheMaxAge' in result && result.cacheMaxAge).toBe(60);
+  });
+
   it('lets an onResponse plugin add cookies next to the page ones', async () => {
     const registry = new NodePluginRegistry();
     registry.register({
@@ -711,6 +727,26 @@ describe('getServerSideProps context', () => {
       'page=1; Path=/',
       'plugin=1; Path=/',
     ]);
+  });
+
+  it('page cookies reach onResponse in setCookies, where a plugin strips them', async () => {
+    let seenHeaderCookie: string | undefined = 'unset';
+    const registry = new NodePluginRegistry();
+    registry.register({
+      name: 'strip', version: '0.0.0',
+      onResponse: async (_req, res) => {
+        seenHeaderCookie = res.headers['set-cookie'];
+        return { ...res, setCookies: [] };
+      },
+    });
+    const routes = makeRoute('/', {
+      getServerSideProps: async () => ({ props: {}, headers: { 'set-cookie': 'page=1; Path=/' } }),
+    });
+    const result = await renderRoute(makeRequest('/'), routes, noLayouts, registry);
+    // Documented in docs/plugins.md: the headers map no longer carries them.
+    expect(seenHeaderCookie).toBeUndefined();
+    expect('setCookies' in result && result.setCookies).toEqual([]);
+    expect('headers' in result && result.headers['set-cookie']).toBeUndefined();
   });
 
   it('flat results containing a headers key stay plain props', async () => {

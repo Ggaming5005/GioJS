@@ -443,8 +443,14 @@ export async function renderRoute(
       if (isRecord(nested)) {
         props = nested;
         const returnedHeaders = result['headers'];
-        if (isHeaderRecord(returnedHeaders) && Object.keys(returnedHeaders).length > 0) {
-          gsspHeaders = flattenResponseHeaders(returnedHeaders);
+        if (isHeaderRecord(returnedHeaders)) {
+          // Checked after flattening: `{ 'set-cookie': [] }` (cookies set
+          // only sometimes) sends nothing, so it must not cost the page its
+          // cacheability.
+          const flat = flattenResponseHeaders(returnedHeaders);
+          if (Object.keys(flat.headers).length > 0 || flat.setCookies.length > 0) {
+            gsspHeaders = flat;
+          }
         }
       } else {
         props = result;

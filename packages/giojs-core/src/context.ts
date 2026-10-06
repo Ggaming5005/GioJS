@@ -60,6 +60,8 @@ export interface IPCResponse {
    * Set-Cookie values, each sent as its own header (additive, protocol stays
    * v3). Cookies cannot share the single-valued `headers` map: they are not
    * comma-joinable (Expires dates contain commas). Plugins append here too.
+   * Page (gSSP) and route.ts cookies arrive here, never in
+   * `headers['set-cookie']`; an onResponse plugin strips them with `[]`.
    */
   setCookies?: string[];
 }
