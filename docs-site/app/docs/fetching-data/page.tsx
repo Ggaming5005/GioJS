@@ -30,6 +30,12 @@ export async function getServerSideProps(ctx) {
         <code>revalidate</code> is not cached for that request - see{' '}
         <a href="/docs/caching">Caching</a>.
       </p>
+      <p>
+        <code>ctx.headers</code> is a tracked view of the request headers (a Proxy), so{' '}
+        <code>structuredClone</code>, <code>postMessage</code> and worker threads reject it.
+        Pass a plain copy instead - <code>{'{ ...ctx.headers }'}</code> - which, like any
+        enumeration of the headers, counts as reading them.
+      </p>
     </>
   );
 }

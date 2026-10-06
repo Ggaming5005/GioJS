@@ -54,9 +54,10 @@ Plugins run in **registration order** for `onRequest`/`onResponse`/`onStartup`. 
 
 **Caching and personalization:** the Rust page cache keys renders by method, path (locale included),
 and query - never by anything an `onRequest` plugin derives from the visitor. GioJS protects the common case:
-request headers a plugin adds or changes (e.g. an auth plugin setting `x-user-id` from the session
-cookie) count as credentials, so a page whose `getServerSideProps` reads them is rendered per
-request and never cached, exactly like reading `ctx.cookies`. Two things stay the plugin's
+request headers a plugin adds, changes or removes (e.g. an auth plugin setting `x-user-id` from the
+session cookie; names match case-insensitively) count as credentials, so a page whose
+`getServerSideProps` reads them is rendered per request and never cached, exactly like reading
+`ctx.cookies`. Two things stay the plugin's
 responsibility:
 
 - An `IPCResponse` returned from `onRequest` is sent as-is, including its `cacheable` /

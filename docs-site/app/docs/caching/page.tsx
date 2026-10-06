@@ -29,8 +29,8 @@ export const revalidate = false;
         <code>authorization</code> entry of <code>ctx.headers</code> (including spreading or
         enumerating the headers) - GioJS marks that render personalized and does not cache it,
         even though the page exports <code>revalidate</code>. A warning is logged once per
-        route. Headers an <code>onRequest</code> plugin added or changed count as credentials
-        too; other headers (<code>accept-language</code>, <code>user-agent</code>, ...) do not.
+        route. Headers an <code>onRequest</code> plugin added, changed or removed count as
+        credentials too; other headers (<code>accept-language</code>, <code>user-agent</code>, ...) do not.
       </p>
       <p>
         To keep a personalized page fast, either drop <code>revalidate</code> (it renders per

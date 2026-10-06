@@ -159,11 +159,15 @@ function makeGioRequest(req: IPCRequest, params: Record<string, string>): GioReq
 
 /**
  * Build the getServerSideProps context with Next.js-style dynamic detection:
- * touching `ctx.cookies`, or reading/probing/enumerating one of the `tracked`
- * headers on `ctx.headers`, marks the render as personalized. Detection is
- * per access, not per value - an absent cookie read still decides the output
- * (the anonymous variant), so it counts too. Only the user-facing context is
- * instrumented; framework code reads `req.headers` directly and never trips it.
+ * touching `ctx.cookies`, reading or probing one of the `tracked` headers
+ * (lowercase names) on `ctx.headers`, or enumerating the headers at all,
+ * marks the render as personalized. Detection is per access, not per value -
+ * an absent cookie read still decides the output (the anonymous variant), so
+ * it counts too. Only the user-facing context is instrumented; framework code
+ * reads `req.headers` directly and never trips it.
+ *
+ * `ctx.headers` is a Proxy, so structuredClone/postMessage reject it; a copy
+ * (`{ ...ctx.headers }`) is a plain object - and counts as a read.
  */
 function makeGsspContext(
   req: IPCRequest,
@@ -184,10 +188,16 @@ function makeGsspContext(
         if (isTracked(key)) read = true;
         return Reflect.has(target, key);
       },
-      // Spread, Object.entries and JSON.stringify all go through here.
       getOwnPropertyDescriptor(target, key) {
         if (isTracked(key)) read = true;
         return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+      // Every enumeration (spread, Object.keys, JSON.stringify, for...in,
+      // getOwnPropertyNames) lists the keys first, and the list alone tells
+      // whether credentials were sent - a read with or without them.
+      ownKeys(target) {
+        read = true;
+        return Reflect.ownKeys(target);
       },
     },
   );
@@ -209,15 +219,20 @@ function makeGsspContext(
 }
 
 /**
- * Headers an onRequest plugin added or changed. They are derived per request
- * (typically from the session cookie - an auth plugin setting x-user-id), so
- * reading them is as personal as reading the cookie itself.
+ * Headers an onRequest plugin added, changed or removed, as lowercase names
+ * (the tracked set is matched case-insensitively; plugins may write
+ * `X-User-Id`). They are derived per request (typically from the session
+ * cookie - an auth plugin setting x-user-id), so reading them is as personal
+ * as reading the cookie itself.
  */
 function pluginDerivedHeaders(
   before: Record<string, string>,
   after: Record<string, string>,
 ): string[] {
-  return Object.keys(after).filter(name => before[name] !== after[name]);
+  const names = new Set([...Object.keys(before), ...Object.keys(after)]);
+  return [...names]
+    .filter(name => before[name] !== after[name])
+    .map(name => name.toLowerCase());
 }
 
 /** Rank a single segment: literal (2) > dynamic (1) > catch-all (0). */

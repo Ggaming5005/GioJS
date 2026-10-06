@@ -827,9 +827,41 @@ describe('credential reads make a revalidate page uncacheable', () => {
     expect(await cacheFields(gsspRoute('/', ctx => JSON.stringify({ ...ctx.headers })))).toEqual(PERSONAL);
   });
 
+  it('listing the header names counts as a read (ownKeys)', async () => {
+    const reads: ((ctx: GsspContextLike) => unknown)[] = [
+      ctx => Object.getOwnPropertyNames(ctx.headers).includes('cookie'),
+      ctx => Reflect.ownKeys(ctx.headers).includes('authorization'),
+      ctx => Object.keys(ctx.headers).length,
+      ctx => {
+        const names: string[] = [];
+        for (const name in ctx.headers) names.push(name);
+        return names.join(',');
+      },
+    ];
+    for (const read of reads) {
+      expect(await cacheFields(gsspRoute('/', read))).toEqual(PERSONAL);
+    }
+  });
+
   it('a read counts even when the request carries no credentials (the anonymous variant)', async () => {
     const routes = gsspRoute('/', ctx => ctx.cookies['session'] ?? 'anon');
     expect(await cacheFields(routes, makeRequest('/'))).toEqual(PERSONAL);
+    // No cookie descriptor is ever touched here - the enumeration decides.
+    const anonymous: ((ctx: GsspContextLike) => unknown)[] = [
+      ctx => ({ ...ctx.headers })['cookie'] !== undefined ? 'IN' : 'ANON',
+      ctx => Object.keys(ctx.headers).includes('cookie'),
+      ctx => JSON.stringify(ctx.headers),
+    ];
+    for (const read of anonymous) {
+      expect(await cacheFields(gsspRoute('/', read), makeRequest('/'))).toEqual(PERSONAL);
+    }
+  });
+
+  it('a copy of the headers is a plain, cloneable object (and counts as a read)', async () => {
+    const routes = gsspRoute('/', ctx => structuredClone({ ...ctx.headers })['x-thing']);
+    const result = await renderRoute(credentialRequest(), routes, noLayouts);
+    expect('body' in result && result.body).toContain('page content');
+    expect('cacheable' in result && result.cacheable).toBe(false);
   });
 
   it('reading non-credential headers keeps the page cacheable', async () => {
@@ -881,6 +913,36 @@ describe('credential reads make a revalidate page uncacheable', () => {
     ).toEqual(PERSONAL);
     expect(
       await cacheFields(gsspRoute('/', ctx => ctx.headers['x-thing']), credentialRequest(), registry),
+    ).toEqual(SHARED);
+  });
+
+  it('plugin-set header names match regardless of case, and removals count too', async () => {
+    const registry = new NodePluginRegistry();
+    registry.register({
+      name: 'auth',
+      version: '1.0.0',
+      onRequest: async (req) => {
+        req.headers['X-User-Id'] = req.headers['cookie'] === 'session=u1' ? 'u1' : 'anon';
+        if (req.headers['cookie'] === undefined) delete req.headers['x-thing'];
+        return req;
+      },
+    });
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['X-User-Id']), credentialRequest(), registry),
+    ).toEqual(PERSONAL);
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['x-user-id']), credentialRequest(), registry),
+    ).toEqual(PERSONAL);
+    expect(
+      await cacheFields(gsspRoute('/', ctx => 'X-USER-ID' in ctx.headers), credentialRequest(), registry),
+    ).toEqual(PERSONAL);
+    const anonymous = { ...makeRequest('/'), headers: { 'x-thing': 'v' } };
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['x-thing'] ?? 'gone'), anonymous, registry),
+    ).toEqual(PERSONAL);
+    // Untouched headers stay shareable.
+    expect(
+      await cacheFields(gsspRoute('/', ctx => ctx.headers['accept-language']), credentialRequest(), registry),
     ).toEqual(SHARED);
   });
 
