@@ -217,6 +217,48 @@ async function main() {
       );
     });
 
+    await test('route.ts Response cookies arrive as separate Set-Cookie headers', async () => {
+      const res = await fetch(`${BASE}/api/session`, { method: 'POST' });
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.headers.getSetCookie(), [
+        'session=s1; Path=/; HttpOnly; Expires=Wed, 21 Oct 2037 07:28:00 GMT',
+        'csrf=c1; Path=/; SameSite=Strict',
+      ]);
+    });
+
+    await test('getServerSideProps cookies arrive separately and keep the page uncached', async () => {
+      const expected = [
+        'session=s2; Path=/; HttpOnly; Expires=Wed, 21 Oct 2037 07:28:00 GMT',
+        'csrf=c2; Path=/; SameSite=Strict',
+      ];
+      // GET streams (uncacheable render); HEAD takes the buffered path.
+      const first = await fetch(`${BASE}/account`);
+      assert.match(await first.text(), /INTEGRATION_FIXTURE_ACCOUNT/);
+      assert.deepEqual(first.headers.getSetCookie(), expected);
+      const second = await fetch(`${BASE}/account`);
+      await second.text();
+      assert.deepEqual(second.headers.getSetCookie(), expected);
+      assert.equal(second.headers.get('x-gio-cache'), 'bypass', 'cookie pages must never be cached');
+      const head = await fetch(`${BASE}/account`, { method: 'HEAD' });
+      assert.deepEqual(head.headers.getSetCookie(), expected);
+    });
+
+    await test('getServerSideProps redirects carry their cookies', async () => {
+      const res = await fetch(`${BASE}/logout`, { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), '/');
+      assert.deepEqual(res.headers.getSetCookie(), [
+        'session=; Path=/; Max-Age=0',
+        'csrf=; Path=/; Max-Age=0',
+      ]);
+    });
+
+    await test('a cookie in both the headers map and setCookies is sent once', async () => {
+      const res = await fetch(`${BASE}/plugin-cookies`);
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.headers.getSetCookie(), ['a=1; Path=/', 'b=2; Path=/']);
+    });
+
     await test('unexported methods get 405 with an Allow header', async () => {
       const res = await fetch(`${BASE}/api/notes`, { method: 'DELETE' });
       assert.equal(res.status, 405);
