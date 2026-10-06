@@ -657,6 +657,43 @@ export default function Page() {
   });
 });
 
+describe('buildClientBundles for a static export', () => {
+  let projectRoot: string;
+
+  beforeAll(async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), 'gio-client-export-'));
+    await mkdir(join(projectRoot, 'app'), { recursive: true });
+    await mkdir(join(projectRoot, 'lib'), { recursive: true });
+    await writeFile(join(projectRoot, 'app', 'page.tsx'), PAGE_SOURCE);
+    await writeFile(join(projectRoot, 'lib', 'secret.ts'), SECRET_SOURCE);
+    // A running server's build must survive an export from the same project.
+    await mkdir(join(projectRoot, '.gio', 'build', 'static', 'chunks'), { recursive: true });
+    await writeFile(join(projectRoot, '.gio', 'build', 'static', 'chunks', 'route-live-X.js'), '');
+  });
+
+  afterAll(async () => {
+    await rm(projectRoot, { recursive: true, force: true });
+  });
+
+  it('writes the chunks under <out>/_next/static/chunks, at the URLs it reports', async () => {
+    const outDir = join(projectRoot, 'out');
+    const manifest = await buildClientBundles({
+      routes: new Map([['/', routeFor('/', join(projectRoot, 'app', 'page.tsx'))]]),
+      layouts: new Map(),
+      projectRoot,
+      dev: false,
+      staticExportDir: outDir,
+      nodePaths: [join(packageDir, 'node_modules')],
+    });
+    const url = manifest.get('/');
+    expect(url).toMatch(/^\/_next\/static\/chunks\/route-index-[A-Z0-9]+\.js$/);
+    const files = await readdir(join(outDir, '_next', 'static', 'chunks'));
+    expect(files).toContain(url?.split('/').pop());
+    expect(files.some(f => f.endsWith('.map'))).toBe(false);
+    expect(await readdir(join(projectRoot, '.gio', 'build', 'static', 'chunks'))).toEqual(['route-live-X.js']);
+  }, 60_000);
+});
+
 describe('clientEnvDefines', () => {
   it('defines only well-formed GIO_PUBLIC_* keys, JSON-encoded', () => {
     const defines = clientEnvDefines(
@@ -681,6 +718,12 @@ describe('clientEnvDefines', () => {
 
   it('marks dev builds as development', () => {
     expect(clientEnvDefines({}, true)['process.env.NODE_ENV']).toBe('"development"');
+  });
+
+  it('static export bundles see GIO_EXPORT=1, as the export render did', () => {
+    const defines = clientEnvDefines({}, false, true);
+    expect(defines['process.env.GIO_EXPORT']).toBe('"1"');
+    expect(JSON.parse(defines['process.env'] ?? '')).toMatchObject({ GIO_EXPORT: '1' });
   });
 
   it('gives destructuring and dynamic reads the public values, and only those', async () => {

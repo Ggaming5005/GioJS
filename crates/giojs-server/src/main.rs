@@ -332,6 +332,14 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     // Before the worker spawns (it may receive the dev secret) and before
     // any rule set compiles (require_session guards verify with it).
     session_token::init(dev_mode);
+    // <GioImage> must only emit srcset widths /_gio/image accepts. Settings
+    // the HTML depends on are listed in config::WORKER_RENDER_SETTINGS_ENV,
+    // which hashes them into the derived deployment ID: changing them drops
+    // persisted pages.
+    let worker_env = vec![(
+        config::WORKER_IMAGE_CONFIG_ENV.to_string(),
+        cfg.images.worker_json(),
+    )];
 
     let cache_dir = std::env::var("GIO_CACHE_DIR")
         .map(PathBuf::from)
@@ -353,7 +361,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         // renders with its own placeholder.
         security::load_or_create_nonce_placeholder(
             &cache_dir.join("meta"),
-            &ipc::generate_deployment_id(),
+            &ipc::generate_deployment_id(&worker_env),
         )
     });
     let security = match &nonce_placeholder {
@@ -384,7 +392,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let security = Arc::new(security);
 
     info!("Starting Node SSR worker: {node_script}");
-    let ipc = IpcClient::start(&node_script, &ipc_paths, &ipc_token, dev_mode).await?;
+    let ipc = IpcClient::start(&node_script, &ipc_paths, &ipc_token, dev_mode, worker_env).await?;
     let cache_epoch: Arc<str> =
         security::cache_epoch(ipc.deployment_id(), nonce_placeholder.as_deref()).into();
 

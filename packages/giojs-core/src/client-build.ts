@@ -69,6 +69,13 @@ export interface ClientBuildOptions {
   dev: boolean;
   /** Extra module resolution dirs (tests use this to reach react). */
   nodePaths?: string[];
+  /**
+   * Static export: chunks go straight into `<outDir>/_next/static/chunks`
+   * (the URLs pages reference), and the bundles see GIO_EXPORT=1 like the
+   * export render did. Generated entries live under `.gio/export/`, so an
+   * export never wipes a running server's build.
+   */
+  staticExportDir?: string;
 }
 
 /** Route pattern → public entry script URL (e.g. "/_next/static/chunks/route-index-ABC.js"). */
@@ -199,10 +206,14 @@ export function publicEnvDefines(env: NodeJS.ProcessEnv): Record<string, string>
  * a secret, and never a `process is not defined` crash. The more specific
  * defines win over the object.
  */
-export function clientEnvDefines(env: NodeJS.ProcessEnv, dev: boolean): Record<string, string> {
+export function clientEnvDefines(
+  env: NodeJS.ProcessEnv,
+  dev: boolean,
+  staticExport = false,
+): Record<string, string> {
   const visible = {
     NODE_ENV: dev ? 'development' : 'production',
-    GIO_EXPORT: '0',
+    GIO_EXPORT: staticExport ? '1' : '0',
     ...publicEnv(env),
   };
   return {
@@ -530,8 +541,15 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
 
   const started = Date.now();
   const projectRoot = resolve(options.projectRoot);
-  const outDir = join(projectRoot, '.gio', 'build', 'static', 'chunks');
-  const entriesDir = join(projectRoot, '.gio', 'build', 'entries');
+  const exportDir = options.staticExportDir;
+  const outDir =
+    exportDir !== undefined
+      ? join(resolve(exportDir), ...PUBLIC_CHUNK_PATH.split('/').filter(Boolean))
+      : join(projectRoot, '.gio', 'build', 'static', 'chunks');
+  const entriesDir =
+    exportDir !== undefined
+      ? join(projectRoot, '.gio', 'export', 'entries')
+      : join(projectRoot, '.gio', 'build', 'entries');
   const runtimePath = fileURLToPath(new URL('./client-runtime.ts', import.meta.url));
 
   try {
@@ -562,7 +580,7 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
     }
 
     const plugin = gioServerCodePlugin(projectRoot);
-    const defines = clientEnvDefines(process.env, options.dev);
+    const defines = clientEnvDefines(process.env, options.dev, exportDir !== undefined);
     const bundle = (selected: GeneratedEntry[]): Promise<BuiltBundles> =>
       runEsbuild({
         entryPoints: Object.fromEntries(selected.map(e => [e.name, e.file])),

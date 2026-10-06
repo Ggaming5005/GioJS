@@ -12,10 +12,10 @@
  * Fixtures live under this package so page files can resolve `react`.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdir, readFile, rm, writeFile, access, symlink } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile, access, symlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { exportSite, isRootServable, patternToPath } from './export.ts';
 
 // Vite's import() does not percent-decode file URLs, so bracket folders
@@ -78,6 +78,19 @@ describe('exportSite 404.html', () => {
     const html = await readFile(join(outDir, '404.html'), 'utf8');
     expect(html).toContain('EXPORT_CUSTOM_404');
     expect(html).not.toContain('HTTP 404');
+  });
+
+  it('is written even when no page is (out/ is created up front)', async () => {
+    const appDir = join(fixtureRoot, 'no-pages', 'app');
+    const outDir = join(fixtureRoot, 'no-pages', 'out');
+    await mkdir(join(appDir, 'posts', '[id]'), { recursive: true });
+    await writeFile(join(appDir, 'posts', '[id]', 'page.tsx'), PARAMS_PAGE('id'));
+
+    const { written, skipped } = await exportSite(appDir, outDir);
+    expect(written).toEqual([]);
+    expect(skipped).toEqual([{ route: '/posts/:id', reason: 'dynamic route without getStaticPaths()' }]);
+    expect(await readFile(join(outDir, '404.html'), 'utf8')).toContain('HTTP 404');
+    expect(await exists(join(outDir, 'robots.txt'))).toBe(true);
   });
 
   it('is never claimed by a root optional catch-all page', async () => {
@@ -521,5 +534,144 @@ describe('exportSite public/', () => {
     expect(isRootServable('.well-known/.hidden')).toBe(false);
     expect(isRootServable('nested/.well-known/x')).toBe(false);
     expect(isRootServable('_gio/health')).toBe(false);
+  });
+});
+
+// A stateful client component: it only works in the browser if the page
+// hydrates. The image goes through GioImage, which has no optimizer to
+// point at on a static host.
+const INTERACTIVE_PAGE = `import React from 'react';
+import { GioImage } from '../../../../giojs-react/src/Image.tsx';
+function Counter() {
+  const [count, setCount] = React.useState(0);
+  return React.createElement('button', { onClick: () => setCount(count + 1) }, 'COUNT=' + count);
+}
+export default function Home({ greeting }) {
+  return React.createElement('main', null,
+    React.createElement('h1', null, 'EXPORT_INTERACTIVE ' + greeting + ' ' + process.env.GIO_PUBLIC_EXPORT_GREETING),
+    React.createElement(Counter),
+    React.createElement(GioImage, { src: '/hero.jpg', width: 640, height: 480, alt: 'hero', sizes: '100vw' }));
+}
+export async function getServerSideProps() {
+  return { props: { greeting: 'from-gssp' } };
+}
+`;
+
+const SERVER_ONLY_PAGE = `import React from 'react';
+import { KEY } from '../../lib/keys.server.ts';
+export default function Leak() { return React.createElement('p', null, 'LEAK ' + KEY); }
+`;
+
+const PLAIN_POST = `import React from 'react';
+export default function Post({ params }) { return React.createElement('p', null, 'POST ' + params.id); }
+export function getStaticPaths() { return { paths: [{ params: { id: '1' } }, { params: { id: '2' } }] }; }
+`;
+
+interface Envelope {
+  props: Record<string, unknown>;
+  path: string;
+  pattern: string;
+  entry: string;
+  images?: { widths: number[]; quality: number; unoptimized: boolean };
+}
+
+function envelopeOf(html: string): Envelope {
+  const json = html.match(/<script id="__gio_props" type="application\/json">([^<]*)<\/script>/)?.[1];
+  expect(json, 'page carries the hydration envelope').toBeDefined();
+  return JSON.parse(json as string) as Envelope;
+}
+
+/** Local file behind a root-relative URL in out/. */
+function outFile(outDir: string, url: string): string {
+  return join(outDir, ...url.split('/').filter(Boolean));
+}
+
+async function readChunks(outDir: string): Promise<string[]> {
+  const chunksDir = join(outDir, '_next', 'static', 'chunks');
+  return Promise.all((await readdir(chunksDir)).map(name => readFile(join(chunksDir, name), 'utf8')));
+}
+
+describe('exportSite hydration', () => {
+  const base = join(fixtureRoot, 'hydration');
+  const appDir = join(base, 'app');
+  const outDir = join(base, 'out');
+  let result: Awaited<ReturnType<typeof exportSite>>;
+
+  beforeAll(async () => {
+    await mkdir(join(appDir, 'posts', '[id]'), { recursive: true });
+    await mkdir(join(appDir, 'leak'), { recursive: true });
+    await mkdir(join(base, 'lib'), { recursive: true });
+    await writeFile(join(appDir, 'page.tsx'), INTERACTIVE_PAGE);
+    await writeFile(join(appDir, 'posts', '[id]', 'page.tsx'), PLAIN_POST);
+    await writeFile(join(appDir, 'leak', 'page.tsx'), SERVER_ONLY_PAGE);
+    await writeFile(join(base, 'lib', 'keys.server.ts'), "export const KEY = 'EXPORT_SERVER_SECRET';\n");
+    vi.stubEnv('GIO_PUBLIC_EXPORT_GREETING', 'EXPORT_PUBLIC_VALUE');
+    try {
+      result = await exportSite(appDir, outDir);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }, 60_000);
+
+  afterAll(async () => {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  });
+
+  it('pages carry the envelope and a bootstrap module that exists in out/', async () => {
+    expect(result.written).toEqual(expect.arrayContaining(['/', '/posts/1', '/posts/2', '/leak']));
+    for (const [path, file] of [
+      ['/', 'index.html'],
+      ['/posts/1', join('posts', '1', 'index.html')],
+    ] as const) {
+      const html = await readFile(join(outDir, file), 'utf8');
+      const envelope = envelopeOf(html);
+      expect(envelope.path).toBe(path);
+      expect(envelope.entry).toMatch(/^\/_next\/static\/chunks\/route-[\w-]+-[A-Z0-9]+\.js$/);
+      // React's bootstrap script loads the same entry the envelope names.
+      expect(html).toContain(`<script type="module" src="${envelope.entry}"`);
+      expect(await exists(outFile(outDir, envelope.entry)), envelope.entry).toBe(true);
+    }
+  });
+
+  it('every chunk an entry imports is in out/ next to it', async () => {
+    const envelope = envelopeOf(await readFile(join(outDir, 'index.html'), 'utf8'));
+    const entryFile = outFile(outDir, envelope.entry);
+    const js = await readFile(entryFile, 'utf8');
+    const imports = [...js.matchAll(/["'](\.\/shared-[A-Z0-9]+\.js)["']/g)].map(m => m[1] as string);
+    expect(imports.length, 'entries share chunks (one React for soft navigation)').toBeGreaterThan(0);
+    for (const rel of imports) {
+      expect(await exists(join(dirname(entryFile), rel)), rel).toBe(true);
+    }
+    // Production bundle: no source maps shipped.
+    expect(await exists(`${entryFile}.map`)).toBe(false);
+  });
+
+  it('the envelope carries build-time props and GIO_PUBLIC_* values are frozen into the chunks', async () => {
+    const html = await readFile(join(outDir, 'index.html'), 'utf8');
+    expect(html).toMatch(/EXPORT_INTERACTIVE from-gssp EXPORT_PUBLIC_VALUE/);
+    expect(envelopeOf(html).props).toEqual({ greeting: 'from-gssp' });
+    const chunks = await readChunks(outDir);
+    expect(chunks.some(js => js.includes('EXPORT_PUBLIC_VALUE'))).toBe(true);
+    // getServerSideProps never ships.
+    expect(chunks.some(js => js.includes('from-gssp'))).toBe(false);
+  });
+
+  it('images render their plain src (no optimizer on a static host), identically after hydration', async () => {
+    const html = await readFile(join(outDir, 'index.html'), 'utf8');
+    expect(html).toMatch(/<img src="\/hero.jpg"/);
+    expect(html).not.toContain('/_gio/image');
+    expect(envelopeOf(html).images).toMatchObject({ unoptimized: true });
+  });
+
+  it('a route rejected for importing server-only code exports as HTML only, and is reported', async () => {
+    const html = await readFile(join(outDir, 'leak', 'index.html'), 'utf8');
+    expect(html).toContain('LEAK');
+    expect(html).not.toContain('id="__gio_props"');
+    expect(html).not.toContain('type="module"');
+    for (const js of await readChunks(outDir)) {
+      expect(js).not.toContain('EXPORT_SERVER_SECRET');
+    }
+    expect(result.unhydrated.map(u => u.route)).toEqual(['/leak']);
+    expect(result.unhydrated[0]?.reason).toMatch(/imports server-only code/);
   });
 });

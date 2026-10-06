@@ -45,8 +45,9 @@ renders React. Full docs: https://giojs.com/llms.txt
   error boundary (shipped in the page bundles - no server-only imports), and
   `reset` exists only for errors caught in the browser.
 - Components come from `@gio.js/react`: `<GioLink>` (client nav + prefetch),
-  `<GioImage>` (points at the built-in `/_gio/image` optimizer — never add
-  `sharp` or `next/image`). Route-handler types come from `@gio.js/core`
+  `<GioImage>` (srcset from the gio.toml `[images]` allowed_widths, served by
+  the built-in `/_gio/image` optimizer; `sizes`, `priority` to preload,
+  `unoptimized` for a plain `src` — never add `sharp` or `next/image`). Route-handler types come from `@gio.js/core`
   (`GioRequest`, `GioEventStream` for SSE).
 - WebSockets: export `wsHandler(socket)` from a `route.js`.
 - Security runs in Rust: default headers (nosniff, `X-Frame-Options:
@@ -78,6 +79,11 @@ renders React. Full docs: https://giojs.com/llms.txt
   `*.server.js`. Using one from getServerSideProps/route handlers is fine;
   importing it from client code rejects that route's bundle (page renders but
   never hydrates).
+- Static export (`gio export` → `out/`): dynamic routes need
+  `export function getStaticPaths()` listing their params; pages still
+  hydrate (client JS ships under `out/_next/`), `GIO_PUBLIC_*` values are
+  frozen at export time, and `<GioImage>` renders plain `src` (no optimizer
+  on a static host).
 
 ## Commands
 

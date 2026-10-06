@@ -9,6 +9,9 @@
  * overlay) is server HTML that React never touches. Inside it, every folder's
  * error.* is a React error boundary, so an error thrown while rendering in
  * the browser replaces only that segment instead of unmounting the page.
+ *
+ * The envelope also carries the `<GioImage>` config the server rendered
+ * with; it is installed before every render so srcsets hydrate unchanged.
  */
 import React from 'react';
 import { hydrateRoot, createRoot, type Root } from 'react-dom/client';
@@ -22,6 +25,8 @@ export interface GioEnvelope {
   path: string;
   pattern: string;
   entry: string;
+  /** image-config.ts ImageRenderConfig, opaque here. */
+  images?: Record<string, unknown>;
 }
 
 type BuildFn = (props: Record<string, unknown>, path: string) => React.ReactNode;
@@ -44,6 +49,9 @@ function readEnvelope(): GioEnvelope | null {
       path: env['path'],
       pattern: env['pattern'],
       entry: typeof env['entry'] === 'string' ? env['entry'] : '',
+      ...(typeof env['images'] === 'object' && env['images'] !== null
+        ? { images: env['images'] as Record<string, unknown> }
+        : {}),
     };
   } catch {
     return null;
@@ -65,6 +73,9 @@ function mount(): void {
     return;
   }
 
+  if (envelope.images !== undefined) {
+    (globalThis as Record<string, unknown>)['__GIO_IMAGES__'] = envelope.images;
+  }
   const element = build(envelope.props, envelope.path);
   if (activeRoot === null) {
     // First load: the container holds this exact tree's server HTML.

@@ -56,6 +56,7 @@ import {
   UnsupportedMediaTypeError,
 } from './request-body.ts';
 import { parseCookies } from './cookies.ts';
+import { installedImageConfig, type ImageRenderConfig } from './image-config.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -469,6 +470,8 @@ export function serializeEnvelope(envelope: {
   path: string;
   pattern: string;
   entry: string;
+  /** The `<GioImage>` config the server rendered with, for identical srcsets. */
+  images?: ImageRenderConfig;
 }): string | null {
   try {
     return JSON.stringify(envelope)
@@ -723,11 +726,19 @@ export async function renderRoute(
     const inner = buildSegmentTree(React.createElement(Component, props), req.path, levels);
 
     const pattern = match.module.urlPattern;
-    const entryScript =
-      process.env.GIO_EXPORT === '1' ? undefined : clientScripts?.get(pattern);
+    // Installed before rendering: <GioImage> reads it during the render.
+    const images = installedImageConfig();
+    // Static export passes the manifest of its own build (export.ts).
+    const entryScript = clientScripts?.get(pattern);
     const envelopeJson =
       entryScript !== undefined
-        ? serializeEnvelope({ props, path: req.path, pattern, entry: entryScript })
+        ? serializeEnvelope({
+            props,
+            path: req.path,
+            pattern,
+            entry: entryScript,
+            images,
+          })
         : null;
     if (entryScript !== undefined && envelopeJson === null) {
       logger.warn('props are not JSON-serializable - page will render without hydration', {

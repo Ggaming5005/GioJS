@@ -376,6 +376,10 @@ struct NodeWorker {
     ws_path: String,
     token: String,
     dev_mode: bool,
+    /// Server settings the worker renders with (e.g. GIO_IMAGE_CONFIG),
+    /// handed to every respawn too. Those named in
+    /// `config::WORKER_RENDER_SETTINGS_ENV` also feed the deployment ID.
+    extra_env: Vec<(String, String)>,
 }
 
 impl NodeWorker {
@@ -386,6 +390,7 @@ impl NodeWorker {
             &self.ws_path,
             &self.token,
             self.dev_mode,
+            &self.extra_env,
         )
     }
 }
@@ -396,6 +401,7 @@ impl IpcClient {
         paths: &IpcPaths,
         token: &str,
         dev_mode: bool,
+        extra_env: Vec<(String, String)>,
     ) -> anyhow::Result<Self> {
         let worker = NodeWorker {
             script: node_script.to_string(),
@@ -403,12 +409,13 @@ impl IpcClient {
             ws_path: paths.ws.clone(),
             token: token.to_string(),
             dev_mode,
+            extra_env,
         };
         let mut child = worker.spawn()?;
         let spawned_pid = child.id();
         info!("Node process spawned (pid {:?})", spawned_pid);
 
-        let deployment_id = generate_deployment_id();
+        let deployment_id = generate_deployment_id(&worker.extra_env);
 
         let connection = match connect_and_handshake(
             &worker.ipc_path,
@@ -647,8 +654,7 @@ async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> anyhow::Result<B
 
 // ── Deployment ID ────────────────────────────────────────────────────────────
 
-pub fn generate_deployment_id() -> String {
-    use sha2::{Digest, Sha256};
+pub fn generate_deployment_id(worker_env: &[(String, String)]) -> String {
     // Content-derived, never time-derived: a restart of the same build must
     // keep the same ID or the entire persisted disk cache becomes dead weight
     // (and every pod in a multi-instance deployment would disagree).
@@ -660,8 +666,31 @@ pub fn generate_deployment_id() -> String {
         }
     }
     let manifest = std::fs::read(".gio/manifest.json").unwrap_or_default();
+    derive_deployment_id(&manifest, worker_env)
+}
+
+/// The build manifest alone does not describe the rendered HTML: the worker
+/// also renders with server settings handed to it in its environment (e.g.
+/// `[images]` decides every `<GioImage>` srcset). Those are hashed in too, so
+/// a gio.toml change invalidates persisted pages that were rendered with the
+/// old settings instead of serving them - and their now-rejected image URLs -
+/// until they expire. Only the variables listed in
+/// `config::WORKER_RENDER_SETTINGS_ENV` count: anything else the worker gets
+/// (a secret, a per-boot value) stays out of this public, restart-stable ID.
+fn derive_deployment_id(manifest: &[u8], worker_env: &[(String, String)]) -> String {
+    use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(&manifest);
+    h.update(manifest);
+    let render_settings = worker_env
+        .iter()
+        .filter(|(key, _)| crate::config::WORKER_RENDER_SETTINGS_ENV.contains(&key.as_str()));
+    for (key, value) in render_settings {
+        // Length-prefixed so no two different settings lists hash alike.
+        for part in [key, value] {
+            h.update((part.len() as u64).to_le_bytes());
+            h.update(part.as_bytes());
+        }
+    }
     // 16 hex chars (64 bits) - human-readable, collision-resistant for deployment tracking
     h.finalize()
         .iter()
@@ -737,12 +766,13 @@ fn spawn_node_tsx(
     ws_path: &str,
     token: &str,
     dev_mode: bool,
+    extra_env: &[(String, String)],
 ) -> anyhow::Result<tokio::process::Child> {
     if worker_runs_without_tsx(node_script, std::env::var("GIO_STANDALONE").ok().as_deref()) {
         tracing::debug!("spawning prebuilt worker directly: node {node_script}");
         let mut cmd = Command::new("node");
         cmd.arg(node_script);
-        return spawn_worker_command(cmd, ipc_path, ws_path, token, dev_mode);
+        return spawn_worker_command(cmd, ipc_path, ws_path, token, dev_mode, extra_env);
     }
     // Find the tsx package directory: the directory that contains dist/cli.mjs
     let tsx_pkg_dir = std::env::var("GIO_TSX_PKG").unwrap_or_else(|_| {
@@ -795,7 +825,7 @@ fn spawn_node_tsx(
     cmd.arg(&cli_mjs)
         .arg(node_script)
         .env("NODE_PATH", node_path);
-    spawn_worker_command(cmd, ipc_path, ws_path, token, dev_mode)
+    spawn_worker_command(cmd, ipc_path, ws_path, token, dev_mode, extra_env)
 }
 
 /// NODE_ENV for the worker. Rust's mode is the single source of truth: the
@@ -811,6 +841,23 @@ fn worker_node_env(dev_mode: bool) -> &'static str {
     }
 }
 
+/// The worker's environment. `extra_env` goes first so it can never
+/// override the mode, socket paths, or token set after it.
+fn set_worker_env(
+    cmd: &mut Command,
+    ipc_path: &str,
+    ws_path: &str,
+    token: &str,
+    dev_mode: bool,
+    extra_env: &[(String, String)],
+) {
+    cmd.envs(extra_env.iter().map(|(key, value)| (key, value)))
+        .env("NODE_ENV", worker_node_env(dev_mode))
+        .env("GIO_SOCKET_PATH", ipc_path)
+        .env("GIO_WS_SOCKET_PATH", ws_path)
+        .env("GIO_IPC_TOKEN", token);
+}
+
 /// Environment, stdio, and orphan protection shared by both worker launch
 /// modes (tsx wrapper and direct node).
 fn spawn_worker_command(
@@ -819,12 +866,10 @@ fn spawn_worker_command(
     ws_path: &str,
     token: &str,
     dev_mode: bool,
+    extra_env: &[(String, String)],
 ) -> anyhow::Result<tokio::process::Child> {
-    cmd.env("NODE_ENV", worker_node_env(dev_mode))
-        .env("GIO_SOCKET_PATH", ipc_path)
-        .env("GIO_WS_SOCKET_PATH", ws_path)
-        .env("GIO_IPC_TOKEN", token)
-        .envs(crate::session_token::worker_env())
+    set_worker_env(&mut cmd, ipc_path, ws_path, token, dev_mode, extra_env);
+    cmd.envs(crate::session_token::worker_env())
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -1621,6 +1666,73 @@ mod tests {
     fn worker_node_env_follows_the_server_mode() {
         assert_eq!(worker_node_env(true), "development");
         assert_eq!(worker_node_env(false), "production");
+    }
+
+    #[test]
+    fn worker_env_carries_extra_settings_without_letting_them_override_internals() {
+        let mut cmd = Command::new("node");
+        let extra = vec![
+            (
+                "GIO_IMAGE_CONFIG".to_string(),
+                r#"{"widths":[640]}"#.to_string(),
+            ),
+            ("GIO_IPC_TOKEN".to_string(), "spoofed".to_string()),
+            ("NODE_ENV".to_string(), "development".to_string()),
+        ];
+        set_worker_env(&mut cmd, "/tmp/ipc", "/tmp/ws", "real-token", false, &extra);
+        // Later .env() calls for the same key replace earlier ones.
+        let envs: std::collections::HashMap<_, _> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+            .collect();
+        let get = |key: &str| envs.get(std::ffi::OsStr::new(key)).cloned().flatten();
+        assert_eq!(get("GIO_IMAGE_CONFIG").unwrap(), r#"{"widths":[640]}"#);
+        assert_eq!(get("GIO_IPC_TOKEN").unwrap(), "real-token");
+        assert_eq!(get("NODE_ENV").unwrap(), "production");
+        assert_eq!(get("GIO_SOCKET_PATH").unwrap(), "/tmp/ipc");
+    }
+
+    #[test]
+    fn deployment_id_changes_with_the_settings_the_worker_renders_with() {
+        // Persisted pages are only dropped when the deployment ID changes, and
+        // their HTML bakes in the [images] widths: a gio.toml edit must not
+        // leave srcsets the optimizer now rejects in the disk cache.
+        let render_env = |widths: Vec<u32>| {
+            let images = crate::config::ImageConfig {
+                allowed_widths: widths,
+                ..Default::default()
+            };
+            vec![(
+                crate::config::WORKER_IMAGE_CONFIG_ENV.to_string(),
+                images.worker_json(),
+            )]
+        };
+        let manifest = br#"{"routes":[]}"#;
+        let before = derive_deployment_id(manifest, &render_env(vec![640]));
+        assert_eq!(before.len(), 16);
+        assert_eq!(
+            before,
+            derive_deployment_id(manifest, &render_env(vec![640])),
+            "same build + same settings must keep the ID (and the warm disk cache)"
+        );
+        assert_ne!(
+            before,
+            derive_deployment_id(manifest, &render_env(vec![828])),
+            "changing [images] allowed_widths must invalidate cached pages"
+        );
+        assert_ne!(before, derive_deployment_id(b"", &render_env(vec![640])));
+        // Only listed render settings count: a secret or per-boot value handed
+        // to the worker must neither leak into the public ID nor change it on
+        // every restart.
+        let mut with_secret = render_env(vec![640]);
+        with_secret.push(("GIO_SESSION_SECRET".into(), "s3cret".into()));
+        assert_eq!(before, derive_deployment_id(manifest, &with_secret));
+        // No render settings at all: the manifest hash alone, as before.
+        assert_eq!(
+            derive_deployment_id(manifest, &[]),
+            derive_deployment_id(manifest, &[("OTHER".into(), "x".into())])
+        );
     }
 
     #[test]

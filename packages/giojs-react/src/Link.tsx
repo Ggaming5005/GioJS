@@ -14,10 +14,12 @@ import React from 'react';
 import {
   getDeploymentId,
   isHardReloadResponse,
+  isSwappableResponse,
   handleHardReload,
   navigateTo,
   initPopstateHandler,
   prefetchCache,
+  PREFETCH_NOT_SWAPPABLE,
   type TransitionPreset,
 } from './navigation.js';
 
@@ -67,7 +69,10 @@ function isClientNavigableHref(href: string): boolean {
   return href.startsWith('/') && !href.startsWith('//');
 }
 
-/** Fetch a page into the prefetch cache; '' marks an in-flight request. */
+/**
+ * Fetch a page into the prefetch cache; '' marks an in-flight request and
+ * PREFETCH_NOT_SWAPPABLE a page the browser must load itself.
+ */
 function prefetchHref(href: string): void {
   if (prefetchCache.has(href) || !isClientNavigableHref(href)) return;
   prefetchCache.set(href, '');
@@ -79,6 +84,12 @@ function prefetchHref(href: string): void {
       if (isHardReloadResponse(r)) {
         prefetchCache.delete(href);
         handleHardReload();
+        return undefined;
+      }
+      if (!isSwappableResponse(r)) {
+        // Remembered, not deleted: later hovers must not refetch it, and a
+        // click goes straight to a full load.
+        prefetchCache.set(href, PREFETCH_NOT_SWAPPABLE);
         return undefined;
       }
       return r.text();

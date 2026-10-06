@@ -29,6 +29,16 @@ export function isHardReloadResponse(resp: Response): boolean {
   return resp.status === 409 && resp.headers.get('x-gio-action') === 'hard-reload';
 }
 
+/**
+ * Only a 2xx page is swapped in. Anything else (a static host's 404.html
+ * for a path that was never exported, a 500) is left to a full browser
+ * load, which shows that page with its real status instead of swapping a
+ * document without a #__gio boundary under the new URL.
+ */
+export function isSwappableResponse(resp: Response): boolean {
+  return resp.status >= 200 && resp.status < 300;
+}
+
 export function handleHardReload(): void {
   window.location.reload();
 }
@@ -42,7 +52,15 @@ export interface PrefetchCache {
 
 const MAX_PREFETCH_ENTRIES = 50;
 
-// Sentinel value '' marks an in-flight prefetch; non-empty string is cached HTML.
+/**
+ * Prefetch cache value for a URL whose response cannot be swapped in (a 404
+ * or 500). Remembering it keeps every later hover from refetching the page;
+ * a click on it goes straight to a full browser load, which fetches it fresh.
+ */
+export const PREFETCH_NOT_SWAPPABLE = '\0gio:not-swappable';
+
+// Sentinel value '' marks an in-flight prefetch, PREFETCH_NOT_SWAPPABLE a
+// page the browser must load itself; any other string is cached HTML.
 function createPrefetchCache(maxEntries: number): PrefetchCache {
   const entries = new Map<string, string>();
   return {
@@ -95,13 +113,16 @@ function swapContent(html: string): void {
   window.dispatchEvent(new Event('gio:navigated'));
 }
 
-/** Fetch a page for client navigation. Returns null when a hard reload was triggered. */
+/**
+ * Fetch a page for client navigation. Returns null when the browser must
+ * load the URL itself (deployment skew, or a response that cannot be swapped).
+ */
 async function fetchPageHtml(href: string): Promise<string | null> {
   const deployId = getDeploymentId();
   const fetchHeaders: Record<string, string> = { Accept: 'text/html' };
   if (deployId) fetchHeaders['x-deployment-id'] = deployId;
   const res = await fetch(href, { headers: fetchHeaders });
-  if (isHardReloadResponse(res)) {
+  if (isHardReloadResponse(res) || !isSwappableResponse(res)) {
     return null;
   }
   return res.text();
@@ -149,13 +170,18 @@ export async function navigateTo(
   const cached = prefetchCache.get(href);
   let html: string;
 
+  if (cached === PREFETCH_NOT_SWAPPABLE) {
+    // The prefetch saw a 404/500: the browser loads (and shows) it itself.
+    window.location.href = href;
+    return;
+  }
   if (cached) {
     html = cached;
   } else {
     const fetched = await fetchPageHtml(href);
     if (!isCurrentNavigation(seq)) return;
     if (fetched === null) {
-      // Deployment changed - navigate to the new URL with a fresh load.
+      // Deployment changed, or not a swappable page: let the browser load it.
       window.location.href = href;
       return;
     }
