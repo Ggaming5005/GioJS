@@ -22,7 +22,7 @@ import type { SseStream } from './sse.ts';
 import type { WsHandlerFn } from './ws-router.ts';
 import type { NodePluginRegistry } from './plugin.ts';
 import type { MiddlewareRules } from './middleware.ts';
-import { logger } from './logger.ts';
+import { logger, withRequestLogContext } from './logger.ts';
 import { createErrorDigest, describeError, isDevMode } from './mode.ts';
 
 const IS_WINDOWS = process.platform === 'win32';
@@ -184,26 +184,32 @@ export function createIPCServer(
         return;
       }
 
-      try {
-        await handleRequest(req);
-      } catch (requestError) {
-        const digest = createErrorDigest();
-        logger.error('request handling failed', {
-          id: req.id,
-          path: req.path,
-          digest,
-          ...describeError(requestError),
-        });
-        writeFrame(socket, {
-          id: req.id,
-          error: true,
-          code: 'INTERNAL',
-          message: isDevMode()
-            ? requestError instanceof Error ? requestError.message : String(requestError)
-            : 'Internal Server Error',
-          digest,
-        } satisfies IPCError);
-      }
+      // Every line logged while handling the request (render, handlers,
+      // stream pumping, SSE callbacks) carries its id.
+      const logContext = req.requestId !== undefined ? { requestId: req.requestId } : undefined;
+      await withRequestLogContext(logContext, async () => {
+        try {
+          await handleRequest(req);
+        } catch (requestError) {
+          const digest = createErrorDigest();
+          logger.error('request handling failed', {
+            id: req.id,
+            path: req.path,
+            digest,
+            ...describeError(requestError),
+          });
+          writeFrame(socket, {
+            id: req.id,
+            error: true,
+            code: 'INTERNAL',
+            message: isDevMode()
+              ? requestError instanceof Error ? requestError.message : String(requestError)
+              : 'Internal Server Error',
+            digest,
+            ...logContext,
+          } satisfies IPCError);
+        }
+      });
     }
 
     async function handleRequest(req: IPCRequest): Promise<void> {
@@ -479,6 +485,15 @@ export function validateIPCRequest(msg: Record<string, unknown>): IPCRequest | n
   const skipShell = msg['skipShell'];
   if (skipShell !== undefined && typeof skipShell !== 'boolean') return null;
 
+  // Client identity fields are optional (older servers omit them).
+  const client: Pick<IPCRequest, 'ip' | 'scheme' | 'host' | 'requestId'> = {};
+  for (const key of ['ip', 'scheme', 'host', 'requestId'] as const) {
+    const value = msg[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string') return null;
+    client[key] = value;
+  }
+
   return {
     id: msg['id'],
     method: msg['method'],
@@ -491,6 +506,7 @@ export function validateIPCRequest(msg: Record<string, unknown>): IPCRequest | n
     deploymentId: typeof msg['deploymentId'] === 'string' ? msg['deploymentId'] : '',
     locale: typeof msg['locale'] === 'string' ? msg['locale'] : '',
     skipShell: skipShell ?? false,
+    ...client,
   };
 }
 

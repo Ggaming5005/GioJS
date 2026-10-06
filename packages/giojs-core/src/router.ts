@@ -81,6 +81,18 @@ export interface GsspContext {
   /** Cookie header parsed into name → value. */
   cookies: Record<string, string>;
   locale?: string;
+  /**
+   * The client's IP (proxy-aware, see `[server] trusted_proxies`). Reading
+   * it makes the render personal, like reading cookies: a `revalidate`
+   * page that reads it is not cached for everyone.
+   */
+  readonly ip?: string | undefined;
+  /** 'https' or 'http', as the client used it (proxy-aware). */
+  scheme?: string;
+  /** The host the client addressed (proxy-aware, may include a port). */
+  host?: string;
+  /** This request's id (X-Request-Id). Reading it does not make a render personal. */
+  requestId?: string;
 }
 
 export interface PageModule {

@@ -91,6 +91,13 @@ const GENERIC_ERROR_MESSAGE = 'Internal Server Error';
  */
 const CREDENTIAL_HEADERS: readonly string[] = ['cookie', 'authorization'];
 
+/**
+ * Raw client-address headers - the material `ctx.ip` is derived from.
+ * Reading them is as personal as reading `ctx.ip` (which is the trustworthy
+ * way to get the address; any client can send these).
+ */
+const CLIENT_ADDRESS_HEADERS: readonly string[] = ['x-forwarded-for', 'forwarded', 'x-real-ip'];
+
 /** Routes already warned about credential reads (one warning per route). */
 const warnedDynamicRoutes = new Set<string>();
 
@@ -172,17 +179,31 @@ function makeGioRequest(req: IPCRequest, params: Record<string, string>): GioReq
       return JSON.parse(req.body) as T;
     },
     locale: req.locale,
+    ...clientFields(req),
+  };
+}
+
+/** The request's optional client identity fields, only those Rust sent. */
+function clientFields(req: IPCRequest): Pick<GioRequest, 'ip' | 'scheme' | 'host' | 'requestId'> {
+  return {
+    ...(req.ip !== undefined ? { ip: req.ip } : {}),
+    ...(req.scheme !== undefined ? { scheme: req.scheme } : {}),
+    ...(req.host !== undefined ? { host: req.host } : {}),
+    ...(req.requestId !== undefined ? { requestId: req.requestId } : {}),
   };
 }
 
 /**
  * Build the getServerSideProps context with Next.js-style dynamic detection:
- * touching `ctx.cookies`, reading or probing one of the `tracked` headers
- * (lowercase names) on `ctx.headers`, or enumerating the headers at all,
- * marks the render as personalized. Detection is per access, not per value -
- * an absent cookie read still decides the output (the anonymous variant), so
- * it counts too. Only the user-facing context is instrumented; framework code
- * reads `req.headers` directly and never trips it.
+ * touching `ctx.cookies` or `ctx.ip`, reading or probing one of the
+ * `tracked` headers (lowercase names) on `ctx.headers`, or enumerating the
+ * headers at all, marks the render as personalized. Detection is per access,
+ * not per value - an absent cookie read still decides the output (the
+ * anonymous variant), so it counts too. `ctx.requestId`, `ctx.scheme` and
+ * `ctx.host` do not: a request id is for logs and never shapes a page, and
+ * scheme/host name the site, not the visitor. Only the user-facing context
+ * is instrumented; framework code reads `req.headers` directly and never
+ * trips it.
  *
  * `ctx.headers` is a Proxy, so structuredClone/postMessage reject it; a copy
  * (`{ ...ctx.headers }`) is a plain object - and counts as a read.
@@ -231,7 +252,17 @@ function makeGsspContext(
       cookies ??= parseCookies(req.headers['cookie']);
       return cookies;
     },
+    // A page that varies by visitor IP (geo, allowlists) is as personal as
+    // one that varies by cookie: caching it would serve one visitor's
+    // variant to everyone.
+    get ip() {
+      read = true;
+      return req.ip;
+    },
     ...(req.locale !== '' ? { locale: req.locale } : {}),
+    ...(req.scheme !== undefined ? { scheme: req.scheme } : {}),
+    ...(req.host !== undefined ? { host: req.host } : {}),
+    ...(req.requestId !== undefined ? { requestId: req.requestId } : {}),
   };
   return { ctx, credentialsRead: () => read };
 }
@@ -469,7 +500,7 @@ export async function renderRoute(
   clientScripts?: Map<string, string>,
   extras?: RenderExtras,
 ): Promise<IPCOutbound | SseRouteResult | StreamRenderResult> {
-  const credentialHeaders = new Set(CREDENTIAL_HEADERS);
+  const credentialHeaders = new Set([...CREDENTIAL_HEADERS, ...CLIENT_ADDRESS_HEADERS]);
   if (registry !== undefined && !registry.isEmpty) {
     // Snapshot first: plugins may mutate req.headers in place.
     const incomingHeaders = { ...req.headers };
@@ -822,6 +853,7 @@ export async function renderRoute(
       code: 'RENDER_ERROR',
       message,
       digest,
+      ...(req.requestId !== undefined ? { requestId: req.requestId } : {}),
       ...(dev && err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
     };
   }
@@ -840,8 +872,9 @@ function warnPersonalRender(pattern: string, path: string): void {
   if (warnedDynamicRoutes.has(pattern)) return;
   warnedDynamicRoutes.add(pattern);
   logger.warn(
-    'getServerSideProps read request credentials (ctx.cookies, the cookie/authorization ' +
-      'header, or a header an onRequest plugin set) - this render is personalized, so it is ' +
+    'getServerSideProps read request credentials (ctx.cookies, ctx.ip, the cookie/authorization ' +
+      'or a client-address header, or a header an onRequest plugin set) - this render is ' +
+      'personalized, so it is ' +
       'not cached even though the page ' +
       "exports revalidate. Remove `revalidate`, or keep `revalidate` + `shell = 'cache'` " +
       'and render the personalized parts inside <Suspense> holes',
