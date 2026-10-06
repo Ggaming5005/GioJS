@@ -28,6 +28,7 @@ mod dev_watch;
 mod devtools;
 mod env_files;
 mod ipc;
+mod logging;
 mod metrics;
 mod path_hygiene;
 mod public_files;
@@ -292,9 +293,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
-        .init();
+    // Before logging starts: gio.toml's [logging] picks the log format.
+    // Loading never logs through tracing (a bad file exits via eprintln), so
+    // nothing is lost by running it first.
+    let cfg = config::GioConfig::load();
+    if let Some(warning) = logging::init(cfg.logging.format) {
+        warn!("{warning}");
+    }
     if !env_files.files.is_empty() {
         info!(
             mode = env_files.mode.as_str(),
@@ -314,7 +319,6 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         );
     }
 
-    let cfg = config::GioConfig::load();
     let bind_addr: SocketAddr = cfg.bind_addr().parse()?;
     let project_root = config::GioConfig::project_root();
 

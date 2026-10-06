@@ -184,6 +184,26 @@ pub struct GioConfig {
     pub dev: DevConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
+}
+
+/// `[logging]`: server log output (see logging.rs). `GIO_LOG_FORMAT`
+/// overrides `format`. An unknown key or format value is a startup error.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LoggingConfig {
+    #[serde(default)]
+    pub format: LogFormat,
+}
+
+/// `"text"` (human-readable, the default) or `"json"` (one object per line).
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 impl GioConfig {
@@ -650,6 +670,22 @@ mod tests {
         assert_eq!(config.images.quality, 75);
         assert_eq!(config.images.disk_max_bytes, 512 * 1024 * 1024);
         assert_eq!(config.images.max_remote_bytes, 20 * 1024 * 1024);
+        assert_eq!(config.logging.format, LogFormat::Text);
+    }
+
+    #[test]
+    fn logging_format_parses_and_rejects_unknown_values() {
+        let path = unique_temp_path("logging_json.toml");
+        std::fs::write(&path, "[logging]\nformat = \"json\"\n").unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.unwrap().logging.format, LogFormat::Json);
+
+        let path = unique_temp_path("logging_bad.toml");
+        std::fs::write(&path, "[logging]\nformat = \"logfmt\"\n").unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     #[test]
