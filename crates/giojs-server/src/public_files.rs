@@ -44,6 +44,14 @@ pub const PUBLIC_URL_PREFIX: &str = "/public";
 /// memory; files past it stay reachable under /public/*.
 const MAX_INDEXED_FILES: usize = 100_000;
 
+/// The worker's app-root metadata conventions (giojs-core metadata-routes.ts):
+/// the URL each serves and the module basename, `.ts` or `.js`.
+const METADATA_ROUTES: [(&str, &str); 3] = [
+    ("/sitemap.xml", "sitemap"),
+    ("/robots.txt", "robots"),
+    ("/manifest.webmanifest", "manifest"),
+];
+
 pub struct PublicFiles {
     root: PathBuf,
     serve_dir: ServeDir,
@@ -77,6 +85,24 @@ impl PublicFiles {
 
     pub fn len(&self) -> usize {
         self.files.read().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// App-root metadata modules (`app/robots.ts`, ...) whose URL an indexed
+    /// public/ file also answers: the file is served before any request
+    /// reaches the worker, so the module never runs. Returns
+    /// `(url, module path)` pairs for the startup warning.
+    pub fn shadowed_metadata_routes(&self, app_dir: &Path) -> Vec<(&'static str, PathBuf)> {
+        METADATA_ROUTES
+            .iter()
+            .filter(|(url, _)| self.contains(url))
+            .filter_map(|(url, base)| {
+                ["ts", "js"]
+                    .iter()
+                    .map(|ext| app_dir.join(format!("{base}.{ext}")))
+                    .find(|module| module.is_file())
+                    .map(|module| (*url, module))
+            })
+            .collect()
     }
 
     /// True when the raw (percent-encoded) request path names an indexed file.
@@ -346,6 +372,28 @@ mod tests {
         assert_eq!(public.public_url("/members"), None);
         assert_eq!(public.public_url("/missing.txt"), None);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reports_app_metadata_modules_a_public_file_shadows() {
+        let root = temp_public("shadowed_metadata");
+        let app = temp_public("shadowed_metadata_app");
+        write(&root, "robots.txt", "User-agent: *");
+        write(&root, "manifest.webmanifest", "{}");
+        write(&app, "robots.ts", "export default {}");
+        write(&app, "sitemap.ts", "export default []");
+        // A directory with the module's name is not a module.
+        std::fs::create_dir_all(app.join("manifest.js")).expect("mkdir");
+        let public = PublicFiles::load(root.clone());
+        assert_eq!(
+            public.shadowed_metadata_routes(&app),
+            vec![("/robots.txt", app.join("robots.ts"))]
+        );
+        std::fs::remove_dir_all(app.join("manifest.js")).expect("rmdir");
+        write(&app, "manifest.js", "export default {}");
+        assert_eq!(public.shadowed_metadata_routes(&app).len(), 2);
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_dir_all(app).ok();
     }
 
     #[test]
