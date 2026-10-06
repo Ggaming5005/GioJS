@@ -439,6 +439,17 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             proxy_headers = proxy_trust.headers.as_str(),
             "client IPs are read from forwarding headers sent by trusted proxies"
         );
+        if let Some(everything) = proxy_trust
+            .trusted
+            .entries()
+            .iter()
+            .find(|net| net.is_everything())
+        {
+            warn!(
+                "trusted_proxies includes {everything}: any client of that family can pick its own \
+                 IP, rate-limit bucket and request id - list only your proxies' addresses"
+            );
+        }
     }
 
     let app_dir = std::env::var("GIO_APP_DIR").unwrap_or_else(|_| "app".to_string());

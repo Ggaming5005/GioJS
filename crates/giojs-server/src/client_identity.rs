@@ -47,6 +47,11 @@ pub struct IpNet {
 }
 
 impl IpNet {
+    /// A /0: every address of its family.
+    pub fn is_everything(&self) -> bool {
+        self.prefix == 0
+    }
+
     pub fn contains(&self, ip: IpAddr) -> bool {
         match (self.network, ip.to_canonical()) {
             (IpAddr::V4(net), IpAddr::V4(ip)) => {
@@ -570,6 +575,9 @@ mod tests {
     #[test]
     fn edge_prefixes_and_host_bits() {
         assert!(trust(&["0.0.0.0/0"]).contains(ip("203.0.113.9")));
+        assert!("0.0.0.0/0".parse::<IpNet>().unwrap().is_everything());
+        assert!("::/0".parse::<IpNet>().unwrap().is_everything());
+        assert!(!"10.0.0.0/8".parse::<IpNet>().unwrap().is_everything());
         assert!(
             trust(&["10.1.2.3/8"]).contains(ip("10.9.9.9")),
             "host bits masked"
