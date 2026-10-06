@@ -144,6 +144,7 @@ try {
   finish(1);
 }
 await exercise(report.start);
+report.start.content = document.getElementById('__gio')?.textContent ?? null;
 
 const link = document.querySelector(`#__gio a[href="${navPath}"]`);
 if (link === null) {

@@ -623,6 +623,34 @@ async function main() {
         'the client bundle must wrap the same [id] layout the server rendered');
     });
 
+    await test('router hooks render the request route in SSR, and the envelope carries the same info', async () => {
+      const res = await fetch(`${BASE}/router-hooks/first-post?q=a%20b&x=1`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.match(html, /ROUTER_HOOKS_PAGE pathname=\[\/router-hooks\/first-post\] slug=\[first-post\] q=\[a b\]/);
+      assert.match(
+        html,
+        /ROUTER_HOOKS_LAYOUT pathname=\[\/router-hooks\/first-post\] params=\[\{&quot;slug&quot;:&quot;first-post&quot;\}\]/,
+      );
+      const envelope = JSON.parse(html.match(/<script id="__gio_props" type="application\/json">([^<]*)</)[1]);
+      assert.equal(envelope.path, '/router-hooks/first-post');
+      assert.equal(envelope.pattern, '/router-hooks/:slug');
+      assert.deepEqual(envelope.params, { slug: 'first-post' });
+      assert.equal(typeof envelope.locale, 'string');
+      // The client provides what the server rendered with: same query values.
+      const search = new URLSearchParams(envelope.search);
+      assert.equal(search.get('q'), 'a b');
+      assert.equal(search.get('x'), '1');
+      assert.ok(entryChunkOf(html), 'the hooks page hydrates');
+    });
+
+    await test('a not-found page keeps the #__gio boundary soft navigation renders in place', async () => {
+      const res = await fetch(`${BASE}/router-hooks-nowhere/deep`);
+      assert.equal(res.status, 404);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/html/);
+      assert.match(await res.text(), /<div id="__gio">/);
+    });
+
     await test('private _folders are never routable', async () => {
       const res = await fetch(`${BASE}/_private`);
       assert.equal(res.status, 404);
@@ -2326,18 +2354,32 @@ async function standalonePhase() {
       '  React.useEffect(() => setMounted(true), []);\n' +
       '  const probe = <button data-probe="" onClick={() => setClicks((n) => n + 1)}>' +
       `{\`${label} mounted=\${mounted} clicks=\${clicks}\`}</button>;\n`;
-    // GioLink's source, copied in: a path into the repo would not be a
-    // relative import (another drive on Windows CI) or a resolvable package.
-    await mkdir(join(workDir, 'components'), { recursive: true });
-    for (const file of ['Link.tsx', 'navigation.ts']) {
+    // GioLink's and the router hooks' source, copied in: a path into the
+    // repo would not be a relative import (another drive on Windows CI) or a
+    // resolvable package.
+    await mkdir(join(workDir, 'components', 'hooks'), { recursive: true });
+    for (const file of [
+      'Link.tsx',
+      'navigation.ts',
+      'navigation-context.ts',
+      'typed-href.ts',
+      join('hooks', 'useNavigation.ts'),
+    ]) {
       await cp(join(repoRoot, 'packages', 'giojs-react', 'src', file), join(workDir, 'components', file));
     }
+    // What the router hooks render: hydration must reproduce it exactly, and
+    // a soft navigation must update it.
+    const routerProbe =
+      "  const routerText = `ROUTER pathname=[${usePathname()}] id=[${useParams().id ?? ''}]`;\n";
     await writeFile(
       join(workDir, 'app', 'page.tsx'),
-      "import React from 'react';\nimport { GioLink } from '../components/Link.tsx';\n\nexport default function Home() {\n" +
+      "import React from 'react';\nimport { GioLink } from '../components/Link.tsx';\n" +
+        "import { useParams, usePathname } from '../components/hooks/useNavigation.ts';\n\nexport default function Home() {\n" +
         probe('HOME') +
+        routerProbe +
         '  return (\n    <main>\n' +
         '      <h1>STANDALONE_FIXTURE_HOME {process.env.GIO_PUBLIC_STANDALONE_GREETING}</h1>\n' +
+        '      <p>{routerText}</p>\n' +
         '      {probe}\n      <GioLink href="/posts/7">post 7</GioLink>\n    </main>\n  );\n}\n',
     );
     await writeFile(
@@ -2363,9 +2405,12 @@ async function standalonePhase() {
     );
     await writeFile(
       join(workDir, 'app', '(blog)', 'posts', '[id]', 'page.tsx'),
-      "import React from 'react';\n\nexport default function Post({ params }) {\n" +
+      "import React from 'react';\n" +
+        "import { useParams, usePathname } from '../../../../components/hooks/useNavigation.ts';\n\n" +
+        'export default function Post({ params }) {\n' +
         probe('POST') +
-        '  return <><p>{`STANDALONE_POST id=[${params.id}]`}</p>{probe}</>;\n}\n' +
+        routerProbe +
+        '  return <><p>{`STANDALONE_POST id=[${params.id}]`}</p><p>{routerText}</p>{probe}</>;\n}\n' +
         "\nexport async function getServerSideProps(ctx) {\n" +
         "  return ctx.params.id === 'missing' ? { notFound: true } : { props: { params: ctx.params } };\n}\n" +
         // For `gio export`; the server must ignore it (any id renders).
@@ -2473,6 +2518,10 @@ async function standalonePhase() {
       assert.equal(report.nav.pathname, '/posts/7');
       assert.equal(report.nav.envelopePath, '/posts/7');
       assert.match(report.nav.content, /STANDALONE_POST id=\[7\]/);
+      // The hooks hydrated from the envelope (no mismatch: report.errors is
+      // empty) and follow the soft navigation.
+      assert.match(report.start.content, /ROUTER pathname=\[\/\] id=\[\]/);
+      assert.match(report.nav.content, /ROUTER pathname=\[\/posts\/7\] id=\[7\]/);
       assert.equal(report.nav.mounted, 'POST mounted=true clicks=0');
       assert.equal(report.nav.afterClick, 'POST mounted=true clicks=1');
     });
