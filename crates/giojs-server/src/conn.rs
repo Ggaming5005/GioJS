@@ -367,11 +367,17 @@ impl HttpBody for TrackedBody {
 /// deadlines. hyper's own header_read_timeout only covers HTTP/1 head
 /// parsing; the auto builder's protocol sniffing and the HTTP/2 handshake run
 /// before it, and HTTP/2 has no idle timeout at all, so both are enforced here.
+///
+/// `shutdown` turning true (or its sender dropping) starts the same graceful
+/// close as the idle deadline: an idle keep-alive connection closes at once
+/// instead of holding the server's exit until the drain deadline, and a
+/// request in flight is still served to the end.
 pub async fn drive<F, E>(
     conn: F,
     graceful_shutdown: impl FnOnce(Pin<&mut F>),
     activity: &ConnActivity,
     settings: &ConnSettings,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) where
     F: Future<Output = Result<(), E>>,
     E: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -383,8 +389,18 @@ pub async fn drive<F, E>(
             Watch::FirstRequest(at) | Watch::Idle(at) => Some(at),
             Watch::Busy | Watch::Unbounded => None,
         };
-        if poll_until(conn.as_mut(), activity, wake_at).await {
-            return;
+        let shutting_down = tokio::select! {
+            done = poll_until(conn.as_mut(), activity, wake_at) => {
+                if done {
+                    return;
+                }
+                false
+            }
+            _ = shutdown.wait_for(|stop| *stop) => true,
+        };
+        if shutting_down {
+            debug!("closing connection: server shutting down");
+            break;
         }
         // Re-read at wake time: a request may have started meanwhile.
         match activity.watch(header_read_timeout, idle_timeout) {
@@ -749,6 +765,41 @@ mod tests {
         let response = String::from_utf8_lossy(&received).to_ascii_lowercase();
         assert!(response.starts_with("http/1.1 200"), "{response}");
         assert!(response.contains("keep-alive: timeout=1"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_idle_keep_alive_connections_and_frees_the_port_at_once() {
+        let (addr, stop) = spawn_server(
+            server_config(|s| {
+                s.http2 = false;
+                // Far beyond the test: only the shutdown may close it.
+                s.idle_timeout_secs = 600;
+            }),
+            None,
+        )
+        .await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let n = client.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"));
+
+        drop(stop);
+        let started = Instant::now();
+        assert!(
+            read_until_closed(&mut client, Duration::from_secs(3))
+                .await
+                .is_some(),
+            "an idle keep-alive connection must not hold the shutdown"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            TcpStream::connect(addr).await.is_err(),
+            "the listener is closed once shutdown starts"
+        );
     }
 
     #[tokio::test]

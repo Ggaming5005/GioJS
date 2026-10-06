@@ -3928,7 +3928,68 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+        _ = launcher_gone() => {}
     }
+}
+
+/// With GIO_EXIT_ON_STDIN_EOF=1, resolves when stdin reads EOF: the launcher
+/// that spawned this server (`gio`, a standalone run.mjs) holds a stdin pipe
+/// open and never writes, so EOF means it died - SIGKILL included, which no
+/// signal handler sees - and the server shuts down gracefully instead of
+/// lingering on the port. Never resolves otherwise, or when stdin is not a
+/// pipe (a terminal or /dev/null says nothing about a launcher).
+async fn launcher_gone() {
+    if std::env::var(ipc::EXIT_ON_STDIN_EOF_ENV).as_deref() != Ok("1") || !stdin_is_pipe() {
+        return std::future::pending().await;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // A plain thread, not tokio's stdin: its blocking read cannot be
+    // cancelled and would hold up runtime shutdown.
+    let spawned = std::thread::Builder::new()
+        .name("gio-stdin-watch".into())
+        .spawn(move || {
+            read_until_eof(std::io::stdin().lock());
+            let _ = tx.send(());
+        });
+    if let Err(e) = spawned {
+        warn!(error = %e, "cannot watch stdin - launcher-exit detection disabled");
+        return std::future::pending().await;
+    }
+    if rx.await.is_ok() {
+        warn!("stdin closed: the launcher exited - shutting down");
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Drain `reader` until EOF or a read error (a broken pipe is EOF too).
+fn read_until_eof(mut reader: impl std::io::Read) {
+    let mut buf = [0u8; 256];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn stdin_is_pipe() -> bool {
+    // SAFETY: fstat only writes into the zeroed buffer we own; a closed fd 0
+    // just returns -1 (EBADF).
+    unsafe {
+        let mut stat: libc::stat = std::mem::zeroed();
+        libc::fstat(0, &mut stat) == 0
+            && matches!(stat.st_mode & libc::S_IFMT, libc::S_IFIFO | libc::S_IFSOCK)
+    }
+}
+
+#[cfg(not(unix))]
+fn stdin_is_pipe() -> bool {
+    // Windows launchers set the flag only together with a piped stdin.
+    true
 }
 
 // ── TLS helpers ──────────────────────────────────────────────────────────────
@@ -3999,6 +4060,8 @@ async fn serve_connections(
     let mut acceptor = conn::ConnAcceptor::new(listener, settings.max_connections);
     let mut join_set = tokio::task::JoinSet::new();
     let mut shutdown = std::pin::pin!(shutdown);
+    // Tells every live connection to close gracefully (see conn::drive).
+    let (closing_tx, closing_rx) = tokio::sync::watch::channel(false);
 
     loop {
         tokio::select! {
@@ -4010,6 +4073,7 @@ async fn serve_connections(
                 let app = app.clone();
                 let tls_acceptor = tls_acceptor.clone();
                 let settings = settings.clone();
+                let closing = closing_rx.clone();
 
                 join_set.spawn(async move {
                     // The max_connections slot, held for the connection's lifetime.
@@ -4018,10 +4082,12 @@ async fn serve_connections(
                         let handshake =
                             conn::tls_handshake(&acceptor, tcp_stream, settings.tls_handshake_timeout);
                         if let Some(tls_stream) = handshake.await {
-                            run_connection(TokioIo::new(tls_stream), app, peer_addr, &settings).await;
+                            let io = TokioIo::new(tls_stream);
+                            run_connection(io, app, peer_addr, &settings, closing).await;
                         }
                     } else {
-                        run_connection(TokioIo::new(tcp_stream), app, peer_addr, &settings).await;
+                        let io = TokioIo::new(tcp_stream);
+                        run_connection(io, app, peer_addr, &settings, closing).await;
                     }
                 });
             }
@@ -4031,6 +4097,11 @@ async fn serve_connections(
             }
         }
     }
+    // Free the port now: new connections are refused instead of queueing
+    // unanswered in the backlog, and a replacement process can bind at once.
+    drop(acceptor);
+    // Idle keep-alive connections close now; in-flight requests finish.
+    let _ = closing_tx.send(true);
 
     // Bounded drain: idle keep-alive connections have no reason to close on
     // our schedule, and a graceful shutdown that can wait forever is not
@@ -4054,6 +4125,7 @@ async fn run_connection<I>(
     app: axum::Router,
     peer_addr: SocketAddr,
     settings: &conn::ConnSettings,
+    closing: tokio::sync::watch::Receiver<bool>,
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
@@ -4098,13 +4170,27 @@ async fn run_connection<I>(
         let connection = settings
             .auto_builder()
             .serve_connection_with_upgrades(io, svc);
-        conn::drive(connection, |c| c.graceful_shutdown(), &activity, settings).await;
+        conn::drive(
+            connection,
+            |c| c.graceful_shutdown(),
+            &activity,
+            settings,
+            closing,
+        )
+        .await;
     } else {
         let connection = settings
             .http1_builder()
             .serve_connection(io, svc)
             .with_upgrades();
-        conn::drive(connection, |c| c.graceful_shutdown(), &activity, settings).await;
+        conn::drive(
+            connection,
+            |c| c.graceful_shutdown(),
+            &activity,
+            settings,
+            closing,
+        )
+        .await;
     }
 }
 
@@ -5022,6 +5108,18 @@ mod tests {
         stamp_rule_headers(resp.headers_mut(), rules.response_headers("/account"));
         let values: Vec<_> = resp.headers().get_all("x-frame-options").iter().collect();
         assert_eq!(values, vec!["DENY"]);
+    }
+
+    #[test]
+    fn stdin_watch_returns_at_eof_and_on_read_errors() {
+        read_until_eof(std::io::Cursor::new(b"ignored input".to_vec()));
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+        }
+        read_until_eof(Broken);
     }
 
     /// Log lines written under `filter`, as the server's fmt subscriber

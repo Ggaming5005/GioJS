@@ -134,15 +134,20 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const server = spawn(join(here, ${JSON.stringify(serverName)}), process.argv.slice(2), {
   cwd: here,
-  stdio: 'inherit',
+  // stdin is a pipe this launcher holds open and never writes: if it dies -
+  // even by SIGKILL, which it cannot forward - the server reads EOF and shuts
+  // down instead of lingering on the port (GIO_EXIT_ON_STDIN_EOF).
+  stdio: ['pipe', 'inherit', 'inherit'],
   env: {
     ...process.env,
     NODE_ENV: process.env.NODE_ENV ?? 'production',
+    GIO_EXIT_ON_STDIN_EOF: '1',
     GIO_STANDALONE: '1',
     GIO_NODE_SCRIPT: join(here, 'worker.js'),
     GIO_STATIC_DIR: join(here, 'static'),
   },
 });
+server.stdin.on('error', () => {});
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => server.kill(signal));
 }

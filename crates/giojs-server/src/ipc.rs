@@ -110,6 +110,14 @@ fn remove_stale_sockets() {
     }
 }
 
+/// Set on the worker (and honored by the server itself, see main.rs): exit
+/// gracefully when stdin reads EOF. The spawning parent holds the write end
+/// of a stdin pipe open for the child's lifetime and never writes; the OS
+/// closes it however the parent dies - SIGKILL and OOM kills included, which
+/// `kill_on_drop` never observes - so an orphan notices at once instead of
+/// running (and holding memory) forever.
+pub const EXIT_ON_STDIN_EOF_ENV: &str = "GIO_EXIT_ON_STDIN_EOF";
+
 /// Kill the worker and its entire process tree. Windows relies on the Job
 /// Object (KILL_ON_JOB_CLOSE). On Unix the worker runs in its own process
 /// group (`spawn_node_tsx` sets `process_group(0)`) and SIGKILL cannot be
@@ -382,16 +390,23 @@ struct NodeWorker {
     extra_env: Vec<(String, String)>,
 }
 
+/// Write end of a worker's stdin pipe (see EXIT_ON_STDIN_EOF_ENV). Held next
+/// to the Child, never inside it: `Child::wait` closes the child's stdin
+/// before waiting, which would tell a healthy worker its server is gone.
+type StdinGuard = Option<tokio::process::ChildStdin>;
+
 impl NodeWorker {
-    fn spawn(&self) -> anyhow::Result<tokio::process::Child> {
-        spawn_node_tsx(
+    fn spawn(&self) -> anyhow::Result<(tokio::process::Child, StdinGuard)> {
+        let mut child = spawn_node_tsx(
             &self.script,
             &self.ipc_path,
             &self.ws_path,
             &self.token,
             self.dev_mode,
             &self.extra_env,
-        )
+        )?;
+        let stdin = child.stdin.take();
+        Ok((child, stdin))
     }
 }
 
@@ -411,7 +426,7 @@ impl IpcClient {
             dev_mode,
             extra_env,
         };
-        let mut child = worker.spawn()?;
+        let (mut child, stdin_guard) = worker.spawn()?;
         let spawned_pid = child.id();
         info!("Node process spawned (pid {:?})", spawned_pid);
 
@@ -462,7 +477,13 @@ impl IpcClient {
         // worker if it exits and reconnects on socket errors.
         let inner = client.inner.clone();
         tokio::spawn(ipc_supervisor(
-            worker, child, reader, writer, write_rx, restart_rx, inner,
+            worker,
+            (child, stdin_guard),
+            reader,
+            writer,
+            write_rx,
+            restart_rx,
+            inner,
         ));
 
         Ok(client)
@@ -855,7 +876,8 @@ fn set_worker_env(
         .env("NODE_ENV", worker_node_env(dev_mode))
         .env("GIO_SOCKET_PATH", ipc_path)
         .env("GIO_WS_SOCKET_PATH", ws_path)
-        .env("GIO_IPC_TOKEN", token);
+        .env("GIO_IPC_TOKEN", token)
+        .env(EXIT_ON_STDIN_EOF_ENV, "1");
 }
 
 /// Environment, stdio, and orphan protection shared by both worker launch
@@ -870,7 +892,10 @@ fn spawn_worker_command(
 ) -> anyhow::Result<tokio::process::Child> {
     set_worker_env(&mut cmd, ipc_path, ws_path, token, dev_mode, extra_env);
     cmd.envs(crate::session_token::worker_env())
-        .stdin(Stdio::null())
+        // Orphan protection (EXIT_ON_STDIN_EOF_ENV): the pipe's write end
+        // lives in the returned Child - never written, closed when the
+        // supervisor drops the child or this process dies in any way.
+        .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         // Reap the worker when the supervisor drops it (panic/unwind paths).
@@ -1285,7 +1310,7 @@ enum ServeEnd {
 /// reason to give up.
 async fn ipc_supervisor(
     worker: NodeWorker,
-    mut child: tokio::process::Child,
+    (mut child, mut _stdin_guard): (tokio::process::Child, StdinGuard),
     mut reader: BoxReader,
     mut writer: BoxWriter,
     mut write_rx: mpsc::Receiver<Bytes>,
@@ -1366,8 +1391,10 @@ async fn ipc_supervisor(
             };
             if child_dead {
                 match worker.spawn() {
-                    Ok(new_child) => {
+                    Ok((new_child, new_stdin_guard)) => {
                         child = new_child;
+                        // Dropping the old guard closes the dead worker's pipe.
+                        _stdin_guard = new_stdin_guard;
                         worker_pid = child.id();
                         info!("Node worker respawned (pid {:?})", worker_pid);
                     }
@@ -1691,6 +1718,7 @@ mod tests {
         assert_eq!(get("GIO_IPC_TOKEN").unwrap(), "real-token");
         assert_eq!(get("NODE_ENV").unwrap(), "production");
         assert_eq!(get("GIO_SOCKET_PATH").unwrap(), "/tmp/ipc");
+        assert_eq!(get(EXIT_ON_STDIN_EOF_ENV).unwrap(), "1");
     }
 
     #[test]
@@ -1921,6 +1949,39 @@ mod tests {
             "chunk_end must unregister the stream"
         );
         reader_task.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_stdin_pipe_stays_open_until_its_guard_drops() {
+        // Stands in for a worker blocked on its stdin watch: exits at EOF.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("cat >/dev/null; exit 7");
+        let mut child = spawn_worker_command(
+            cmd,
+            "/tmp/gio-test-ipc",
+            "/tmp/gio-test-ws",
+            "t",
+            false,
+            &[],
+        )
+        .unwrap();
+        let guard: StdinGuard = child.stdin.take();
+        assert!(guard.is_some(), "the worker's stdin is a pipe");
+        // Child::wait closes a stdin it still holds - the guard lives outside.
+        assert!(
+            timeout(Duration::from_millis(300), child.wait())
+                .await
+                .is_err(),
+            "the worker must keep running while the server holds the pipe"
+        );
+        // However the server goes away, its end of the pipe closes.
+        drop(guard);
+        let status = timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("EOF ends the worker")
+            .unwrap();
+        assert_eq!(status.code(), Some(7));
     }
 
     #[tokio::test]
