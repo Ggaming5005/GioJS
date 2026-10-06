@@ -206,6 +206,7 @@ async function main() {
     router.discoverLayouts(appDir),
     router.discoverRouteFiles(appDir),
   ]);
+  router.assertNoRouteConflicts(appDir, routes, routeFiles);
   if (routes.size === 0 && routeFiles.length === 0) {
     fail(`no pages or route files discovered under ${appDir}`);
   }
@@ -224,8 +225,8 @@ async function main() {
 
   const spec = {
     entryModulePath: join(coreDir, 'src', 'standalone-entry.ts'),
-    routes: [...routes.values()].map((r) => ({ pattern: r.urlPattern, filePath: r.filePath })),
-    layouts: [...layouts.values()].map((l) => ({ prefix: l.urlPrefix, filePath: l.filePath })),
+    routes: [...routes.values()].map((r) => ({ pattern: r.urlPattern, dir: r.dir, filePath: r.filePath })),
+    layouts: [...layouts.values()].map((l) => ({ dir: l.dir, filePath: l.filePath })),
     // discoverRouteFiles returns file URLs; imports want filesystem paths.
     routeFiles: routeFiles.map((f) => ({
       pattern: f.urlPattern,

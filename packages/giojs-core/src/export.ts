@@ -8,7 +8,7 @@
  * (route handlers, SSE, WebSockets) are skipped with a warning.
  */
 import { mkdir, writeFile, cp, access } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative, resolve, isAbsolute, sep } from 'node:path';
 import { discoverRoutes, discoverLayouts, discoverSpecialPages } from './router.ts';
 import { renderRoute } from './ssr.ts';
 import type { IPCRequest, IPCResponse } from './context.ts';
@@ -17,7 +17,12 @@ import type { IPCRequest, IPCResponse } from './context.ts';
 // so no /_next bootstrap script is injected.
 process.env.GIO_EXPORT = '1';
 
-interface StaticPath { params: Record<string, string>; }
+/**
+ * Catch-all params take the runtime shape ("a/b") or, for Next.js parity,
+ * an array of segments (["a", "b"]). An optional catch-all may be omitted,
+ * '' or [] to export the bare parent path.
+ */
+interface StaticPath { params: Record<string, string | string[] | undefined>; }
 interface ExportResult {
   written: string[];
   skipped: { route: string; reason: string }[];
@@ -27,20 +32,56 @@ function isDynamic(pattern: string): boolean {
   return pattern.split('/').some(s => s.startsWith(':') || s.startsWith('*'));
 }
 
-/** Fill a route pattern's :param / *rest segments from a params object. */
-function patternToPath(pattern: string, params: Record<string, string>): string {
-  const parts = pattern.split('/').filter(Boolean).map(seg => {
-    if (seg.startsWith(':')) return params[seg.slice(1)] ?? '';
-    if (seg.startsWith('*')) return params[seg.slice(1)] ?? '';
-    return seg;
-  });
-  return '/' + parts.join('/');
+/**
+ * Fill a route pattern's :param / *rest / *rest? segments from a
+ * getStaticPaths params object. Returns the URL path plus the string params
+ * the render sees, or an error naming what is wrong with the entry.
+ */
+export function patternToPath(
+  pattern: string,
+  params: StaticPath['params'],
+): { path: string; params: Record<string, string> } | { error: string } {
+  const parts: string[] = [];
+  const resolved: Record<string, string> = {};
+  for (const seg of pattern.split('/').filter(Boolean)) {
+    if (!seg.startsWith(':') && !seg.startsWith('*')) {
+      parts.push(seg);
+      continue;
+    }
+    const optional = seg.startsWith('*') && seg.endsWith('?');
+    const name = optional ? seg.slice(1, -1) : seg.slice(1);
+    const raw = params[name];
+    const value = Array.isArray(raw) ? raw.join('/') : (raw ?? '');
+    const valueSegments = value === '' ? [] : value.split('/');
+    if (valueSegments.length === 0 && !optional) {
+      return { error: `getStaticPaths entry is missing param "${name}"` };
+    }
+    if (seg.startsWith(':') && valueSegments.length > 1) {
+      return { error: `param "${name}" is a single segment but "${value}" contains '/'` };
+    }
+    // Each value segment becomes a directory under out/: empty, '.' and '..'
+    // segments would write outside the route (or outside out/ entirely), and
+    // so would a backslash, which Windows path.join treats as a separator
+    // ("a\..\..\x").
+    if (valueSegments.some(s => s === '' || s === '.' || s === '..' || s.includes('\\'))) {
+      return { error: `param "${name}" has an empty, relative or backslashed segment: "${value}"` };
+    }
+    resolved[name] = value;
+    parts.push(...valueSegments);
+  }
+  return { path: '/' + parts.join('/'), params: resolved };
 }
 
-/** Map a URL path to its output file: "/" → out/index.html, "/a/b" → out/a/b/index.html. */
-function pathToFile(outDir: string, urlPath: string): string {
+/**
+ * Map a URL path to its output file: "/" → out/index.html, "/a/b" →
+ * out/a/b/index.html. Returns null when the resolved file would land outside
+ * out/ - a last line of defense behind patternToPath's segment checks.
+ */
+function pathToFile(outDir: string, urlPath: string): string | null {
   const clean = urlPath.replace(/^\/+|\/+$/g, '');
-  return clean === '' ? join(outDir, 'index.html') : join(outDir, clean, 'index.html');
+  const file = clean === '' ? join(outDir, 'index.html') : join(outDir, clean, 'index.html');
+  const rel = relative(resolve(outDir), resolve(file));
+  return rel.startsWith(`..${sep}`) || isAbsolute(rel) ? null : file;
 }
 
 function makeRequest(path: string, params: Record<string, string>): IPCRequest {
@@ -76,7 +117,15 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
         continue;
       }
       const result = await page.getStaticPaths();
-      targets = result.paths.map(p => ({ path: patternToPath(pattern, p.params), params: p.params }));
+      targets = [];
+      for (const staticPath of result.paths) {
+        const target = patternToPath(pattern, staticPath.params);
+        if ('error' in target) {
+          skipped.push({ route: pattern, reason: target.error });
+        } else {
+          targets.push(target);
+        }
+      }
     }
 
     for (const target of targets) {
@@ -97,6 +146,10 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
       const res = out as IPCResponse;
       if (res.status === 200 && typeof res.body === 'string') {
         const file = pathToFile(outDir, target.path);
+        if (file === null) {
+          skipped.push({ route: target.path, reason: 'output path escapes the export directory' });
+          continue;
+        }
         await mkdir(dirname(file), { recursive: true });
         await writeFile(file, res.body, 'utf8');
         written.push(target.path);
@@ -112,10 +165,12 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
   // with a real 404 status for unmatched paths. Without it, Cloudflare Pages
   // falls back to index.html - every unknown URL would 200 with the home page.
   // Renders app/not-found.* through the layout pipeline, or the built-in 404.
+  // No routes are passed: a root catch-all (/*slug, /*slug?) would otherwise
+  // claim the probe path and 404.html would be that page.
   const specialPages = await discoverSpecialPages(appDir);
   const notFoundOut = await renderRoute(
     makeRequest('/__gio_not_found__', {}),
-    routes,
+    new Map(),
     layouts,
     undefined,
     undefined,

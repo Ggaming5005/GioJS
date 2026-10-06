@@ -3,8 +3,9 @@
  *
  * href() substitution and encoding: static routes pass through, :param values
  * are URI-encoded, *catchall values keep '/' separators while each segment is
- * encoded. The local module augmentation mirrors what the generated
- * .gio/routes.d.ts does against '@gio.js/react' in a real project.
+ * encoded, and an empty optional *catchall? drops its segment. The local
+ * module augmentation mirrors what the generated .gio/routes.d.ts does
+ * against '@gio.js/react' in a real project.
  */
 import { describe, it, expect } from 'vitest';
 import { href } from './typed-href.ts';
@@ -16,6 +17,8 @@ declare module './typed-href.ts' {
     '/posts/:id': { id: string };
     '/users/:userId/posts/:postId': { userId: string; postId: string };
     '/docs/*slug': { slug: string };
+    '/shop/*path?': { path?: string };
+    '/*all?': { all?: string };
   }
 }
 
@@ -51,5 +54,23 @@ describe('href', () => {
 
   it('substitutes a single-segment *catchall value', () => {
     expect(href('/docs/*slug', { slug: 'intro' })).toBe('/docs/intro');
+  });
+
+  it('substitutes an optional *catchall? value like a catch-all', () => {
+    expect(href('/shop/*path?', { path: 'shoes/red shoes' })).toBe('/shop/shoes/red%20shoes');
+  });
+
+  it('drops an empty or omitted optional *catchall? segment entirely', () => {
+    expect(href('/shop/*path?', { path: '' })).toBe('/shop');
+    expect(href('/shop/*path?', {})).toBe('/shop');
+    // All-optional routes may omit the params argument.
+    expect(href('/shop/*path?')).toBe('/shop');
+    expect(href('/*all?')).toBe('/');
+    expect(href('/*all?', { all: 'a/b' })).toBe('/a/b');
+  });
+
+  it('still requires the params argument when any param is required (checked by tsc)', () => {
+    // @ts-expect-error - '/docs/*slug' needs { slug }
+    expect(href('/docs/*slug')).toBe('/docs/');
   });
 });

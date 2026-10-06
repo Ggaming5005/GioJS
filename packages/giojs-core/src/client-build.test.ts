@@ -22,6 +22,7 @@ import {
   type ClientManifest,
 } from './client-build.ts';
 import { logger } from './logger.ts';
+import { discoverLayouts, discoverRoutes } from './router.ts';
 import type { RouteModule, LayoutEntry, PageModule, LayoutModule } from './router.ts';
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -51,18 +52,19 @@ export function readSecret(): string {
 }
 `;
 
-function routeFor(pattern: string, filePath: string): RouteModule {
+function routeFor(pattern: string, filePath: string, dir = pattern.slice(1)): RouteModule {
   return {
     filePath,
     urlPattern: pattern,
+    dir,
     load: (): Promise<PageModule> => Promise.reject(new Error('not loaded in build test')),
   };
 }
 
-function layoutFor(urlPrefix: string, filePath: string): LayoutEntry {
+function layoutFor(dir: string, filePath: string): LayoutEntry {
   return {
     filePath,
-    urlPrefix,
+    dir,
     load: (): Promise<LayoutModule> => Promise.reject(new Error('not loaded in build test')),
   };
 }
@@ -99,7 +101,7 @@ export default function DocsLayout({ children }: { children: React.ReactNode }) 
       ['/docs', routeFor('/docs', join(projectRoot, 'app', 'docs', 'page.tsx'))],
     ]);
     const layouts = new Map<string, LayoutEntry>([
-      ['/docs', layoutFor('/docs', join(projectRoot, 'app', 'docs', 'layout.tsx'))],
+      ['docs', layoutFor('docs', join(projectRoot, 'app', 'docs', 'layout.tsx'))],
     ]);
 
     manifest = await buildClientBundles({
@@ -184,6 +186,75 @@ export default missing;
       await rm(brokenRoot, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+describe('buildClientBundles layout association', () => {
+  let projectRoot: string;
+  let entrySources: Map<string, string>;
+
+  beforeAll(async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), 'gio-client-layouts-'));
+    const appDir = join(projectRoot, 'app');
+    const component = (name: string, tag: string): string => `import React from 'react';
+export default function ${name}({ children }: { children?: React.ReactNode }) {
+  return React.createElement('${tag}', null, children);
+}
+`;
+    const files: Record<string, string> = {
+      'layout.tsx': component('Root', 'body'),
+      'posts/[id]/layout.tsx': component('PostLayout', 'article'),
+      'posts/[id]/page.tsx': component('Post', 'p'),
+      '(shop)/layout.tsx': component('ShopLayout', 'section'),
+      '(shop)/cart/page.tsx': component('Cart', 'p'),
+      '(marketing)/layout.tsx': component('MarketingLayout', 'aside'),
+      '(marketing)/about/page.tsx': component('About', 'p'),
+    };
+    for (const [rel, source] of Object.entries(files)) {
+      await mkdir(dirname(join(appDir, rel)), { recursive: true });
+      await writeFile(join(appDir, rel), source);
+    }
+
+    const [routes, layouts] = await Promise.all([discoverRoutes(appDir), discoverLayouts(appDir)]);
+    const manifest = await buildClientBundles({
+      routes,
+      layouts,
+      projectRoot,
+      dev: true,
+      nodePaths: [join(packageDir, 'node_modules')],
+    });
+    expect([...manifest.keys()].sort()).toEqual(['/about', '/cart', '/posts/:id']);
+
+    // The generated entry sources show exactly which layouts each route wraps.
+    entrySources = new Map();
+    const entriesDir = join(projectRoot, '.gio', 'build', 'entries');
+    for (const file of await readdir(entriesDir)) {
+      const source = await readFile(join(entriesDir, file), 'utf8');
+      const pattern = /registerRoute\(("[^"]*")/.exec(source)?.[1];
+      if (pattern !== undefined) entrySources.set(JSON.parse(pattern) as string, source);
+    }
+  }, 60_000);
+
+  afterAll(async () => {
+    await rm(projectRoot, { recursive: true, force: true });
+  });
+
+  it('includes a layout inside a dynamic [id] folder in that route bundle', () => {
+    const source = entrySources.get('/posts/:id') ?? '';
+    expect(source).toContain('posts/[id]/layout.tsx');
+  });
+
+  it("includes a (group) layout only in that group's route bundles", () => {
+    expect(entrySources.get('/cart')).toContain('(shop)/layout.tsx');
+    expect(entrySources.get('/cart')).not.toContain('(marketing)/layout.tsx');
+    expect(entrySources.get('/about')).toContain('(marketing)/layout.tsx');
+    expect(entrySources.get('/about')).not.toContain('(shop)/layout.tsx');
+  });
+
+  it('keeps the root layout out of every bundle (it stays server-only HTML)', () => {
+    for (const source of entrySources.values()) {
+      expect(source).not.toContain('/app/layout.tsx');
+    }
+  });
 });
 
 /** Write `files` (project-relative path → source) under a fresh temp root. */

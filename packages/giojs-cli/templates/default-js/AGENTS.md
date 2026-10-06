@@ -8,7 +8,12 @@ renders React. Full docs: https://giojs.com/llms.txt
 
 - File routing lives in `app/`: `page.jsx` (pages), `layout.jsx` (nested
   layouts), `route.js` (API handlers exporting GET/POST/PUT/PATCH/DELETE),
-  `not-found.jsx`, `error.jsx`. Dynamic segments: `[id]`; catch-all: `[...slug]`.
+  `not-found.jsx`, `error.jsx`. Dynamic segments: `[id]`; catch-all: `[...slug]`
+  (one or more segments); optional catch-all: `[[...slug]]` (also matches the
+  parent URL). Catch-all params are one string with `/` separators (`"a/b"`).
+  `(group)` folders add no URL segment; `_folders` are private (never routed).
+  Layouts apply by folder ancestry, so a `(group)/layout.jsx` wraps only that
+  group.
 - Data fetching is `export async function getServerSideProps(ctx)` returning
   `{ props }` (optionally `{ props, headers }` or a redirect). There are NO
   React Server Components, no `use client`/`use server`, no server actions.

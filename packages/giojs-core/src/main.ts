@@ -12,6 +12,7 @@ import {
   discoverLayouts,
   discoverRouteFiles,
   discoverSpecialPages,
+  assertNoRouteConflicts,
 } from './router.ts';
 import { buildClientBundles } from './client-build.ts';
 import { discoverRouteModules } from './ws-router.ts';
@@ -38,8 +39,12 @@ export async function runServer(): Promise<void> {
     discoverLayouts(appDir),
     discoverRouteFiles(appDir),
   ]);
+  assertNoRouteConflicts(appDir, routes, routeFiles);
   logger.info('routes discovered', { count: routes.size, patterns: [...routes.keys()] });
-  logger.info('layouts discovered', { count: layouts.size, prefixes: [...layouts.keys()] });
+  logger.info('layouts discovered', {
+    count: layouts.size,
+    dirs: [...layouts.keys()].map(dir => (dir === '' ? '.' : dir)),
+  });
 
   const { wsHandlers, handlers } = await discoverRouteModules(routeFiles);
   logger.info('route handlers discovered', {

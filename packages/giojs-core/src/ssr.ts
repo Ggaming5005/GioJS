@@ -28,6 +28,7 @@ import type {
   SpecialPages,
   PageModule,
 } from './router.ts';
+import { layoutsForDir } from './router.ts';
 import { GioEventStream, isGioEventStream } from './sse.ts';
 import type { NodePluginRegistry } from './plugin.ts';
 import { logger } from './logger.ts';
@@ -104,18 +105,21 @@ function devOverlayHandOff(): boolean {
   return process.env.NODE_ENV === 'development' && process.env.GIO_EXPORT !== '1';
 }
 
-/** Match a URL path against pattern-keyed entries (mirrors the Rust trie logic). */
+/** Match a URL path against pattern-keyed entries. */
 function matchIn<T>(
   path: string,
   entries: Map<string, T>,
 ): { entry: T; pattern: string; params: Record<string, string> } | null {
-  // Exact match first
+  // Exact match first - static patterns only, so a request for the literal
+  // path "/posts/:id" never resolves to the dynamic route without params.
   const exact = entries.get(path);
-  if (exact !== undefined) return { entry: exact, pattern: path, params: {} };
+  if (exact !== undefined && !/[:*]/.test(path)) {
+    return { entry: exact, pattern: path, params: {} };
+  }
 
-  // Among all matching patterns, pick the most specific one. This makes the
-  // result independent of Map insertion order and mirrors the Rust trie's
-  // precedence: literal > dynamic (:param) > catch-all (*rest), left to right.
+  // Among all matching patterns, pick the most specific one, so the result
+  // is independent of Map insertion order. Precedence is compared segment by
+  // segment, left to right: literal > :param > *catchAll > *optional?.
   let best: { entry: T; pattern: string; params: Record<string, string> } | null = null;
   for (const [pattern, entry] of entries) {
     const params = matchPattern(pattern, path);
@@ -248,12 +252,18 @@ function pluginDerivedHeaders(
     .map(name => name.toLowerCase());
 }
 
-/** Rank a single segment: literal (2) > dynamic (1) > catch-all (0). */
+/**
+ * Rank one pattern segment: literal (4) > dynamic (3) > catch-all (2) >
+ * end of pattern (1) > optional catch-all (0). The pattern ending can only
+ * tie with an optional catch-all that matched nothing (any other segment
+ * needs a path segment there), and then the shorter pattern - `/shop` over
+ * `/shop/*p?` for "/shop" - is the more specific one.
+ */
 function segmentRank(seg: string | undefined): number {
-  if (seg === undefined) return -1;
-  if (seg.startsWith('*')) return 0;
-  if (seg.startsWith(':')) return 1;
-  return 2;
+  if (seg === undefined) return 1;
+  if (seg.startsWith('*')) return seg.endsWith('?') ? 0 : 2;
+  if (seg.startsWith(':')) return 3;
+  return 4;
 }
 
 /** Returns < 0 if `a` is more specific than `b`, > 0 if less, 0 if equal. */
@@ -265,10 +275,14 @@ function compareSpecificity(a: string, b: string): number {
     const diff = segmentRank(bSegs[i]) - segmentRank(aSegs[i]);
     if (diff !== 0) return diff;
   }
-  // Same shape: more concrete segments (longer) wins.
-  return bSegs.length - aSegs.length;
+  // Same shape: discovery rejects two such routes, so this is a true tie.
+  return 0;
 }
 
+/**
+ * Match `path` against `pattern`. Catch-all values keep their slashes
+ * ("a/b"); an optional catch-all that matches no segments yields ''.
+ */
 function matchPattern(pattern: string, path: string): Record<string, string> | null {
   const patParts = pattern.split('/').filter(Boolean);
   const pathParts = path.split('/').filter(Boolean);
@@ -282,7 +296,11 @@ function matchPattern(pattern: string, path: string): Record<string, string> | n
     if (seg === undefined) return null;
 
     if (seg.startsWith('*')) {
-      params[seg.slice(1)] = pathParts.slice(pi).join('/');
+      const optional = seg.endsWith('?');
+      // A required catch-all needs at least one segment: /docs/*slug never
+      // answers "/docs" itself.
+      if (!optional && pi >= pathParts.length) return null;
+      params[optional ? seg.slice(1, -1) : seg.slice(1)] = pathParts.slice(pi).join('/');
       return params;
     }
 
@@ -366,16 +384,6 @@ export function serializeEnvelope(envelope: {
   }
 }
 
-/** Returns layouts sorted outermost-first (root "/" first, then by prefix length). */
-function findApplicableLayouts(path: string, layouts: Map<string, LayoutEntry>): LayoutEntry[] {
-  return [...layouts.values()]
-    .filter(l => {
-      if (l.urlPrefix === '/') return true;
-      return path === l.urlPrefix || path.startsWith(l.urlPrefix + '/');
-    })
-    .sort((a, b) => a.urlPrefix.length - b.urlPrefix.length);
-}
-
 function isRedirect(result: unknown): result is RedirectResult {
   return typeof result === 'object' && result !== null && 'redirect' in result;
 }
@@ -422,10 +430,22 @@ export async function renderRoute(
     }
   }
 
+  const match = matchRoute(req.path, routes);
+
   // ── route.ts method handlers (API routes + SSE) ───────────────────────────
+  // Pages and route.ts files share one precedence rule: the more specific
+  // pattern owns the URL, so app/blog/about/page.tsx is never shadowed by
+  // app/blog/[slug]/route.ts or a catch-all route.ts above it. Equal
+  // patterns are the same-folder pairing (discovery rejects any other): the
+  // route.ts serves the methods it exports and GET/HEAD fall through to the
+  // page.
   const handlerMatch =
     extras?.handlers !== undefined ? matchIn(req.path, extras.handlers) : null;
-  if (handlerMatch !== null) {
+  const handlerVsPage =
+    handlerMatch === null || match === null
+      ? -1
+      : compareSpecificity(handlerMatch.pattern, match.module.urlPattern);
+  if (handlerMatch !== null && handlerVsPage <= 0) {
     // HEAD is served by the GET handler (body discarded by the client).
     const method = req.method === 'HEAD' ? 'GET' : req.method;
     const handler = handlerMatch.entry.methods.get(method);
@@ -436,15 +456,13 @@ export async function renderRoute(
       }
       return result;
     }
-    // A handler file owns this path for its exported methods; a GET without a
-    // GET handler may still be a page render. Anything else is a 405.
-    const pageExists = matchRoute(req.path, routes) !== null;
-    if (!((req.method === 'GET' || req.method === 'HEAD') && pageExists)) {
+    // The route.ts owns this URL; only a sibling page (same pattern) may still
+    // render a GET it does not export. Anything else is a 405.
+    const siblingPage = handlerVsPage === 0;
+    if (!((req.method === 'GET' || req.method === 'HEAD') && siblingPage)) {
       return methodNotAllowed(req, [...handlerMatch.entry.methods.keys()]);
     }
   }
-
-  const match = matchRoute(req.path, routes);
 
   if (!match) {
     const notFound = await renderSpecialPage(req, layouts, extras?.specialPages?.notFound, {}, 404, signal);
@@ -526,9 +544,9 @@ export async function renderRoute(
     // bundle hydrates exactly this div; the root layout (and everything Rust
     // injects into the document later) stays server-only HTML, so post-render
     // head/body injection can never cause a hydration mismatch.
-    const applicableLayouts = findApplicableLayouts(req.path, layouts);
-    const rootLayoutEntry = applicableLayouts.find(l => l.urlPrefix === '/');
-    const innerLayouts = applicableLayouts.filter(l => l.urlPrefix !== '/');
+    const applicableLayouts = layoutsForDir(match.module.dir, layouts);
+    const rootLayoutEntry = applicableLayouts.find(l => l.dir === '');
+    const innerLayouts = applicableLayouts.filter(l => l.dir !== '');
 
     let inner: React.ReactNode = React.createElement(Component, props);
     for (const layoutEntry of [...innerLayouts].reverse()) {
@@ -860,9 +878,12 @@ async function renderSpecialPage(
   if (load === undefined) return null;
   try {
     const pageModule = await load();
-    const applicableLayouts = findApplicableLayouts(req.path, layouts);
-    const rootLayoutEntry = applicableLayouts.find(l => l.urlPrefix === '/');
-    const innerLayouts = applicableLayouts.filter(l => l.urlPrefix !== '/');
+    // Layouts follow the special page's own filesystem ancestry, the same rule
+    // as for pages. Special pages live at app/ root, so today that is just the
+    // root layout - never the layouts of whatever URL failed or was missing.
+    const applicableLayouts = layoutsForDir('', layouts);
+    const rootLayoutEntry = applicableLayouts.find(l => l.dir === '');
+    const innerLayouts = applicableLayouts.filter(l => l.dir !== '');
 
     let inner: React.ReactNode = React.createElement(pageModule.default, props);
     for (const layoutEntry of [...innerLayouts].reverse()) {

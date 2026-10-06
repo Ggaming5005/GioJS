@@ -3,7 +3,7 @@
  *
  * Builds the per-route client bundles that hydrate the #__gio boundary.
  * For each discovered route a small entry module is generated that imports
- * the page component plus its static-prefix non-root layouts and registers
+ * the page component plus its non-root ancestor layouts and registers
  * them with the shared client runtime. esbuild bundles all entries in one
  * pass (ESM + code splitting, content-hashed names) into
  * `.gio/build/static/chunks/`, which Rust serves at `/_next/static/chunks/`
@@ -42,7 +42,7 @@ import {
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { RouteModule, LayoutEntry } from './router.ts';
+import { layoutsForDir, type RouteModule, type LayoutEntry } from './router.ts';
 import { logger } from './logger.ts';
 import { clearClientBuildErrors, recordClientBuildError } from './client-build-errors.ts';
 
@@ -81,17 +81,13 @@ function importPath(p: string): string {
 }
 
 /**
- * Non-root layouts that apply to every path this pattern can match. Layouts
- * with dynamic segments in their prefix are excluded - the server's runtime
- * prefix match never applies them to concrete paths, and the client must
- * wrap exactly what the server wrapped.
+ * The non-root layouts wrapping a route, outermost first - the same
+ * filesystem-ancestry chain ssr.ts renders inside the #__gio boundary (the
+ * root layout stays server-only HTML). The client must wrap exactly what the
+ * server wrapped or hydration mismatches.
  */
-function clientLayoutsFor(pattern: string, layouts: Map<string, LayoutEntry>): LayoutEntry[] {
-  return [...layouts.values()]
-    .filter(l => l.urlPrefix !== '/')
-    .filter(l => !l.urlPrefix.includes(':') && !l.urlPrefix.includes('*'))
-    .filter(l => pattern === l.urlPrefix || pattern.startsWith(l.urlPrefix + '/'))
-    .sort((a, b) => a.urlPrefix.length - b.urlPrefix.length);
+function clientLayoutsFor(route: RouteModule, layouts: Map<string, LayoutEntry>): LayoutEntry[] {
+  return layoutsForDir(route.dir, layouts).filter(l => l.dir !== '');
 }
 
 function generateEntrySource(
@@ -531,7 +527,7 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
       const source = generateEntrySource(
         pattern,
         route,
-        clientLayoutsFor(pattern, options.layouts),
+        clientLayoutsFor(route, options.layouts),
         runtimePath,
       );
       await writeFile(file, source, 'utf8');

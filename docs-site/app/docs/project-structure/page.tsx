@@ -20,7 +20,7 @@ export default function Page(): React.JSX.Element {
   public/              # static assets served as-is
   gio.toml             # server configuration`} />
       <h2>The app directory</h2>
-      <p>Routes are folders. A page.tsx (or .jsx) makes a folder a route; a layout.tsx wraps the pages beneath it. Dynamic segments use [brackets].</p>
+      <p>Routes are folders. A page.tsx (or .jsx) makes a folder a route; a layout.tsx wraps the pages beneath it. Dynamic segments use [brackets] ([...slug] and [[...slug]] for catch-alls), (group) folders organize routes without adding a URL segment, and _private folders are never routable.</p>
       <h2>public/</h2>
       <p>Files in public/ are served directly by the Rust layer at /public/* - images, stylesheets, fonts. Static files never touch Node.</p>
     </>

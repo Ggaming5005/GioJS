@@ -16,27 +16,36 @@ function escapeSingleQuoted(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
-function paramNames(pattern: string): string[] {
-  const names: string[] = [];
+interface ParamSpec {
+  name: string;
+  /** Optional catch-all (`*name?`): may be omitted or empty. */
+  optional: boolean;
+}
+
+function paramSpecs(pattern: string): ParamSpec[] {
+  const params: ParamSpec[] = [];
   for (const segment of pattern.split('/')) {
     if (segment.startsWith(':') || segment.startsWith('*')) {
-      const name = segment.slice(1);
+      const optional = segment.startsWith('*') && segment.endsWith('?');
+      const name = optional ? segment.slice(1, -1) : segment.slice(1);
       if (name.length > 0) {
-        names.push(name);
+        params.push({ name, optional });
       }
     }
   }
-  return names;
+  return params;
 }
 
 function paramsType(pattern: string): string {
-  const names = paramNames(pattern);
-  if (names.length === 0) {
+  const params = paramSpecs(pattern);
+  if (params.length === 0) {
     return 'Record<string, never>';
   }
-  const fields = names.map(name => {
+  // Catch-all values are one string with '/' separators ("a/b"), the same
+  // shape getServerSideProps receives in ctx.params.
+  const fields = params.map(({ name, optional }) => {
     const key = IDENTIFIER_RE.test(name) ? name : `'${escapeSingleQuoted(name)}'`;
-    return `${key}: string`;
+    return `${key}${optional ? '?' : ''}: string`;
   });
   return `{ ${fields.join('; ')} }`;
 }
