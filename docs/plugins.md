@@ -110,13 +110,17 @@ export function createAuthPlugin({ sessions, prefix = '/admin' }: {
   sessions: SessionStorage;
   prefix?: string;
 }): GioNodePlugin {
+  // '/admin/' and 'admin' mean '/admin'; '/' protects every path.
+  const trimmed = prefix.replace(/^\/+|\/+$/g, '');
+  const base = trimmed === '' ? '' : `/${trimmed}`;
   return {
     name: 'giojs-auth-example',
     version: '0.1.0',
 
     async onRequest(req) {
       // Segment-aware: /admin and /admin/x, not /administrator.
-      if (req.path !== prefix && !req.path.startsWith(`${prefix}/`)) return req;
+      const isProtected = base === '' || req.path === base || req.path.startsWith(`${base}/`);
+      if (!isProtected) return req;
       // Tampered, expired, or foreign cookies read as an empty session.
       if (sessions.getSession(req).has('userId')) return req;  // authenticated
       return {
@@ -134,8 +138,18 @@ export function createAuthPlugin({ sessions, prefix = '/admin' }: {
 
 Pair it with a `require_session` guard on the same paths: the guard verifies the
 session's signature and expiry in Rust before Node is involved, and the plugin
-checks what is inside it (roles, revocation). `examples/auth-demo` wires both
-together with a login form, a session-reading dashboard, and logout:
+checks what is inside it.
+
+Plugins run only when a request reaches the worker. A page that exports
+`revalidate` is cached by Rust (the cache key holds no cookies) and later
+requests are answered from the cache without calling `onRequest` - so anyone the
+guard lets through gets it. For checks that differ per user (roles, revocation),
+either drop `revalidate` from the protected pages or read the session in the page
+itself: reading it marks the render personal, and personal renders are never
+cached.
+
+`examples/auth-demo` wires guard and plugin together with a login form, a
+session-reading dashboard, and logout:
 
 ```bash
 # Start server with the auth-demo app (DEMO_PASSWORD comes from examples/auth-demo/.env;
