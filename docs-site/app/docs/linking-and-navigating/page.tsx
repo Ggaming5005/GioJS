@@ -8,16 +8,161 @@ export default function Page(): React.JSX.Element {
     <>
       <div className="docs-eyebrow">Building Your App</div>
       <h1>Linking & Navigating</h1>
-      <p className="page-subtitle">Client-side navigation with hover-intent prefetch and view transitions.</p>
+      <p className="page-subtitle">Client-side navigation, router hooks, prefetching, scroll and focus.</p>
       <p>Use GioLink for internal navigation. It prefetches on hover intent by default and swaps content without a full reload. Set <code>prefetch=&quot;viewport&quot;</code> to instead prefetch once when the link scrolls into view (via IntersectionObserver), or <code>prefetch={'{false}'}</code> to disable prefetching.</p>
       <CodeBlock lang="tsx" code={`import { GioLink } from '@gio.js/react';
 
 <GioLink href="/about">About</GioLink>
-<GioLink href="/posts/1" prefetch="viewport">First post</GioLink>`} />
+<GioLink href="/posts/1" prefetch="viewport">First post</GioLink>
+<GioLink href="/search?q=gio" replace scroll={false}>Search</GioLink>
+<GioLink href="#comments">Jump to comments</GioLink>`} />
+
+      <h2>How a soft navigation works</h2>
+      <p>
+        A click fetches the next page&apos;s HTML (or takes a fresh prefetch), loads the
+        route&apos;s client chunk, and renders the new page into the same React root. Layouts
+        the two pages share stay mounted, so their state (an open sidebar, a search box, a
+        playing video) survives the navigation; the page itself mounts fresh, also when only
+        a dynamic segment changes (<code>/posts/1</code> to <code>/posts/2</code>). An
+        error a folder&apos;s <code>error.tsx</code> boundary caught is cleared when you
+        navigate away from it.
+      </p>
+      <p>
+        Only GioJS pages are rendered in place - HTML with the page boundary, including your
+        <code> not-found.tsx</code> and <code>error.tsx</code> pages. Anything else falls back
+        to a normal full page load, so it shows with its real status: a non-HTML response, a{' '}
+        <code>503</code> from the server, a network error, a static host&apos;s{' '}
+        <code>404.html</code>, or a link to another origin. After a redirect, the address bar
+        and the router hooks show the URL the redirect landed on. When a new deployment went
+        live since the page loaded, the navigation becomes a full load of the new build.
+      </p>
+      <div className="callout">
+        The root layout (<code>app/layout.tsx</code>) is server-only HTML: a soft navigation
+        does not re-render it, so anything it derives from the URL (an active nav link) keeps
+        the value of the page that was loaded in full. Put URL-dependent UI in a component
+        below it - for a layout shared by every page, use a route group such as{' '}
+        <code>app/(site)/layout.tsx</code>.
+      </div>
+
+      <h2>Router hooks</h2>
+      <p>
+        <code>usePathname</code>, <code>useParams</code> and <code>useSearchParams</code> read
+        the page the router matched. They work during server rendering - in the root layout
+        too - and return the same values when the page hydrates, so they never cause a
+        hydration mismatch; after a soft navigation they return the new page&apos;s values.
+      </p>
+      <CodeBlock lang="tsx" code={`import { usePathname, useParams, useSearchParams } from '@gio.js/react';
+
+export default function PostPage() {
+  const pathname = usePathname();               // '/posts/42'
+  const { id } = useParams<'/posts/:id'>();      // typed from your routes
+  const searchParams = useSearchParams();       // read-only URLSearchParams
+  const tab = searchParams.get('tab') ?? 'overview';
+  // ...
+}`} />
+      <ul>
+        <li>
+          <code>usePathname()</code> is the path the page was rendered for, without query or
+          hash. With i18n the locale prefix is not part of it (<code>/fr/about</code> gives{' '}
+          <code>/about</code>; combine it with <code>useLocale()</code>), and after a{' '}
+          <code>[[rewrites]]</code> rule it is the rewritten path.
+        </li>
+        <li>
+          <code>useParams()</code> returns the dynamic segment values. Pass a route pattern
+          (<code>{"useParams<'/posts/:id'>()"}</code>) for typed params from the generated
+          typed routes, or a shape (<code>{'useParams<{ id: string }>()'}</code>).
+        </li>
+        <li>
+          <code>useSearchParams()</code> returns the query as a read-only{' '}
+          <code>URLSearchParams</code>: <code>set</code>, <code>append</code>,{' '}
+          <code>delete</code> and <code>sort</code> throw. To change the query, navigate. A
+          query key that appears more than once keeps one value (the last).
+        </li>
+        <li>
+          <code>useLocale()</code> returns the request locale, during server rendering too, so{' '}
+          <code>&lt;LocaleLink&gt;</code> renders its prefixed href in the server HTML.
+        </li>
+      </ul>
+
+      <h2>Navigating from code</h2>
+      <CodeBlock lang="tsx" code={`import { useRouter, href } from '@gio.js/react';
+
+function SaveButton({ id }: { id: string }) {
+  const router = useRouter();
+  async function save() {
+    await fetch('/api/posts', { method: 'POST', body: '...' });
+    router.push(href('/posts/:id', { id }));
+  }
+  return <button onClick={save}>Save</button>;
+}`} />
+      <table>
+        <thead><tr><th>Method</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>push(href, {'{ scroll? }'})</code></td><td>Soft-navigate, adding a history entry.</td></tr>
+          <tr><td><code>replace(href, {'{ scroll? }'})</code></td><td>Soft-navigate, replacing the current entry.</td></tr>
+          <tr><td><code>back()</code> / <code>forward()</code></td><td>Move through history; the router renders the page and restores its scroll position.</td></tr>
+          <tr><td><code>refresh()</code></td><td>Re-fetch the current page, bypassing (and clearing) the prefetch cache, and re-render it in place: same URL, same scroll position, component state kept, fresh props.</td></tr>
+          <tr><td><code>prefetch(href)</code></td><td>Fetch a page into the prefetch cache ahead of a navigation.</td></tr>
+        </tbody>
+      </table>
+      <p>
+        <code>useRouter()</code> returns the same object on every render, so it is safe in
+        effect dependencies; outside components, <code>navigate(href, {'{ replace, scroll }'})</code>{' '}
+        does the same as <code>push</code>/<code>replace</code>. All of them return a promise
+        that settles once the new page is on screen, accept any same-origin href (build typed
+        ones with <code>href()</code>), turn other origins into full page loads, refuse{' '}
+        <code>javascript:</code> URLs, and do nothing during server rendering.
+      </p>
+
+      <h2>Scroll</h2>
+      <ul>
+        <li>
+          A navigation scrolls to the top of the new page, or to the element its{' '}
+          <code>#hash</code> names. Pass <code>scroll={'{false}'}</code> (on GioLink or to{' '}
+          <code>push</code>/<code>replace</code>) to keep the position - handy for tabs or
+          filters that only change the query.
+        </li>
+        <li>
+          Back and forward restore each page&apos;s scroll position once that page has
+          rendered. The router saves positions per history entry and takes over{' '}
+          <code>history.scrollRestoration</code> while it is active; full page loads and
+          reloads keep the browser&apos;s own restoration.
+        </li>
+        <li>
+          Links to a hash on the current page (<code>#comments</code>,{' '}
+          <code>/docs#install</code> while on <code>/docs</code>) only scroll: nothing is
+          fetched.
+        </li>
+      </ul>
+
+      <h2>Prefetching</h2>
+      <p>
+        Prefetched pages are kept for 30 seconds (<code>PREFETCH_TTL_MS</code>), at most 50 of
+        them; an older entry is fetched again when it is used. The cache is cleared by{' '}
+        <code>router.refresh()</code> and by any non-GET <code>fetch()</code> to your own
+        origin (an API mutation), so a navigation after a change never shows a
+        page prefetched before it. A prefetch that hit a page which cannot be rendered in
+        place is remembered too: hovering the link again does not refetch it, and clicking it
+        goes straight to a full page load.
+      </p>
+      <div className="callout">Prefetching is budgeted by the Rust prefetch manager, so a page full of links will not flood your server.</div>
+
+      <h2>Focus and announcements</h2>
+      <p>
+        After a soft navigation, focus moves to the new page&apos;s <code>&lt;main&gt;</code>{' '}
+        (or the page container when there is none), so keyboard and screen-reader users start
+        at the new content rather than on a link that may be gone - unless the page focused
+        something itself (an <code>autoFocus</code> input). The new page&apos;s title (or its
+        first <code>&lt;h1&gt;</code>) is announced through a visually hidden live region.
+        Give every page a meaningful title.
+      </p>
+
       <h2>View transitions</h2>
       <p>Set a transition preset to animate between pages using the View Transitions API.</p>
-      <CodeBlock lang="tsx" code={`<GioLink href="/about" transition="fade">About</GioLink>`} />
-      <div className="callout">Prefetching is budgeted by the Rust prefetch manager, so a page full of links will not flood your server.</div>
+      <CodeBlock lang="tsx" code={`<GioLink href="/about" transition="fade">About</GioLink>
+
+router.push('/about', { transition: 'slide-left' });`} />
+
       <h2>Typed routes</h2>
       <p>
         The <code>href()</code> helper builds URLs from your route patterns with full

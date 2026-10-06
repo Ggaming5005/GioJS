@@ -127,14 +127,16 @@ export function transformSource(source: string): { output: string; transforms: s
     if (linkCount > 0) transforms.push(`<Link /> → <GioLink /> ×${linkCount}`);
   }
 
-  // 6. next/navigation has no GioJS equivalent yet - flag it, don't rewrite
+  // 6. next/navigation - flag it, don't rewrite: the common hooks exist in
+  // @gio.js/react under the same names, but redirect/notFound and the
+  // segment hooks do not, so a person decides per import.
   const navPattern = /^(import\s+[^\n]+from\s+['"]next\/navigation['"][^\n]*)/m;
   if (navPattern.test(text)) {
     text = text.replace(
       navPattern,
-      '// TODO(gio-migrate): next/navigation has no GioJS equivalent yet - use <GioLink> for links and location/history APIs for imperative navigation\n$1'
+      '// TODO(gio-migrate): usePathname/useParams/useSearchParams/useRouter come from @gio.js/react - switch this import (other next/navigation exports have no GioJS equivalent)\n$1'
     );
-    transforms.push('next/navigation → flagged (no GioJS equivalent)');
+    transforms.push('next/navigation → flagged (hooks: switch to @gio.js/react)');
   }
 
   // 7. next/font → TODO comment (leave import intact)

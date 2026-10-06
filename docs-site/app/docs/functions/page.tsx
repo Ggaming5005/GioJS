@@ -8,7 +8,7 @@ export default function Page(): React.JSX.Element {
     <>
       <div className="docs-eyebrow">API Reference</div>
       <h1>Functions</h1>
-      <p className="page-subtitle">Server-side functions and page exports.</p>
+      <p className="page-subtitle">Server-side functions, page exports and router hooks.</p>
 
       <h2>getServerSideProps(ctx)</h2>
       <p>
@@ -60,6 +60,30 @@ export async function getServerSideProps(ctx) {
         <code>PUT</code> / <code>PATCH</code> / <code>DELETE</code> (API endpoints,
         SSE) and <code>wsHandler</code> (WebSockets) - see Route Handlers.
       </p>
+
+      <h2>Router hooks</h2>
+      <p>
+        From <code>@gio.js/react</code>. They read the page the router matched, on the server
+        (root layout included) and in the browser with identical values, and follow soft
+        navigations. See <a href="/docs/linking-and-navigating">Linking &amp; Navigating</a>.
+      </p>
+      <table>
+        <thead><tr><th>Hook</th><th>Returns</th></tr></thead>
+        <tbody>
+          <tr><td><code>usePathname()</code></td><td>The routed path, without query, hash or locale prefix.</td></tr>
+          <tr><td><code>{'useParams<T>()'}</code></td><td>The dynamic segment values; <code>T</code> is a registered pattern (<code>{"'/posts/:id'"}</code>) or a params shape.</td></tr>
+          <tr><td><code>useSearchParams()</code></td><td>The query as a read-only <code>URLSearchParams</code>.</td></tr>
+          <tr><td><code>useLocale()</code></td><td>The request locale (<code>&apos;&apos;</code> without i18n).</td></tr>
+          <tr><td><code>useRouter()</code></td><td><code>{'{ push, replace, back, forward, refresh, prefetch }'}</code> - one stable object; no-ops on the server.</td></tr>
+        </tbody>
+      </table>
+      <CodeBlock lang="tsx" code={`import { usePathname, useRouter, navigate } from '@gio.js/react';
+
+const router = useRouter();
+await router.push('/posts/2', { scroll: false });
+router.refresh();                       // fresh props, same URL and state
+
+await navigate('/login', { replace: true });   // outside components`} />
 
       <h2>cspNonce()</h2>
       <p>

@@ -80,9 +80,10 @@ export default function Loading() {
           request as a hole (see <a href="/docs/caching-layers">Caching Layers</a>).
         </li>
         <li>
-          Client-side navigation does not show the loading UI yet: <code>&lt;GioLink&gt;</code>{' '}
-          keeps the current page on screen until the next page&apos;s HTML has arrived
-          (prefetching hides most of that wait).
+          Client-side navigation keeps the current page on screen until the next page&apos;s
+          HTML has arrived (prefetching hides most of that wait), then renders it into the same
+          React tree: layouts the two pages share keep their state, and the loading UI shows
+          only if the new page suspends in the browser.
         </li>
       </ul>
       <h2>Dynamic routes</h2>
