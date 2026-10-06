@@ -56,7 +56,7 @@ max_connections = 1000
 ping_interval_secs = 30
 
 [[rate_limits]]         # repeat per path rule; /_gio/image honors these too
-path = "/api/*"
+path = "/api/*"         # exact, or prefix with trailing * ("/api/*" covers /api too)
 per_ip = 100            # requests per window (default 100)
 window_seconds = 60     # default 60
 burst = 20              # default 20
@@ -132,6 +132,39 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
         <code>ip_allowlist</code> is set - unauthenticated metrics are fine on
         localhost but should never face the public internet.
       </div>
+
+      <h2>Rate limits</h2>
+      <p>
+        Each <code>[[rate_limits]]</code> rule is a token bucket per client:
+        <code>per_ip</code> requests per <code>window_seconds</code>, plus{' '}
+        <code>burst</code> on top. When several rules match, the one with the
+        longest literal prefix wins. Limits run in Rust before routing, so a
+        rejected request (<code>429</code> with <code>Retry-After</code>) never
+        reaches Node.
+      </p>
+      <ul>
+        <li>
+          <strong>Paths are matched in canonical form</strong> - the same
+          form <a href="/docs/middleware">middleware rules</a> use. Repeated
+          and trailing slashes and percent-escaped letters, digits,{' '}
+          <code>-</code>, <code>.</code>, <code>_</code>, <code>~</code> are
+          normalized first, so <code>/api/login/</code>,{' '}
+          <code>//api//login</code> and <code>/api/%6Cogin</code> all draw
+          from the <code>/api/login</code> bucket, just as they all reach the
+          same handler.
+        </li>
+        <li>
+          <strong>A client is an IPv4 address or an IPv6 /64.</strong> IPv6
+          hosts typically control a whole /64, so per-address buckets would let
+          one host rotate into unlimited fresh budgets.
+        </li>
+        <li>
+          <strong>Memory is bounded.</strong> Buckets that have refilled are
+          dropped (a new one starts full, so nothing is lost), and the store
+          holds at most 100,000 buckets - past that the least recently seen
+          are evicted.
+        </li>
+      </ul>
 
       <h2>Environment variables</h2>
       <p>

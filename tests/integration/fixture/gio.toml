@@ -10,3 +10,10 @@ http2 = false
 from   = "/moved"
 to     = "/cached"
 status = 301
+
+# Exact-path rule the integration tests try to dodge with path spellings.
+[[rate_limits]]
+path           = "/api/limited"
+per_ip         = 2
+window_seconds = 3600
+burst          = 0

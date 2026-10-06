@@ -23,6 +23,7 @@ mod dev_overlay;
 mod devtools;
 mod ipc;
 mod metrics;
+mod path_hygiene;
 mod rules;
 mod stream_inject;
 mod ws;
@@ -543,6 +544,9 @@ async fn main() -> anyhow::Result<()> {
             state.clone(),
             i18n_middleware,
         ))
+        // Outside i18n so locale detection, rate limits and rules all see
+        // the same escape-normalized path (see path_hygiene.rs).
+        .layer(axum::middleware::from_fn(path_hygiene_middleware))
         .layer(axum::middleware::from_fn(cache_status_stamp_middleware))
         // Compression is added last so it is the outermost response transform:
         // it must run after i18n injects <html lang>, otherwise it compresses
@@ -698,23 +702,69 @@ async fn prefetch_budget_middleware(
     resp
 }
 
+/// True when the router dispatched this request to one of Rust's own `/_gio`
+/// endpoints. Registered routes carry a `MatchedPath` (dev-only routes exist
+/// only in dev, so they match only there); the nested font service carries
+/// none but owns its whole prefix. Anything else under `/_gio` fell through
+/// to the fallback and gets no internal-endpoint exemptions. These layers
+/// run after routing, so the router's verdict is already final here.
+fn is_internal_endpoint(req: &Request) -> bool {
+    if let Some(matched) = req.extensions().get::<axum::extract::MatchedPath>() {
+        return matched.as_str().starts_with("/_gio/");
+    }
+    let path = req.uri().path();
+    path == "/_gio/fonts" || path.starts_with("/_gio/fonts/")
+}
+
+/// Outermost path gate (see path_hygiene.rs), ahead of i18n, rate limits and
+/// rules. Dot segments are refused, the `/_gio` namespace answers 404 for
+/// anything that is not a real internal endpoint (so `/_gio/x` can never
+/// render an app page under a top-level dynamic segment, nor reach the cache
+/// or Node), and unreserved percent-escapes are decoded in the forwarded URI
+/// so every later matcher and the Node router agree on one spelling.
+async fn path_hygiene_middleware(mut req: Request, next: Next) -> Response {
+    let in_gio_namespace = match path_hygiene::canonical(req.uri().path()) {
+        Ok(canonical) => path_hygiene::is_gio_namespace(&canonical),
+        Err(rejection) => {
+            warn!(path = %req.uri().path(), ?rejection, "request path rejected");
+            let mut resp = (StatusCode::BAD_REQUEST, "400 Bad Request").into_response();
+            insert_cache_status_header(&mut resp, "bypass");
+            return resp;
+        }
+    };
+    if in_gio_namespace && !is_internal_endpoint(&req) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let std::borrow::Cow::Owned(normalized) = path_hygiene::normalize_escapes(req.uri().path()) {
+        rewrite_request_uri(&mut req, normalized);
+    }
+    next.run(req).await
+}
+
 async fn rate_limit_middleware(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
     next: Next,
 ) -> Response {
-    let path = req.uri().path().to_string();
-
-    // Internal GioJS routes are never rate-limited - except the image
+    // Rust's own endpoints are never rate-limited - except the image
     // optimizer, the most CPU-expensive endpoint in the system, which
-    // honors operator [[rate_limits]] rules like any app route.
-    if path.starts_with("/_gio/") && path != "/_gio/image" {
+    // honors operator [[rate_limits]] rules like any app route. Unrouted
+    // /_gio paths are not exempt (path_hygiene_middleware 404s them anyway).
+    if is_internal_endpoint(&req) && req.uri().path() != "/_gio/image" {
         return next.run(req).await;
     }
 
     let Some(ref rl) = state.rate_limiter else {
         return next.run(req).await;
+    };
+
+    // Limits match the canonical path, so `/api/login/`, `//api/login` and
+    // `/api/%6Cogin` share the `/api/login` bucket the Node router would
+    // dispatch them to.
+    let path = match path_hygiene::canonical(req.uri().path()) {
+        Ok(canonical) => canonical.into_owned(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
     let ip = addr.ip();
@@ -768,12 +818,15 @@ async fn rate_limit_middleware(
 /// Declarative middleware rules (gio.toml + worker middleware.ts), executed
 /// in Rust before routing so no request can bypass them. Order per request:
 /// guards, redirects, rewrites - static rules before worker rules in each
-/// phase (see rules.rs). Redirects short-circuit with the original query
-/// preserved; rewrites mutate the request URI in place so routing and the
-/// cache key both see the rewritten path. Header rules match the requested
-/// (pre-rewrite) path and are stamped on the response. `/_gio/*` is exempt.
+/// phase (see rules.rs). Every phase matches the canonical path (see
+/// path_hygiene.rs), so slash and percent-encoding variants cannot slip past
+/// a rule. Redirects short-circuit with the original query preserved;
+/// rewrites mutate the request URI in place so the cache key and Node both
+/// see the rewritten path. Header rules match the requested (pre-rewrite)
+/// path and are stamped on every response, rule redirects included. Rust's
+/// own `/_gio` endpoints are exempt.
 async fn rules_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
-    if req.uri().path().starts_with("/_gio/") {
+    if is_internal_endpoint(&req) {
         return next.run(req).await;
     }
     let worker_rules = state.ipc.worker_rules();
@@ -782,25 +835,33 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
         return next.run(req).await;
     }
 
+    let path = match path_hygiene::canonical(req.uri().path()) {
+        Ok(canonical) => canonical.into_owned(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
     let outcome = {
-        let path = req.uri().path();
         let cookie_header = req
             .headers()
             .get(header::COOKIE)
             .and_then(|value| value.to_str().ok());
         if worker_rules.is_empty() {
-            static_rules.apply(path, cookie_header)
+            static_rules.apply(&path, cookie_header)
         } else if static_rules.is_empty() {
-            worker_rules.apply(path, cookie_header)
+            worker_rules.apply(&path, cookie_header)
         } else {
-            rules::apply_merged(static_rules, &worker_rules, path, cookie_header)
+            rules::apply_merged(static_rules, &worker_rules, &path, cookie_header)
         }
     };
+    // Collected before a rewrite replaces the URI, and before the redirect
+    // short-circuit: security headers (frame options, HSTS, CSP) configured
+    // for a path must cover its redirect responses too.
+    let rule_headers = rule_response_headers(static_rules, &worker_rules, &path);
 
     match outcome {
         rules::RuleOutcome::Redirect { location, status } => {
             let location = rules::with_query(location, req.uri().query());
-            if let Some(resp) = rule_redirect_response(&location, status) {
+            if let Some(mut resp) = rule_redirect_response(&location, status) {
+                stamp_rule_headers(&mut resp, rule_headers);
                 info!(
                     method = %req.method(),
                     path = %req.uri().path(),
@@ -817,25 +878,30 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
         rules::RuleOutcome::None => {}
     }
 
-    // Header rules match the path the client requested, captured before the
-    // rewrite (if any) replaced the URI. Allocates only when header rules exist.
-    let stamped_path = if static_rules.has_header_rules() || worker_rules.has_header_rules() {
-        Some(req.uri().path().to_string())
-    } else {
-        None
-    };
     let mut resp = next.run(req).await;
-    if let Some(path) = stamped_path {
-        for (name, value) in state
-            .static_rules
-            .response_headers(&path)
-            .into_iter()
-            .chain(worker_rules.response_headers(&path))
-        {
-            resp.headers_mut().insert(name, value);
-        }
-    }
+    stamp_rule_headers(&mut resp, rule_headers);
     resp
+}
+
+/// Headers from every matching header rule, static set first. Allocates
+/// nothing when no header rules exist.
+fn rule_response_headers(
+    static_rules: &rules::RuleSet,
+    worker_rules: &rules::RuleSet,
+    path: &str,
+) -> Vec<(HeaderName, HeaderValue)> {
+    if !static_rules.has_header_rules() && !worker_rules.has_header_rules() {
+        return Vec::new();
+    }
+    let mut collected = static_rules.response_headers(path);
+    collected.extend(worker_rules.response_headers(path));
+    collected
+}
+
+fn stamp_rule_headers(resp: &mut Response, rule_headers: Vec<(HeaderName, HeaderValue)>) {
+    for (name, value) in rule_headers {
+        resp.headers_mut().insert(name, value);
+    }
 }
 
 /// Build the redirect response for a rule match. Returns `None` when the
@@ -950,6 +1016,12 @@ async fn dynamic_handler(
     let prefetch_status = if is_prefetch(&req) { "allowed" } else { "n/a" };
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
+    // Nothing under /_gio belongs to the app. path_hygiene_middleware already
+    // 404s unrouted /_gio requests; this also covers paths that only land in
+    // the namespace after a locale prefix is stripped or a rule rewrites.
+    if path_hygiene::is_gio_namespace(&path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let locale = req
         .extensions()
         .get::<String>()
@@ -3675,6 +3747,270 @@ mod tests {
         rewrite_request_uri(&mut req, "/cached".to_string());
         assert_eq!(req.uri().path(), "/cached");
         assert_eq!(req.uri().query(), None);
+    }
+
+    #[test]
+    fn rule_headers_combine_static_then_worker_sets() {
+        let header_rules = |path: &str, name: &str| {
+            rules::RuleSet::compile(&rules::MiddlewareRules {
+                headers: vec![rules::HeaderRule {
+                    path: path.to_string(),
+                    headers: [(name.to_string(), "1".to_string())].into(),
+                }],
+                ..Default::default()
+            })
+        };
+        let static_rules = header_rules("/*rest", "x-static");
+        let worker_rules = header_rules("/admin", "x-worker");
+        let names = |path: &str| -> Vec<String> {
+            rule_response_headers(&static_rules, &worker_rules, path)
+                .into_iter()
+                .map(|(name, _)| name.to_string())
+                .collect()
+        };
+        assert_eq!(names("/admin"), ["x-static", "x-worker"]);
+        assert_eq!(names("/"), ["x-static"]);
+        let empty = rules::RuleSet::default();
+        assert!(rule_response_headers(&empty, &empty, "/admin").is_empty());
+
+        let mut resp = rule_redirect_response("/login", StatusCode::FOUND).unwrap();
+        stamp_rule_headers(
+            &mut resp,
+            rule_response_headers(&static_rules, &worker_rules, "/admin"),
+        );
+        assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/login");
+        assert_eq!(resp.headers().get("x-static").unwrap(), "1");
+        assert_eq!(resp.headers().get("x-worker").unwrap(), "1");
+    }
+
+    // ── path hygiene ──────────────────────────────────────────────────────────
+
+    /// Spellings the Node router dispatches to the same handler as
+    /// `/api/login` (it skips empty segments; escapes of unreserved
+    /// characters are equivalent and get decoded before Node sees them).
+    const LOGIN_SPELLINGS: [&str; 8] = [
+        "/api/login",
+        "/api/login/",
+        "//api/login",
+        "/api//login",
+        "///api///login///",
+        "/api/%6Cogin",
+        "/%61pi/%6c%6f%67%69%6e",
+        "//%61pi//login/",
+    ];
+
+    #[test]
+    fn rate_limit_buckets_cannot_be_dodged_by_path_spelling() {
+        let limiter = RateLimiter::new(vec![RateLimitRule {
+            path_pattern: "/api/login".to_string(),
+            per_ip: 1,
+            window_seconds: 3600,
+            burst: 0,
+            key_header: None,
+        }]);
+        let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        let headers = HashMap::new();
+        let first = path_hygiene::canonical(LOGIN_SPELLINGS[0]).unwrap();
+        assert!(matches!(
+            limiter.check(&first, ip, &headers),
+            RateLimitResult::Allowed { limit: 1, .. }
+        ));
+        for raw in LOGIN_SPELLINGS {
+            let canonical = path_hygiene::canonical(raw).unwrap();
+            assert!(
+                matches!(
+                    limiter.check(&canonical, ip, &headers),
+                    RateLimitResult::Rejected { .. }
+                ),
+                "{raw} must hit the exhausted /api/login bucket"
+            );
+        }
+    }
+
+    #[test]
+    fn rules_cannot_be_dodged_by_path_spelling() {
+        let rules = rules::RuleSet::compile(&rules::MiddlewareRules {
+            guards: vec![rules::GuardRule {
+                path: "/api/login".to_string(),
+                require_cookie: "session".to_string(),
+                redirect_to: "/".to_string(),
+            }],
+            redirects: vec![rules::RedirectRule {
+                from: "/old/:slug".to_string(),
+                to: "/new/:slug".to_string(),
+                status: 301,
+            }],
+            rewrites: vec![rules::RewriteRule {
+                from: "/alias".to_string(),
+                to: "/cached".to_string(),
+            }],
+            headers: vec![rules::HeaderRule {
+                path: "/api/login".to_string(),
+                headers: [("x-frame-options".to_string(), "DENY".to_string())].into(),
+            }],
+        });
+        for raw in LOGIN_SPELLINGS {
+            let canonical = path_hygiene::canonical(raw).unwrap();
+            assert!(
+                matches!(
+                    rules.apply(&canonical, None),
+                    rules::RuleOutcome::Redirect { .. }
+                ),
+                "guard must hold for {raw}"
+            );
+            assert_eq!(rules.response_headers(&canonical).len(), 1, "{raw}");
+        }
+        let canonical = path_hygiene::canonical("//%6Fld/hello%2dworld/").unwrap();
+        assert_eq!(
+            rules.apply(&canonical, None),
+            rules::RuleOutcome::Redirect {
+                location: "/new/hello-world".to_string(),
+                status: StatusCode::MOVED_PERMANENTLY,
+            }
+        );
+        let canonical = path_hygiene::canonical("/%61lias/").unwrap();
+        assert_eq!(
+            rules.apply(&canonical, None),
+            rules::RuleOutcome::Rewrite {
+                new_path: "/cached".to_string()
+            }
+        );
+    }
+
+    /// The real middleware stack shape: routes, a nested service, a fallback
+    /// that echoes the path it was handed, and the internal-endpoint verdict
+    /// (what the rate-limit and rules middlewares key their exemptions on)
+    /// exposed as a response header.
+    fn hygiene_router(dev_mode: bool) -> Router {
+        let mut app = Router::new()
+            .route("/_gio/health", get(|| async { "health" }))
+            .route("/_gio/image", get(|| async { "image" }));
+        if dev_mode {
+            app = app.route("/_gio/devtools", get(|| async { "devtools" }));
+        }
+        app.nest_service("/_gio/fonts", get(|| async { "font" }))
+            .fallback(
+                |req: axum::extract::Request| async move { format!("fallback {}", req.uri()) },
+            )
+            .layer(axum::middleware::from_fn(
+                |req: axum::extract::Request, next: Next| async move {
+                    let internal = is_internal_endpoint(&req);
+                    let mut resp = next.run(req).await;
+                    resp.headers_mut().insert(
+                        "x-internal",
+                        HeaderValue::from_static(if internal { "1" } else { "0" }),
+                    );
+                    resp
+                },
+            ))
+            .layer(axum::middleware::from_fn(path_hygiene_middleware))
+    }
+
+    async fn hygiene_get(app: &Router, uri: &str) -> (StatusCode, Option<String>, String) {
+        // Router is always ready; run_connection calls it the same way.
+        let resp = app
+            .clone()
+            .call(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let internal = resp
+            .headers()
+            .get("x-internal")
+            .map(|value| value.to_str().unwrap().to_string());
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, internal, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn unrouted_gio_paths_404_before_reaching_the_app() {
+        let app = hygiene_router(false);
+        for uri in [
+            "/_gio",
+            "/_gio/",
+            "/_gio/settings",
+            "/_gio/health/",
+            "//_gio/health",
+            "/_gio//health",
+            "/%5Fgio/settings",
+            "/%5fgio/health",
+            "/_gio/image/extra",
+        ] {
+            let (status, internal, body) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(internal, None, "{uri} must not reach the inner layers");
+            assert!(!body.contains("fallback"), "{uri} reached the fallback");
+        }
+    }
+
+    #[tokio::test]
+    async fn real_internal_endpoints_pass_and_are_recognized() {
+        let app = hygiene_router(false);
+        for (uri, body) in [
+            ("/_gio/health", "health"),
+            ("/_gio/image?src=/a.png&w=64", "image"),
+            ("/_gio/fonts/inter.woff2", "font"),
+        ] {
+            assert_eq!(
+                hygiene_get(&app, uri).await,
+                (StatusCode::OK, Some("1".to_string()), body.to_string()),
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dev_only_endpoints_404_in_production() {
+        let (status, internal, _) = hygiene_get(&hygiene_router(false), "/_gio/devtools").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(internal, None);
+        assert_eq!(
+            hygiene_get(&hygiene_router(true), "/_gio/devtools").await,
+            (
+                StatusCode::OK,
+                Some("1".to_string()),
+                "devtools".to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn app_paths_are_not_internal_and_reach_the_fallback() {
+        let app = hygiene_router(false);
+        let (status, internal, body) = hygiene_get(&app, "/acme/_gio").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(internal.as_deref(), Some("0"));
+        assert_eq!(body, "fallback /acme/_gio");
+    }
+
+    #[tokio::test]
+    async fn unreserved_escapes_are_decoded_before_the_app_sees_the_path() {
+        let app = hygiene_router(false);
+        let (_, _, body) = hygiene_get(&app, "/api/%6Cogin?next=%2Fhome").await;
+        // Path decoded, query untouched.
+        assert_eq!(body, "fallback /api/login?next=%2Fhome");
+        let (_, _, body) = hygiene_get(&app, "/a%2fb/caf%c3%a9").await;
+        assert_eq!(body, "fallback /a%2Fb/caf%C3%A9");
+        // Slashes are left as sent: the Node router already ignores them.
+        let (_, _, body) = hygiene_get(&app, "//api//login/").await;
+        assert_eq!(body, "fallback //api//login/");
+    }
+
+    #[tokio::test]
+    async fn dot_segments_are_rejected_with_400() {
+        let app = hygiene_router(false);
+        for uri in [
+            "/admin/../x",
+            "/x/./admin",
+            "/%2e%2e/admin",
+            "/_gio/fonts/../../etc/passwd",
+        ] {
+            let (status, internal, _) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(internal, None, "{uri}");
+        }
     }
 
     // ── query decoding ────────────────────────────────────────────────────────
