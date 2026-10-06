@@ -53,6 +53,25 @@ export default function Page(): React.JSX.Element {
   const posts = await db.posts.all();
   return { paths: posts.map((p) => ({ params: { id: String(p.id) } })) };
 }`} />
+      <p>
+        Catch-all params take the same <code>/</code>-joined string the page receives (an
+        array of segments works too), and an optional catch-all exports its bare parent when the
+        param is omitted or empty:
+      </p>
+      <CodeBlock lang="tsx" code={`// app/docs/[[...slug]]/page.tsx
+export function getStaticPaths() {
+  return {
+    paths: [
+      { params: {} },                        // out/docs/index.html
+      { params: { slug: 'guides/setup' } },  // out/docs/guides/setup/index.html
+      { params: { slug: ['api', 'ref'] } },  // out/docs/api/ref/index.html
+    ],
+  };
+}`} />
+      <p>
+        Entries missing a required param, or whose values contain empty, <code>.</code> or{' '}
+        <code>..</code> segments, are skipped with a reason instead of being written.
+      </p>
       <div className="callout">
         Dynamic routes without <code>getStaticPaths</code> are skipped with a warning -
         they can only be served by the GioJS server.

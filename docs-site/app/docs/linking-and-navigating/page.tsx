@@ -34,10 +34,15 @@ export default function Page(): React.JSX.Element {
 <GioLink href={href('/posts/:id', { id: post.id })}>{post.title}</GioLink>
 
 href('/about');                        // static routes take no params
-href('/docs/*rest', { rest: 'a/b' });  // catch-all keeps its slashes`} />
+href('/docs/*rest', { rest: 'a/b' });  // catch-all keeps its slashes
+href('/shop/*path?');                  // optional catch-all: '/shop'
+href('/shop/*path?', { path: 'a/b' }); // '/shop/a/b'`} />
       <p>
-        Param values are URL-encoded per segment (a catch-all value keeps its{' '}
-        <code>/</code> separators). Projects scaffolded by <code>create-giojs</code>{' '}
+        Patterns are the URL shapes of your routes, so route groups never appear in them:{' '}
+        <code>[id]</code> is <code>:id</code>, <code>[...slug]</code> is <code>*slug</code>, and{' '}
+        <code>[[...slug]]</code> is <code>*slug?</code>. Param values are URL-encoded per
+        segment (a catch-all value keeps its <code>/</code> separators); an empty or omitted
+        optional catch-all drops its segment entirely. Projects scaffolded by <code>create-giojs</code>{' '}
         already include the generated file in their tsconfig; in an existing project,
         add <code>&quot;.gio/routes.d.ts&quot;</code> to the <code>include</code> array
         of <code>tsconfig.json</code>.</p>
