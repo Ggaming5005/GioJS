@@ -35,6 +35,7 @@ import type { NodePluginRegistry } from './plugin.ts';
 import { logger } from './logger.ts';
 import { clientBuildErrorFor } from './client-build-errors.ts';
 import { createErrorDigest, describeError, isDevMode } from './mode.ts';
+import { parseCookies } from './cookies.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -138,21 +139,6 @@ function matchRoute(
 ): { module: RouteModule; params: Record<string, string> } | null {
   const match = matchIn(path, routes);
   return match === null ? null : { module: match.entry, params: match.params };
-}
-
-/** Parse a Cookie header into name → value (first occurrence wins). */
-export function parseCookies(header: string | undefined): Record<string, string> {
-  const cookies: Record<string, string> = {};
-  if (header === undefined || header === '') return cookies;
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    const name = part.slice(0, eq).trim();
-    if (name !== '' && cookies[name] === undefined) {
-      cookies[name] = part.slice(eq + 1).trim();
-    }
-  }
-  return cookies;
 }
 
 /** Build the request object handed to route.ts handlers. */
