@@ -11,6 +11,7 @@ import { createIPCServer } from './ipc.ts';
 import { createWsIpcServer } from './ws-ipc.ts';
 import { NodePluginRegistry, type GioNodePlugin } from './plugin.ts';
 import { logger } from './logger.ts';
+import { imageConfigFromEnv, installImageConfig } from './image-config.ts';
 import type { RouteModule, LayoutEntry, HandlerEntry, SpecialPages } from './router.ts';
 import type { WsHandlerFn } from './ws-router.ts';
 import type { MiddlewareRules } from './middleware.ts';
@@ -76,6 +77,8 @@ export async function startPluginRegistry(
 
 /** Start the HTTP IPC bridge and the WebSocket bridge that Rust connects to. */
 export function startIpcServers(components: WorkerComponents): void {
+  // GIO_IMAGE_CONFIG comes from Rust: the widths /_gio/image accepts.
+  installImageConfig(imageConfigFromEnv(process.env));
   createIPCServer(
     components.routes,
     components.layouts,

@@ -35,6 +35,7 @@ import type { NodePluginRegistry } from './plugin.ts';
 import { logger } from './logger.ts';
 import { clientBuildErrorFor } from './client-build-errors.ts';
 import { createErrorDigest, describeError, isDevMode } from './mode.ts';
+import { installedImageConfig, type ImageRenderConfig } from './image-config.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -374,6 +375,8 @@ export function serializeEnvelope(envelope: {
   path: string;
   pattern: string;
   entry: string;
+  /** The `<GioImage>` config the server rendered with, for identical srcsets. */
+  images?: ImageRenderConfig;
 }): string | null {
   try {
     return JSON.stringify(envelope)
@@ -619,11 +622,19 @@ export async function renderRoute(
     }
 
     const pattern = match.module.urlPattern;
+    // Installed before rendering: <GioImage> reads it during the render.
+    const images = installedImageConfig();
     const entryScript =
       process.env.GIO_EXPORT === '1' ? undefined : clientScripts?.get(pattern);
     const envelopeJson =
       entryScript !== undefined
-        ? serializeEnvelope({ props, path: req.path, pattern, entry: entryScript })
+        ? serializeEnvelope({
+            props,
+            path: req.path,
+            pattern,
+            entry: entryScript,
+            images,
+          })
         : null;
     if (entryScript !== undefined && envelopeJson === null) {
       logger.warn('props are not JSON-serializable - page will render without hydration', {

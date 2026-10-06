@@ -15,6 +15,7 @@ import {
   type StreamRenderResult,
 } from './ssr.ts';
 import { clearClientBuildErrors, recordClientBuildError } from './client-build-errors.ts';
+import { installImageConfig, installedImageConfig } from './image-config.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import type { IPCRequest } from './context.ts';
 import type { RouteModule, LayoutEntry, PageModule, LayoutModule } from './router.ts';
@@ -419,6 +420,29 @@ describe('hydration envelope', () => {
     expect(body).toContain('"pattern":"/"');
     expect(body).toContain('/_next/static/chunks/route-index-ABC.js');
     expect(body).toContain('type="module"');
+  });
+
+  it('carries the image config the render used, so srcsets hydrate unchanged', async () => {
+    const images = { widths: [640, 1080], quality: 80, unoptimized: false };
+    const installed = installedImageConfig();
+    let renderSaw: unknown;
+    const routes = makeRoute('/', {
+      default: function ImagePage() {
+        renderSaw = (globalThis as Record<string, unknown>)['__GIO_IMAGES__'];
+        return React.createElement('img', { alt: '' });
+      },
+    });
+    installImageConfig(images);
+    try {
+      const result = await renderRoute(
+        makeRequest('/'), routes, noLayouts, undefined, undefined, new Map([['/', '/e.js']]),
+      );
+      const body = 'body' in result ? result.body : '';
+      expect(body).toContain('"images":{"widths":[640,1080],"quality":80,"unoptimized":false}');
+      expect(renderSaw).toEqual(images);
+    } finally {
+      installImageConfig(installed);
+    }
   });
 
   it('omits the envelope and bootstrap script when the route has no bundle', async () => {

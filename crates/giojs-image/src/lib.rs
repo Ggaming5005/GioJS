@@ -277,8 +277,13 @@ impl ImageHandler {
         Ok(parsed)
     }
 
+    /// A local `src` is the URL the server serves the file at: public/ is
+    /// served at the site root and under /public/*, so `/hero.png` and
+    /// `/public/hero.png` both name public/hero.png.
     fn validate_local_path(&self, src: &str) -> Result<PathBuf, ImageError> {
-        let requested = self.public_dir.join(src.trim_start_matches('/'));
+        let relative = src.trim_start_matches('/');
+        let relative = relative.strip_prefix("public/").unwrap_or(relative);
+        let requested = self.public_dir.join(relative);
         let canonical = requested.canonicalize().map_err(|_| ImageError::NotFound)?;
         let root = self
             .public_dir
@@ -483,6 +488,34 @@ mod tests {
             err,
             ImageError::PathTraversal | ImageError::NotFound
         ));
+    }
+
+    #[test]
+    fn local_sources_resolve_like_the_public_urls_they_are_served_at() {
+        let public =
+            std::env::temp_dir().join(format!("gio_test_public_alias_{}", std::process::id()));
+        std::fs::create_dir_all(public.join("public")).unwrap();
+        std::fs::write(public.join("hero.png"), b"png").unwrap();
+        std::fs::write(public.join("public").join("nested.png"), b"png").unwrap();
+        let handler = ImageHandler::new(
+            ImageConfig::default(),
+            std::env::temp_dir().join("gio_test_image_cache"),
+            public.clone(),
+        );
+        let root = public.canonicalize().unwrap();
+        let resolve = |src: &str| handler.validate_local_path(src);
+        assert_eq!(resolve("/hero.png").unwrap(), root.join("hero.png"));
+        assert_eq!(resolve("/public/hero.png").unwrap(), root.join("hero.png"));
+        // /public/public/x is public/public/x, as the server serves it.
+        assert_eq!(
+            resolve("/public/public/nested.png").unwrap(),
+            root.join("public").join("nested.png")
+        );
+        assert!(matches!(
+            resolve("/public/../../etc/passwd"),
+            Err(ImageError::NotFound | ImageError::PathTraversal)
+        ));
+        let _ = std::fs::remove_dir_all(&public);
     }
 
     #[test]

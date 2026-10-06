@@ -286,6 +286,45 @@ async function main() {
       assert.match(js, /\.\/shared-[A-Z0-9]+\.js/, 'entry imports a shared chunk');
     });
 
+    await test('GioImage renders only the gio.toml [images] widths, and every candidate serves', async () => {
+      const res = await fetch(`${BASE}/image`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      assert.match(html, /IMAGE_FIXTURE/);
+      const decode = (s) => s.replace(/&amp;/g, '&');
+      const imgs = [...html.matchAll(/<img [^>]*>/g)].map((m) => m[0]);
+      const attr = (tag, name) => tag.match(new RegExp(`\\s${name}="([^"]*)"`))?.[1];
+      const [fixed, responsive, plain] = imgs;
+      assert.ok(fixed && responsive && plain, 'three images rendered');
+      const urls = new Set();
+      for (const tag of [fixed, responsive]) {
+        urls.add(decode(attr(tag, 'src')));
+        for (const candidate of decode(attr(tag, 'srcSet') ?? '').split(', ')) {
+          urls.add(candidate.split(' ')[0]);
+        }
+      }
+      const widths = [...urls].map((u) => Number(new URL(u, BASE).searchParams.get('w')));
+      assert.deepEqual([...new Set(widths)].sort((a, b) => a - b), [48, 96, 640]);
+      assert.match(attr(fixed, 'srcSet'), /w=48&amp;q=70 1x, .*w=96&amp;q=70 2x/);
+      assert.equal(attr(responsive, 'sizes'), '50vw');
+      assert.equal(attr(plain, 'src'), '/gio-test.png');
+      // priority: preloaded (React hoists it ahead of the content).
+      assert.match(html, /<link rel="preload" as="image"[^>]*imageSrcSet="[^"]*w=48[^"]*"[^>]*fetchPriority="high"/);
+      // The browser renders the same srcsets when it hydrates.
+      const envelope = JSON.parse(html.match(/<script id="__gio_props" type="application\/json">([^<]*)</)[1]);
+      assert.deepEqual(envelope.images, { widths: [48, 96, 640], quality: 70, unoptimized: false });
+      for (const url of urls) {
+        const image = await fetch(`${BASE}${url}`, { headers: { accept: 'image/webp' } });
+        assert.equal(image.status, 200, `${url} must be servable`);
+        assert.match(image.headers.get('content-type') ?? '', /^image\//);
+        await image.arrayBuffer();
+      }
+      // A src names the file by the URL it is served at: /public/x is public/x too.
+      const aliased = await fetch(`${BASE}/_gio/image?src=${encodeURIComponent('/public/gio-test.png')}&w=48`);
+      assert.equal(aliased.status, 200);
+      await aliased.arrayBuffer();
+    });
+
     await test('POST bodies are forwarded to Node', async () => {
       const res = await fetch(`${BASE}/echo`, { method: 'POST', body: 'hello body' });
       assert.equal(res.status, 200);

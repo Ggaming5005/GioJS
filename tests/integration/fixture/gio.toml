@@ -9,6 +9,12 @@ http2 = false
 header_read_timeout_secs  = 2
 request_body_timeout_secs = 2
 
+# Not the defaults: <GioImage> must render exactly these widths (any other
+# width is a 400 from /_gio/image).
+[images]
+allowed_widths = [96, 48, 640]
+quality        = 70
+
 [[redirects]]
 from   = "/moved"
 to     = "/cached"

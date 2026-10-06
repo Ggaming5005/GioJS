@@ -13,8 +13,8 @@ export default function Page(): React.JSX.Element {
       <p>Client-side navigation with hover-intent prefetch and optional view transitions.</p>
       <CodeBlock lang="tsx" code={`<GioLink href="/about" prefetch="hover" transition="fade">About</GioLink>`} />
       <h2>GioImage</h2>
-      <p>Optimized images via the Rust /_gio/image endpoint. Requires width and height.</p>
-      <CodeBlock lang="tsx" code={`<GioImage src="/public/photo.jpg" alt="" width={800} height={600} priority />`} />
+      <p>Optimized images via the Rust /_gio/image endpoint, with a srcset built from gio.toml&apos;s [images] allowed_widths. Requires width and height; takes sizes, fill, quality, priority (preloads the image) and unoptimized (plain src - also automatic in a static export). See <a href="/docs/image-optimization">Image Optimization</a>.</p>
+      <CodeBlock lang="tsx" code={`<GioImage src="/photo.jpg" alt="" width={800} height={600} priority />`} />
       <h2>GioFont</h2>
       <p>Self-hosts a font and injects preload + stylesheet links.</p>
     </>
