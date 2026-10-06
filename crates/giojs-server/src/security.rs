@@ -144,21 +144,30 @@ pub fn with_nonce_attr(markup: &str, tag: &str, attr: &str) -> String {
 /// `cache_epoch`).
 pub fn load_or_create_nonce_placeholder(dir: &Path) -> String {
     let path = dir.join(PLACEHOLDER_FILE);
-    if let Some(existing) = read_placeholder(&path) {
-        return existing;
-    }
     let fresh = generate_placeholder();
-    match write_placeholder(dir, &path, &fresh) {
-        Ok(()) => fresh,
-        // Another instance sharing the cache won the race: use its value.
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            read_placeholder(&path).unwrap_or(fresh)
+    // The second attempt follows the removal of a corrupt file.
+    for _ in 0..2 {
+        if let Some(existing) = read_placeholder(&path) {
+            return existing;
         }
-        Err(e) => {
-            warn!(path = %path.display(), error = %e, "cannot persist the CSP nonce placeholder - the disk page cache will not survive a restart");
-            fresh
+        match create_placeholder_file(dir, &path, &fresh) {
+            Ok(()) => return fresh,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Another instance sharing the cache just won the race (its
+                // file is complete: it was linked into place fully written),
+                // or the file is corrupt and must go.
+                if let Some(existing) = read_placeholder(&path) {
+                    return existing;
+                }
+                let _ = std::fs::remove_file(&path);
+            }
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "cannot persist the CSP nonce placeholder - the disk page cache will not survive a restart");
+                return fresh;
+            }
         }
     }
+    fresh
 }
 
 fn read_placeholder(path: &Path) -> Option<String> {
@@ -167,14 +176,15 @@ fn read_placeholder(path: &Path) -> Option<String> {
     is_valid_placeholder(value).then(|| value.to_string())
 }
 
-fn write_placeholder(dir: &Path, path: &Path, value: &str) -> std::io::Result<()> {
+/// Write `value` to a private temp file, then hard-link it into place: the
+/// link fails if the file exists, and a reader never sees it half-written.
+fn create_placeholder_file(dir: &Path, path: &Path, value: &str) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
-    // A corrupt file (wrong length, edited) is replaced; create_new below
-    // keeps concurrent first starts from overwriting each other.
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
+    let tmp = dir.join(format!(
+        "{PLACEHOLDER_FILE}.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -182,7 +192,12 @@ fn write_placeholder(dir: &Path, path: &Path, value: &str) -> std::io::Result<()
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path)?.write_all(value.as_bytes())
+    let written = options
+        .open(&tmp)
+        .and_then(|mut file| file.write_all(value.as_bytes()));
+    let linked = written.and_then(|()| std::fs::hard_link(&tmp, path));
+    let _ = std::fs::remove_file(&tmp);
+    linked
 }
 
 fn is_valid_placeholder(value: &str) -> bool {
@@ -1439,6 +1454,11 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from(PLACEHOLDER_FILE)]);
         let _ = std::fs::remove_dir_all(&dir);
         assert_ne!(generate_placeholder(), generate_placeholder());
     }

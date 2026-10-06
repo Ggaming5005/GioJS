@@ -1842,9 +1842,10 @@ permissions-policy = "camera=()"
  * Phase 1c (CSP nonces): a fixture copy whose gio.toml turns on a nonce
  * Content-Security-Policy, in its own server instances - per-response
  * nonces make every page response unique, while the main phase compares
- * bodies across requests. Production first (every serve path: buffered
- * miss, cache hit, PPR shell + holes, streaming, 404), then dev (overlay and
- * error page scripts).
+ * bodies across requests. Runs: production (every serve path: buffered
+ * miss, cache hit, PPR shell + holes, streaming, 404), a restart on the same
+ * disk cache, the plain fixture (CSP off) on that cache, then dev (overlay
+ * and error page scripts).
  */
 async function cspPhase() {
   const binary = findServerBinary();
@@ -1856,43 +1857,31 @@ async function cspPhase() {
     join(cspDir, 'app', 'csp-boom', 'page.tsx'),
     "export default function Boom() {\n  throw new Error('CSP_BOOM');\n}\n",
   );
+  const sharedCache = await mkdtemp(join(tmpdir(), 'gio-int-csp-cache-'));
+  const devCache = await mkdtemp(join(tmpdir(), 'gio-int-csp-devcache-'));
+  const placeholderOf = async (cacheDir) =>
+    (await readFile(join(cacheDir, 'meta', 'csp-nonce-placeholder'), 'utf8')).trim();
+  const bodies = [];
+  const fetchHtml = async (path, init) => {
+    const res = await fetch(`${BASE}${path}`, init);
+    const html = await res.text();
+    bodies.push(html);
+    return { res, html };
+  };
+  let firstPlaceholder;
+  let cspDeploymentId;
+  const deploymentId = async () => (await (await fetch(`${BASE}/_gio/health`)).json()).deploymentId;
 
-  for (const mode of ['production', 'development']) {
-    const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-csp-cache-'));
-    let log = '';
-    const server = spawn(binary, [], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        GIO_APP_DIR: join(cspDir, 'app'),
-        GIO_CACHE_DIR: cacheDir,
-        RUST_LOG: 'info',
-        NODE_ENV: mode,
-      },
-    });
-    server.stdout.on('data', (d) => { log += d.toString(); });
-    server.stderr.on('data', (d) => { log += d.toString(); });
-    let serverGone = false;
-    const serverExited = new Promise((r) =>
-      server.on('exit', () => { serverGone = true; r(); }),
-    );
+  const runs = [
+    {
+      label: 'production',
+      appDir: cspDir,
+      cacheDir: sharedCache,
+      mode: 'production',
+      async check() {
+        firstPlaceholder = await placeholderOf(sharedCache);
+        assert.match(firstPlaceholder, /^[0-9a-f]{32}$/);
 
-    try {
-      await waitFor(`server health (CSP, ${mode})`, async () => {
-        const res = await fetch(`${BASE}/_gio/health`);
-        return res.ok && (await res.json()).nodeReady === true;
-      }, 30_000);
-      const placeholder = (await readFile(join(cacheDir, 'meta', 'csp-nonce-placeholder'), 'utf8')).trim();
-      assert.match(placeholder, /^[0-9a-f]{32}$/);
-      const bodies = [];
-      const fetchHtml = async (path, init) => {
-        const res = await fetch(`${BASE}${path}`, init);
-        const html = await res.text();
-        bodies.push(html);
-        return { res, html };
-      };
-
-      if (mode === 'production') {
         await test('CSP: buffered render and cache hit carry fresh nonces matching the header', async () => {
           const miss = await fetchHtml('/cached');
           assert.equal(miss.res.headers.get('x-gio-cache'), 'miss; stored');
@@ -1937,7 +1926,45 @@ async function cspPhase() {
           assert.equal(res.headers.get('permissions-policy'), 'camera=()');
           assert.ok(cspNonceOf(res.headers.get('content-security-policy')));
         });
-      } else {
+      },
+    },
+    {
+      label: 'restart',
+      appDir: cspDir,
+      cacheDir: sharedCache,
+      mode: 'production',
+      async check() {
+        await test('CSP: the disk cache survives a restart and its pages still get nonces', async () => {
+          assert.equal(await placeholderOf(sharedCache), firstPlaceholder, 'placeholder persisted');
+          cspDeploymentId = await deploymentId();
+          const hit = await fetchHtml('/cached');
+          assert.match(hit.res.headers.get('x-gio-cache') ?? '', /^hit/);
+          assertNoncedResponse(hit.res, hit.html, 'hit after restart');
+        });
+      },
+    },
+    {
+      label: 'CSP off',
+      appDir: fixtureDir,
+      cacheDir: sharedCache,
+      mode: 'production',
+      async check() {
+        await test('CSP: turning it off never serves pages cached with the placeholder', async () => {
+          // Same build, same cache key: only the CSP setting differs.
+          assert.equal(await deploymentId(), cspDeploymentId);
+          const res = await fetchHtml('/cached');
+          assert.equal(res.res.headers.get('x-gio-cache'), 'miss; stored');
+          assert.equal(res.res.headers.get('content-security-policy'), null);
+          assert.doesNotMatch(res.html, /nonce=/);
+        });
+      },
+    },
+    {
+      label: 'development',
+      appDir: cspDir,
+      cacheDir: devCache,
+      mode: 'development',
+      async check() {
         await test('CSP (dev): the error overlay and dev error page scripts carry the nonce', async () => {
           const page = await fetchHtml('/');
           assertNoncedResponse(page.res, page.html, 'dev page');
@@ -1947,14 +1974,43 @@ async function cspPhase() {
           assert.match(boom.html, /__GIO_SSR_ERROR__=\{"message":"CSP_BOOM/);
           assertNoncedResponse(boom.res, boom.html, 'dev error page');
         });
-      }
+        await test('CSP: the nonce placeholder never reaches a client', async () => {
+          const placeholders = [firstPlaceholder, await placeholderOf(devCache)];
+          assert.ok(bodies.length > 10);
+          for (const html of bodies) {
+            for (const placeholder of placeholders) assert.ok(!html.includes(placeholder));
+          }
+        });
+      },
+    },
+  ];
 
-      await test(`CSP (${mode}): the nonce placeholder never reaches a client`, async () => {
-        assert.ok(bodies.length > 0);
-        for (const html of bodies) assert.ok(!html.includes(placeholder));
-      });
+  for (const run of runs) {
+    let log = '';
+    const server = spawn(binary, [], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        GIO_APP_DIR: join(run.appDir, 'app'),
+        GIO_CACHE_DIR: run.cacheDir,
+        RUST_LOG: 'info',
+        NODE_ENV: run.mode,
+      },
+    });
+    server.stdout.on('data', (d) => { log += d.toString(); });
+    server.stderr.on('data', (d) => { log += d.toString(); });
+    let serverGone = false;
+    const serverExited = new Promise((r) =>
+      server.on('exit', () => { serverGone = true; r(); }),
+    );
+    try {
+      await waitFor(`server health (CSP phase, ${run.label})`, async () => {
+        const res = await fetch(`${BASE}/_gio/health`);
+        return res.ok && (await res.json()).nodeReady === true;
+      }, 30_000);
+      await run.check();
     } catch (err) {
-      console.error(`\nintegration (CSP, ${mode}): FAILED`);
+      console.error(`\nintegration (CSP phase, ${run.label}): FAILED`);
       console.error(err);
       console.error('\n── server log tail ──');
       console.error(significantLogTail(log));
@@ -1962,11 +2018,12 @@ async function cspPhase() {
     } finally {
       if (!serverGone) server.kill();
       await serverExited;
-      await rm(cacheDir, { recursive: true, force: true });
     }
     if (process.exitCode === 1) break;
   }
-  await rm(cspDir, { recursive: true, force: true });
+  for (const dir of [sharedCache, devCache, cspDir]) {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 await main();
