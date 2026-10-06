@@ -1597,8 +1597,27 @@ describe('client identity', () => {
       }
     });
 
-    it('reading requestId, scheme or host keeps the page cacheable', async () => {
-      expect(await cacheFieldsFor(ctx => `${ctx.requestId}-${ctx.scheme}-${ctx.host}`)).toEqual(SHARED);
+    it('reading requestId keeps the page cacheable', async () => {
+      expect(await cacheFieldsFor(ctx => ctx.requestId)).toEqual(SHARED);
+    });
+
+    it('reading ctx.host or ctx.scheme makes the render personal - the host is client-supplied', async () => {
+      // Shared, `Host: evil.example` would put the attacker's host in every
+      // visitor's cached links (cache poisoning).
+      expect(await cacheFieldsFor(ctx => `${ctx.scheme}://${ctx.host}/reset`)).toEqual(PERSONAL);
+      expect(await cacheFieldsFor(ctx => ctx.host)).toEqual(PERSONAL);
+      expect(await cacheFieldsFor(ctx => ctx.scheme)).toEqual(PERSONAL);
+      expect(await cacheFieldsFor(ctx => ctx.host ?? 'none', makeRequest('/'))).toEqual(PERSONAL);
+    });
+
+    it('reading the raw host headers is just as personal', async () => {
+      const req = {
+        ...identified(),
+        headers: { host: 'evil.example', 'x-forwarded-host': 'evil.example', 'x-forwarded-proto': 'http' },
+      };
+      for (const name of ['host', 'Host', 'x-forwarded-host', 'x-forwarded-proto']) {
+        expect(await cacheFieldsFor(ctx => ctx.headers[name], req)).toEqual(PERSONAL);
+      }
     });
   });
 

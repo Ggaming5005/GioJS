@@ -87,10 +87,18 @@ export interface GsspContext {
    * page that reads it is not cached for everyone.
    */
   readonly ip?: string | undefined;
-  /** 'https' or 'http', as the client used it (proxy-aware). */
-  scheme?: string;
-  /** The host the client addressed (proxy-aware, may include a port). */
-  host?: string;
+  /**
+   * 'https' or 'http', as the client used it (proxy-aware). Reading it makes
+   * the render personal: it varies with how each request arrived.
+   */
+  readonly scheme?: string | undefined;
+  /**
+   * The host the client addressed (proxy-aware, may include a port). It is
+   * whatever the client sent unless your proxy pins it, so reading it makes
+   * the render personal - a cached page printing it could be poisoned for
+   * everyone. For absolute URLs on cached pages, use a configured origin.
+   */
+  readonly host?: string | undefined;
   /** This request's id (X-Request-Id). Reading it does not make a render personal. */
   requestId?: string;
 }

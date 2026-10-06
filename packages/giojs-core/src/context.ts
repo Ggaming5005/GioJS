@@ -123,7 +123,11 @@ export interface GioRequest {
   ip?: string;
   /** 'https' or 'http', as the client used it (proxy-aware). */
   scheme?: string;
-  /** The host the client addressed (proxy-aware, may include a port). */
+  /**
+   * The host the client addressed (proxy-aware, may include a port). It is
+   * whatever the client sent unless your proxy pins it: fine for display,
+   * never for a security decision.
+   */
   host?: string;
   /** Unique per request: the response's X-Request-Id, and on every log line. */
   requestId?: string;

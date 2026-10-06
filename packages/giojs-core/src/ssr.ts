@@ -98,6 +98,15 @@ const CREDENTIAL_HEADERS: readonly string[] = ['cookie', 'authorization'];
  */
 const CLIENT_ADDRESS_HEADERS: readonly string[] = ['x-forwarded-for', 'forwarded', 'x-real-ip'];
 
+/**
+ * Raw headers naming the site the client asked for - the material
+ * `ctx.host` / `ctx.scheme` are derived from. The host is whatever the
+ * client sent unless a proxy pins it, so a cached page that printed it
+ * could be poisoned for everyone; reading these is as personal as reading
+ * `ctx.host`.
+ */
+const REQUEST_ORIGIN_HEADERS: readonly string[] = ['host', 'x-forwarded-host', 'x-forwarded-proto'];
+
 /** Routes already warned about credential reads (one warning per route). */
 const warnedDynamicRoutes = new Set<string>();
 
@@ -195,15 +204,14 @@ function clientFields(req: IPCRequest): Pick<GioRequest, 'ip' | 'scheme' | 'host
 
 /**
  * Build the getServerSideProps context with Next.js-style dynamic detection:
- * touching `ctx.cookies` or `ctx.ip`, reading or probing one of the
- * `tracked` headers (lowercase names) on `ctx.headers`, or enumerating the
- * headers at all, marks the render as personalized. Detection is per access,
- * not per value - an absent cookie read still decides the output (the
- * anonymous variant), so it counts too. `ctx.requestId`, `ctx.scheme` and
- * `ctx.host` do not: a request id is for logs and never shapes a page, and
- * scheme/host name the site, not the visitor. Only the user-facing context
- * is instrumented; framework code reads `req.headers` directly and never
- * trips it.
+ * touching `ctx.cookies`, `ctx.ip`, `ctx.host` or `ctx.scheme`, reading or
+ * probing one of the `tracked` headers (lowercase names) on `ctx.headers`,
+ * or enumerating the headers at all, marks the render as personalized.
+ * Detection is per access, not per value - an absent cookie read still
+ * decides the output (the anonymous variant), so it counts too. Only
+ * `ctx.requestId` does not: a request id is for logs and never shapes a
+ * page. Only the user-facing context is instrumented; framework code reads
+ * `req.headers` directly and never trips it.
  *
  * `ctx.headers` is a Proxy, so structuredClone/postMessage reject it; a copy
  * (`{ ...ctx.headers }`) is a plain object - and counts as a read.
@@ -259,9 +267,20 @@ function makeGsspContext(
       read = true;
       return req.ip;
     },
+    // The host is whatever the client sent (unless a proxy pins it), and
+    // the scheme is how this request arrived: a cached page that printed
+    // either - an absolute link, a canonical URL - would serve one
+    // request's value to everyone, an attacker's `Host: evil.example`
+    // included.
+    get scheme() {
+      read = true;
+      return req.scheme;
+    },
+    get host() {
+      read = true;
+      return req.host;
+    },
     ...(req.locale !== '' ? { locale: req.locale } : {}),
-    ...(req.scheme !== undefined ? { scheme: req.scheme } : {}),
-    ...(req.host !== undefined ? { host: req.host } : {}),
     ...(req.requestId !== undefined ? { requestId: req.requestId } : {}),
   };
   return { ctx, credentialsRead: () => read };
@@ -500,7 +519,11 @@ export async function renderRoute(
   clientScripts?: Map<string, string>,
   extras?: RenderExtras,
 ): Promise<IPCOutbound | SseRouteResult | StreamRenderResult> {
-  const credentialHeaders = new Set([...CREDENTIAL_HEADERS, ...CLIENT_ADDRESS_HEADERS]);
+  const credentialHeaders = new Set([
+    ...CREDENTIAL_HEADERS,
+    ...CLIENT_ADDRESS_HEADERS,
+    ...REQUEST_ORIGIN_HEADERS,
+  ]);
   if (registry !== undefined && !registry.isEmpty) {
     // Snapshot first: plugins may mutate req.headers in place.
     const incomingHeaders = { ...req.headers };
@@ -872,10 +895,9 @@ function warnPersonalRender(pattern: string, path: string): void {
   if (warnedDynamicRoutes.has(pattern)) return;
   warnedDynamicRoutes.add(pattern);
   logger.warn(
-    'getServerSideProps read request credentials (ctx.cookies, ctx.ip, the cookie/authorization ' +
-      'or a client-address header, or a header an onRequest plugin set) - this render is ' +
-      'personalized, so it is ' +
-      'not cached even though the page ' +
+    'getServerSideProps read request credentials (ctx.cookies, ctx.ip, ctx.host, ctx.scheme, ' +
+      'the cookie/authorization, a client-address or a host header, or a header an onRequest ' +
+      'plugin set) - this render is personalized, so it is not cached even though the page ' +
       "exports revalidate. Remove `revalidate`, or keep `revalidate` + `shell = 'cache'` " +
       'and render the personalized parts inside <Suspense> holes',
     { route: pattern, path },
