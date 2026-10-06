@@ -114,7 +114,8 @@ export default function Error({ error, reset }: GioErrorProps) {
         itself, and if it fails there too, the nearest <code>error.tsx</code> boundary shows
         it. Errors inside your own <code>&lt;Suspense&gt;</code> boundaries always get that
         client-side recovery; only a <code>notFound()</code> there still answers 404 while
-        nothing has been sent.
+        nothing has been sent. A render that recovered this way is never cached, even on a
+        page with <code>revalidate</code>.
       </p>
 
       <h2>Production error responses</h2>

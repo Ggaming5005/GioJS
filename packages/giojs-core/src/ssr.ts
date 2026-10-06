@@ -817,6 +817,17 @@ export async function renderRoute(
     const html = await streamToString(stream);
     const failure = shellEquivalentFailure(reported, probes);
     if (failure !== null) throw failure;
+    if (cacheable && reported.length > 0) {
+      // React recovered from an error inside a Suspense boundary (the
+      // browser renders that part instead). Fine for this visitor; cached,
+      // everyone would get the fallback until the next revalidation.
+      logger.warn('render recovered from an error in a Suspense boundary - not cached', {
+        path: req.path,
+      });
+      cacheable = false;
+      cacheMaxAge = 0;
+      shareable = false;
+    }
     // Props can carry ctx.headers into the render itself; catch reads that
     // happened while rendering, before the response is offered to the cache.
     if (shareable && credentialsRead()) {

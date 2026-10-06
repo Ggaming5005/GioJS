@@ -497,6 +497,20 @@ describe('loading.*', () => {
     expect(html).not.toContain('never');
   });
 
+  it('never caches a buffered render that recovered from an error in a boundary', async () => {
+    const Page = suspendsFor(10, 'never', () => {
+      throw new Error('late failure');
+    });
+    const result = await render('/feed', routeAt('/feed', 'feed', { default: Page, revalidate: 60 }), layouts, {
+      segmentFiles: files(),
+      streaming: true,
+    });
+    expect(status(result)).toBe(200);
+    expect('cacheable' in result && result.cacheable).toBe(false);
+    expect('cacheMaxAge' in result && result.cacheMaxAge).toBe(0);
+    expect(bodyOf(result)).toContain('<!--$!-->');
+  });
+
   it("is the shell edge of a PPR page: the cached shell holds its fallback", async () => {
     const routes = routeAt('/feed', 'feed', {
       default: suspendsFor(30, 'FEED_HOLE'),
