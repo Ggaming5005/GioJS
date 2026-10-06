@@ -94,7 +94,9 @@ export async function getServerSideProps(ctx: GsspContext) {
         cached shell and the holes come from different render passes - a shell that varies
         per visitor would mismatch. The page must also be shareable in the usual sense
         (<code>revalidate</code> set, no per-request response headers, no vary); a page that
-        isn't falls back to plain streaming with a warning.
+        isn't falls back to plain streaming with a warning. Cookies cannot be set from a
+        holes render - the cached shell has already sent the response headers - so they are
+        dropped with a warning; set them from a route handler or a non-PPR page.
       </p>
       <p>
         PPR degrades gracefully: if the holes render fails or times out, the body simply ends

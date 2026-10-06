@@ -50,6 +50,11 @@ parameters and return types are inferred.
 
 Plugins run in **registration order** for `onRequest`/`onResponse`/`onStartup`. `onShutdown` runs in **reverse** registration order (last-in, first-out).
 
+**Cookies:** `IPCResponse.headers` holds one value per header name, so set cookies through the
+optional `setCookies: string[]` field instead - each entry is sent as its own `Set-Cookie` header.
+Append to it in `onResponse` (`setCookies: [...(res.setCookies ?? []), 'a=1; Path=/']`) so cookies
+set by the page are kept. A response that sets cookies is never cached or shared between requests.
+
 **Error behaviour:** If any hook throws, the error is caught, logged to stderr, and a `500 Internal Server Error` is returned. The Node process never crashes due to a plugin error.
 
 ---

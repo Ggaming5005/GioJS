@@ -25,11 +25,16 @@ export default function Page(): React.JSX.Element {
   }
   return {
     props: { name: user.name },
-    headers: { 'set-cookie': 'seen=1; Path=/; HttpOnly' },  // optional
+    headers: {                                              // optional
+      'set-cookie': ['seen=1; Path=/; HttpOnly', 'theme=dark; Path=/'],
+    },
   };
 }`} />
       <p>
-        A page that returns response headers is automatically made uncacheable -
+        Header values are strings or string arrays: each <code>set-cookie</code> entry is
+        sent as its own header, other arrays are joined with <code>, </code>. A{' '}
+        <code>redirect</code> may carry <code>headers</code> too (e.g. clearing cookies on
+        logout). A page that returns response headers is automatically made uncacheable -
         caching a per-request <code>set-cookie</code> would replay one visitor&apos;s
         cookie to everyone.
       </p>
