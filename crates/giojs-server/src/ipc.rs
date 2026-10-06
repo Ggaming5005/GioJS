@@ -246,6 +246,11 @@ pub struct IpcResponse {
     /// frame; everything before it is the cacheable static shell.
     #[serde(rename = "pprShell", default)]
     pub ppr_shell: bool,
+    /// Set-Cookie values, one header each. They cannot ride in the
+    /// single-valued `headers` map: cookies are not comma-joinable (Expires
+    /// dates contain commas), so a map would keep only one of them.
+    #[serde(rename = "setCookies", default)]
+    pub set_cookies: Vec<String>,
 }
 
 /// Materialize a response body: base64-decoded when the worker flagged it
@@ -956,6 +961,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                 cache_tags: Vec::new(),
                                 streaming: false,
                                 ppr_shell: false,
+                                set_cookies: Vec::new(),
                             }
                         } else {
                             match serde_json::from_value::<IpcResponse>(val) {
@@ -1050,6 +1056,7 @@ fn unavailable_response(id: &str) -> IpcResponse {
         body_base64: false,
         streaming: false,
         ppr_shell: false,
+        set_cookies: Vec::new(),
     }
 }
 
@@ -1396,6 +1403,23 @@ mod tests {
         )
         .expect("valid ppr head frame");
         assert!(ppr.ppr_shell);
+    }
+
+    #[test]
+    fn ipc_response_set_cookies_default_empty_and_parse_on_head_frames() {
+        let plain: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"x","cacheable":false,"cacheMaxAge":0}"#,
+        )
+        .expect("frame without setCookies (older worker)");
+        assert!(plain.set_cookies.is_empty());
+        let head: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"","cacheable":false,"cacheMaxAge":0,"streaming":true,"setCookies":["a=1; Path=/","b=2; Expires=Wed, 21 Oct 2026 07:28:00 GMT"]}"#,
+        )
+        .expect("streaming head frame with setCookies");
+        assert_eq!(
+            head.set_cookies,
+            vec!["a=1; Path=/", "b=2; Expires=Wed, 21 Oct 2026 07:28:00 GMT"]
+        );
     }
 
     #[test]
