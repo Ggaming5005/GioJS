@@ -149,6 +149,111 @@ idle_timeout_secs = 65`}</code>
         <a href="/docs/configuration">Configuration</a> for every connection limit.
       </p>
 
+      <h3>Client IPs, HTTPS and request IDs</h3>
+      <p>
+        Behind a proxy, every connection comes from the proxy, so rate limits would put all
+        visitors in one bucket and <code>req.ip</code> would be the proxy&apos;s address.
+        List the proxy in <code>trusted_proxies</code> and GioJS reads the real client from
+        the headers it adds (see{' '}
+        <a href="/docs/configuration">Reverse proxies &amp; client IPs</a> for the exact
+        rules). Whatever the proxy, get four things right:
+      </p>
+      <ul>
+        <li>
+          <strong>Trust only the proxy.</strong> Put its address (or the private range it
+          connects from) in <code>trusted_proxies</code>, and make sure clients cannot reach
+          GioJS directly - bind to <code>127.0.0.1</code> or firewall the port.
+        </li>
+        <li>
+          <strong>Forward <code>X-Forwarded-For</code>, <code>X-Forwarded-Proto</code> and{' '}
+          <code>X-Forwarded-Host</code></strong>, with the proxy setting Proto and Host
+          rather than passing a client&apos;s values through. Appending is fine: GioJS reads{' '}
+          <code>X-Forwarded-For</code> from the right and takes the last Proto and Host
+          value, the one the nearest proxy wrote (HAProxy&apos;s <code>add-header</code>{' '}
+          works as well as <code>set-header</code>).
+        </li>
+        <li>
+          <strong>Keep the <code>Host</code> header</strong> (or set{' '}
+          <code>X-Forwarded-Host</code>), so the host GioJS sees is the one the browser used.
+          It is still client-supplied unless the proxy only routes your own domains to
+          GioJS - never base a security decision on <code>req.host</code>.
+        </li>
+        <li>
+          <strong>Decide who sets <code>X-Request-Id</code>.</strong> GioJS adopts a valid id
+          from a trusted proxy. If yours passes a client&apos;s header through instead of
+          setting one (most do), make it set or strip the header, or set{' '}
+          <code>accept_request_id = false</code> so GioJS generates every id.
+        </li>
+      </ul>
+      <p>nginx (on the same machine):</p>
+      <pre>
+        <code>{`location / {
+    proxy_pass         http://127.0.0.1:3000;
+    proxy_set_header   Host $host;
+    proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header   X-Forwarded-Proto $scheme;
+    proxy_set_header   X-Forwarded-Host $host;
+    proxy_set_header   X-Request-Id $request_id;   # nginx's own id becomes GioJS's
+}
+
+# gio.toml
+[server]
+host = "127.0.0.1"
+trusted_proxies = ["127.0.0.1", "::1"]`}</code>
+      </pre>
+      <p>
+        Caddy&apos;s <code>reverse_proxy</code> sets all three forwarding headers and keeps{' '}
+        <code>Host</code> by default, and Traefik does the same for its routers - both drop
+        forwarding headers sent by untrusted clients. Neither sets an{' '}
+        <code>X-Request-Id</code>, so a client&apos;s own would pass straight through: have
+        Caddy set one, and have Traefik strip it (a headers middleware with{' '}
+        <code>customRequestHeaders: {'{'} X-Request-Id: &quot;&quot; {'}'}</code>) or turn
+        adoption off:
+      </p>
+      <pre>
+        <code>{`# Caddyfile
+example.com {
+    reverse_proxy 127.0.0.1:3000 {
+        header_up X-Request-Id {http.request.uuid}
+    }
+}
+
+# gio.toml - Caddy on the same host; for Traefik in Docker, trust the
+# network it connects from instead, e.g. ["172.16.0.0/12"]
+[server]
+trusted_proxies = ["127.0.0.1", "::1"]
+# accept_request_id = false   # Traefik without the strip middleware`}</code>
+      </pre>
+      <p>
+        Cloud load balancers connect from addresses inside your network: trust that range.
+        AWS ALB appends to <code>X-Forwarded-For</code>, sets <code>X-Forwarded-Proto</code>{' '}
+        and keeps <code>Host</code>; Google Cloud&apos;s HTTPS load balancer appends both the
+        client IP <em>and its own forwarding-rule IP</em>, so add that public IP and
+        Google&apos;s proxy ranges (<code>35.191.0.0/16</code>, <code>130.211.0.0/22</code>).
+        Neither sets <code>X-Request-Id</code> or <code>X-Forwarded-Host</code>, nor can
+        either remove them, so a client&apos;s own values arrive as if the load balancer had
+        sent them. Turn request-id adoption off, and treat the host as client-supplied:
+      </p>
+      <pre>
+        <code>{`# gio.toml behind AWS ALB (your VPC CIDR) or Google Cloud LB
+[server]
+trusted_proxies   = ["10.0.0.0/16"]
+accept_request_id = false   # the LB would pass a client's X-Request-Id through`}</code>
+      </pre>
+      <p>
+        In Kubernetes, trust the pod CIDR the ingress controller runs in. ingress-nginx sends
+        an <code>X-Request-ID</code>, but it deliberately reuses one the client sent; keep{' '}
+        <code>accept_request_id</code> on only if a client-chosen id is acceptable in your
+        logs. Behind Cloudflare, trust Cloudflare&apos;s published IP ranges; it does not set{' '}
+        <code>X-Request-Id</code> either, so turn adoption off or remove the header with a
+        Transform Rule.
+      </p>
+      <p>
+        Every response carries <code>X-Request-Id</code>, and the same id is on the server and
+        worker log lines for the request - see{' '}
+        <a href="/docs/observability">Observability</a>.
+      </p>
+
       <h2>Multi-instance deployments</h2>
       <p>
         The page cache is per-instance (in-memory LRU plus a local disk tier) - there is no

@@ -21,9 +21,16 @@ renders React. Full docs: https://giojs.com/llms.txt
   belongs in `getServerSideProps`.
 - Caching: `export const revalidate = <seconds>` on a page enables ISR in the
   Rust cache (`false` = cache forever). Caching happens in Rust, never in Node.
-  Reading `ctx.cookies` (or the cookie/authorization header) in
-  `getServerSideProps` makes that render per-user and uncached; personalize
-  inside `<Suspense>` holes with `export const shell = 'cache'` instead.
+  Reading `ctx.cookies`, `ctx.ip`, `ctx.host` or `ctx.scheme` (or the
+  cookie/authorization/host header) in `getServerSideProps` makes that render
+  per-user and uncached; personalize inside `<Suspense>` holes with
+  `export const shell = 'cache'` instead. Build absolute URLs on cached pages
+  from a configured origin (env var), not `ctx.host`.
+- Client identity: `req.ip` / `ctx.ip` is the visitor's IP - never parse
+  `x-forwarded-for` yourself; behind a reverse proxy set
+  `[server] trusted_proxies` in `gio.toml`. `req.host` is client-supplied -
+  never a security check. `req.requestId` / `ctx.requestId` is the
+  `X-Request-Id` response header, also on that request's log lines.
 - `app/error.tsx` gets `{ error: { message, digest } }`; in production the
   message is always generic - log lookups go by `digest`.
 - Components come from `@gio.js/react`: `<GioLink>` (client nav + prefetch),

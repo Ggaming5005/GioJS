@@ -76,6 +76,28 @@ describe('validateIPCRequest', () => {
     expect(validateIPCRequest({ ...validFrame(), skipShell: 'yes' })).toBeNull();
   });
 
+  it('carries the optional client identity fields, absent when not sent', () => {
+    const plain = validateIPCRequest(validFrame());
+    for (const key of ['ip', 'scheme', 'host', 'requestId']) {
+      expect(plain).not.toHaveProperty(key);
+    }
+    const identified = validateIPCRequest({
+      ...validFrame(),
+      ip: '2001:db8::1',
+      scheme: 'https',
+      host: 'app.example',
+      requestId: 'rid-1',
+    });
+    expect(identified).toMatchObject({
+      ip: '2001:db8::1',
+      scheme: 'https',
+      host: 'app.example',
+      requestId: 'rid-1',
+    });
+    expect(validateIPCRequest({ ...validFrame(), ip: 42 })).toBeNull();
+    expect(validateIPCRequest({ ...validFrame(), requestId: null })).toBeNull();
+  });
+
   it.each(['id', 'method', 'path', 'params', 'query', 'headers'])(
     'rejects a frame missing required field %s',
     (field) => {

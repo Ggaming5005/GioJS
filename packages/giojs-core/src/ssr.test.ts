@@ -17,7 +17,7 @@ import {
 import { clearClientBuildErrors, recordClientBuildError } from './client-build-errors.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import type { IPCRequest } from './context.ts';
-import type { RouteModule, LayoutEntry, PageModule, LayoutModule } from './router.ts';
+import type { RouteModule, LayoutEntry, PageModule, LayoutModule, GsspContext } from './router.ts';
 
 function makeRequest(path: string, id = 'req-1'): IPCRequest {
   return {
@@ -1499,6 +1499,142 @@ describe('credential reads make a revalidate page uncacheable', () => {
       expect('type' in result).toBe(false);
       expect('cacheable' in result && result.cacheable).toBe(false);
     });
+  });
+});
+
+// ─── client identity (ip, scheme, host, requestId) ────────────────────────────
+
+describe('client identity', () => {
+  const identified = (path = '/'): IPCRequest => ({
+    ...makeRequest(path),
+    ip: '198.51.100.4',
+    scheme: 'https',
+    host: 'app.example',
+    requestId: 'rid-123',
+  });
+
+  it('route handlers see ip, scheme, host and requestId', async () => {
+    let seen: GioRequest | undefined;
+    const handlers = makeHandlers('/api/who', {
+      GET: (gioReq) => {
+        seen = gioReq;
+        return null;
+      },
+    });
+    await renderRoute(identified('/api/who'), new Map(), noLayouts, undefined, undefined, undefined, {
+      handlers,
+    });
+    expect(seen).toMatchObject({
+      ip: '198.51.100.4',
+      scheme: 'https',
+      host: 'app.example',
+      requestId: 'rid-123',
+    });
+  });
+
+  it('the fields are absent when the server sent none (static export, older servers)', async () => {
+    let seen: GioRequest | undefined;
+    const handlers = makeHandlers('/api/who', {
+      GET: (gioReq) => {
+        seen = gioReq;
+        return null;
+      },
+    });
+    await renderRoute(makeRequest('/api/who'), new Map(), noLayouts, undefined, undefined, undefined, {
+      handlers,
+    });
+    for (const key of ['ip', 'scheme', 'host', 'requestId']) {
+      expect(seen).not.toHaveProperty(key);
+    }
+  });
+
+  it('getServerSideProps sees them on ctx', async () => {
+    let ctxSeen: Record<string, unknown> | undefined;
+    const routes = makeRoute('/', {
+      getServerSideProps: async (ctx) => {
+        ctxSeen = { ip: ctx.ip, scheme: ctx.scheme, host: ctx.host, requestId: ctx.requestId };
+        return { props: {} };
+      },
+    });
+    await renderRoute(identified(), routes, noLayouts);
+    expect(ctxSeen).toEqual({
+      ip: '198.51.100.4',
+      scheme: 'https',
+      host: 'app.example',
+      requestId: 'rid-123',
+    });
+  });
+
+  describe('personal-render detection', () => {
+    const PERSONAL = { cacheable: false, cacheMaxAge: 0 };
+    const SHARED = { cacheable: true, cacheMaxAge: 60 };
+
+    async function cacheFieldsFor(
+      read: (ctx: GsspContext) => unknown,
+      req: IPCRequest = identified(),
+    ): Promise<{ cacheable: unknown; cacheMaxAge: unknown }> {
+      const routes = makeRoute('/', {
+        revalidate: 60,
+        getServerSideProps: async (ctx) => ({ props: { v: String(read(ctx)) } }),
+      });
+      const result = await renderRoute(req, routes, noLayouts);
+      return {
+        cacheable: 'cacheable' in result ? result.cacheable : undefined,
+        cacheMaxAge: 'cacheMaxAge' in result ? result.cacheMaxAge : undefined,
+      };
+    }
+
+    it('reading ctx.ip makes the render personal - an IP-dependent page is never shared', async () => {
+      expect(await cacheFieldsFor(ctx => ctx.ip)).toEqual(PERSONAL);
+      // Even without an address (the anonymous variant), the read decides.
+      expect(await cacheFieldsFor(ctx => ctx.ip ?? 'none', makeRequest('/'))).toEqual(PERSONAL);
+    });
+
+    it('reading raw client-address headers is just as personal', async () => {
+      const req = { ...identified(), headers: { 'x-forwarded-for': '1.2.3.4', forwarded: 'for=1.2.3.4' } };
+      for (const name of ['x-forwarded-for', 'X-Forwarded-For', 'forwarded', 'x-real-ip']) {
+        expect(await cacheFieldsFor(ctx => ctx.headers[name], req)).toEqual(PERSONAL);
+      }
+    });
+
+    it('reading requestId keeps the page cacheable', async () => {
+      expect(await cacheFieldsFor(ctx => ctx.requestId)).toEqual(SHARED);
+    });
+
+    it('reading ctx.host or ctx.scheme makes the render personal - the host is client-supplied', async () => {
+      // Shared, `Host: evil.example` would put the attacker's host in every
+      // visitor's cached links (cache poisoning).
+      expect(await cacheFieldsFor(ctx => `${ctx.scheme}://${ctx.host}/reset`)).toEqual(PERSONAL);
+      expect(await cacheFieldsFor(ctx => ctx.host)).toEqual(PERSONAL);
+      expect(await cacheFieldsFor(ctx => ctx.scheme)).toEqual(PERSONAL);
+      expect(await cacheFieldsFor(ctx => ctx.host ?? 'none', makeRequest('/'))).toEqual(PERSONAL);
+    });
+
+    it('reading the raw host headers is just as personal', async () => {
+      const req = {
+        ...identified(),
+        headers: { host: 'evil.example', 'x-forwarded-host': 'evil.example', 'x-forwarded-proto': 'http' },
+      };
+      for (const name of ['host', 'Host', 'x-forwarded-host', 'x-forwarded-proto']) {
+        expect(await cacheFieldsFor(ctx => ctx.headers[name], req)).toEqual(PERSONAL);
+      }
+    });
+  });
+
+  it('error frames echo the request id', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    const logs = captureLogs();
+    let result;
+    try {
+      const routes = makeRoute('/', {
+        getServerSideProps: async () => { throw new Error('boom'); },
+      });
+      result = await renderRoute(identified(), routes, noLayouts);
+    } finally {
+      logs.restore();
+      vi.unstubAllEnvs();
+    }
+    expect(result).toMatchObject({ error: true, requestId: 'rid-123' });
   });
 });
 

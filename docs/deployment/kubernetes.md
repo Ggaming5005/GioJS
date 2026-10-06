@@ -150,6 +150,16 @@ idle_timeout_secs = 65
 
 Alternatively, set `upstream-keepalive-timeout: "5"` in the ingress-nginx controller ConfigMap. See [Behind a reverse proxy or load balancer](README.md#behind-a-reverse-proxy-or-load-balancer).
 
+Every request reaches the pod from the ingress controller, so trust it in the same ConfigMap - otherwise rate limits and `req.ip` see the controller instead of visitors. Use the pod CIDR the controller runs in (your cluster's may differ):
+
+```toml
+[server]
+trusted_proxies = ["10.244.0.0/16"]
+accept_request_id = false   # ingress-nginx reuses a client's own X-Request-ID
+```
+
+ingress-nginx sends `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and an `X-Request-ID`. That id is the client's own when the client sent one, so with `accept_request_id = false` GioJS generates every id instead; leave it on (the default) only if a client-chosen id is acceptable in your logs, in exchange for one id across the controller's and GioJS's logs. See [Client IPs, HTTPS and request IDs](README.md#client-ips-https-and-request-ids).
+
 ---
 
 ## Horizontal Pod Autoscaler

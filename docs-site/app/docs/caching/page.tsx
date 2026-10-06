@@ -25,8 +25,12 @@ export const revalidate = false;
       <p>
         A cached page is served to everyone, so it must not depend on who is asking. When{' '}
         <code>getServerSideProps</code> reads the visitor&apos;s credentials - any access to{' '}
-        <code>ctx.cookies</code>, or reading the <code>cookie</code> or{' '}
-        <code>authorization</code> entry of <code>ctx.headers</code> (including spreading or
+        <code>ctx.cookies</code>, <code>ctx.ip</code>, <code>ctx.host</code> or{' '}
+        <code>ctx.scheme</code>, or reading the <code>cookie</code>,{' '}
+        <code>authorization</code>, a client-address (<code>x-forwarded-for</code>,{' '}
+        <code>forwarded</code>, <code>x-real-ip</code>) or a host (<code>host</code>,{' '}
+        <code>x-forwarded-host</code>, <code>x-forwarded-proto</code>) entry of{' '}
+        <code>ctx.headers</code> (including spreading or
         enumerating the headers) - GioJS marks that render personalized and does not cache it,
         even though the page exports <code>revalidate</code>. A warning is logged once per
         route. Headers an <code>onRequest</code> plugin added, changed or removed count as

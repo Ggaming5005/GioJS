@@ -596,6 +596,21 @@ async function main() {
         Promise.resolve(/read request credentials/.test(log)), 5_000);
     });
 
+    await test('a revalidate page that reads ctx.host is never cached for another Host', async () => {
+      // Cache poisoning: the attacker's Host must not reach the next visitor.
+      const evil = await rawGet('/hostpage', { host: 'evil.example' });
+      assert.match(evil.body, /href="http:\/\/evil\.example\/reset"/);
+      assert.equal(evil.headers['x-gio-cache'], 'bypass');
+      const visitor = await fetch(`${BASE}/hostpage`);
+      const html = await visitor.text();
+      assert.doesNotMatch(html, /evil\.example/, 'a later visitor must get their own host');
+      assert.match(html, /href="http:\/\/127\.0\.0\.1:39517\/reset"/);
+      assert.equal(visitor.headers.get('x-gio-cache'), 'bypass');
+      // The same through the trusted proxy's X-Forwarded-Host.
+      await rawGet('/hostpage', { 'x-forwarded-host': 'evil.example' });
+      assert.doesNotMatch(await (await fetch(`${BASE}/hostpage`)).text(), /evil\.example/);
+    });
+
     await test('streaming SSR: first bytes arrive before suspended content resolves', async () => {
       // accept-encoding: identity keeps the compression layer from buffering
       // chunks, so the timing below measures the server, not the encoder.
@@ -947,6 +962,145 @@ async function main() {
       }
     });
 
+    await test('trusted proxy: X-Forwarded-* name the client the worker sees', async () => {
+      const whoami = async (headers) => (await rawGet('/api/whoami', headers)).body;
+      assert.deepEqual(JSON.parse(await whoami({})).ip, '127.0.0.1', 'no header: the peer');
+      const proxied = JSON.parse(await whoami({
+        'x-forwarded-for': '203.0.113.50',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'app.example',
+      }));
+      assert.equal(proxied.ip, '203.0.113.50');
+      assert.equal(proxied.scheme, 'https');
+      assert.equal(proxied.host, 'app.example');
+      // The rightmost untrusted hop wins; what the client prepended is ignored.
+      const chained = JSON.parse(await whoami({ 'x-forwarded-for': '6.6.6.6, 203.0.113.51, 127.0.0.1' }));
+      assert.equal(chained.ip, '203.0.113.51');
+      assert.equal(JSON.parse(await whoami({ 'x-forwarded-for': '2001:db8::7' })).ip, '2001:db8::7');
+      const malformed = JSON.parse(await whoami({ 'x-forwarded-for': 'not-an-ip', 'x-forwarded-proto': 'gopher' }));
+      assert.equal(malformed.ip, '127.0.0.1');
+      assert.equal(malformed.scheme, 'http');
+      // A proxy that appends instead of replacing: the client's own line
+      // comes first and is never read.
+      const appended = JSON.parse(await whoami({
+        'x-forwarded-proto': ['http', 'https'],
+        'x-forwarded-host': ['evil.example', 'app.example'],
+      }));
+      assert.equal(appended.scheme, 'https');
+      assert.equal(appended.host, 'app.example');
+    });
+
+    await test('trusted proxy: nothing a client puts left of its address is read', async () => {
+      // What nginx's $proxy_add_x_forwarded_for forwards: the client's own
+      // header (any bytes it likes), then the address it connected from.
+      const viaProxy = async (path, prefix, clientIp) => {
+        const head = Buffer.concat([
+          Buffer.from(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:39517\r\nConnection: close\r\nX-Forwarded-For: `),
+          prefix,
+          Buffer.from(`, ${clientIp}\r\n\r\n`),
+        ]);
+        const { data } = await rawExchange(head);
+        return { status: Number(data.slice(9, 12)), ip: data.match(/"ip":"([^"]*)"/)?.[1] };
+      };
+      for (const prefix of [Buffer.from([0xff]), Buffer.from('"unterminated'), Buffer.alloc(9000, 'a')]) {
+        const what = `${prefix.length}-byte prefix`;
+        assert.equal((await viaProxy('/api/whoami', prefix, '203.0.113.50')).ip, '203.0.113.50', what);
+        assert.equal((await viaProxy('/api/whoami', prefix, '2001:db8::7')).ip, '2001:db8::7', what);
+        // Never the proxy itself: the metrics allowlist sees the real client.
+        assert.equal((await viaProxy('/_gio/metrics', prefix, '203.0.113.50')).status, 403, what);
+        assert.equal((await viaProxy('/_gio/metrics', prefix, '198.51.100.7')).status, 200, what);
+      }
+      // A hop the proxy itself wrote is unreadable: the client is unknown,
+      // and the allowlist fails closed.
+      assert.equal((await rawGet('/_gio/metrics', { 'x-forwarded-for': '198.51.100.7, unknown' })).status, 403);
+    });
+
+    await test('trusted proxy: every forwarded client gets its own rate-limit bucket', async () => {
+      const hit = async (xff) =>
+        (await rawGet('/api/proxied-limit', { 'x-forwarded-for': xff })).status;
+      assert.equal(await hit('198.51.100.10'), 200);
+      assert.equal(await hit('198.51.100.10'), 429, 'same client, same bucket');
+      assert.equal(await hit('198.51.100.11'), 200, 'another client behind the same proxy');
+      // IPv6 clients are still bucketed by /64.
+      assert.equal(await hit('2001:db8:1:2::1'), 200);
+      assert.equal(await hit('2001:db8:1:2::99'), 429);
+      assert.equal(await hit('2001:db8:1:3::1'), 200);
+    });
+
+    await test('trusted proxy: the metrics allowlist checks the forwarded client', async () => {
+      // 127.0.0.1 is the proxy, not an allowlisted client.
+      assert.equal((await rawGet('/_gio/metrics')).status, 403);
+      assert.equal((await rawGet('/_gio/metrics', { 'x-forwarded-for': '203.0.113.9' })).status, 403);
+      const allowed = await rawGet('/_gio/metrics', { 'x-forwarded-for': '198.51.100.7' });
+      assert.equal(allowed.status, 200);
+      assert.match(allowed.body, /gio_requests_total/);
+    });
+
+    await test('X-Request-Id: a trusted proxy\'s valid id is kept, anything else replaced', async () => {
+      const kept = await rawGet('/api/whoami', { 'x-request-id': 'lb-trace.123:a_b' });
+      assert.equal(kept.headers['x-request-id'], 'lb-trace.123:a_b');
+      assert.equal(JSON.parse(kept.body).requestId, 'lb-trace.123:a_b');
+      for (const bad of ['has space', 'x'.repeat(129), 'semi;colon']) {
+        const res = await rawGet('/api/whoami', { 'x-request-id': bad });
+        const id = res.headers['x-request-id'];
+        assert.match(id, /^[0-9a-f-]{36}$/, `${bad} must be replaced by a generated id`);
+        const body = JSON.parse(res.body);
+        assert.equal(body.requestId, id);
+        assert.equal(body.requestIdHeader, id, 'the worker never sees the rejected header');
+      }
+      const a = (await rawGet('/api/whoami')).headers['x-request-id'];
+      const b = (await rawGet('/api/whoami')).headers['x-request-id'];
+      assert.match(a, /^[0-9a-f-]{36}$/);
+      assert.notEqual(a, b);
+    });
+
+    await test('X-Request-Id is on every response: cached, static, redirects, errors', async () => {
+      await fetch(`${BASE}/cached`);
+      const hit = await fetch(`${BASE}/cached`);
+      assert.match(hit.headers.get('x-gio-cache') ?? '', /^hit/);
+      const html = await (await fetch(`${BASE}/`)).text();
+      const chunk = html.match(/\/_next\/static\/chunks\/route-index-[A-Z0-9]+\.js/)?.[0];
+      assert.ok(chunk);
+      const responses = {
+        'cache hit': hit,
+        'static chunk': await fetch(`${BASE}${chunk}`),
+        'public file': await fetch(`${BASE}/robots.txt`),
+        redirect: await fetch(`${BASE}/moved`, { redirect: 'manual' }),
+        'unknown /_gio path': await fetch(`${BASE}/_gio/nope`),
+        'bad path': (await rawGet('/a/../b')),
+        'rate limited': await fetch(`${BASE}/api/limited`),
+        health: await fetch(`${BASE}/_gio/health`),
+      };
+      const seen = new Set();
+      for (const [what, res] of Object.entries(responses)) {
+        const id = typeof res.headers.get === 'function'
+          ? res.headers.get('x-request-id')
+          : res.headers['x-request-id'];
+        assert.match(id ?? '', /^[0-9a-f-]{36}$/, `${what} must carry an X-Request-Id`);
+        assert.ok(!seen.has(id), `${what} must have its own id`);
+        seen.add(id);
+      }
+      assert.equal(responses['bad path'].status, 400);
+      assert.equal(responses['rate limited'].status, 429);
+    });
+
+    await test('one request id ties the server and worker log lines of a failing request', async () => {
+      const id = 'int-boom-1';
+      const res = await fetch(`${BASE}/boom`, { headers: { 'x-request-id': id } });
+      assert.equal(res.status, 500);
+      assert.equal(res.headers.get('x-request-id'), id);
+      const digest = (await res.text()).match(/Error reference: <code>([0-9a-f]{12})<\/code>/)?.[1];
+      assert.ok(digest);
+      await waitFor('request id in the server and worker logs', () => {
+        const lines = log.split('\n').filter((line) => line.includes(id));
+        const worker = lines.some((line) =>
+          line.includes('"requestId":"int-boom-1"') && line.includes(digest) && line.includes('FIXTURE_SECRET_FAILURE'));
+        const completed = lines.some((line) => line.includes('request completed') && line.includes('500'));
+        const renderError = lines.some((line) => line.includes('Node render error') && line.includes(digest));
+        return Promise.resolve(worker && completed && renderError);
+      }, 5_000);
+    });
+
     await test('site-wide header rules cover the root and rule redirects', async () => {
       const root = await fetch(`${BASE}/`);
       assert.equal(root.headers.get('x-fixture-sitewide'), 'on', '/*rest matches zero segments');
@@ -1139,6 +1293,108 @@ async function inheritedModePhase() {
       await rm(cacheDir, { recursive: true, force: true });
     }
     if (process.exitCode === 1) return;
+  }
+}
+
+/**
+ * Phase 1c (no trusted_proxies - the default): forwarding headers and
+ * incoming request ids are a client's word and are ignored entirely. A
+ * throwaway app with one route keeps the boot fast.
+ */
+async function untrustedProxyPhase() {
+  const binary = findServerBinary();
+  const workDir = await mkdtemp(join(tmpdir(), 'gio-int-untrusted-'));
+  await mkdir(join(workDir, 'app', 'api', 'whoami'), { recursive: true });
+  await mkdir(join(workDir, 'app', 'api', 'limited'), { recursive: true });
+  await cp(
+    join(fixtureDir, 'app', 'api', 'whoami', 'route.ts'),
+    join(workDir, 'app', 'api', 'whoami', 'route.ts'),
+  );
+  await writeFile(
+    join(workDir, 'app', 'api', 'limited', 'route.ts'),
+    'export function GET(): unknown {\n  return { limited: true };\n}\n',
+  );
+  await writeFile(join(workDir, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
+  await writeFile(
+    join(workDir, 'gio.toml'),
+    [
+      '[server]',
+      'host = "127.0.0.1"',
+      'port = 39517',
+      'http2 = false',
+      '',
+      '[[rate_limits]]',
+      'path = "/api/limited"',
+      'per_ip = 1',
+      'window_seconds = 3600',
+      'burst = 0',
+      '',
+    ].join('\n'),
+  );
+
+  let log = '';
+  const server = spawn(binary, [], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      GIO_APP_DIR: join(workDir, 'app'),
+      GIO_CACHE_DIR: join(workDir, 'cache'),
+      // Production log level: the request span must survive it.
+      RUST_LOG: 'warn',
+      NODE_ENV: 'production',
+    },
+  });
+  server.stdout.on('data', (d) => { log += d.toString(); });
+  server.stderr.on('data', (d) => { log += d.toString(); });
+  let serverGone = false;
+  const serverExited = new Promise((r) =>
+    server.on('exit', () => { serverGone = true; r(); }),
+  );
+
+  try {
+    await waitFor('server health (no trusted proxies)', async () => {
+      const res = await fetch(`${BASE}/_gio/health`);
+      return res.ok && (await res.json()).nodeReady === true;
+    }, 30_000);
+
+    await test('untrusted peer: X-Forwarded-* and X-Request-Id are ignored', async () => {
+      const res = await rawGet('/api/whoami', {
+        'x-forwarded-for': '203.0.113.50',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'evil.example',
+        'x-request-id': 'spoofed-id',
+      });
+      const body = JSON.parse(res.body);
+      assert.equal(body.ip, '127.0.0.1');
+      assert.equal(body.scheme, 'http');
+      assert.equal(body.host, '127.0.0.1:39517');
+      assert.notEqual(res.headers['x-request-id'], 'spoofed-id');
+      assert.match(res.headers['x-request-id'], /^[0-9a-f-]{36}$/);
+      assert.equal(body.requestId, res.headers['x-request-id']);
+      assert.equal(body.requestIdHeader, res.headers['x-request-id']);
+    });
+
+    await test('untrusted peer: a spoofed X-Forwarded-For buys no fresh rate-limit bucket', async () => {
+      assert.equal((await rawGet('/api/limited', { 'x-forwarded-for': '198.51.100.1' })).status, 200);
+      const limited = await rawGet('/api/limited', { 'x-forwarded-for': '198.51.100.2' });
+      assert.equal(limited.status, 429);
+      // At RUST_LOG=warn the warning still carries the request's id.
+      const id = limited.headers['x-request-id'];
+      assert.match(id, /^[0-9a-f-]{36}$/);
+      await waitFor('rate-limit warning with its request id', () =>
+        Promise.resolve(log.replace(/\x1b\[[0-9;]*m/g, '').split('\n').some((line) =>
+          line.includes('rate limit exceeded') && line.includes(`request{request_id=${id}}`))), 5_000);
+    });
+  } catch (err) {
+    console.error('\nintegration (no trusted proxies): FAILED');
+    console.error(err);
+    console.error('\n── server log tail ──');
+    console.error(significantLogTail(log));
+    process.exitCode = 1;
+  } finally {
+    if (!serverGone) server.kill();
+    await serverExited;
+    await rm(workDir, { recursive: true, force: true });
   }
 }
 
@@ -1665,6 +1921,9 @@ if (process.exitCode !== 1) {
 }
 if (process.exitCode !== 1) {
   await inheritedModePhase();
+}
+if (process.exitCode !== 1) {
+  await untrustedProxyPhase();
 }
 if (process.exitCode !== 1) {
   await devWatchPhase();

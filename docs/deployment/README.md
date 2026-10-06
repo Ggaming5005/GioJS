@@ -58,6 +58,36 @@ GioJS closes an HTTP/1.1 keep-alive connection after `header_read_timeout_secs` 
 
 A plain `proxy_pass` with no `upstream { keepalive }` block, as in the [systemd guide](linux-systemd.md), opens a fresh upstream connection per request and needs neither. See *Connection limits* on the configuration docs page for every connection setting.
 
+### Client IPs, HTTPS and request IDs
+
+Behind a proxy every connection comes from the proxy: without configuration, `[[rate_limits]]` put all visitors in one bucket, the `[metrics] ip_allowlist` sees only the proxy, and `req.ip` / `ctx.ip` are the proxy's address. List the proxy in `trusted_proxies` and GioJS reads the real client from its forwarding headers - and ignores those headers from everyone else:
+
+```toml
+[server]
+trusted_proxies = ["127.0.0.1", "::1"]   # IPs and CIDR blocks; default [] = trust nobody
+# proxy_headers = "forwarded"            # if the proxy sends RFC 7239 Forwarded instead of X-Forwarded-*
+# accept_request_id = false              # if the proxy passes a client's X-Request-Id through
+```
+
+The client IP is the first address in `X-Forwarded-For` that is not a trusted proxy, reading from the right. Entries left of it are never read - not even checked for being well-formed - so whatever a client sends in its own `X-Forwarded-For` through a proxy that appends to it changes nothing. From a trusted proxy, `X-Forwarded-Proto` sets the scheme and `X-Forwarded-Host` the host; GioJS takes the last value, the one the nearest proxy wrote. Whatever the proxy:
+
+- **Trust only the proxy**, and make sure clients cannot reach GioJS directly (bind `127.0.0.1`, or firewall the port).
+- **Forward `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host`**, with the proxy setting Proto and Host rather than passing a client's values through. Appending is fine (HAProxy's `http-request add-header` works as well as `set-header`); in a chain of proxies, have the inner one pass the outer one's value on.
+- **Keep the `Host` header** (or set `X-Forwarded-Host`). The host is client-supplied unless the proxy only routes your own domains to GioJS: never base a security decision on `req.host` / `ctx.host`.
+- **Decide who sets `X-Request-Id`.** GioJS adopts a valid id from a trusted proxy. Most proxies pass a client's header through instead of setting one: make the proxy set or strip it, or set `accept_request_id = false` so GioJS generates every id.
+
+| Proxy | What to configure |
+|-------|-------------------|
+| nginx | `proxy_set_header Host $host;` `X-Forwarded-For $proxy_add_x_forwarded_for;` `X-Forwarded-Proto $scheme;` `X-Forwarded-Host $host;` `X-Request-Id $request_id;` - see the [systemd guide](linux-systemd.md). `trusted_proxies = ["127.0.0.1", "::1"]` on the same host. |
+| Caddy | `reverse_proxy 127.0.0.1:3000` already sets the three forwarding headers, keeps `Host`, and ignores spoofed ones. It passes a client's `X-Request-Id` through: add `header_up X-Request-Id {http.request.uuid}` inside the `reverse_proxy` block. Trust Caddy's address. |
+| Traefik | Sets the three forwarding headers and keeps `Host` by default. It passes a client's `X-Request-Id` through: strip it with a headers middleware (`customRequestHeaders: { X-Request-Id: "" }`) or set `accept_request_id = false`. Trust the network Traefik connects from (in Docker, e.g. `"172.16.0.0/12"`). |
+| AWS ALB | Appends `X-Forwarded-For`, sets `X-Forwarded-Proto`, keeps `Host`. It neither sets nor removes `X-Request-Id` and `X-Forwarded-Host`, so a client's own arrive as if the ALB sent them: set `accept_request_id = false`, and treat the host as client-supplied. Trust your VPC CIDR, e.g. `"10.0.0.0/16"`. |
+| Google Cloud HTTPS LB | Appends the client IP *and its own forwarding-rule IP* to `X-Forwarded-For`: trust that public IP plus Google's proxy ranges `"35.191.0.0/16"` and `"130.211.0.0/22"`. Like ALB it passes a client's `X-Request-Id` and `X-Forwarded-Host` through: set `accept_request_id = false`. |
+| Kubernetes ingress-nginx | Trust the pod CIDR the controller runs in. Its `X-Request-ID` deliberately reuses one the client sent; set `accept_request_id = false` unless a client-chosen id is fine in your logs. |
+| Cloudflare | Trust Cloudflare's published IP ranges (cloudflare.com/ips). It does not set `X-Request-Id`: set `accept_request_id = false`, or remove the header with a Transform Rule. |
+
+Every response carries `X-Request-Id`. A valid incoming id (`^[A-Za-z0-9._:-]{1,128}$`) from a trusted proxy is kept (unless `accept_request_id = false`), so the proxy's id follows the request; anything else is replaced by a generated UUID. The same id is on the server's log lines for the request (`request{request_id=...}`, kept at any `RUST_LOG` level) and on every JSON line the Node worker logs while handling it (`"requestId"`).
+
 ## Health check
 
 `/_gio/health` returns JSON and is always available - use it for readiness probes and uptime monitors:

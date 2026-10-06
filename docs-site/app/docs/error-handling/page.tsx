@@ -50,9 +50,11 @@ export default function Error({ error }: { error?: { message: string; digest?: s
         an <code>app/error.tsx</code>, a failed render is answered with a plain
         page naming only the status and the error reference. The real message
         and stack are logged server-side under the same digest, so a user
-        report finds the exact failure:
+        report finds the exact failure - and its <code>requestId</code> finds
+        every other log line of that request (see{' '}
+        <a href="/docs/observability">Observability</a>):
       </p>
-      <CodeBlock lang="bash" code={`{"level":"error","msg":"ssr render failed","path":"/posts/7","digest":"3f9a1c0b7e2d","error":"connect ECONNREFUSED 10.0.0.5:5432","stack":"Error: connect ECONNREFUSED ..."}`} />
+      <CodeBlock lang="bash" code={`{"level":"error","msg":"ssr render failed","requestId":"0b8e3c52-7a1d-4f0e-9c3b-5d2a6e8f1a47","path":"/posts/7","digest":"3f9a1c0b7e2d","error":"connect ECONNREFUSED 10.0.0.5:5432","stack":"Error: connect ECONNREFUSED ..."}`} />
       <p>
         Production means anything other than <code>NODE_ENV=development</code>{' '}
         when the server starts: unset and <code>test</code> are production too.

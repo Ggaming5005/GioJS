@@ -23,6 +23,17 @@ export interface IPCRequest {
    * discarded because Rust already served them from the cache.
    */
   skipShell?: boolean;
+  /**
+   * The client's IP, behind any `[server] trusted_proxies` (additive,
+   * protocol stays v3 - absent from older servers and static export).
+   */
+  ip?: string;
+  /** 'https' or 'http', as the client used it (proxy-aware). */
+  scheme?: string;
+  /** The host the client addressed (proxy-aware; absent if none was sent). */
+  host?: string;
+  /** This request's id - Rust's X-Request-Id, also in every log line. */
+  requestId?: string;
 }
 
 export interface IPCResponse {
@@ -79,6 +90,8 @@ export interface IPCError {
    * message and stack, and shown on the production error page instead.
    */
   digest?: string;
+  /** The failed request's id, echoed so Rust's error log line carries it. */
+  requestId?: string;
 }
 
 export type IPCOutbound = IPCResponse | IPCError;
@@ -100,6 +113,24 @@ export interface GioRequest {
   /** Parse the body as JSON. Throws on absent, base64, or malformed bodies. */
   json<T = unknown>(): T;
   locale?: string;
+  /**
+   * The client's IP address. Behind a reverse proxy this is the visitor
+   * only when the proxy is listed in gio.toml `[server] trusted_proxies`
+   * (otherwise it is the proxy's address) - never read X-Forwarded-For
+   * yourself, any client can send it. Absent outside the server (static
+   * export).
+   */
+  ip?: string;
+  /** 'https' or 'http', as the client used it (proxy-aware). */
+  scheme?: string;
+  /**
+   * The host the client addressed (proxy-aware, may include a port). It is
+   * whatever the client sent unless your proxy pins it: fine for display,
+   * never for a security decision.
+   */
+  host?: string;
+  /** Unique per request: the response's X-Request-Id, and on every log line. */
+  requestId?: string;
 }
 
 /** Server-side handle for a WebSocket connection. Binary frames arrive as Buffer. */
