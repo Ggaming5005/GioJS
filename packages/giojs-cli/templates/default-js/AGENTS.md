@@ -8,14 +8,23 @@ renders React. Full docs: https://giojs.com/llms.txt
 
 - File routing lives in `app/`: `page.jsx` (pages), `layout.jsx` (nested
   layouts), `route.js` (API handlers exporting GET/POST/PUT/PATCH/DELETE),
-  `not-found.jsx`, `error.jsx`. Dynamic segments: `[id]`; catch-all: `[...slug]`
-  (one or more segments); optional catch-all: `[[...slug]]` (also matches the
-  parent URL). Catch-all params are one string with `/` separators (`"a/b"`).
+  `not-found.jsx`, `error.jsx`, `loading.jsx`. Dynamic segments: `[id]`;
+  catch-all: `[...slug]` (one or more segments); optional catch-all:
+  `[[...slug]]` (also matches the parent URL). Catch-all params are one string
+  with `/` separators (`"a/b"`).
   `(group)` folders add no URL segment; `_folders` are private (never routed).
   Layouts apply by folder ancestry, so a `(group)/layout.jsx` wraps only that
   group.
+- `not-found.jsx`, `error.jsx` and `loading.jsx` work in any folder; the
+  nearest one at or above a page wins. `notFound()` from `@gio.js/core` (or
+  `{ notFound: true }` from getServerSideProps) answers 404 with the nearest
+  `not-found.jsx`. `error.jsx` renders inside its folder's layout and never
+  catches that layout's own errors. `loading.jsx` is a `<Suspense>` fallback
+  for content that suspends while rendering - it does not cover
+  getServerSideProps, which runs before rendering.
 - Data fetching is `export async function getServerSideProps(ctx)` returning
-  `{ props }` (optionally `{ props, headers }` or a redirect). There are NO
+  `{ props }` (optionally `{ props, headers }`, a redirect, or
+  `{ notFound: true }`). There are NO
   React Server Components, no `use client`/`use server`, no server actions.
 - Never fetch inside a component render; never use `useEffect` for data that
   belongs in `getServerSideProps`.
@@ -24,8 +33,10 @@ renders React. Full docs: https://giojs.com/llms.txt
   Reading `ctx.cookies` (or the cookie/authorization header) in
   `getServerSideProps` makes that render per-user and uncached; personalize
   inside `<Suspense>` holes with `export const shell = 'cache'` instead.
-- `app/error.tsx` gets `{ error: { message, digest } }`; in production the
-  message is always generic - log lookups go by `digest`.
+- `error.jsx` gets `{ error: { message, digest }, reset }`; in production the
+  message is always generic - log lookups go by `digest`. It is also a client
+  error boundary (shipped in the page bundles - no server-only imports), and
+  `reset` exists only for errors caught in the browser.
 - Components come from `@gio.js/react`: `<GioLink>` (client nav + prefetch),
   `<GioImage>` (points at the built-in `/_gio/image` optimizer — never add
   `sharp` or `next/image`). Route-handler types come from `@gio.js/core`

@@ -107,6 +107,15 @@ export async function getServerSideProps(ctx: GsspContext) {
         values would be cached in the shell.
       </p>
       <p>
+        A <code>loading.tsx</code> is a Suspense boundary too, around everything below its
+        folder. On a PPR page whose content suspends, the cached shell therefore ends there:
+        it holds the layouts above the <code>loading.tsx</code> and its loading UI, and the
+        page itself streams per request as a hole. A page that renders without suspending is
+        part of the shell, and the contract applies to it. A page that throws before it
+        suspends is answered with its <code>error.tsx</code> and a 500 - a broken render is
+        never stored as a shell.
+      </p>
+      <p>
         PPR degrades gracefully: if the holes render fails or times out, the body simply ends
         after the shell and the Suspense fallbacks remain visible - the user gets the cached
         page with "Loading…" states instead of an error.

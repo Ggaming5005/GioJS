@@ -32,8 +32,56 @@ export default function Page(): React.JSX.Element {
         folders (<code>app/posts/[id]/layout.tsx</code> wraps every post) and inside route
         groups. The root <code>app/layout.tsx</code> is server-only HTML; the layouts nested
         under it render inside the hydrated region and ship in the page&apos;s client bundle.
-        The root <code>not-found.tsx</code> and <code>error.tsx</code> get only the root layout.
+        A <code>not-found.tsx</code> or <code>error.tsx</code> gets the layouts of its own
+        folder and the folders above it - never those of the page below it that failed (see{' '}
+        <a href="/docs/error-handling">Error Handling</a>).
       </p>
+      <h2>Loading UI</h2>
+      <p>
+        A <code>loading.tsx</code> wraps everything below its folder - the page and the layouts
+        of deeper folders - in a <code>&lt;Suspense&gt;</code> boundary with its default export
+        as the fallback. When the page suspends while rendering (React&apos;s{' '}
+        <code>use()</code> on a promise, a lazy component), a streamed response sends the
+        layouts and the loading UI at once and the page as soon as it is ready.
+      </p>
+      <CodeBlock lang="tsx" code={`// app/dashboard/loading.tsx
+export default function Loading() {
+  return <p>Loading dashboard…</p>;
+}`} />
+      <p>
+        <code>getServerSideProps</code> runs before rendering starts, so the loading UI does
+        not cover it - it shows only for content that suspends during the render. Per folder,
+        the boundary sits inside the folder&apos;s layout and its <code>error.tsx</code>{' '}
+        boundary:
+      </p>
+      <CodeBlock lang="text" code={`<Layout>               dashboard/layout.tsx
+  <ErrorBoundary>      dashboard/error.tsx
+    <Suspense>         dashboard/loading.tsx
+      <Page />`} />
+      <ul>
+        <li>
+          A page that renders without suspending looks exactly as before; the boundary only
+          adds React&apos;s Suspense markers to the HTML. A cacheable page is still rendered
+          completely and cached.
+        </li>
+        <li>
+          If the page throws or calls <code>notFound()</code> before it suspends, the response
+          is still the error or not-found page - adding a <code>loading.tsx</code> never turns
+          a 500 into a 200. After it has suspended, errors are handled like in any Suspense
+          boundary (see <a href="/docs/error-handling">Error Handling</a>).
+        </li>
+        <li>
+          With partial prerendering (<code>shell = &apos;cache&apos;</code>) the boundary is a
+          shell edge like any <code>&lt;Suspense&gt;</code>: when the page suspends, the cached
+          shell holds the layouts above it plus the loading UI, and the page streams per
+          request as a hole (see <a href="/docs/caching-layers">Caching Layers</a>).
+        </li>
+        <li>
+          Client-side navigation does not show the loading UI yet: <code>&lt;GioLink&gt;</code>{' '}
+          keeps the current page on screen until the next page&apos;s HTML has arrived
+          (prefetching hides most of that wait).
+        </li>
+      </ul>
       <h2>Dynamic routes</h2>
       <p>Wrap a folder name in brackets to capture URL segments. Params reach{' '}
         <code>ctx.params</code> in getServerSideProps (and the <code>params</code> prop when

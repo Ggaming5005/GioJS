@@ -21,6 +21,26 @@ export async function getServerSideProps(ctx) {
       <h2>Redirects</h2>
       <p>Return a redirect instead of props to send the visitor elsewhere.</p>
       <CodeBlock lang="tsx" code={`return { redirect: { destination: '/login', permanent: false } };`} />
+      <h2>Not found</h2>
+      <p>
+        When the data does not exist, call <code>notFound()</code> - or return{' '}
+        <code>{'{ notFound: true }'}</code>. The page answers 404 with the nearest{' '}
+        <code>not-found.tsx</code> at or above its folder (see{' '}
+        <a href="/docs/error-handling">Error Handling</a>).
+      </p>
+      <CodeBlock lang="tsx" code={`import { notFound } from '@gio.js/core';
+
+export async function getServerSideProps(ctx) {
+  const post = await db.posts.find(ctx.params.id);
+  if (!post) notFound();             // or: return { notFound: true };
+  return { props: { post } };
+}`} />
+      <p>
+        <code>notFound()</code> works by throwing, so a <code>try</code>/<code>catch</code>{' '}
+        around it swallows it - call it outside the <code>try</code>, or rethrow. It works
+        while rendering too, and in <code>route.ts</code> handlers (a JSON 404). A 404 is
+        never cached, even with <code>revalidate</code> set.
+      </p>
       <h2>Response headers and cookies</h2>
       <p>
         Return <code>headers</code> next to <code>props</code> (or a <code>redirect</code>) to

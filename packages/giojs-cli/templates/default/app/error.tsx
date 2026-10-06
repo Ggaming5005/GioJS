@@ -2,15 +2,18 @@ import React from 'react';
 
 interface ErrorPageProps {
   error?: { message: string; digest?: string };
+  reset?: () => void;
 }
 
 /**
- * Rendered server-side with status 500 when a page render throws.
- * Receives { error: { message, digest } }. In production the message is a
- * generic "Internal Server Error"; the digest is the reference the real
- * error was logged under, so users can quote it in a report.
+ * Rendered server-side with status 500 when a page render throws, and the
+ * error boundary of every page once hydrated (an error.tsx in a nested
+ * folder takes over below it). Receives { error: { message, digest } }. In
+ * production the message is generic; the digest is the reference the real
+ * error was logged under, so users can quote it in a report. `reset` - only
+ * for errors caught in the browser - renders the page again.
  */
-export default function Error({ error }: ErrorPageProps): React.JSX.Element {
+export default function Error({ error, reset }: ErrorPageProps): React.JSX.Element {
   return (
     <div className="gio-status">
       <span className="gio-status__code" aria-hidden="true">500</span>
@@ -21,6 +24,9 @@ export default function Error({ error }: ErrorPageProps): React.JSX.Element {
       )}
       {error?.digest !== undefined && (
         <p className="gio-status__ref">Error reference: <code>{error.digest}</code></p>
+      )}
+      {reset !== undefined && (
+        <button type="button" onClick={reset} className="gio-btn gio-btn--secondary">Try again</button>
       )}
       <a href="/" className="gio-btn gio-btn--primary">Go home</a>
     </div>
