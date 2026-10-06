@@ -38,6 +38,9 @@ struct DiskEntry {
     /// Route pattern for metrics; absent in entries written before it existed.
     #[serde(default)]
     route: Option<String>,
+    /// Absent in entries written before ETags existed - computed on load.
+    #[serde(default)]
+    etag: Option<String>,
 }
 
 impl From<&CacheEntry> for DiskEntry {
@@ -58,6 +61,7 @@ impl From<&CacheEntry> for DiskEntry {
             tags: e.tags.clone(),
             ppr_shell: e.ppr_shell,
             route: e.route.clone(),
+            etag: e.etag.clone(),
         }
     }
 }
@@ -65,6 +69,10 @@ impl From<&CacheEntry> for DiskEntry {
 impl From<DiskEntry> for CacheEntry {
     fn from(d: DiskEntry) -> Self {
         let created_at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(d.created_at_secs);
+        // Once per load: the loaded entry is promoted into memory with it.
+        let etag = d
+            .etag
+            .unwrap_or_else(|| crate::entry_etag(d.html.as_bytes()));
         CacheEntry {
             html: Bytes::from(d.html.into_bytes()),
             status: d.status,
@@ -76,6 +84,7 @@ impl From<DiskEntry> for CacheEntry {
             tags: d.tags,
             ppr_shell: d.ppr_shell,
             route: d.route,
+            etag: Some(etag),
         }
     }
 }
@@ -216,6 +225,7 @@ mod tests {
             tags: Vec::new(),
             ppr_shell: false,
             route: None,
+            etag: None,
         }
     }
 
@@ -227,6 +237,22 @@ mod tests {
         assert!(!entry.composed);
         assert!(!entry.ppr_shell, "pre-PPR entries must read as full pages");
         assert_eq!(entry.route, None);
+        assert_eq!(
+            entry.etag.as_deref(),
+            Some(crate::entry_etag(b"<h1>x</h1>").as_str()),
+            "entries written before ETags get one when loaded"
+        );
+    }
+
+    #[test]
+    fn route_and_etag_survive_serde_roundtrip() {
+        let mut entry = entry_of_size(16);
+        entry.route = Some("/posts/:id".into());
+        entry.etag = Some("\"abc\"".into());
+        let json = serde_json::to_string(&DiskEntry::from(&entry)).unwrap();
+        let restored = CacheEntry::from(serde_json::from_str::<DiskEntry>(&json).unwrap());
+        assert_eq!(restored.route.as_deref(), Some("/posts/:id"));
+        assert_eq!(restored.etag.as_deref(), Some("\"abc\""));
     }
 
     #[test]

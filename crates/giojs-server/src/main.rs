@@ -99,8 +99,11 @@ struct RenderedPage {
     /// True when `body` already has all head snippets injected (put-time
     /// composition), so response building must not inject again.
     composed: bool,
+    max_age_secs: u64,
     /// Matched route pattern, the metrics label.
     route: Option<String>,
+    /// The stored entry's ETag (same bytes as `body`).
+    etag: String,
 }
 
 /// Result of a coalesced render. `Page` is a shareable cached response.
@@ -141,6 +144,108 @@ fn entry_age_secs(entry: &CacheEntry) -> u64 {
         .duration_since(entry.created_at)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Stale entries keep serving (while one refresh runs) until they are this
+/// many times `max_age` old. Also sizes the CDN stale-while-revalidate window.
+const CACHE_SWR_MULTIPLIER: u64 = 10;
+
+/// How browsers and CDNs may cache a page response the pipeline built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageCachePolicy {
+    /// A shareable cached render, `age_secs` into its `max_age_secs` life.
+    Shared { max_age_secs: u64, age_secs: u64 },
+    /// Personal or uncacheable - and every PPR response: its holes are
+    /// rendered with the visitor's cookies.
+    Private,
+}
+
+/// The Cache-Control value for `policy`. A shared page is CDN-fresh for what
+/// is left of its revalidate window, CDN-servable stale (while it refreshes)
+/// for what is left of the SWR window, and always revalidated by browsers
+/// (max-age=0). Personal pages are `private, no-cache` - never `no-store`,
+/// which would disable the back/forward cache.
+fn page_cache_control(policy: PageCachePolicy) -> String {
+    match policy {
+        PageCachePolicy::Shared {
+            max_age_secs,
+            age_secs,
+        } => {
+            let fresh = max_age_secs.saturating_sub(age_secs);
+            let swr_end = max_age_secs.saturating_mul(CACHE_SWR_MULTIPLIER);
+            let swr = swr_end.saturating_sub(age_secs.max(max_age_secs));
+            format!("public, max-age=0, s-maxage={fresh}, stale-while-revalidate={swr}")
+        }
+        PageCachePolicy::Private => "private, no-cache".to_string(),
+    }
+}
+
+/// Set Cache-Control on an HTML page response unless the app set its own:
+/// route handlers, getServerSideProps headers and header rules always win.
+fn apply_page_cache_control(resp: &mut Response, policy: PageCachePolicy) {
+    let is_html = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/html"));
+    if !is_html || resp.headers().contains_key(header::CACHE_CONTROL) {
+        return;
+    }
+    if let Ok(value) = HeaderValue::from_str(&page_cache_control(policy)) {
+        resp.headers_mut().insert(header::CACHE_CONTROL, value);
+        resp.extensions_mut().insert(FrameworkCacheControl);
+    }
+}
+
+/// Response-extension marker: Cache-Control was set by
+/// `apply_page_cache_control`, not by the app, so i18n_middleware may
+/// tighten it.
+#[derive(Debug, Clone, Copy)]
+struct FrameworkCacheControl;
+
+/// Request-extension marker from i18n_middleware: the locale came from
+/// request headers (Accept-Language / cookie), not the URL, so one URL
+/// serves different pages to different visitors. Shared caches key by URL
+/// (many ignore Vary), so such pages are never `public` and get no ETag.
+#[derive(Debug, Clone, Copy)]
+struct HeaderNegotiatedLocale;
+
+/// If-None-Match evaluation (RFC 9110 weak comparison, as the header
+/// requires): `*`, or any listed tag equal to `etag` ignoring `W/`.
+fn if_none_match_hits(if_none_match: &str, etag: &str) -> bool {
+    let opaque = |tag: &str| tag.trim().trim_start_matches("W/").to_string();
+    if_none_match.trim() == "*"
+        || if_none_match
+            .split(',')
+            .any(|candidate| opaque(candidate) == opaque(etag))
+}
+
+/// Stamp a cache hit's ETag, and turn the response into a 304 - the same
+/// headers, no body - when the client already holds that version. Returns
+/// true for a 304.
+fn apply_entry_etag(
+    resp: &mut Response,
+    etag: Option<&str>,
+    if_none_match: Option<&HeaderValue>,
+) -> bool {
+    // Conditional requests only apply to what would otherwise be a 200.
+    if resp.status() != StatusCode::OK {
+        return false;
+    }
+    let Some(value) = etag.and_then(|etag| HeaderValue::from_str(etag).ok()) else {
+        return false;
+    };
+    let not_modified = if_none_match
+        .and_then(|v| v.to_str().ok())
+        .zip(etag)
+        .is_some_and(|(candidates, etag)| if_none_match_hits(candidates, etag));
+    resp.headers_mut().insert(header::ETAG, value);
+    if not_modified {
+        *resp.status_mut() = StatusCode::NOT_MODIFIED;
+        *resp.body_mut() = axum::body::Body::empty();
+        resp.headers_mut().remove(header::CONTENT_LENGTH);
+    }
+    not_modified
 }
 
 /// Stamps `X-Gio-Cache: static` on responses the dynamic pipeline never saw
@@ -1473,8 +1578,26 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
     }
 
     parts.extensions.insert(locale.clone());
+    // No locale prefix in the URL: the locale (default included) is the
+    // answer of whichever request headers detection reads.
+    let header_negotiated =
+        result.path == original_path && i18n_cfg.detect_from.iter().any(|source| source != "path");
+    if header_negotiated {
+        parts.extensions.insert(HeaderNegotiatedLocale);
+    }
     let req = Request::from_parts(parts, body);
     let mut response = next.run(req).await;
+    if header_negotiated
+        && response
+            .extensions()
+            .get::<FrameworkCacheControl>()
+            .is_some()
+    {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-cache"),
+        );
+    }
 
     if locale != i18n_cfg.default_locale {
         let is_html = response
@@ -1562,6 +1685,11 @@ async fn dynamic_handler(
         .get::<client_identity::ClientInfo>()
         .map(ipc::IpcClientFields::from)
         .unwrap_or_default();
+    // A hit's ETag must stand for one body under this URL: not with a
+    // header-negotiated locale, and not with CSP nonces (unique per body).
+    let etag_allowed = req.extensions().get::<HeaderNegotiatedLocale>().is_none()
+        && security::nonce_placeholder().is_none();
+    let if_none_match = req.headers().get(header::IF_NONE_MATCH).cloned();
     // Nothing under /_gio belongs to the app. path_hygiene_middleware already
     // 404s unrouted /_gio requests; this also covers paths that only land in
     // the namespace after a locale prefix is stripped or a rule rewrites.
@@ -1731,11 +1859,14 @@ async fn dynamic_handler(
             );
         }
         Some((entry, CacheStatus::Hit)) => {
-            let status = entry.status;
-            let ttl_secs = entry.max_age_secs.saturating_sub(entry_age_secs(&entry));
-            let duration_ms = start.elapsed().as_millis() as u64;
-            info!(method = %method, path = %path, status = %status, cache = "hit", encoding = %encoding, prefetch = %prefetch_status, "request completed");
+            let age_secs = entry_age_secs(&entry);
+            let ttl_secs = entry.max_age_secs.saturating_sub(age_secs);
+            let policy = PageCachePolicy::Shared {
+                max_age_secs: entry.max_age_secs,
+                age_secs,
+            };
             let route = entry.route.clone();
+            let etag = entry.etag.clone().filter(|_| etag_allowed);
             let mut resp = build_response_from_entry(
                 entry,
                 &deployment_id,
@@ -1747,6 +1878,11 @@ async fn dynamic_handler(
             )
             .await;
             insert_cache_status_header(&mut resp, &format!("hit; ttl={ttl_secs}"));
+            apply_page_cache_control(&mut resp, policy);
+            apply_entry_etag(&mut resp, etag.as_deref(), if_none_match.as_ref());
+            let status = resp.status().as_u16();
+            let duration_ms = start.elapsed().as_millis() as u64;
+            info!(method = %method, path = %path, status = %status, cache = "hit", encoding = %encoding, prefetch = %prefetch_status, "request completed");
             state.metrics.record_request(
                 &method,
                 status,
@@ -1768,17 +1904,19 @@ async fn dynamic_handler(
             return resp;
         }
         Some((entry, CacheStatus::Stale)) => {
-            let status = entry.status;
             let age_secs = entry_age_secs(&entry);
-            let duration_ms = start.elapsed().as_millis() as u64;
+            let policy = PageCachePolicy::Shared {
+                max_age_secs: entry.max_age_secs,
+                age_secs,
+            };
             let route = entry.route.clone();
+            let etag = entry.etag.clone().filter(|_| etag_allowed);
             spawn_revalidation(
                 state.clone(),
                 cache_key.clone(),
                 build_ipc_request(&method, &path, &query_str, &req, &deployment_id, &locale),
                 default_locale.clone(),
             );
-            info!(method = %method, path = %path, status = %status, cache = "stale", encoding = %encoding, prefetch = %prefetch_status, "request completed");
             let mut resp = build_response_from_entry(
                 entry,
                 &deployment_id,
@@ -1790,6 +1928,11 @@ async fn dynamic_handler(
             )
             .await;
             insert_cache_status_header(&mut resp, &format!("stale; age={age_secs}; revalidating"));
+            apply_page_cache_control(&mut resp, policy);
+            apply_entry_etag(&mut resp, etag.as_deref(), if_none_match.as_ref());
+            let status = resp.status().as_u16();
+            let duration_ms = start.elapsed().as_millis() as u64;
+            info!(method = %method, path = %path, status = %status, cache = "stale", encoding = %encoding, prefetch = %prefetch_status, "request completed");
             state.metrics.record_request(
                 &method,
                 status,
@@ -1903,6 +2046,7 @@ async fn dynamic_handler(
                                 &default_locale,
                             )
                             .await;
+                            let etag = giojs_cache::entry_etag(&body);
                             let entry = CacheEntry {
                                 html: body.clone(),
                                 status: resp.status,
@@ -1914,6 +2058,7 @@ async fn dynamic_handler(
                                 tags: resp.cache_tags.clone(),
                                 ppr_shell: false,
                                 route: resp.route.clone(),
+                                etag: Some(etag.clone()),
                             };
                             if let Err(e) = state.cache.put(&cache_key, entry).await {
                                 warn!(path = %path, error = %e, "cache write failed");
@@ -1924,7 +2069,9 @@ async fn dynamic_handler(
                                 body,
                                 cacheable: resp.cacheable,
                                 composed,
+                                max_age_secs: resp.cache_max_age,
                                 route: resp.route,
+                                etag,
                             }))
                         }
                         // Streams are per-connection (SSE and streaming SSR
@@ -1961,10 +2108,6 @@ async fn dynamic_handler(
 
     match coalesced {
         CoalescedRender::Page(page) => {
-            let status_code =
-                StatusCode::from_u16(page.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let duration_ms = start.elapsed().as_millis() as u64;
-            info!(method = %method, path = %path, status = %status_code.as_u16(), cache = "miss", encoding = %encoding, prefetch = %prefetch_status, "request completed");
             let mut resp_out = build_html_response(
                 page.status,
                 &page.headers,
@@ -1979,6 +2122,21 @@ async fn dynamic_handler(
                 dev_mode,
             );
             insert_cache_status_header(&mut resp_out, "miss; stored");
+            apply_page_cache_control(
+                &mut resp_out,
+                PageCachePolicy::Shared {
+                    max_age_secs: page.max_age_secs,
+                    age_secs: 0,
+                },
+            );
+            apply_entry_etag(
+                &mut resp_out,
+                etag_allowed.then_some(page.etag.as_str()),
+                if_none_match.as_ref(),
+            );
+            let status_code = resp_out.status();
+            let duration_ms = start.elapsed().as_millis() as u64;
+            info!(method = %method, path = %path, status = %status_code.as_u16(), cache = "miss", encoding = %encoding, prefetch = %prefetch_status, "request completed");
             state.metrics.record_request(
                 &method,
                 status_code.as_u16(),
@@ -2278,6 +2436,7 @@ async fn respond_from_render(
             tags: resp.cache_tags.clone(),
             ppr_shell: false,
             route: resp.route.clone(),
+            etag: None,
         };
         if let Err(e) = state.cache.put(cache_key, entry).await {
             warn!(path = %path, error = %e, "cache write failed");
@@ -2313,6 +2472,17 @@ async fn respond_from_render(
     insert_cache_status_header(
         &mut resp_out,
         if will_cache { "miss; stored" } else { "bypass" },
+    );
+    apply_page_cache_control(
+        &mut resp_out,
+        if will_cache {
+            PageCachePolicy::Shared {
+                max_age_secs: resp.cache_max_age,
+                age_secs: 0,
+            }
+        } else {
+            PageCachePolicy::Private
+        },
     );
     state.metrics.record_request(
         method,
@@ -2541,6 +2711,9 @@ fn respond_stream(
             "bypass"
         },
     );
+    // Streamed renders are never stored whole: personal, or a PPR page
+    // whose holes are personal.
+    apply_page_cache_control(&mut resp, PageCachePolicy::Private);
     resp.extensions_mut().insert(StreamedBody);
     resp
 }
@@ -2591,6 +2764,7 @@ async fn put_ppr_shell_entry(
         tags,
         ppr_shell: true,
         route,
+        etag: None,
     };
     if let Err(e) = cache.put(cache_key, entry).await {
         warn!(path = %path, error = %e, "PPR shell cache write failed");
@@ -2826,6 +3000,7 @@ fn respond_ppr_hit(
         .body(axum::body::Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     insert_cache_status_header(&mut resp, cache_label);
+    apply_page_cache_control(&mut resp, PageCachePolicy::Private);
     resp.extensions_mut().insert(StreamedBody);
     resp
 }
@@ -2955,6 +3130,7 @@ fn respond_ipc_error(
             .into_response()
     };
     insert_cache_status_header(&mut resp, "bypass");
+    apply_page_cache_control(&mut resp, PageCachePolicy::Private);
     resp
 }
 
@@ -3944,6 +4120,7 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                     tags: resp.cache_tags,
                     ppr_shell: false,
                     route: resp.route,
+                    etag: None,
                 };
                 if let Err(e) = state.cache.put(&key, entry).await {
                     warn!(key = %key, error = %e, "background revalidation cache write failed");
@@ -4470,6 +4647,7 @@ mod tests {
             tags: Vec::new(),
             ppr_shell: false,
             route: None,
+            etag: None,
         }
     }
 
@@ -5101,6 +5279,128 @@ mod tests {
             route: None,
             frame_error: None,
         }
+    }
+
+    #[test]
+    fn shared_pages_are_cdn_cacheable_and_browser_revalidated() {
+        let fresh = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 0,
+        };
+        assert_eq!(
+            page_cache_control(fresh),
+            "public, max-age=0, s-maxage=60, stale-while-revalidate=540"
+        );
+        // A hit hands out only what is left of the windows.
+        let aged = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 45,
+        };
+        assert_eq!(
+            page_cache_control(aged),
+            "public, max-age=0, s-maxage=15, stale-while-revalidate=540"
+        );
+        let stale = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 100,
+        };
+        assert_eq!(
+            page_cache_control(stale),
+            "public, max-age=0, s-maxage=0, stale-while-revalidate=500"
+        );
+        // Never no-store: it disables the back/forward cache.
+        assert_eq!(
+            page_cache_control(PageCachePolicy::Private),
+            "private, no-cache"
+        );
+    }
+
+    fn html_response(cache_control: Option<&str>, content_type: &str) -> Response {
+        let mut builder = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_LENGTH, "11");
+        if let Some(value) = cache_control {
+            builder = builder.header(header::CACHE_CONTROL, value);
+        }
+        builder.body(axum::body::Body::from("<p>page</p>")).unwrap()
+    }
+
+    #[test]
+    fn app_set_cache_control_always_wins() {
+        let mut page = html_response(None, "text/html; charset=utf-8");
+        apply_page_cache_control(&mut page, PageCachePolicy::Private);
+        assert_eq!(page.headers()[header::CACHE_CONTROL], "private, no-cache");
+        assert!(page.extensions().get::<FrameworkCacheControl>().is_some());
+
+        let mut own = html_response(Some("max-age=5"), "text/html");
+        apply_page_cache_control(&mut own, PageCachePolicy::Private);
+        assert_eq!(own.headers()[header::CACHE_CONTROL], "max-age=5");
+        assert!(own.extensions().get::<FrameworkCacheControl>().is_none());
+
+        // Route handler JSON is the app's business.
+        let mut json = html_response(None, "application/json");
+        apply_page_cache_control(&mut json, PageCachePolicy::Private);
+        assert!(json.headers().get(header::CACHE_CONTROL).is_none());
+    }
+
+    #[test]
+    fn if_none_match_uses_weak_comparison_and_lists() {
+        let etag = r#""abc123""#;
+        assert!(if_none_match_hits(r#""abc123""#, etag));
+        assert!(if_none_match_hits(r#"W/"abc123""#, etag));
+        assert!(if_none_match_hits(r#""zzz", "abc123""#, etag));
+        assert!(if_none_match_hits("*", etag));
+        assert!(!if_none_match_hits(r#""abc124""#, etag));
+        assert!(!if_none_match_hits("", etag));
+    }
+
+    #[tokio::test]
+    async fn a_matching_etag_turns_a_hit_into_a_bodiless_304_with_its_headers() {
+        let etag = r#""abc123""#;
+        let mut resp = html_response(Some("public, max-age=0"), "text/html");
+        let if_none_match = HeaderValue::from_static(r#""abc123""#);
+        assert!(apply_entry_etag(
+            &mut resp,
+            Some(etag),
+            Some(&if_none_match)
+        ));
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(resp.headers()[header::ETAG], etag);
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=0");
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/html");
+        assert!(resp.headers().get(header::CONTENT_LENGTH).is_none());
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert!(body.is_empty());
+
+        let mut changed = html_response(None, "text/html");
+        let stale_tag = HeaderValue::from_static(r#""old""#);
+        assert!(!apply_entry_etag(
+            &mut changed,
+            Some(etag),
+            Some(&stale_tag)
+        ));
+        assert_eq!(changed.status(), StatusCode::OK);
+        assert_eq!(changed.headers()[header::ETAG], etag);
+
+        let mut unconditional = html_response(None, "text/html");
+        assert!(!apply_entry_etag(&mut unconditional, Some(etag), None));
+        assert_eq!(unconditional.headers()[header::ETAG], etag);
+
+        // Skipped entries (nonces, negotiated locale) carry no ETag at all.
+        let mut skipped = html_response(None, "text/html");
+        assert!(!apply_entry_etag(&mut skipped, None, Some(&if_none_match)));
+        assert!(skipped.headers().get(header::ETAG).is_none());
+
+        // Only a would-be 200 can become a 304.
+        let mut not_found = html_response(None, "text/html");
+        *not_found.status_mut() = StatusCode::NOT_FOUND;
+        assert!(!apply_entry_etag(
+            &mut not_found,
+            Some(etag),
+            Some(&if_none_match)
+        ));
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

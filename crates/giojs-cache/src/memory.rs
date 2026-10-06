@@ -74,6 +74,7 @@ mod tests {
             tags: Vec::new(),
             ppr_shell: false,
             route: None,
+            etag: None,
         }
     }
 
