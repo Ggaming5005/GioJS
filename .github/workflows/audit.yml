@@ -4,6 +4,8 @@ name: Security audit
 # CI only annotates them (see ci.yml). This weekly run is where they fail
 # loudly: a red scheduled run notifies the maintainers without blocking
 # unrelated PRs, and the fix is a Cargo.lock / pnpm-lock.yaml bump.
+# It is also the only cargo-deny run where an unmaintained direct dependency
+# is an error - CI and release pass `--warn unmaintained` (see deny.toml).
 
 on:
   schedule:

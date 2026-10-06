@@ -91,7 +91,9 @@ jobs:
 
   # Never publish binaries that link a crate with a known vulnerability (or
   # that break the license/source policy) - unlike CI on pull requests, the
-  # advisories check is a hard gate here. Policy lives in deny.toml.
+  # advisories check is a hard gate here. Policy lives in deny.toml. A crate
+  # merely marked unmaintained is a warning, not a reason to hold a release:
+  # the weekly audit.yml run is where those fail.
   cargo-deny:
     name: cargo-deny
     needs: version-lockstep
@@ -102,6 +104,7 @@ jobs:
         with:
           command: check advisories bans licenses sources
           arguments: --all-features --locked
+          command-arguments: --warn unmaintained
 
   build-platform:
     name: Build ${{ matrix.pkg }}

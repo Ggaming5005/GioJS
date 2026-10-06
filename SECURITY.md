@@ -58,7 +58,9 @@ issue publicly.
   release build runs with `--locked`.
 - `cargo-deny` (see `deny.toml`) checks advisories, licenses and crate
   sources on every pull request and gates every release; `pnpm audit` covers
-  the production npm dependencies.
+  the production npm dependencies. A vulnerable or unsound crate blocks a
+  release. A crate that is only marked unmaintained is a warning there, and
+  the weekly audit run fails on it.
 - npm packages are published from GitHub Actions with
   [provenance](https://docs.npmjs.com/generating-provenance-statements), and
   third-party actions are pinned to commit SHAs.

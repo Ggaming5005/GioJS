@@ -2,7 +2,8 @@
 # release workflow refuses to publish binaries that fail it.
 #
 #   cargo install cargo-deny --locked
-#   cargo deny --all-features --locked check
+#   cargo deny --all-features --locked check --warn unmaintained   # as CI and release run it
+#   cargo deny --all-features --locked check advisories            # as the weekly audit runs it
 
 [graph]
 # Only the targets release.yml actually ships. Without this, cfg(fuzzing),
@@ -18,9 +19,13 @@ all-features = true
 
 [advisories]
 version = 2
-# Vulnerability and unsound advisories always fail. Unmaintained notices fail
-# only for crates we depend on directly - those are ours to replace; a
-# transitive one is the upstream crate's call and would only add noise.
+# Vulnerability and unsound advisories always fail. Unmaintained notices are
+# reported only for crates we depend on directly - those are ours to replace;
+# a transitive one is the upstream crate's call and would only add noise.
+# The v2 config has no "warn" level for them (only this scope), so a reported
+# one is an error unless the caller downgrades it: the CI and release gates
+# pass `--warn unmaintained`, so a maintenance-status notice never blocks a PR,
+# main or a tag release. Only the weekly audit.yml run fails on it.
 unmaintained = "workspace"
 yanked = "warn"
 # Every entry needs a reason; drop it as soon as the dependency moves.

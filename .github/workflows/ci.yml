@@ -64,6 +64,8 @@ jobs:
   # any day a new RUSTSEC entry lands for a crate already in Cargo.lock, which
   # says nothing about the PR under test - on pull requests they annotate
   # instead of failing; pushes to main (and every release tag) still enforce.
+  # An unmaintained-crate notice is a warning everywhere but the weekly
+  # audit.yml run (see deny.toml).
   cargo-deny:
     name: cargo-deny (${{ matrix.checks }})
     runs-on: ubuntu-latest
@@ -73,13 +75,22 @@ jobs:
         checks:
           - advisories
           - bans licenses sources
-    continue-on-error: ${{ matrix.checks == 'advisories' && github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - id: deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        # On the step, not the job: a failed job with job-level
+        # continue-on-error still shows a red check on the PR. This way the
+        # job stays green and the annotation below carries the failure.
+        continue-on-error: ${{ matrix.checks == 'advisories' && github.event_name == 'pull_request' }}
         with:
           command: check ${{ matrix.checks }}
           arguments: --all-features --locked
+          command-arguments: --warn unmaintained
+      - name: Annotate advisories
+        if: steps.deny.outcome == 'failure'
+        run: |
+          echo "::warning title=cargo-deny advisories::a crate in Cargo.lock has a RUSTSEC advisory - see this job's log; it fails CI on main and blocks the next release"
 
   node:
     name: Node tests + typecheck
