@@ -42,6 +42,106 @@ pub struct DevConfig {
     pub allowed_hosts: Vec<String>,
 }
 
+/// `[security]`: default response headers, Content-Security-Policy and
+/// cross-site request protection (see security.rs). Every key is optional.
+/// Unknown keys are a startup error: a misspelled security setting must not
+/// silently leave a protection off.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SecurityConfig {
+    /// `[security.headers]`: overrides for the default response headers
+    /// (`x-content-type-options`, `x-frame-options`, `referrer-policy`) and
+    /// extra headers sent by default (`permissions-policy`,
+    /// `cross-origin-opener-policy`, ...). An empty value removes a default.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Strict-Transport-Security. Unset: `max-age=31536000` when
+    /// `[server.tls]` is enabled, nothing otherwise. `true` / a string / a
+    /// table send it on every response (TLS terminated by a proxy); `false`
+    /// or `""` never send it.
+    #[serde(default)]
+    pub hsts: Option<HstsSetting>,
+    /// Content-Security-Policy. `{nonce}` is replaced by a fresh random
+    /// nonce per response, which every framework inline script carries.
+    #[serde(default)]
+    pub csp: Option<String>,
+    /// Content-Security-Policy-Report-Only, same syntax as `csp`.
+    #[serde(default)]
+    pub csp_report_only: Option<String>,
+    #[serde(default)]
+    pub csrf: CsrfConfig,
+    #[serde(default)]
+    pub websocket: WebSocketSecurityConfig,
+}
+
+/// `hsts = true | false | "raw value" | { max_age, include_subdomains, preload }`.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum HstsSetting {
+    Enabled(bool),
+    Raw(String),
+    Policy(HstsPolicy),
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HstsPolicy {
+    #[serde(default = "default_hsts_max_age")]
+    pub max_age: u64,
+    #[serde(default)]
+    pub include_subdomains: bool,
+    #[serde(default)]
+    pub preload: bool,
+}
+
+pub fn default_hsts_max_age() -> u64 {
+    31_536_000
+}
+
+/// `[security.csrf]`: cross-site request protection for unsafe methods and
+/// WebSocket upgrades. On by default.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CsrfConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Other origins allowed to send unsafe requests and open WebSockets,
+    /// as `scheme://host[:port]` (`https://admin.example.com`).
+    #[serde(default)]
+    pub trusted_origins: Vec<String>,
+    /// Path patterns (rule syntax: `/api/webhooks/*rest`) that skip the
+    /// check entirely - for endpoints called cross-site on purpose.
+    #[serde(default)]
+    pub exempt: Vec<String>,
+}
+
+impl Default for CsrfConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            trusted_origins: Vec::new(),
+            exempt: Vec::new(),
+        }
+    }
+}
+
+/// `[security.websocket]`: the Origin check on WebSocket upgrades (cross-site
+/// WebSocket hijacking). On by default and independent of
+/// `[security.csrf] enabled`; it accepts the same `trusted_origins` and
+/// skips the same `exempt` paths.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct WebSocketSecurityConfig {
+    #[serde(default = "default_true")]
+    pub check_origin: bool,
+}
+
+impl Default for WebSocketSecurityConfig {
+    fn default() -> Self {
+        Self { check_origin: true }
+    }
+}
+
 // app is parsed from gio.toml but consumed by the Node layer, not by Rust server code.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Default)]
@@ -74,6 +174,8 @@ pub struct GioConfig {
     pub guards: Vec<crate::rules::GuardRule>,
     #[serde(default)]
     pub dev: DevConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 impl GioConfig {
@@ -711,6 +813,100 @@ redirect_to    = "/"
             let result = GioConfig::load_from_path(&path);
             let _ = std::fs::remove_file(&path);
             assert!(matches!(result, Err(ConfigError::Parse { .. })), "{bad}");
+        }
+    }
+
+    #[test]
+    fn security_section_defaults_when_absent() {
+        let config = GioConfig::load_from_path(&unique_temp_path("no_security.toml")).unwrap();
+        let security = config.security;
+        assert!(security.headers.is_empty());
+        assert_eq!(security.hsts, None);
+        assert_eq!(security.csp, None);
+        assert!(security.csrf.enabled, "CSRF protection is on by default");
+        assert!(security.csrf.trusted_origins.is_empty());
+        assert!(security.csrf.exempt.is_empty());
+        assert!(
+            security.websocket.check_origin,
+            "the WebSocket origin check is on by default"
+        );
+    }
+
+    #[test]
+    fn security_section_parses_every_hsts_spelling() {
+        let parse = |body: &str| {
+            let path = unique_temp_path("security.toml");
+            std::fs::write(&path, body).unwrap();
+            let result = GioConfig::load_from_path(&path);
+            let _ = std::fs::remove_file(&path);
+            result
+        };
+        let config = parse(
+            r#"
+[security]
+hsts = { max_age = 63072000, include_subdomains = true }
+csp = "default-src 'self'; script-src 'nonce-{nonce}'"
+
+[security.headers]
+x-frame-options = "DENY"
+referrer-policy = ""
+
+[security.csrf]
+enabled = false
+trusted_origins = ["https://admin.example.com"]
+exempt = ["/api/webhooks/*rest"]
+
+[security.websocket]
+check_origin = true
+"#,
+        )
+        .unwrap();
+        let security = config.security;
+        assert!(!security.csrf.enabled);
+        assert!(
+            security.websocket.check_origin,
+            "switched separately from CSRF"
+        );
+        assert_eq!(
+            security.hsts,
+            Some(HstsSetting::Policy(HstsPolicy {
+                max_age: 63_072_000,
+                include_subdomains: true,
+                preload: false,
+            }))
+        );
+        assert_eq!(
+            security.headers.get("referrer-policy").map(String::as_str),
+            Some("")
+        );
+        assert_eq!(security.csrf.exempt, vec!["/api/webhooks/*rest"]);
+        assert!(security.csp.unwrap().contains("{nonce}"));
+
+        let flag = parse("[security]\nhsts = true\n").unwrap();
+        assert_eq!(flag.security.hsts, Some(HstsSetting::Enabled(true)));
+        let raw = parse("[security]\nhsts = \"max-age=60\"\n").unwrap();
+        assert_eq!(
+            raw.security.hsts,
+            Some(HstsSetting::Raw("max-age=60".to_string()))
+        );
+    }
+
+    #[test]
+    fn misspelled_security_keys_fail_loudly() {
+        for body in [
+            "[security]\ncps = \"default-src 'self'\"\n",
+            "[security.csrf]\ntrusted_origin = [\"https://a.example\"]\n",
+            "[security]\nhsts = { maxage = 10 }\n",
+            "[security.websocket]\ncheck_origins = false\n",
+        ] {
+            let path = unique_temp_path("security_typo.toml");
+            std::fs::write(&path, body).unwrap();
+            let result = GioConfig::load_from_path(&path);
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                matches!(result, Err(ConfigError::Parse { .. })),
+                "{body} must be rejected"
+            );
         }
     }
 

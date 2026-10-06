@@ -92,6 +92,23 @@ path = "/admin/*"
 require_cookie = "session"
 redirect_to = "/login"
 
+[security]              # see Security; unknown keys here are a startup error
+csp = ""                # Content-Security-Policy; "{nonce}" = fresh nonce per response
+csp_report_only = ""    # same syntax, sent as Content-Security-Policy-Report-Only
+hsts = true             # unset: only with [server.tls]; true | false | "raw" | { max_age, include_subdomains, preload }
+
+[security.headers]      # override ("value"), remove (""), or add default headers
+x-frame-options = "SAMEORIGIN"
+permissions-policy = "camera=()"
+
+[security.csrf]         # cross-site request protection, on by default
+enabled = true
+trusted_origins = []    # other origins allowed to POST / open WebSockets
+exempt = []             # paths never checked: webhooks, OAuth form_post / SAML callbacks
+
+[security.websocket]
+check_origin = true     # WebSocket Origin check, independent of [security.csrf] enabled
+
 [i18n]
 locales = ["en", "de"]  # empty = i18n disabled
 default_locale = "en"
@@ -336,6 +353,19 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         untrusted network, bind the dev server to <code>127.0.0.1</code> (or
         publish the container port to <code>127.0.0.1</code> only).
       </div>
+
+      <h2>Security</h2>
+      <p>
+        Without any <code>[security]</code> section every response carries{' '}
+        <code>X-Content-Type-Options: nosniff</code>, <code>X-Frame-Options: SAMEORIGIN</code>{' '}
+        and <code>Referrer-Policy: strict-origin-when-cross-origin</code> (plus{' '}
+        <code>Strict-Transport-Security</code> when <code>[server.tls]</code> is enabled), and
+        cross-site <code>POST</code>/<code>PUT</code>/<code>PATCH</code>/<code>DELETE</code>{' '}
+        requests and WebSocket upgrades are refused with <code>403</code>. A
+        Content-Security-Policy with per-response nonces is one line away. Headers your app
+        or a <code>[[headers]]</code> rule sets win over these defaults. See{' '}
+        <a href="/docs/security">Security</a> for every option.
+      </p>
 
       <h2>Rate limits</h2>
       <p>

@@ -15,6 +15,12 @@ import {
   type StreamRenderResult,
 } from './ssr.ts';
 import { clearClientBuildErrors, recordClientBuildError } from './client-build-errors.ts';
+import { cspNonce } from './csp.ts';
+import {
+  isJsonContentType,
+  isUnsupportedMediaTypeError,
+  UnsupportedMediaTypeError,
+} from './request-body.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import type { IPCRequest } from './context.ts';
 import type { RouteModule, LayoutEntry, PageModule, LayoutModule, GsspContext } from './router.ts';
@@ -685,7 +691,7 @@ describe('route.ts method handlers', () => {
       ...makeRequest('/api/notes/42'),
       method: 'POST',
       body: '{"text":"hi"}',
-      headers: { cookie: 'session=abc; theme=dark' },
+      headers: { cookie: 'session=abc; theme=dark', 'content-type': 'application/json' },
     };
     const result = await renderRoute(req, new Map(), noLayouts, undefined, undefined, undefined, {
       handlers,
@@ -801,6 +807,79 @@ describe('route.ts method handlers', () => {
       handlers,
     });
     expect('status' in result && result.status).toBe(204);
+  });
+
+  async function postJson(contentType: string | undefined, handler: RouteHandlerFn) {
+    const handlers = makeHandlers('/api/json', { POST: handler });
+    const req: IPCRequest = {
+      ...makeRequest('/api/json'),
+      method: 'POST',
+      body: '{"a":1}',
+      headers: contentType === undefined ? {} : { 'content-type': contentType },
+    };
+    const result = await renderRoute(req, new Map(), noLayouts, undefined, undefined, undefined, {
+      handlers,
+    });
+    if (!('status' in result)) throw new Error('expected a buffered response');
+    return result;
+  }
+
+  it('json() parses bodies declared as application/json or +json', async () => {
+    for (const contentType of [
+      'application/json',
+      'application/json; charset=utf-8',
+      'Application/JSON',
+      'application/merge-patch+json',
+      'application/vnd.api+json; charset=utf-8',
+    ]) {
+      const result = await postJson(contentType, req => req.json());
+      expect(result.status, contentType).toBe(200);
+      expect(JSON.parse(result.body)).toEqual({ a: 1 });
+    }
+  });
+
+  it('json() on a body not declared as JSON is a 415, not a 500', async () => {
+    for (const contentType of [undefined, 'text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=x', 'application/jsonp', 'text/json']) {
+      const result = await postJson(contentType, req => req.json());
+      expect(result.status, String(contentType)).toBe(415);
+      expect(result.headers['content-type']).toContain('application/json');
+      expect(JSON.parse(result.body)).toMatchObject({ error: 'Unsupported Media Type' });
+    }
+  });
+
+  it('a handler can catch the 415 error and still read the raw body', async () => {
+    const result = await postJson('text/plain', req => {
+      try {
+        return req.json();
+      } catch (err) {
+        if (!isUnsupportedMediaTypeError(err)) throw err;
+        expect(err).toBeInstanceOf(UnsupportedMediaTypeError);
+        expect(err.status).toBe(415);
+        return { raw: req.body };
+      }
+    });
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ raw: '{"a":1}' });
+  });
+
+  it('a handler-thrown UnsupportedMediaTypeError from another module copy maps to 415', async () => {
+    // Route files load in their own module namespace: detection is by brand.
+    const foreign = Object.assign(new Error('nope'), { __gioUnsupportedMediaType: true });
+    const result = await postJson('application/json', () => {
+      throw foreign;
+    });
+    expect(result.status).toBe(415);
+  });
+});
+
+describe('isJsonContentType', () => {
+  it('accepts JSON media types only', () => {
+    expect(isJsonContentType('application/json')).toBe(true);
+    expect(isJsonContentType(' application/ld+json ;profile=x')).toBe(true);
+    expect(isJsonContentType(undefined)).toBe(false);
+    expect(isJsonContentType('')).toBe(false);
+    expect(isJsonContentType('application/json-seq')).toBe(false);
+    expect(isJsonContentType('text/plain; application/json')).toBe(false);
   });
 });
 
@@ -1656,5 +1735,113 @@ describe('flattenResponseHeaders', () => {
     const { headers, setCookies } = flattenResponseHeaders({ link: [], 'set-cookie': [] });
     expect(headers).toEqual({});
     expect(setCookies).toEqual([]);
+  });
+});
+
+// ─── CSP nonces ───────────────────────────────────────────────────────────────
+
+describe('CSP nonce placeholder', () => {
+  const PLACEHOLDER = '0123456789abcdef0123456789abcdef';
+  const clientScripts = new Map([['/', '/_next/static/chunks/route-index-ABC.js']]);
+
+  beforeEach(() => {
+    process.env.GIO_CSP_NONCE_PLACEHOLDER = PLACEHOLDER;
+  });
+  afterEach(() => {
+    delete process.env.GIO_CSP_NONCE_PLACEHOLDER;
+    delete process.env.GIO_EXPORT;
+  });
+
+  /** Opening tags of every executable script (JSON data blocks excluded). */
+  function executableScriptTags(html: string): string[] {
+    return [...html.matchAll(/<script\b[^>]*>/g)]
+      .map(m => m[0])
+      .filter(tag => !tag.includes('type="application/json"'));
+  }
+
+  /** A page whose Suspense boundary resolves after the shell flushed. */
+  function suspendingRoute(): Map<string, RouteModule> {
+    let resolve: (() => void) | undefined;
+    const ready = new Promise<void>(r => { resolve = r; });
+    setTimeout(() => resolve?.(), 20);
+    function Late(): React.ReactElement {
+      React.use(ready);
+      return React.createElement('p', null, 'LATE_CONTENT');
+    }
+    return makeRoute('/', {
+      default: function Page() {
+        return React.createElement(
+          React.Suspense,
+          { fallback: React.createElement('p', null, 'loading') },
+          React.createElement(Late),
+        );
+      },
+    });
+  }
+
+  it('cspNonce() returns the placeholder only when it is well-formed and not exporting', () => {
+    expect(cspNonce()).toBe(PLACEHOLDER);
+    process.env.GIO_CSP_NONCE_PLACEHOLDER = 'not-a-placeholder';
+    expect(cspNonce()).toBeUndefined();
+    process.env.GIO_CSP_NONCE_PLACEHOLDER = PLACEHOLDER;
+    process.env.GIO_EXPORT = '1';
+    expect(cspNonce()).toBeUndefined();
+    delete process.env.GIO_CSP_NONCE_PLACEHOLDER;
+    delete process.env.GIO_EXPORT;
+    expect(cspNonce()).toBeUndefined();
+  });
+
+  it('every inline and bootstrap script of a buffered render carries the placeholder', async () => {
+    const result = await renderRoute(
+      makeRequest('/'), makeRoute('/', { revalidate: 60 }), noLayouts, undefined, undefined, clientScripts,
+    );
+    const html = bodyOf(result);
+    const tags = executableScriptTags(html);
+    expect(tags.some(tag => tag.includes('route-index-ABC.js'))).toBe(true);
+    expect(tags.length).toBeGreaterThanOrEqual(2); // bootstrap module + observer
+    for (const tag of tags) expect(tag).toContain(`nonce="${PLACEHOLDER}"`);
+  });
+
+  it("streamed renders nonce React's Suspense runtime scripts too", async () => {
+    const result = await renderRoute(
+      makeRequest('/'), suspendingRoute(), noLayouts, undefined, undefined, clientScripts, { streaming: true },
+    );
+    const streamed = expectStream(result);
+    const html = streamed.prefix + (await readStreamToString(streamed.stream)) + streamed.suffix;
+    expect(html).toContain('LATE_CONTENT');
+    const tags = executableScriptTags(html);
+    // bootstrap module, React's reveal script(s), and the document observer
+    expect(tags.length).toBeGreaterThanOrEqual(3);
+    for (const tag of tags) expect(tag).toContain(`nonce="${PLACEHOLDER}"`);
+  });
+
+  it('PPR shell and holes renders use the same placeholder', async () => {
+    const routes = makeRoute('/', { shell: 'cache', revalidate: 60 });
+    const shell = expectStream(await renderRoute(
+      makeRequest('/'), routes, noLayouts, undefined, undefined, clientScripts, { streaming: true },
+    ));
+    const holes = expectStream(await renderRoute(
+      { ...makeRequest('/'), skipShell: true }, routes, noLayouts, undefined, undefined, clientScripts, { streaming: true },
+    ));
+    const shellHtml = shell.prefix + (await readStreamToString(shell.stream)) + shell.suffix;
+    const holesHtml = await readStreamToString(holes.stream);
+    for (const tag of executableScriptTags(shellHtml + holesHtml + holes.suffix)) {
+      expect(tag).toContain(`nonce="${PLACEHOLDER}"`);
+    }
+  });
+
+  it('the built-in 404 nonces its inline style', async () => {
+    const result = await renderRoute(makeRequest('/nope'), new Map(), noLayouts);
+    expect(bodyOf(result)).toContain(`<style nonce="${PLACEHOLDER}">`);
+  });
+
+  it('renders no nonce attributes at all without the placeholder', async () => {
+    delete process.env.GIO_CSP_NONCE_PLACEHOLDER;
+    const result = await renderRoute(
+      makeRequest('/'), makeRoute('/', { revalidate: 60 }), noLayouts, undefined, undefined, clientScripts,
+    );
+    expect(bodyOf(result)).not.toContain('nonce=');
+    const missing = await renderRoute(makeRequest('/nope'), new Map(), noLayouts);
+    expect(bodyOf(missing)).not.toContain('nonce=');
   });
 });

@@ -88,6 +88,11 @@ The client IP is the first address in `X-Forwarded-For` that is not a trusted pr
 
 Every response carries `X-Request-Id`. A valid incoming id (`^[A-Za-z0-9._:-]{1,128}$`) from a trusted proxy is kept (unless `accept_request_id = false`), so the proxy's id follows the request; anything else is replaced by a generated UUID. The same id is on the server's log lines for the request (`request{request_id=...}`, kept at any `RUST_LOG` level) and on every JSON line the Node worker logs while handling it (`"requestId"`).
 
+Two security settings depend on the proxy too (see the *Security* docs page):
+
+- **Pass the original `Host` through** (`proxy_set_header Host $host;` in nginx). CSRF protection and the WebSocket origin check compare the browser's `Origin` with the `Host` GioJS receives; a proxy that rewrites it to an internal name makes every same-origin form post and WebSocket look cross-origin (403). If it cannot be passed through, list the public origin in `[security.csrf] trusted_origins`.
+- **HSTS is opt-in when the proxy terminates TLS.** GioJS only sends `Strict-Transport-Security` on its own when `[server.tls]` is enabled; behind a TLS proxy set `[security] hsts = true` in `gio.toml` (or add the header in the proxy).
+
 ## Health check
 
 `/_gio/health` returns JSON and is always available - use it for readiness probes and uptime monitors:

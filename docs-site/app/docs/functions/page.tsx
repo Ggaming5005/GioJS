@@ -58,6 +58,19 @@ export default function Page(): React.JSX.Element {
         <code>PUT</code> / <code>PATCH</code> / <code>DELETE</code> (API endpoints,
         SSE) and <code>wsHandler</code> (WebSockets) - see Route Handlers.
       </p>
+
+      <h2>cspNonce()</h2>
+      <p>
+        The Content-Security-Policy nonce for an inline <code>&lt;script&gt;</code> you
+        render, when <code>[security] csp</code> uses <code>{'{nonce}'}</code>;{' '}
+        <code>undefined</code> otherwise. During server rendering it returns a placeholder the
+        server replaces with each response&apos;s fresh nonce, so it is meant for{' '}
+        <code>nonce</code> attributes only: pass it straight to the attribute (best in the root
+        layout) and never derive anything from it - see <a href="/docs/security">Security</a>.
+      </p>
+      <CodeBlock lang="tsx" code={`import { cspNonce } from '@gio.js/core';
+
+<script nonce={cspNonce()} dangerouslySetInnerHTML={{ __html: 'window.dataLayer = []' }} />`} />
     </>
   );
 }

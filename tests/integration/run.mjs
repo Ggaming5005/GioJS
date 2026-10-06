@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -70,29 +70,90 @@ function significantLogTail(log) {
 /**
  * Raw HTTP request against BASE with full control of Host / Origin /
  * Sec-Fetch-Site (fetch treats those as browser-owned). Resolves with the
- * status and body; event streams resolve on headers and are torn down.
+ * status, headers and body; event streams resolve on headers and are torn
+ * down.
  */
-function rawRequest(method, path, headers = {}) {
+function rawRequest(method, path, headers = {}, body = undefined) {
   const url = new URL(path, BASE);
   return new Promise((resolve, reject) => {
     const req = httpRequest(
       { method, hostname: url.hostname, port: url.port, path: url.pathname + url.search, headers },
       (res) => {
         if (String(res.headers['content-type'] ?? '').startsWith('text/event-stream')) {
-          resolve({ status: res.statusCode, body: '' });
+          resolve({ status: res.statusCode, headers: res.headers, body: '' });
           res.destroy();
           return;
         }
-        let body = '';
+        let text = '';
         res.setEncoding('utf8');
-        res.on('data', (chunk) => { body += chunk; });
-        res.on('end', () => resolve({ status: res.statusCode, body }));
+        res.on('data', (chunk) => { text += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: text }));
         res.on('error', reject);
       },
     );
     req.on('error', reject);
-    req.end();
+    req.end(body);
   });
+}
+
+/**
+ * Send a WebSocket upgrade request and resolve with the status code of the
+ * answer (101 when accepted), tearing the connection down right after.
+ */
+function upgradeStatus(path, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const socket = connect(39517, '127.0.0.1', () => {
+      const lines = [
+        `GET ${path} HTTP/1.1`,
+        'Host: 127.0.0.1:39517',
+        'Connection: Upgrade',
+        'Upgrade: websocket',
+        'Sec-WebSocket-Version: 13',
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+        ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
+      ];
+      socket.write(`${lines.join('\r\n')}\r\n\r\n`);
+    });
+    let data = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      data += chunk;
+      const line = data.split('\r\n')[0];
+      if (data.includes('\r\n')) {
+        socket.destroy();
+        resolve(Number(line.split(' ')[1]));
+      }
+    });
+    socket.on('error', reject);
+  });
+}
+
+/** The nonce a CSP header value grants (`'nonce-…'`), or null. */
+function cspNonceOf(csp) {
+  return /'nonce-([^']+)'/.exec(csp ?? '')?.[1] ?? null;
+}
+
+/** Opening tags of every executable script (JSON data blocks excluded). */
+function executableScriptTags(html) {
+  return [...html.matchAll(/<script\b[^>]*>/g)]
+    .map((m) => m[0])
+    .filter((tag) => !tag.includes('type="application/json"'));
+}
+
+/**
+ * Assert the CSP header carries a nonce and every executable script in the
+ * body carries exactly that nonce. Returns the nonce.
+ */
+function assertNoncedResponse(res, html, what) {
+  const nonce = cspNonceOf(res.headers.get('content-security-policy'));
+  assert.ok(nonce, `${what}: CSP header with a nonce`);
+  assert.match(nonce, /^[A-Za-z0-9+/]{32}$/, `${what}: 192-bit base64 nonce`);
+  const tags = executableScriptTags(html);
+  assert.ok(tags.length > 0, `${what}: has inline/bootstrap scripts`);
+  for (const tag of tags) {
+    assert.ok(tag.includes(` nonce="${nonce}"`), `${what}: ${tag} must carry the header nonce`);
+  }
+  return nonce;
 }
 
 let passed = 0;
@@ -162,12 +223,12 @@ async function linkFixtureDeps(targetDir = fixtureDir) {
 }
 
 /**
- * Dev-watch needs a fixture it can mutate. The copy lives at the same
- * directory depth as the original so the fixture's relative
- * `../../../packages/` imports keep resolving.
+ * Dev-watch needs a fixture it can mutate (and the CSP phase one with its
+ * own gio.toml). The copy lives at the same directory depth as the original
+ * so the fixture's relative `../../../packages/` imports keep resolving.
  */
-async function copyFixtureForDev() {
-  const devDir = join(repoRoot, 'tests', 'integration', '.dev-fixture');
+async function copyFixtureForDev(name = '.dev-fixture') {
+  const devDir = join(repoRoot, 'tests', 'integration', name);
   await rm(devDir, { recursive: true, force: true });
   const items = [
     'app', 'lib', 'components', 'public', 'gio.toml', 'gio.config.ts', 'middleware.ts', 'package.json',
@@ -1229,6 +1290,110 @@ async function main() {
       assert.equal(res.headers.get('x-fixture-header'), 'from-middleware');
     });
 
+    await test('default security headers on pages, static files, redirects, errors and /_gio', async () => {
+      const responses = {
+        page: await fetch(`${BASE}/`),
+        static: await fetch(`${BASE}/robots.txt`),
+        chunk: await fetch(`${BASE}/_next/static/chunks/nonexistent.js`),
+        redirect: await fetch(`${BASE}/moved`, { redirect: 'manual' }),
+        notFound: await fetch(`${BASE}/definitely-missing`),
+        routeHandler: await fetch(`${BASE}/api/notes`),
+        health: await fetch(`${BASE}/_gio/health`),
+      };
+      assert.equal(responses.redirect.status, 301);
+      assert.equal(responses.notFound.status, 404);
+      const rejected = await rawGet('/%zz');
+      assert.equal(rejected.status, 400);
+      const all = [
+        ...Object.entries(responses).map(([what, res]) => [what, (name) => res.headers.get(name)]),
+        ['path rejection', (name) => rejected.headers[name] ?? null],
+      ];
+      for (const [what, get] of all) {
+        assert.equal(get('x-content-type-options'), 'nosniff', what);
+        assert.equal(get('x-frame-options'), 'SAMEORIGIN', what);
+        assert.equal(get('referrer-policy'), 'strict-origin-when-cross-origin', what);
+        assert.equal(get('strict-transport-security'), null, `${what}: no HSTS over plain HTTP`);
+        assert.equal(get('content-security-policy'), null, `${what}: CSP is opt-in`);
+        assert.equal(get('x-powered-by'), null, what);
+      }
+    });
+
+    await test('a header rule overrides or removes a security default, cache hits included', async () => {
+      for (let i = 0; i < 2; i++) {
+        const res = await fetch(`${BASE}/cached`);
+        assert.match(res.headers.get('x-gio-cache') ?? '', /^hit/);
+        assert.equal(res.headers.get('x-frame-options'), 'DENY');
+        assert.equal(res.headers.get('referrer-policy'), null, 'an empty rule value removes it');
+        assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+      }
+    });
+
+    const selfOrigin = new URL(BASE).origin;
+    const postNote = (headers, text = 'csrf-probe') =>
+      rawRequest('POST', '/api/notes', { 'content-type': 'application/json', ...headers }, JSON.stringify({ text }));
+
+    await test('CSRF: cross-site POSTs are refused before reaching the route handler', async () => {
+      const refused = [
+        { origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' },
+        { 'sec-fetch-site': 'cross-site' },
+        { origin: 'http://sibling.127.0.0.1.nip.io', 'sec-fetch-site': 'same-site' },
+        { origin: 'https://evil.example' },
+        { origin: 'null' },
+      ];
+      for (const headers of refused) {
+        const res = await postNote(headers);
+        assert.equal(res.status, 403, JSON.stringify(headers));
+        assert.match(res.body, /\[security\.csrf\] trusted_origins/);
+        assert.equal(res.headers['x-content-type-options'], 'nosniff');
+      }
+      const { notes } = await (await fetch(`${BASE}/api/notes`)).json();
+      assert.ok(!notes.includes('csrf-probe'), 'no refused request may reach the handler');
+      // A hostile page can loop forged requests: one warning per origin.
+      const warned = () => log.match(/cross-site request blocked.*evil\.example/g) ?? [];
+      await waitFor('CSRF warning', () => Promise.resolve(warned().length > 0), 5_000);
+      assert.equal(warned().length, 1, 'two refusals from one origin, one warning');
+    });
+
+    await test('CSRF: same-origin, header-less, trusted-origin and exempt POSTs pass', async () => {
+      const allowed = [
+        { origin: selfOrigin, 'sec-fetch-site': 'same-origin' },
+        { origin: selfOrigin },
+        { 'sec-fetch-site': 'none' },
+        {},
+        { origin: 'https://admin.fixture.test', 'sec-fetch-site': 'cross-site' },
+      ];
+      for (const headers of allowed) {
+        const res = await postNote(headers, 'csrf-allowed');
+        assert.equal(res.status, 200, JSON.stringify(headers));
+      }
+      const webhook = await rawRequest('POST', '/api/webhooks/ping', {
+        origin: 'https://hooks.example',
+        'sec-fetch-site': 'cross-site',
+      });
+      assert.equal(webhook.status, 200, '[security.csrf] exempt path');
+      assert.deepEqual(JSON.parse(webhook.body), { received: true });
+      // Safe methods are never checked: cross-site links and images work.
+      const get = await rawRequest('GET', '/cached', { origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' });
+      assert.equal(get.status, 200);
+    });
+
+    await test('WebSocket upgrades from a foreign origin are refused with 403', async () => {
+      assert.equal(await upgradeStatus('/live', { Origin: 'https://evil.example' }), 403);
+      assert.equal(
+        await upgradeStatus('/live', { Origin: 'https://evil.example', 'Sec-Fetch-Site': 'cross-site' }),
+        403,
+      );
+      assert.equal(await upgradeStatus('/live', { Origin: selfOrigin }), 101);
+      assert.equal(await upgradeStatus('/live', { Origin: 'https://admin.fixture.test' }), 101);
+      assert.equal(await upgradeStatus('/live'), 101, 'non-browser clients send no Origin');
+    });
+
+    await test('route.ts json() answers 415 for bodies not declared as JSON', async () => {
+      const res = await fetch(`${BASE}/api/notes`, { method: 'POST', body: JSON.stringify({ text: 'plain' }) });
+      assert.equal(res.status, 415);
+      assert.equal((await res.json()).error, 'Unsupported Media Type');
+    });
+
     await test('killing the Node worker mid-flight recovers within seconds', async () => {
       const pidsBefore = workerPids();
       assert.ok(pidsBefore.length > 0, 'worker pid parsed from server log');
@@ -2042,7 +2207,318 @@ async function standalonePhase() {
   }
 }
 
+/** The policy the CSP phase adds to its fixture copy's gio.toml. */
+const CSP_TOML = `
+[security]
+csp = """
+  default-src 'self'; script-src 'self' 'nonce-{nonce}' 'strict-dynamic';
+  style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'
+"""
+# Forced HSTS (TLS terminated by a proxy) and an opt-in extra header.
+hsts = { max_age = 600 }
+
+[security.headers]
+permissions-policy = "camera=()"
+`;
+
+/** Content types the CSP phase's echo route answers in (`?type=`). */
+const CSP_ECHO_TYPES = [
+  'text/javascript',
+  'text/css',
+  'application/xml',
+  'text/csv',
+  'image/svg+xml',
+  'application/octet-stream',
+];
+
+/**
+ * Phase 1c (CSP nonces): a fixture copy whose gio.toml turns on a nonce
+ * Content-Security-Policy, in its own server instances - per-response
+ * nonces make every page response unique, while the main phase compares
+ * bodies across requests. The copy also turns CSRF protection off, which
+ * must leave the WebSocket origin check on. Runs: production (every serve
+ * path: buffered miss, cache hit, PPR shell + holes, streaming, 404, route
+ * handlers in any content type), a restart on the same disk cache, the
+ * plain fixture (CSP off) on that cache, a new deployment on that cache
+ * (placeholder rotated), then dev (overlay and error page scripts).
+ */
+async function cspPhase() {
+  const binary = findServerBinary();
+  const cspDir = await copyFixtureForDev('.csp-fixture');
+  const toml = await readFile(join(cspDir, 'gio.toml'), 'utf8');
+  assert.ok(toml.includes('[security.csrf]\n'));
+  await writeFile(
+    join(cspDir, 'gio.toml'),
+    toml.replace('[security.csrf]\n', '[security.csrf]\nenabled = false\n') + CSP_TOML,
+  );
+  await mkdir(join(cspDir, 'app', 'csp-boom'), { recursive: true });
+  await writeFile(
+    join(cspDir, 'app', 'csp-boom', 'page.tsx'),
+    "export default function Boom() {\n  throw new Error('CSP_BOOM');\n}\n",
+  );
+  // cspNonce() echoed into non-HTML bodies, and a body the handler
+  // compressed itself (which the server cannot search).
+  const coreSrc = '../../../../../../packages/giojs-core/src';
+  await mkdir(join(cspDir, 'app', 'api', 'csp-echo'), { recursive: true });
+  await writeFile(
+    join(cspDir, 'app', 'api', 'csp-echo', 'route.ts'),
+    `import { cspNonce } from '${coreSrc}/csp.ts';
+import type { GioRequest } from '${coreSrc}/context.ts';
+
+export function GET(req: GioRequest): Response {
+  const body = \`window.__cfg={nonce:\${JSON.stringify(cspNonce())}}\`;
+  return new Response(body, { headers: { 'content-type': req.query['type'] ?? 'text/javascript' } });
+}
+`,
+  );
+  await mkdir(join(cspDir, 'app', 'api', 'csp-gzip'), { recursive: true });
+  await writeFile(
+    join(cspDir, 'app', 'api', 'csp-gzip', 'route.ts'),
+    `import { gzipSync } from 'node:zlib';
+import { cspNonce } from '${coreSrc}/csp.ts';
+
+export function GET(): Response {
+  return new Response(gzipSync(\`nonce=\${cspNonce()}\`), {
+    headers: { 'content-type': 'text/plain', 'content-encoding': 'gzip' },
+  });
+}
+`,
+  );
+  const sharedCache = await mkdtemp(join(tmpdir(), 'gio-int-csp-cache-'));
+  const devCache = await mkdtemp(join(tmpdir(), 'gio-int-csp-devcache-'));
+  /** The cache's one placeholder file (one per deployment, older ones removed). */
+  const placeholderOf = async (cacheDir) => {
+    const files = (await readdir(join(cacheDir, 'meta'))).filter((name) =>
+      name.startsWith('csp-nonce-placeholder'),
+    );
+    assert.equal(files.length, 1, `one placeholder file, got ${files.join(', ')}`);
+    assert.match(files[0], /^csp-nonce-placeholder-[0-9a-f]{16}$/);
+    return (await readFile(join(cacheDir, 'meta', files[0]), 'utf8')).trim();
+  };
+  const bodies = [];
+  const fetchHtml = async (path, init) => {
+    const res = await fetch(`${BASE}${path}`, init);
+    const html = await res.text();
+    bodies.push(html);
+    return { res, html };
+  };
+  let firstPlaceholder;
+  let rotatedPlaceholder;
+  let cspDeploymentId;
+  const deploymentId = async () => (await (await fetch(`${BASE}/_gio/health`)).json()).deploymentId;
+
+  const runs = [
+    {
+      label: 'production',
+      appDir: cspDir,
+      cacheDir: sharedCache,
+      mode: 'production',
+      async check(log) {
+        firstPlaceholder = await placeholderOf(sharedCache);
+        assert.match(firstPlaceholder, /^[0-9a-f]{32}$/);
+
+        await test('CSP: buffered render and cache hit carry fresh nonces matching the header', async () => {
+          const miss = await fetchHtml('/cached');
+          assert.equal(miss.res.headers.get('x-gio-cache'), 'miss; stored');
+          const missNonce = assertNoncedResponse(miss.res, miss.html, 'miss');
+          const hit = await fetchHtml('/cached');
+          assert.match(hit.res.headers.get('x-gio-cache') ?? '', /^hit/);
+          // Substituted before compression: the body went out gzipped.
+          assert.equal(hit.res.headers.get('content-encoding'), 'gzip');
+          const hitNonce = assertNoncedResponse(hit.res, hit.html, 'hit');
+          assert.notEqual(hitNonce, missNonce, 'every response gets its own nonce');
+          assert.match(hit.html, /__GIO_DEPLOYMENT_ID__/, 'the Rust-injected script is nonced too');
+          assert.match(hit.res.headers.get('content-security-policy'), /default-src 'self'; script-src/);
+        });
+
+        await test('CSP: PPR shell hits and their streamed holes share one fresh nonce', async () => {
+          const stored = await fetchHtml('/ppr', { headers: { cookie: 'who=csp1' } });
+          assert.equal(stored.res.headers.get('x-gio-cache'), 'ppr; shell=stored');
+          const storedNonce = assertNoncedResponse(stored.res, stored.html, 'ppr miss');
+          await sleep(250);
+          const nonces = new Set([storedNonce]);
+          for (const who of ['csp2', 'csp3']) {
+            const hit = await fetchHtml('/ppr', { headers: { cookie: `who=${who}` } });
+            assert.equal(hit.res.headers.get('x-gio-cache'), 'ppr; shell=hit');
+            assert.match(hit.html, new RegExp(`PPR_FIXTURE_HOLE who=${who}`));
+            nonces.add(assertNoncedResponse(hit.res, hit.html, `ppr hit ${who}`));
+          }
+          assert.equal(nonces.size, 3);
+        });
+
+        await test('CSP: streamed and error pages are nonced as well', async () => {
+          const streamed = await fetchHtml('/slow');
+          assert.equal(streamed.res.headers.get('x-gio-cache'), 'bypass');
+          assertNoncedResponse(streamed.res, streamed.html, 'streamed');
+          const missing = await fetchHtml('/csp-missing-page');
+          assert.equal(missing.res.status, 404);
+          assertNoncedResponse(missing.res, missing.html, '404');
+        });
+
+        await test('CSP: forced HSTS and opt-in headers apply over plain HTTP', async () => {
+          const res = await fetch(`${BASE}/robots.txt`);
+          assert.equal(res.headers.get('strict-transport-security'), 'max-age=600');
+          assert.equal(res.headers.get('permissions-policy'), 'camera=()');
+          assert.ok(cspNonceOf(res.headers.get('content-security-policy')));
+        });
+
+        await test('CSP: route handlers echoing cspNonce() send the nonce in every content type', async () => {
+          for (const type of CSP_ECHO_TYPES) {
+            const res = await fetchHtml(`/api/csp-echo?type=${encodeURIComponent(type)}`);
+            assert.equal(res.res.status, 200, type);
+            const nonce = cspNonceOf(res.res.headers.get('content-security-policy'));
+            assert.equal(res.html, `window.__cfg={nonce:${JSON.stringify(nonce)}}`, type);
+            // The nonce is as long as the placeholder: a length still holds.
+            const length = res.res.headers.get('content-length');
+            if (length !== null) assert.equal(Number(length), res.html.length, type);
+          }
+        });
+
+        await test('CSP: a dynamic body with its own Content-Encoding is refused, not leaked', async () => {
+          for (let i = 0; i < 2; i += 1) {
+            const res = await rawRequest('GET', '/api/csp-gzip');
+            assert.equal(res.status, 500);
+            assert.equal(res.headers['content-encoding'], undefined);
+            bodies.push(res.body);
+          }
+          const refused = () => log().match(/refused a dynamic response that sets its own Content-Encoding/g) ?? [];
+          await waitFor('Content-Encoding refusal logged', () => Promise.resolve(refused().length > 0), 5_000);
+          assert.equal(refused().length, 1, 'logged once per path');
+        });
+
+        await test('CSRF off keeps the WebSocket origin check on', async () => {
+          const res = await rawRequest(
+            'POST',
+            '/api/notes',
+            { 'content-type': 'application/json', origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' },
+            JSON.stringify({ text: 'csrf-off' }),
+          );
+          assert.equal(res.status, 200, '[security.csrf] enabled = false');
+          assert.equal(await upgradeStatus('/live', { Origin: 'https://evil.example' }), 403);
+          assert.equal(await upgradeStatus('/live', { Origin: new URL(BASE).origin }), 101);
+        });
+      },
+    },
+    {
+      label: 'restart',
+      appDir: cspDir,
+      cacheDir: sharedCache,
+      mode: 'production',
+      async check() {
+        await test('CSP: the disk cache survives a restart and its pages still get nonces', async () => {
+          assert.equal(await placeholderOf(sharedCache), firstPlaceholder, 'placeholder persisted');
+          cspDeploymentId = await deploymentId();
+          const hit = await fetchHtml('/cached');
+          assert.match(hit.res.headers.get('x-gio-cache') ?? '', /^hit/);
+          assertNoncedResponse(hit.res, hit.html, 'hit after restart');
+        });
+      },
+    },
+    {
+      label: 'CSP off',
+      appDir: fixtureDir,
+      cacheDir: sharedCache,
+      mode: 'production',
+      async check() {
+        await test('CSP: turning it off never serves pages cached with the placeholder', async () => {
+          // Same build, same cache key: only the CSP setting differs.
+          assert.equal(await deploymentId(), cspDeploymentId);
+          const res = await fetchHtml('/cached');
+          assert.equal(res.res.headers.get('x-gio-cache'), 'miss; stored');
+          assert.equal(res.res.headers.get('content-security-policy'), null);
+          assert.doesNotMatch(res.html, /nonce=/);
+        });
+      },
+    },
+    {
+      label: 'new deployment',
+      appDir: cspDir,
+      cacheDir: sharedCache,
+      mode: 'production',
+      env: { GIO_DEPLOYMENT_ID: 'csp-rotated-deployment' },
+      async check() {
+        await test('CSP: a new deployment rotates the placeholder', async () => {
+          assert.equal(await deploymentId(), 'csp-rotated-deployment');
+          rotatedPlaceholder = await placeholderOf(sharedCache);
+          assert.notEqual(rotatedPlaceholder, firstPlaceholder);
+          const res = await fetchHtml('/cached');
+          assert.equal(res.res.headers.get('x-gio-cache'), 'miss; stored');
+          assertNoncedResponse(res.res, res.html, 'new deployment');
+        });
+      },
+    },
+    {
+      label: 'development',
+      appDir: cspDir,
+      cacheDir: devCache,
+      mode: 'development',
+      async check() {
+        await test('CSP (dev): the error overlay and dev error page scripts carry the nonce', async () => {
+          const page = await fetchHtml('/');
+          assertNoncedResponse(page.res, page.html, 'dev page');
+          assert.match(page.html, /<script nonce="[^"]+" id="__gio_dev_overlay_script">/);
+          const boom = await fetchHtml('/csp-boom');
+          assert.equal(boom.res.status, 500);
+          assert.match(boom.html, /__GIO_SSR_ERROR__=\{"message":"CSP_BOOM/);
+          assertNoncedResponse(boom.res, boom.html, 'dev error page');
+        });
+        await test('CSP: the nonce placeholder never reaches a client', async () => {
+          const placeholders = [firstPlaceholder, rotatedPlaceholder, await placeholderOf(devCache)];
+          assert.ok(bodies.length > 10);
+          for (const html of bodies) {
+            for (const placeholder of placeholders) assert.ok(!html.includes(placeholder));
+          }
+        });
+      },
+    },
+  ];
+
+  for (const run of runs) {
+    let log = '';
+    const server = spawn(binary, [], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        GIO_APP_DIR: join(run.appDir, 'app'),
+        GIO_CACHE_DIR: run.cacheDir,
+        RUST_LOG: 'info',
+        NODE_ENV: run.mode,
+        ...run.env,
+      },
+    });
+    server.stdout.on('data', (d) => { log += d.toString(); });
+    server.stderr.on('data', (d) => { log += d.toString(); });
+    let serverGone = false;
+    const serverExited = new Promise((r) =>
+      server.on('exit', () => { serverGone = true; r(); }),
+    );
+    try {
+      await waitFor(`server health (CSP phase, ${run.label})`, async () => {
+        const res = await fetch(`${BASE}/_gio/health`);
+        return res.ok && (await res.json()).nodeReady === true;
+      }, 30_000);
+      await run.check(() => log);
+    } catch (err) {
+      console.error(`\nintegration (CSP phase, ${run.label}): FAILED`);
+      console.error(err);
+      console.error('\n── server log tail ──');
+      console.error(significantLogTail(log));
+      process.exitCode = 1;
+    } finally {
+      if (!serverGone) server.kill();
+      await serverExited;
+    }
+    if (process.exitCode === 1) break;
+  }
+  for (const dir of [sharedCache, devCache, cspDir]) {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 await main();
+if (process.exitCode !== 1) {
+  await cspPhase();
+}
 if (process.exitCode !== 1) {
   await unsetNodeEnvPhase();
 }

@@ -49,6 +49,12 @@ import { clientBuildErrorFor } from './client-build-errors.ts';
 import { createErrorDigest, describeError, isDevMode } from './mode.ts';
 import { isNotFoundError } from './not-found.ts';
 import { buildSegmentTree, type SegmentLevel, type GioErrorProps } from './segment-tree.ts';
+import { cspNonce, nonceAttr } from './csp.ts';
+import {
+  isJsonContentType,
+  isUnsupportedMediaTypeError,
+  UnsupportedMediaTypeError,
+} from './request-body.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -215,6 +221,8 @@ function makeGioRequest(req: IPCRequest, params: Record<string, string>): GioReq
     body: req.body,
     bodyBase64: req.bodyBase64,
     json<T = unknown>(): T {
+      const contentType = req.headers['content-type'];
+      if (!isJsonContentType(contentType)) throw new UnsupportedMediaTypeError(contentType);
       if (req.body === null) throw new Error('request has no body');
       if (req.bodyBase64) throw new Error('request body is binary (base64) - decode it manually');
       return JSON.parse(req.body) as T;
@@ -412,7 +420,7 @@ async function streamToString(stream: ReadableStream<Uint8Array>): Promise<strin
 }
 
 // Inline observer handles the no-root-layout case where useEffect never runs.
-const OBSERVER_SCRIPT = `<script>(function(){var o=new IntersectionObserver(function(e){e.forEach(function(e){if(e.isIntersecting){e.target.dataset.gioAnimateState='entered';o.unobserve(e.target);}});},{threshold:0.1});document.querySelectorAll('[data-gio-animate]').forEach(function(el){o.observe(el);});})();</script>`;
+const OBSERVER_SCRIPT_BODY = `(function(){var o=new IntersectionObserver(function(e){e.forEach(function(e){if(e.isIntersecting){e.target.dataset.gioAnimateState='entered';o.unobserve(e.target);}});},{threshold:0.1});document.querySelectorAll('[data-gio-animate]').forEach(function(el){o.observe(el);});})();`;
 
 /**
  * Default 404 document, served when no `app/not-found.*` exists. Also written
@@ -425,10 +433,29 @@ export const BUILTIN_404_HTML = `<!DOCTYPE html><html lang="en"><head><meta char
 // (they must exist identically in the client element tree), so this shell
 // only supplies the document skeleton a missing root layout would provide.
 const DOCUMENT_PREFIX = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>';
-const DOCUMENT_SUFFIX = `${OBSERVER_SCRIPT}</body></html>`;
+
+/** Closing document shell; its inline script carries the CSP nonce. */
+function documentSuffix(): string {
+  return `<script${nonceAttr()}>${OBSERVER_SCRIPT_BODY}</script></body></html>`;
+}
 
 function wrapWithDocument(inner: string): string {
-  return `${DOCUMENT_PREFIX}${inner}${DOCUMENT_SUFFIX}`;
+  return `${DOCUMENT_PREFIX}${inner}${documentSuffix()}`;
+}
+
+/**
+ * The CSP nonce as React props / render options: React stamps it on its
+ * bootstrap module scripts and its streaming runtime scripts (Suspense
+ * reveals), and we pass it to every inline script we create.
+ */
+function nonceOption(): { nonce?: string } {
+  const nonce = cspNonce();
+  return nonce !== undefined ? { nonce } : {};
+}
+
+/** The built-in 404 document, its inline style nonced like our scripts. */
+function builtin404Html(): string {
+  return BUILTIN_404_HTML.replace('<style>', `<style${nonceAttr()}>`);
 }
 
 /**
@@ -810,6 +837,7 @@ export async function renderRoute(
         : null,
       clientBuildError !== undefined
         ? React.createElement('script', {
+            ...nonceOption(),
             dangerouslySetInnerHTML: { __html: devOverlayErrorScript(clientBuildError) },
           })
         : null,
@@ -825,6 +853,7 @@ export async function renderRoute(
     // Resolves once React's shell is ready; Suspense content streams later.
     const stream = await renderToReadableStream(element, {
       bootstrapModules: envelopeJson !== null && entryScript !== undefined ? [entryScript] : [],
+      ...nonceOption(),
       // Cancelled requests (client disconnect / Rust timeout) abort the React
       // render instead of finishing output nobody will read.
       ...(signal !== undefined ? { signal } : {}),
@@ -894,7 +923,7 @@ export async function renderRoute(
         },
         stream,
         prefix: rootLayoutEntry !== undefined ? '' : DOCUMENT_PREFIX,
-        suffix: rootLayoutEntry !== undefined ? '' : DOCUMENT_SUFFIX,
+        suffix: rootLayoutEntry !== undefined ? '' : documentSuffix(),
         ...(skipShell
           ? { shellBoundary: 'discard' as const }
           : pprShell
@@ -1079,6 +1108,15 @@ async function runRouteHandler(
         body: JSON.stringify({ error: 'Not Found' }),
       };
     }
+    // A client error, not a handler failure: nothing to log or hide.
+    if (isUnsupportedMediaTypeError(err)) {
+      return {
+        ...base,
+        status: 415,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+        body: JSON.stringify({ error: 'Unsupported Media Type', message: err.message }),
+      };
+    }
     const digest = createErrorDigest();
     logger.error('route handler failed', {
       path: req.path,
@@ -1251,7 +1289,7 @@ async function renderNotFound(
     id: req.id,
     status: 404,
     headers: { 'content-type': 'text/html; charset=utf-8' },
-    body: BUILTIN_404_HTML,
+    body: builtin404Html(),
     cacheable: false,
     cacheMaxAge: 0,
   };
@@ -1317,6 +1355,7 @@ async function renderSpecialPage(
 
     const stream = await renderToReadableStream(element, {
       bootstrapModules: [],
+      ...nonceOption(),
       ...(signal !== undefined ? { signal } : {}),
       onError(streamError) {
         logger.error('special page stream error', {

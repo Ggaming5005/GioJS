@@ -12,6 +12,8 @@ export type { GioNodePlugin } from './plugin.ts';
 export { notFound } from './not-found.ts';
 export type { GioErrorProps, GioErrorInfo } from './segment-tree.ts';
 export { defineMiddleware } from './middleware.ts';
+export { cspNonce } from './csp.ts';
+export { UnsupportedMediaTypeError, isUnsupportedMediaTypeError } from './request-body.ts';
 export type {
   MiddlewareRules,
   MiddlewareRedirect,
