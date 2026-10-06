@@ -606,6 +606,32 @@ async function main() {
       assert.match(await unmatched.text(), /FIXTURE_CUSTOM_404/);
     });
 
+    await test('a cached page that starts answering notFound() is evicted by its revalidation', async () => {
+      const first = await fetch(`${BASE}/retired`);
+      assert.equal(first.status, 200);
+      assert.match(await first.text(), /FIXTURE_RETIRED_PAGE/);
+      const cached = await fetch(`${BASE}/retired`);
+      await cached.text();
+      assert.match(cached.headers.get('x-gio-cache') ?? '', /^hit/);
+      const retire = await fetch(`${BASE}/retired`, { method: 'POST' });
+      assert.equal(retire.status, 200);
+      await retire.text();
+      // Past max_age (1s) the stale copy goes out once more while the
+      // background refresh renders...
+      await sleep(1_100);
+      const stale = await fetch(`${BASE}/retired`);
+      assert.equal(stale.status, 200);
+      await stale.text();
+      assert.match(stale.headers.get('x-gio-cache') ?? '', /^stale; .*revalidating$/);
+      // ...and that refresh's 404 evicts it, well inside the 10s SWR window.
+      const gone = await waitFor('the retired page to answer 404', async () => {
+        const res = await fetch(`${BASE}/retired`);
+        const html = await res.text();
+        return res.status === 404 ? html : undefined;
+      }, 4_000);
+      assert.match(gone, /FIXTURE_CUSTOM_404/);
+    });
+
     await test('a nested error.* answers a failed render with 500 and only a digest', async () => {
       const res = await fetch(`${BASE}/dashboard/broken`);
       assert.equal(res.status, 500);

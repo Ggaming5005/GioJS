@@ -511,6 +511,135 @@ describe('loading.*', () => {
     expect(bodyOf(result)).toContain('<!--$!-->');
   });
 
+  it('attributes the 500 to the error that aborted the boundary, not one a Suspense inside it recovered from', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const Boom = (): React.ReactNode => {
+      throw new Error('inner suspense boom');
+    };
+    const Later = (): React.ReactNode => {
+      throw new Error('page boom');
+    };
+    const Page = (): React.ReactNode =>
+      React.createElement(
+        'div',
+        null,
+        React.createElement(React.Suspense, { fallback: 'inner loading' }, React.createElement(Boom)),
+        React.createElement(Later),
+      );
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const results = [];
+    try {
+      for (const page of [{ default: Page }, { default: Page, revalidate: 60 }]) {
+        results.push(
+          await render('/feed', routeAt('/feed', 'feed', page), layouts, {
+            segmentFiles: files(),
+            streaming: true,
+          }),
+        );
+      }
+    } finally {
+      spy.mockRestore();
+    }
+    const pageBoomLines = writes.join('').split('\n').filter(line => line.includes('"error":"page boom"'));
+    for (const result of results) {
+      expect(status(result)).toBe(500);
+      expect(bodyOf(result)).toContain('ROOT_ERROR message=page boom');
+      // The reference points at the log line of the error that caused the 500.
+      const digest = /digest=([0-9a-f]{12})/.exec(bodyOf(result))?.[1];
+      expect(digest).toBeDefined();
+      expect(pageBoomLines.some(line => line.includes(`"digest":"${digest ?? ''}"`))).toBe(true);
+    }
+  });
+
+  it('judges nested loading.* boundaries the same buffered as streamed', async () => {
+    // The feed layout suspends, so the inner boundary is only entered after
+    // the outer content suspended: the page's error comes after the
+    // response could have started, on both paths.
+    const suspendingLayouts = (): Map<string, LayoutEntry> => {
+      // Per render: React remembers a settled promise and would not suspend again.
+      const gate = new Promise<void>(resolve => setTimeout(resolve, 10));
+      const result = new Map(layouts);
+      result.set('feed', {
+        filePath: '/app/feed/layout.tsx',
+        dir: 'feed',
+        load: async () => ({
+          default: function FeedLayout({ children }: { children?: React.ReactNode }) {
+            React.use(gate);
+            return React.createElement('section', { 'data-layout': 'FEED_LAYOUT' }, children);
+          },
+        }),
+      });
+      return result;
+    };
+    const nested = (): SegmentFiles =>
+      segmentFiles({
+        loading: { '': text('p', 'ROOT_LOADING'), feed: text('p', 'FEED_LOADING') },
+        error: { '': errorFile('ROOT_ERROR') },
+      });
+    const Page = (): React.ReactNode => {
+      throw new Error('feed exploded');
+    };
+    const streamed = expectStream(
+      await render('/feed', routeAt('/feed', 'feed', { default: Page }), suspendingLayouts(), {
+        segmentFiles: nested(),
+        streaming: true,
+      }),
+    );
+    expect(streamed.head.status).toBe(200);
+    await readAll(streamed.stream);
+    const buffered = await render(
+      '/feed',
+      routeAt('/feed', 'feed', { default: Page, revalidate: 60 }),
+      suspendingLayouts(),
+      { segmentFiles: nested(), streaming: true },
+    );
+    expect(status(buffered)).toBe(200);
+    expect('cacheable' in buffered && buffered.cacheable).toBe(false);
+    expect(bodyOf(buffered)).toContain('<!--$!-->');
+  });
+
+  it('never caches a PPR shell that holds a boundary React gave up on', async () => {
+    const Broken = (): React.ReactNode => {
+      throw new Error('widget failed');
+    };
+    const Page = (): React.ReactNode =>
+      React.createElement(
+        'main',
+        null,
+        'FEED_SHELL',
+        React.createElement(React.Suspense, { fallback: 'widget loading' }, React.createElement(Broken)),
+      );
+    const routes = routeAt('/feed', 'feed', { default: Page, revalidate: 60, shell: 'cache' });
+    const streamed = expectStream(await render('/feed', routes, layouts, { segmentFiles: files(), streaming: true }));
+    expect(streamed.head.status).toBe(200);
+    expect(streamed.head.cacheable).toBe(false);
+    expect(streamed.head.cacheMaxAge).toBe(0);
+    expect(streamed.head.pprShell).toBeUndefined();
+    const html = await readAll(streamed.stream);
+    expect(html).toContain('FEED_SHELL');
+    expect(html).toContain('<!--$!-->');
+  });
+
+  it('asks live at the shell boundary whether a PPR shell may be stored', async () => {
+    const routes = routeAt('/feed', 'feed', {
+      default: suspendsFor(5, 'never', () => {
+        throw new Error('hole failed');
+      }),
+      revalidate: 60,
+      shell: 'cache',
+    });
+    const streamed = expectStream(await render('/feed', routes, layouts, { segmentFiles: files(), streaming: true }));
+    expect(streamed.head.pprShell).toBe(true);
+    expect(streamed.keepShell?.()).toBe(true);
+    await readAll(streamed.stream);
+    // Asked live: once React reported the hole's error, the shell is not kept.
+    expect(streamed.keepShell?.()).toBe(false);
+  });
+
   it("is the shell edge of a PPR page: the cached shell holds its fallback", async () => {
     const routes = routeAt('/feed', 'feed', {
       default: suspendsFor(30, 'FEED_HOLE'),

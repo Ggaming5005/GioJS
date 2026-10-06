@@ -3545,6 +3545,15 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                     warn!(key = %key, error = %e, "background revalidation cache write failed");
                 }
             }
+            // The page is gone (notFound() or `{ notFound: true }` - 404s are
+            // never cacheable). This render was the anonymous variant, so the
+            // 404 is everyone's answer: evict the entry instead of serving the
+            // deleted page for the rest of the SWR window - the next request
+            // renders, and gets, the 404.
+            Ok(IpcSendResult::Response(resp)) if resp.status == StatusCode::NOT_FOUND.as_u16() => {
+                state.cache.remove(&key).await;
+                info!(key = %key, "background revalidation answered 404 - cached page evicted");
+            }
             // PPR pages refresh in ppr streaming mode: collect the raw shell
             // up to shell_end, stop the holes render, and store the shell
             // exactly like the miss path does.
@@ -3577,8 +3586,10 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                     }
                 }
             }
-            // A non-ppr stream during revalidation is unexpected; make sure
-            // Node stops rendering into a receiver nobody reads.
+            // A non-ppr stream during revalidation (a PPR page whose shell
+            // must not be stored this time, e.g. it recovered from an error)
+            // has nothing to cache; make sure Node stops rendering into a
+            // receiver nobody reads.
             Ok(IpcSendResult::RenderStream { response, .. }) => {
                 state.ipc.send_render_close(&response.id);
             }

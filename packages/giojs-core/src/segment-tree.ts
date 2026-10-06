@@ -43,10 +43,14 @@ type LayoutComponent = React.ComponentType<{ children: React.ReactNode; path?: s
  * renders a boundary's content inline and moves past a suspended child, so
  * an entered-but-never-exited boundary is one whose content THREW before
  * suspending - what would have failed the shell without the boundary.
+ * `after` runs once React has moved past the whole boundary (its next
+ * sibling): React reports the error that aborted the content just before
+ * that, so it is the last error reported when `after` runs.
  */
 export interface LoadingProbe {
   enter(): void;
   exit(): void;
+  after(): void;
 }
 
 /** One folder's contribution to the tree; folders with none of these are omitted. */
@@ -64,9 +68,12 @@ const GENERIC_SERVER_MESSAGE = 'Internal Server Error';
 const GENERIC_CLIENT_MESSAGE = 'Application Error';
 
 /**
- * The `{ message, digest }` a client boundary hands to error.*. Errors that
- * come from the server carry its digest (React attaches it); in production
- * every message is generic, matching what the server sends.
+ * The `{ message, digest }` a client boundary hands to error.*. In production
+ * every message is generic, matching what the server sends. A boundary the
+ * server could not finish does not hand the server's error over: React
+ * reports it (with the server's digest) to onRecoverableError and renders the
+ * segment again in the browser, so a boundary only sees what that render
+ * throws - an error object that carries a digest keeps it.
  */
 export function publicErrorInfo(error: unknown): GioErrorInfo {
   if (isNotFoundError(error)) return { message: 'Not Found' };
@@ -147,6 +154,12 @@ function LoadingContentEnd({ probe }: { probe?: LoadingProbe | undefined }): nul
   return null;
 }
 
+/** Rendered right after the loading boundary; renders nothing on either side. */
+function LoadingBoundaryEnd({ probe }: { probe?: LoadingProbe | undefined }): null {
+  probe?.after();
+  return null;
+}
+
 /**
  * The tree inside #__gio for `page`: each level wraps everything below it,
  * outermost level first in `levels`.
@@ -162,9 +175,14 @@ export function buildSegmentTree(
     if (level === undefined) continue;
     if (level.loading) {
       element = React.createElement(
-        React.Suspense,
-        { fallback: React.createElement(level.loading) },
-        React.createElement(LoadingContent, { probe: level.probe }, element),
+        React.Fragment,
+        null,
+        React.createElement(
+          React.Suspense,
+          { fallback: React.createElement(level.loading) },
+          React.createElement(LoadingContent, { probe: level.probe }, element),
+        ),
+        React.createElement(LoadingBoundaryEnd, { probe: level.probe }),
       );
     }
     if (level.error) {

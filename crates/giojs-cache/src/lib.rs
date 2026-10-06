@@ -155,6 +155,12 @@ impl PageCache {
         self.backend.put(key, entry).await
     }
 
+    /// Drop one entry from memory and disk - e.g. a page whose refresh says
+    /// it no longer exists, so its stale copy must stop being served.
+    pub async fn remove(&self, key: &str) {
+        self.backend.remove(key).await;
+    }
+
     // ── private helpers ───────────────────────────────────────────────────────
 
     fn classify(&self, entry: &CacheEntry) -> Option<CacheStatus> {
@@ -288,6 +294,29 @@ mod tests {
             cache.get("key-clear", "deploy-1").await.is_none(),
             "cleared entry must not survive via memory or disk promotion"
         );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn remove_drops_memory_and_disk_entries() {
+        let dir = std::env::temp_dir().join(format!("giojs-cache-remove-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let cache = PageCache::new(CacheConfig {
+            memory_max_entries: NonZeroUsize::new(100).unwrap(),
+            disk_dir: dir.clone(),
+            swr_multiplier: 10,
+            disk_max_bytes: 0,
+        });
+        cache.put("key-gone", make_entry(60, 65)).await.unwrap();
+        cache.put("key-kept", make_entry(60, 65)).await.unwrap();
+        // Let the background disk writes land, so remove must clear both layers.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cache.remove("key-gone").await;
+        assert!(
+            cache.get("key-gone", "deploy-1").await.is_none(),
+            "removed entry must not come back via disk promotion"
+        );
+        assert!(cache.get("key-kept", "deploy-1").await.is_some());
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

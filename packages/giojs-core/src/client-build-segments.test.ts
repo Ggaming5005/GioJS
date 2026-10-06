@@ -132,6 +132,10 @@ export default function BlogError() { return React.createElement('p', null, API_
   it('rejects the routes under an error.* that imports server-only code, naming the chain', async () => {
     expect(manifest.get('/blog/*slug')).toBeUndefined();
     expect(clientBuildErrorFor('/blog/*slug')).toContain('app/blog/error.tsx -> lib/keys.server.ts');
+    // Upgrading apps whose error.* used to be server-only learn why it matters now.
+    expect(clientBuildErrorFor('/blog/*slug')).toContain(
+      'app/blog/error.tsx is a client error/loading boundary for every page below its folder',
+    );
     expect(manifest.get('/products/:id')).toBeDefined();
     expect(manifest.get('/about')).toBeDefined();
   });

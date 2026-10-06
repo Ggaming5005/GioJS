@@ -375,7 +375,8 @@ function shellFlushTick(): Promise<typeof SHELL_FLUSHED> {
  *
  * PPR: React resolves renderToReadableStream at shell-ready and flushes the
  * complete shell on the first pull, so everything readable before a macrotask
- * tick is the shell. shellBoundary 'mark' emits a shell_end frame there;
+ * tick is the shell. shellBoundary 'mark' emits a shell_end frame there
+ * (unless keepShell() says the shell must not be stored);
  * 'discard' drops everything before it (prefix included) and forwards only
  * the hole chunks. Both passes detect the boundary identically, so a cached
  * shell and a later holes render concatenate without gaps or overlaps as long
@@ -394,7 +395,7 @@ export async function pumpRenderStream(
   let inShell = boundary !== undefined;
   const leaveShell = (): void => {
     inShell = false;
-    if (boundary === 'mark') {
+    if (boundary === 'mark' && (render.keepShell?.() ?? true)) {
       writeFrame(socket, { type: 'shell_end', id: reqId });
     }
     if (render.envelope !== undefined) {

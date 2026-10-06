@@ -405,6 +405,25 @@ describe('pumpRenderStream PPR shell boundary', () => {
     expect(frames[frames.length - 1]?.['type']).toBe('chunk_end');
   });
 
+  it("'mark' withholds shell_end when keepShell() says no, asked at the boundary", async () => {
+    let asked = 0;
+    const sink = makeStreamSink();
+    const stream = suspenseLikeStream('<div>shell</div>', '<div>hole</div>');
+    await pumpRenderStream(sink, 'r1', {
+      ...renderResult(stream, 'PRE', 'SUF', 'mark'),
+      keepShell: () => {
+        asked++;
+        return false;
+      },
+    });
+    const frames = sink.frames();
+    expect(asked).toBe(1);
+    expect(frames.some(f => f['type'] === 'shell_end')).toBe(false);
+    // The visitor still gets the whole page.
+    const body = frames.filter(f => f['type'] === 'chunk').map(f => f['data']).join('');
+    expect(body).toBe('PRE<div>shell</div><div>hole</div>SUF');
+  });
+
   it("'mark' still emits shell_end when the whole page flushes with the shell", async () => {
     const sink = makeStreamSink();
     const encoder = new TextEncoder();

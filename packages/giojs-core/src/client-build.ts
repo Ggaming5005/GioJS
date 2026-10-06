@@ -427,11 +427,22 @@ function describeChain(chain: string[]): string {
     .join(' -> ');
 }
 
+/** error.* and loading.* files - client code for every page below their folder. */
+const SEGMENT_CLIENT_FILE = /(^|[\\/])(error|loading)\.(tsx|jsx|js)$/;
+
 function serverOnlyMessage(pattern: string, chain: string[]): string {
+  // chain[0] is the generated entry; chain[1] the app file that imported it.
+  const importer = chain[1];
+  const segmentHint =
+    importer !== undefined && SEGMENT_CLIENT_FILE.test(importer)
+      ? ` ${importer} is a client error/loading boundary for every page below its folder, ` +
+        'so it must be browser-safe like a page component.'
+      : '';
   return (
-    `client bundle for route "${pattern}" imports server-only code: ${describeChain(chain)}. ` +
-    'The page still server-renders but will NOT hydrate (no client JS) until this import is ' +
-    'removed from client code - keep server-only modules behind getServerSideProps or route.ts.'
+    `client bundle for route "${pattern}" imports server-only code: ${describeChain(chain)}.` +
+    `${segmentHint} The page still server-renders but will NOT hydrate (no client JS) until ` +
+    'this import is removed from client code - keep server-only modules behind ' +
+    'getServerSideProps or route.ts.'
   );
 }
 

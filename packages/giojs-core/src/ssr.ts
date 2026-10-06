@@ -79,6 +79,12 @@ export interface StreamRenderResult {
    * part of the shell Rust caches and replays to every visitor.
    */
   envelope?: string;
+  /**
+   * 'mark' only: asked at the shell boundary. False withholds the shell_end
+   * frame, so Rust stores nothing - React reported an error by then, and a
+   * boundary it client-rendered may be part of the shell bytes.
+   */
+  keepShell?: () => boolean;
 }
 
 /** Optional render inputs beyond pages/layouts. */
@@ -98,6 +104,12 @@ export interface RenderExtras {
    * Only the IPC server sets this - static export keeps the buffered path.
    */
   streaming?: boolean;
+  /**
+   * Static export: the page is written as HTML that never hydrates, so a
+   * Suspense boundary React handed to the browser would show its fallback
+   * forever. Any error React reported fails the render instead.
+   */
+  staticExport?: boolean;
 }
 
 /** What production responses say instead of the real error message. */
@@ -631,7 +643,7 @@ export async function renderRoute(
     // head/body injection can never cause a hydration mismatch.
     const rootLayoutEntry = layouts.get('');
     // Errors React reports while rendering (onError), and the loading.*
-    // boundaries that may have caught one of them (see shellEquivalentFailure).
+    // boundaries that may have caught one of them (see abortedLoadingBoundary).
     const reported: ReportedFailure[] = [];
     const probes: ProbeState[] = [];
     const levels = await loadSegmentLevels(
@@ -776,15 +788,42 @@ export async function renderRoute(
       },
     });
 
+    // React recovered from an error inside a Suspense boundary (the browser
+    // renders that part instead). Fine for this visitor; cached, everyone
+    // would get the fallback until the next revalidation.
+    const makeUncacheableAfterRecovery = (): void => {
+      if (!cacheable) return;
+      logger.warn('render recovered from an error in a Suspense boundary - not cached', {
+        path: req.path,
+      });
+      cacheable = false;
+      cacheMaxAge = 0;
+      shareable = false;
+    };
+
+    // The loading.* boundaries are judged as the shell completes, on both
+    // paths: everything React rendered before the shell was ready has
+    // reported by now. A boundary entered later sits below content that had
+    // already suspended - without its loading.* file the error would not
+    // have failed the shell either - so a buffered render answers exactly
+    // what the same render streamed would have.
+    const abortedBoundary = abortedLoadingBoundary(reported, probes);
+
     if (shouldStream) {
-      // Everything React rendered before the shell was ready has reported by
-      // now. A holes-only render cannot change the answer: Rust already sent
-      // the cached shell.
-      const failure = skipShell ? null : shellEquivalentFailure(reported, probes);
-      if (failure !== null) {
-        await stream.cancel().catch(() => undefined);
-        throw failure;
+      // A holes-only render cannot change the answer: Rust already sent the
+      // cached shell.
+      if (!skipShell) {
+        const failure = notFoundFailure(reported) ?? abortedBoundary;
+        if (failure !== null) {
+          await stream.cancel().catch(() => undefined);
+          throw failure;
+        }
+        // A boundary React already client-rendered is part of the shell (the
+        // only part of a streamed render Rust stores).
+        if (pprShell && reported.length > 0) makeUncacheableAfterRecovery();
       }
+      // Nothing to store when the render stopped being cacheable.
+      const storeShell = pprShell && !skipShell && cacheable;
       // A skipShell response must never be cached: its body is holes-only.
       return {
         type: 'stream',
@@ -796,7 +835,7 @@ export async function renderRoute(
           cacheable: skipShell ? false : cacheable,
           cacheMaxAge: skipShell ? 0 : cacheMaxAge,
           streaming: true,
-          ...(pprShell && !skipShell ? { pprShell: true } : {}),
+          ...(storeShell ? { pprShell: true } : {}),
           ...pageCookies,
         },
         stream,
@@ -807,6 +846,9 @@ export async function renderRoute(
           : pprShell
             ? { shellBoundary: 'mark' as const }
             : {}),
+        // An error React reports between now and the shell boundary (work
+        // it picks up before the first read) can still land in the shell.
+        ...(storeShell ? { keepShell: () => reported.length === 0 } : {}),
         ...(deferEnvelope && envelopeJson !== null
           ? { envelope: envelopeScript(envelopeJson) }
           : {}),
@@ -815,18 +857,15 @@ export async function renderRoute(
 
     await stream.allReady;
     const html = await streamToString(stream);
-    const failure = shellEquivalentFailure(reported, probes);
+    // notFound() anywhere still answers 404: nothing has been sent yet.
+    const failure = notFoundFailure(reported) ?? abortedBoundary;
     if (failure !== null) throw failure;
-    if (cacheable && reported.length > 0) {
-      // React recovered from an error inside a Suspense boundary (the
-      // browser renders that part instead). Fine for this visitor; cached,
-      // everyone would get the fallback until the next revalidation.
-      logger.warn('render recovered from an error in a Suspense boundary - not cached', {
-        path: req.path,
-      });
-      cacheable = false;
-      cacheMaxAge = 0;
-      shareable = false;
+    const recovered = reported[0];
+    if (recovered !== undefined) {
+      // An exported page never hydrates: the browser would never render the
+      // boundary React gave up on, and its fallback would stay forever.
+      if (extras?.staticExport === true) throw recovered;
+      makeUncacheableAfterRecovery();
     }
     // Props can carry ctx.headers into the render itself; catch reads that
     // happened while rendering, before the response is offered to the cache.
@@ -1017,6 +1056,8 @@ interface ProbeState {
   exited: boolean;
   /** How many errors had been reported when the boundary's content started. */
   reportedBefore: number;
+  /** How many had been reported once React moved past the boundary; null until then. */
+  reportedAfter: number | null;
 }
 
 /**
@@ -1045,7 +1086,12 @@ async function loadSegmentLevels(
       loading: loadingMod?.default ?? null,
     };
     if (loadingMod !== undefined) {
-      const state: ProbeState = { entered: false, exited: false, reportedBefore: 0 };
+      const state: ProbeState = {
+        entered: false,
+        exited: false,
+        reportedBefore: 0,
+        reportedAfter: null,
+      };
       probes.push(state);
       segmentLevel.probe = {
         enter: () => {
@@ -1056,6 +1102,9 @@ async function loadSegmentLevels(
         exit: () => {
           state.exited = true;
         },
+        after: () => {
+          state.reportedAfter ??= reported.length;
+        },
       };
     }
     levels.push(segmentLevel);
@@ -1063,28 +1112,36 @@ async function loadSegmentLevels(
   return levels;
 }
 
-/**
- * A failure that must be answered like a failed shell although a Suspense
- * boundary caught it:
- * - notFound() anywhere - nothing has been sent yet, so the answer can still
- *   be a 404;
- * - an error a loading.* boundary caught before its content suspended -
+/*
+ * Failures answered like a failed shell although a Suspense boundary caught
+ * them - while nothing has been sent yet:
+ * - notFound() anywhere: the answer can still be a 404;
+ * - an error a loading.* boundary caught before its content suspended:
  *   without the loading.* file it would have failed the shell, and adding
- *   one must not turn a 500 into a 200.
+ *   one must not turn that 500 into a 200.
  * Errors in the app's own Suspense boundaries (and anything thrown after a
  * loading.* boundary's content suspended) keep React's client-rendering
  * fallback.
  */
-function shellEquivalentFailure(
+
+/** The first notFound() call React reported, if any. */
+function notFoundFailure(reported: readonly ReportedFailure[]): ReportedFailure | null {
+  return reported.find(r => isNotFoundError(r.error)) ?? null;
+}
+
+/** The error that aborted a loading.* boundary's content before it suspended, if any. */
+function abortedLoadingBoundary(
   reported: readonly ReportedFailure[],
   probes: readonly ProbeState[],
 ): ReportedFailure | null {
-  const notFoundCall = reported.find(r => isNotFoundError(r.error));
-  if (notFoundCall !== undefined) return notFoundCall;
   const failed = probes.find(p => p.entered && !p.exited);
   if (failed === undefined) return null;
-  // The boundary's own content threw after it started; an earlier report
-  // came from somewhere else.
+  // React reports the error that aborts a boundary just before it moves on
+  // to the boundary's next sibling. Earlier reports since the content
+  // started came from Suspense boundaries inside it that recovered.
+  if (failed.reportedAfter !== null && failed.reportedAfter > failed.reportedBefore) {
+    return reported[failed.reportedAfter - 1] ?? null;
+  }
   return reported[failed.reportedBefore] ?? reported[0] ?? null;
 }
 

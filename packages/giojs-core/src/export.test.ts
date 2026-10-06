@@ -278,6 +278,29 @@ export default function Page() {
 }
 `;
 
+// Which React build rendered the page: captureOwnerStack exists only in the
+// development build.
+const REACT_BUILD = `import React from 'react';
+export default function Page() {
+  const build = typeof React.captureOwnerStack === 'function' ? 'development' : 'production';
+  return React.createElement('p', null, 'NODE_ENV=' + process.env.NODE_ENV + ' REACT_BUILD=' + build);
+}
+`;
+
+// Suspends for 20ms, then throws: under a loading.* the error lands in the
+// boundary after the content suspended.
+const SUSPENDS_THEN_THROWS = `import React from 'react';
+const gate = new Promise(resolve => setTimeout(resolve, 20));
+export default function Feed() {
+  React.use(gate);
+  throw new Error('FEED_EXPORT_SECRET');
+}
+`;
+
+const FEED_LOADING = `import React from 'react';
+export default function Loading() { return React.createElement('p', null, 'FEED_LOADING'); }
+`;
+
 const giojsBin = join(packageDir, '..', 'giojs', 'bin', 'gio.js');
 const tsxCli = join(packageDir, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 const exportCli = join(packageDir, 'src', 'export-cli.ts');
@@ -362,6 +385,43 @@ describe('exportSite errors', () => {
     expect(skipped[0]?.reason).toMatch(/^render error: Internal Server Error \(ref [0-9a-f]{12}, details in the error log\)$/);
   });
 
+  // An exported page never hydrates: a boundary React leaves to the browser
+  // would show its fallback forever, so the page is reported, not written.
+  it('reports a page whose error a Suspense boundary caught instead of writing its fallback', async () => {
+    const appDir = join(fixtureRoot, 'suspense-throws', 'app');
+    const outDir = join(fixtureRoot, 'suspense-throws', 'out');
+    await mkdir(join(appDir, 'feed'), { recursive: true });
+    await mkdir(join(appDir, 'widget'), { recursive: true });
+    await writeFile(join(appDir, 'page.tsx'), PAGE);
+    // The page fails after it suspended, inside its loading.* boundary.
+    await writeFile(join(appDir, 'feed', 'loading.tsx'), FEED_LOADING);
+    await writeFile(join(appDir, 'feed', 'page.tsx'), SUSPENDS_THEN_THROWS);
+    // The page's own Suspense boundary catches the error.
+    await writeFile(join(appDir, 'widget', 'page.tsx'), SUSPENSE_THROWS);
+
+    const { written, skipped } = await exportSite(appDir, outDir);
+    expect(written).toEqual(['/']);
+    for (const route of ['/feed', '/widget']) {
+      const entry = skipped.find(s => s.route === route);
+      expect(entry?.reason, route).toMatch(
+        /^render error: Internal Server Error \(ref [0-9a-f]{12}, details in the error log\)$/,
+      );
+    }
+    expect(await exists(join(outDir, 'feed', 'index.html'))).toBe(false);
+    expect(await exists(join(outDir, 'widget', 'index.html'))).toBe(false);
+  });
+
+  it('still writes 404.html when no page could be exported', async () => {
+    const appDir = join(fixtureRoot, 'nothing-written', 'app');
+    const outDir = join(fixtureRoot, 'nothing-written', 'out');
+    await mkdir(appDir, { recursive: true });
+    await writeFile(join(appDir, 'page.tsx'), THROWS);
+
+    const { written } = await exportSite(appDir, outDir);
+    expect(written).toEqual([]);
+    expect(await exists(join(outDir, '404.html'))).toBe(true);
+  });
+
   for (const [launcher, args] of [
     ['gio export', [giojsBin, 'export']],
     ['export-cli.ts', [tsxCli, exportCli]],
@@ -370,18 +430,18 @@ describe('exportSite errors', () => {
       const name = launcher.replace(/\W+/g, '-');
       const appDir = join(fixtureRoot, name, 'app');
       const outDir = join(fixtureRoot, name, 'out');
-      await mkdir(appDir, { recursive: true });
-      await writeFile(join(appDir, 'page.tsx'), SUSPENSE_THROWS);
+      await mkdir(join(appDir, 'leaky'), { recursive: true });
+      await writeFile(join(appDir, 'page.tsx'), REACT_BUILD);
+      await writeFile(join(appDir, 'leaky', 'page.tsx'), SUSPENSE_THROWS);
 
       const { code, output } = await runExport([...args], appDir, outDir);
       expect(code, output).toBe(0);
       const html = await readFile(join(outDir, 'index.html'), 'utf8');
-      expect(html).toContain('NODE_ENV=production');
-      // The failed boundary carries only React's digest - no message, no stack.
-      expect(html).toContain('data-dgst');
-      expect(html).not.toContain('SECRET_DB_URL');
-      expect(html).not.toContain('data-msg');
-      expect(html).not.toContain('data-stck');
+      expect(html).toContain('NODE_ENV=production REACT_BUILD=production');
+      // The development build would write the boundary's message and stack
+      // into the HTML; the page is not exported at all.
+      expect(await exists(join(outDir, 'leaky', 'index.html'))).toBe(false);
+      expect(output).toMatch(/- \/leaky {2}- {2}render error: Internal Server Error \(ref [0-9a-f]{12}/);
     }, 30_000);
   }
 });

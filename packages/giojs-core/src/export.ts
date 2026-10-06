@@ -130,8 +130,13 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
   ]);
   // Pages render inside their loading.* and error.* boundaries, as served.
   // A failure is reported (with its digest) rather than exported as an
-  // error page, and notFound() pages are skipped: nothing is written.
-  const pageExtras: RenderExtras = { segmentFiles: { ...segmentFiles, error: new Map() } };
+  // error page - one inside a Suspense boundary included, since an exported
+  // page never hydrates to recover from it - and notFound() pages are
+  // skipped: nothing is written.
+  const pageExtras: RenderExtras = {
+    segmentFiles: { ...segmentFiles, error: new Map() },
+    staticExport: true,
+  };
 
   const written: string[] = [];
   const skipped: { route: string; reason: string }[] = [];
@@ -223,6 +228,8 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
     { specialPages, segmentFiles },
   );
   if ('body' in notFoundOut && typeof notFoundOut.body === 'string' && notFoundOut.body !== '') {
+    // out/ does not exist yet when no page was written.
+    await mkdir(outDir, { recursive: true });
     await writeFile(join(outDir, '404.html'), notFoundOut.body, 'utf8');
     renderedFiles.add(resolve(outDir, '404.html'));
   }

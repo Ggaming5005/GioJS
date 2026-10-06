@@ -66,9 +66,12 @@ export default function Loading() {
         </li>
         <li>
           If the page throws or calls <code>notFound()</code> before it suspends, the response
-          is still the error or not-found page - adding a <code>loading.tsx</code> never turns
-          a 500 into a 200. After it has suspended, errors are handled like in any Suspense
-          boundary (see <a href="/docs/error-handling">Error Handling</a>).
+          is still the error or not-found page, as without the <code>loading.tsx</code>. After
+          it has suspended, the 200 and the loading UI are already on their way, so errors are
+          handled like in any Suspense boundary (see{' '}
+          <a href="/docs/error-handling">Error Handling</a>) - a page that suspends and then
+          throws, a 500 without the <code>loading.tsx</code>, is a 200 with it. Streamed or
+          rendered completely (a cacheable page), the answer is the same.
         </li>
         <li>
           With partial prerendering (<code>shell = &apos;cache&apos;</code>) the boundary is a

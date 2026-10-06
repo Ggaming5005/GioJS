@@ -158,7 +158,7 @@ describe('server markup hydrates against the client tree', () => {
       return React.createElement('label', { htmlFor: id }, `PAGE ${id}`);
     }
     const levels = (probe: boolean): SegmentLevel[] => {
-      const noop = { enter: () => undefined, exit: () => undefined };
+      const noop = { enter: () => undefined, exit: () => undefined, after: () => undefined };
       return [
         { error: errorView('ROOT_ERROR'), loading: () => React.createElement('p', null, 'ROOT_LOADING'), ...(probe ? { probe: noop } : {}) },
         { layout: marker('DASH_LAYOUT') },

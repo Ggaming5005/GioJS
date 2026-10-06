@@ -43,9 +43,12 @@ export default function NotFound() {
         URLs that match no route always get the <code>app/not-found.tsx</code> - they belong
         to no folder. A 404 is never cached, even on a page that exports{' '}
         <code>revalidate</code>: it can depend on anything <code>getServerSideProps</code>{' '}
-        read, and a cached 404 would outlive the content appearing. A{' '}
-        <code>route.ts</code> handler that calls <code>notFound()</code> answers{' '}
-        <code>{'{ "error": "Not Found" }'}</code> with status 404.
+        read, and a cached 404 would outlive the content appearing. When a cached page starts
+        answering 404 - its data was deleted - the background revalidation that sees the 404
+        evicts the cached copy, so the deleted page is not served for the rest of the
+        stale-while-revalidate window. A <code>route.ts</code> handler that calls{' '}
+        <code>notFound()</code> answers <code>{'{ "error": "Not Found" }'}</code> with
+        status 404.
       </p>
 
       <h2>Errors</h2>
@@ -92,12 +95,25 @@ export default function Error({ error, reset }: GioErrorProps) {
       </p>
       <p>
         In the browser, too, <code>message</code> is real only in development. In production
-        it is <code>Internal Server Error</code> (with the server&apos;s <code>digest</code>)
-        for a failure the server reported while streaming, and{' '}
-        <code>Application Error</code> for an error thrown in the browser. A{' '}
+        it is the generic <code>Application Error</code>, and there is no{' '}
+        <code>digest</code>: the boundary only ever sees an error thrown in the browser. That
+        includes a part the server could not finish while streaming - React renders it again
+        in the browser, and the boundary catches only what fails there. The server&apos;s
+        failure is in the server log under its own digest; in the browser React reports it
+        as a recoverable error on the console, never to the boundary. A{' '}
         <code>notFound()</code> that runs in the browser reaches the nearest boundary as{' '}
         <code>Not Found</code>; <code>not-found.tsx</code> files are server-only.
       </p>
+      <div className="callout">
+        <strong>Upgrading:</strong> <code>error.tsx</code> used to render only on the server.
+        It is now client code, bundled into every page below its folder (<code>app/error.tsx</code>{' '}
+        into every page) - so it must be browser-safe like a page component. An existing{' '}
+        <code>error.tsx</code> that imports server-only code (a <code>*.server.ts</code>{' '}
+        module, <code>server-only</code>, a Node builtin, a server-side logger) costs those
+        pages their client bundles: they are still server-rendered but no longer hydrate, and
+        the build log names the <code>error.tsx</code>. Report errors from it through a{' '}
+        <code>route.ts</code> instead.
+      </div>
       <p>
         <code>reset</code> exists only on a boundary caught in the browser: the 500 page the
         server renders is static HTML - link the user home or ask them to reload there.
@@ -112,10 +128,14 @@ export default function Error({ error, reset }: GioErrorProps) {
         suspended, the status and the loading UI are on their way; an error after that is
         handled by React like any Suspense boundary - the browser renders the segment
         itself, and if it fails there too, the nearest <code>error.tsx</code> boundary shows
-        it. Errors inside your own <code>&lt;Suspense&gt;</code> boundaries always get that
-        client-side recovery; only a <code>notFound()</code> there still answers 404 while
-        nothing has been sent. A render that recovered this way is never cached, even on a
-        page with <code>revalidate</code>.
+        it. So a page that suspends and <em>then</em> throws answers 200 under a{' '}
+        <code>loading.tsx</code>, where without one it would have failed the whole render
+        with a 500. A cacheable page, rendered completely before it is sent, gets the same
+        answer as when it streams. Errors inside your own <code>&lt;Suspense&gt;</code>{' '}
+        boundaries always get that client-side recovery; only a <code>notFound()</code>{' '}
+        there still answers 404 while nothing has been sent. A render that recovered this
+        way is never cached, even on a page with <code>revalidate</code> - with partial
+        prerendering, its shell is not stored either.
       </p>
 
       <h2>Production error responses</h2>
@@ -182,7 +202,10 @@ GIO_EDITOR="subl -w" npm run dev`} />
         it, many hosts fall back to the home page with a 200. Pages that call{' '}
         <code>notFound()</code> at export time are skipped - nothing is written for them -
         and a page that fails to render is listed with its error reference instead of
-        being exported as an error page.
+        being exported as an error page. That includes an error caught by a{' '}
+        <code>&lt;Suspense&gt;</code> or <code>loading.tsx</code> boundary: an exported page
+        never hydrates, so the browser could never recover the boundary and its fallback
+        would stay on screen.
       </p>
 
       <h2>API routes</h2>
