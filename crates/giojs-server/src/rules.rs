@@ -4,7 +4,9 @@
 //! guards) executed in the Rust HTTP layer before routing and before any Node
 //! code. Rules come from gio.toml (static) and from the worker's READY frame
 //! (middleware.ts). Patterns share the routing conventions: literal segments,
-//! `:param` captures, `*rest` catch-all. Evaluation order per request:
+//! `:param` captures, `*rest` catch-all (zero or more segments, so
+//! `/admin/*rest` also covers `/admin` itself). Callers match the canonical
+//! request path (path_hygiene.rs). Evaluation order per request:
 //! guards, then redirects, then rewrites - first match wins within each phase,
 //! and when two rule sets are merged the static (gio.toml) set is checked
 //! before the worker set inside every phase. Header rules stamp responses
@@ -136,18 +138,16 @@ impl Pattern {
 
     /// Match `path`, returning captured values in `capture_names` order.
     /// A `*rest` capture takes the entire remainder (slashes included) and
-    /// requires at least one segment. `None` allocates nothing for patterns
+    /// may be empty: `/admin/*rest` matches `/admin` too, the same way the
+    /// Node router's catch-all does - a guard on a section must not leave
+    /// the section's index page open. `None` allocates nothing for patterns
     /// without captures.
     fn match_path<'p>(&self, path: &'p str) -> Option<Vec<&'p str>> {
         let mut captures: Vec<&'p str> = Vec::new();
         let mut rest = path.trim_start_matches('/');
         for segment in &self.segments {
             if *segment == Segment::CatchAll {
-                let remainder = rest.trim_end_matches('/');
-                if remainder.is_empty() {
-                    return None;
-                }
-                captures.push(remainder);
+                captures.push(rest.trim_end_matches('/'));
                 return Some(captures);
             }
             let (head, tail) = match rest.find('/') {
@@ -214,14 +214,23 @@ impl Template {
         Ok(Template { parts })
     }
 
+    /// An empty capture (a catch-all that matched zero segments) contributes
+    /// no segment at all: `/old/*rest -> /new/*rest` sends `/old` to `/new`,
+    /// not `/new/`.
     fn expand(&self, captures: &[&str]) -> String {
         let mut target = String::new();
         for part in &self.parts {
-            target.push('/');
             match part {
-                TemplatePart::Literal(literal) => target.push_str(literal),
+                TemplatePart::Literal(literal) => {
+                    target.push('/');
+                    target.push_str(literal);
+                }
                 TemplatePart::Capture(index) => {
-                    target.push_str(captures.get(*index).copied().unwrap_or(""));
+                    let value = captures.get(*index).copied().unwrap_or("");
+                    if !value.is_empty() {
+                        target.push('/');
+                        target.push_str(value);
+                    }
                 }
             }
         }
@@ -608,10 +617,61 @@ mod tests {
     }
 
     #[test]
-    fn catch_all_requires_at_least_one_segment() {
+    fn catch_all_matches_zero_segments() {
         let rules = rules_with_rewrite("/docs/*rest", "/guide/*rest");
-        assert_eq!(rules.apply("/docs", None), RuleOutcome::None);
-        assert_eq!(rules.apply("/docs/", None), RuleOutcome::None);
+        for path in ["/docs", "/docs/"] {
+            assert_eq!(
+                rules.apply(path, None),
+                RuleOutcome::Rewrite {
+                    new_path: "/guide".to_string()
+                },
+                "{path}"
+            );
+        }
+        assert_eq!(rules.apply("/docsx", None), RuleOutcome::None);
+        assert_eq!(rules.apply("/", None), RuleOutcome::None);
+    }
+
+    #[test]
+    fn empty_catch_all_drops_its_segment_from_redirect_targets() {
+        let rules = rules_with_redirect("/old/*rest", "/new/:rest", 301);
+        assert_eq!(
+            rules.apply("/old", None),
+            RuleOutcome::Redirect {
+                location: "/new".to_string(),
+                status: StatusCode::MOVED_PERMANENTLY
+            }
+        );
+        assert_eq!(
+            rules.apply("/old/a/b", None),
+            RuleOutcome::Redirect {
+                location: "/new/a/b".to_string(),
+                status: StatusCode::MOVED_PERMANENTLY
+            }
+        );
+        // A target that is nothing but the empty capture resolves to root.
+        let to_root = rules_with_redirect("/legacy/*rest", "/*rest", 302);
+        assert_eq!(
+            to_root.apply("/legacy", None),
+            RuleOutcome::Redirect {
+                location: "/".to_string(),
+                status: StatusCode::FOUND
+            }
+        );
+    }
+
+    #[test]
+    fn root_catch_all_covers_every_path_including_root() {
+        let rules = RuleSet::compile(&MiddlewareRules {
+            headers: vec![HeaderRule {
+                path: "/*rest".to_string(),
+                headers: [("x-frame-options".to_string(), "DENY".to_string())].into(),
+            }],
+            ..Default::default()
+        });
+        for path in ["/", "/about", "/a/b/c"] {
+            assert_eq!(rules.response_headers(path).len(), 1, "{path}");
+        }
     }
 
     #[test]
@@ -736,6 +796,20 @@ mod tests {
             RuleOutcome::Redirect { .. }
         ));
         assert_eq!(rules.apply("/public-page", None), RuleOutcome::None);
+    }
+
+    #[test]
+    fn section_guard_also_covers_the_section_index() {
+        let rules = RuleSet::compile(&MiddlewareRules {
+            guards: vec![guard("/admin/*rest", "session", "/login")],
+            ..Default::default()
+        });
+        assert!(matches!(
+            rules.apply("/admin", None),
+            RuleOutcome::Redirect { .. }
+        ));
+        assert_eq!(rules.apply("/admin", Some("session=x")), RuleOutcome::None);
+        assert_eq!(rules.apply("/administrator", None), RuleOutcome::None);
     }
 
     // ── phase and rule ordering ──────────────────────────────────────────────
