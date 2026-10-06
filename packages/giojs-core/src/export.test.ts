@@ -523,6 +523,48 @@ describe('exportSite public/', () => {
     expect(await readFile(join(outDir, 'favicon.ico'), 'utf8')).toBe('ICO');
   });
 
+  it('writes sitemap.xml/robots.txt/manifest from app/ modules; public/ files still win', async () => {
+    const base = join(fixtureRoot, 'metadata-routes');
+    const appDir = join(base, 'app');
+    const outDir = join(base, 'out');
+    await put(
+      appDir,
+      'page.tsx',
+      `${PAGE}export const metadata = { title: 'Exported', alternates: { canonical: '/' } };\n`,
+    );
+    await put(
+      appDir,
+      'sitemap.ts',
+      "export default async function sitemap() { return [{ url: '/', changeFrequency: 'daily' }, { url: '/a&b' }]; }\n",
+    );
+    await put(appDir, 'robots.ts', "export default { rules: { disallow: '/admin' }, sitemap: '/sitemap.xml' };\n");
+    await put(appDir, 'manifest.ts', "export default () => ({ name: 'From app' });\n");
+    await put(join(base, 'public'), 'manifest.webmanifest', '{"name":"From public"}');
+
+    vi.stubEnv('GIO_SITE_URL', 'https://example.com/');
+    let skipped: { route: string; reason: string }[];
+    try {
+      ({ skipped } = await exportSite(appDir, outDir));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    const sitemap = await readFile(join(outDir, 'sitemap.xml'), 'utf8');
+    expect(sitemap).toContain('<loc>https://example.com/</loc>\n<changefreq>daily</changefreq>');
+    expect(sitemap).toContain('<loc>https://example.com/a&amp;b</loc>');
+    expect(await readFile(join(outDir, 'robots.txt'), 'utf8')).toBe(
+      'User-Agent: *\nDisallow: /admin\n\nSitemap: https://example.com/sitemap.xml\n',
+    );
+    expect(await readFile(join(outDir, 'manifest.webmanifest'), 'utf8')).toBe('{"name":"From public"}');
+    expect(skipped).toContainEqual({
+      route: '/manifest.webmanifest',
+      reason: expect.stringContaining('public/manifest.webmanifest shadows app/manifest') as unknown as string,
+    });
+    // Page metadata is in the exported head, URLs resolved against GIO_SITE_URL.
+    const html = await readFile(join(outDir, 'index.html'), 'utf8');
+    expect(html).toContain('<title>Exported</title>');
+    expect(html).toContain('<link rel="canonical" href="https://example.com/"/>');
+  });
+
   it('isRootServable mirrors the server index', () => {
     expect(isRootServable('robots.txt')).toBe(true);
     expect(isRootServable('images/logo.svg')).toBe(true);

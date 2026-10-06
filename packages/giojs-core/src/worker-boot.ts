@@ -21,6 +21,7 @@ import type {
 } from './router.ts';
 import type { WsHandlerFn } from './ws-router.ts';
 import type { WireMiddlewareRules } from './middleware.ts';
+import type { MetadataRoutes } from './metadata-routes.ts';
 
 /** Everything the IPC servers need, produced by discovery or by a registry. */
 export interface WorkerComponents {
@@ -30,6 +31,8 @@ export interface WorkerComponents {
   handlers: Map<string, HandlerEntry>;
   specialPages: SpecialPages;
   segmentFiles: SegmentFiles;
+  /** app/sitemap.*, app/robots.*, app/manifest.* */
+  metadataRoutes: MetadataRoutes;
   clientScripts: Map<string, string>;
   middlewareRules: WireMiddlewareRules;
   pluginRegistry: NodePluginRegistry;
@@ -96,6 +99,7 @@ export function startIpcServers(components: WorkerComponents): void {
       handlers: components.handlers,
       specialPages: components.specialPages,
       segmentFiles: components.segmentFiles,
+      metadataRoutes: components.metadataRoutes,
     },
     components.middlewareRules,
   );

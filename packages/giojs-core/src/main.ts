@@ -13,7 +13,9 @@ import {
   discoverRouteFiles,
   discoverSpecialPages,
   discoverSegmentFiles,
+  discoverMetadataRoutes,
   assertNoRouteConflicts,
+  assertNoMetadataRouteConflicts,
 } from './router.ts';
 import { buildClientBundles } from './client-build.ts';
 import { discoverRouteModules } from './ws-router.ts';
@@ -35,18 +37,23 @@ export async function runServer(): Promise<void> {
   const nodePluginRegistry = await startPluginRegistry(gioConfig.plugins ?? []);
 
   logger.info('discovering routes', { appDir });
-  const [routes, layouts, routeFiles, segmentFiles] = await Promise.all([
+  const [routes, layouts, routeFiles, segmentFiles, metadataRoutes] = await Promise.all([
     discoverRoutes(appDir),
     discoverLayouts(appDir),
     discoverRouteFiles(appDir),
     discoverSegmentFiles(appDir),
+    discoverMetadataRoutes(appDir),
   ]);
   assertNoRouteConflicts(appDir, routes, routeFiles);
+  assertNoMetadataRouteConflicts(appDir, routes, routeFiles, metadataRoutes);
   logger.info('routes discovered', { count: routes.size, patterns: [...routes.keys()] });
   logger.info('layouts discovered', {
     count: layouts.size,
     dirs: [...layouts.keys()].map(dir => (dir === '' ? '.' : dir)),
   });
+  if (Object.keys(metadataRoutes).length > 0) {
+    logger.info('metadata routes discovered', { kinds: Object.keys(metadataRoutes) });
+  }
 
   const { wsHandlers, handlers } = await discoverRouteModules(routeFiles);
   logger.info('route handlers discovered', {
@@ -89,6 +96,7 @@ export async function runServer(): Promise<void> {
     handlers,
     specialPages,
     segmentFiles,
+    metadataRoutes,
     clientScripts,
     middlewareRules,
     pluginRegistry: nodePluginRegistry,

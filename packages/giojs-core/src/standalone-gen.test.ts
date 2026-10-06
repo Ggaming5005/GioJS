@@ -24,6 +24,10 @@ function fullSpec(): StandaloneEntrySpec {
       { kind: 'not-found', dir: 'posts/[id]', filePath: resolve('/proj/app/posts/[id]/not-found.tsx') },
       { kind: 'loading', dir: '(shop)', filePath: resolve('/proj/app/(shop)/loading.tsx') },
     ],
+    metadataRoutes: [
+      { kind: 'sitemap', filePath: resolve('/proj/app/sitemap.ts') },
+      { kind: 'robots', filePath: resolve('/proj/app/robots.ts') },
+    ],
     notFoundPath: resolve('/proj/app/not-found.tsx'),
     errorPath: resolve('/proj/app/error.tsx'),
     configPath: resolve('/proj/gio.config.ts'),
@@ -74,6 +78,15 @@ describe('generateStandaloneEntry', () => {
     expect(source).toContain('module: gioSegment1 }');
   });
 
+  it('wires app/sitemap, app/robots and app/manifest modules with their kind', () => {
+    const source = generateStandaloneEntry(fullSpec());
+    expect(source).toContain('import * as gioMetadataRoute0 from ');
+    expect(source).toContain('{ kind: "sitemap", filePath: ');
+    expect(source).toContain('module: gioMetadataRoute0 }');
+    expect(source).toContain('{ kind: "robots", filePath: ');
+    expect(source).toContain('module: gioMetadataRoute1 }');
+  });
+
   it('omits optional sections that were not discovered', () => {
     const source = generateStandaloneEntry({
       entryModulePath: CORE_ENTRY,
@@ -84,6 +97,7 @@ describe('generateStandaloneEntry', () => {
     });
     expect(source).not.toContain('specialPages');
     expect(source).not.toContain('segmentFiles');
+    expect(source).not.toContain('metadataRoutes');
     expect(source).not.toContain('gioConfig');
     expect(source).not.toContain('gioMiddleware');
     expect(source).not.toContain('gioNotFound');

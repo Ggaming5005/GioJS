@@ -12,9 +12,13 @@
  *
  * The envelope also carries the `<GioImage>` config the server rendered
  * with; it is installed before every render so srcsets hydrate unchanged.
+ * Its `metadata` head tags are rendered in front of the route's tree, as on
+ * the server (metadata-tags.ts): React adopts the server's head elements on
+ * hydration and swaps them for the next page's when the tree changes.
  */
 import React from 'react';
 import { hydrateRoot, createRoot, type Root } from 'react-dom/client';
+import { sanitizeMetadataTags, withMetadata, type MetadataTag } from './metadata-tags.ts';
 
 // Generated entries build their tree with the same function the server used.
 export { buildSegmentTree } from './segment-tree.ts';
@@ -27,6 +31,8 @@ export interface GioEnvelope {
   entry: string;
   /** image-config.ts ImageRenderConfig, opaque here. */
   images?: Record<string, unknown>;
+  /** The page's head tags (metadata-tags.ts). */
+  metadata?: MetadataTag[];
 }
 
 type BuildFn = (props: Record<string, unknown>, path: string) => React.ReactNode;
@@ -52,6 +58,7 @@ function readEnvelope(): GioEnvelope | null {
       ...(typeof env['images'] === 'object' && env['images'] !== null
         ? { images: env['images'] as Record<string, unknown> }
         : {}),
+      ...(Array.isArray(env['metadata']) ? { metadata: sanitizeMetadataTags(env['metadata']) } : {}),
     };
   } catch {
     return null;
@@ -76,7 +83,7 @@ function mount(): void {
   if (envelope.images !== undefined) {
     (globalThis as Record<string, unknown>)['__GIO_IMAGES__'] = envelope.images;
   }
-  const element = build(envelope.props, envelope.path);
+  const element = withMetadata(build(envelope.props, envelope.path), envelope.metadata);
   if (activeRoot === null) {
     // First load: the container holds this exact tree's server HTML.
     activeRoot = hydrateRoot(container, element);

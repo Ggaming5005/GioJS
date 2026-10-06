@@ -21,6 +21,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadTsModule } from './load-ts.ts';
 import type { GioRequest } from './context.ts';
 import type { GioEventStream } from './sse.ts';
+import type { Metadata, MetadataExtras } from './metadata.ts';
+import {
+  METADATA_ROUTE_PATHS,
+  type MetadataRouteModule,
+  type MetadataRoutes,
+} from './metadata-routes.ts';
 
 // JSX-bearing files (page, layout) may be .tsx/.jsx/.js; pure handlers
 // (route) may be .ts/.js. Order is precedence when several coexist.
@@ -124,6 +130,10 @@ export interface PageModule {
   dynamic?: 'force-dynamic' | 'force-static' | 'auto';
   /** SSE route handler - return a GioEventStream to switch to streaming mode. */
   GET?: (req: GioRequest) => GioEventStream;
+  /** Static head metadata (metadata.ts). */
+  metadata?: Metadata;
+  /** Per-request head metadata; receives the gSSP context and `{ props }`. */
+  generateMetadata?: (ctx: GsspContext, extras: MetadataExtras) => Metadata | Promise<Metadata>;
 }
 
 export interface RouteFile {
@@ -182,9 +192,61 @@ export async function discoverSpecialPages(appDir: string): Promise<SpecialPages
   return special;
 }
 
+/**
+ * Discover the app-root metadata conventions: app/sitemap.*, app/robots.*
+ * and app/manifest.* (handler extensions, like route.ts). Root only - a
+ * sitemap.ts in a subfolder is an ordinary module.
+ */
+export async function discoverMetadataRoutes(appDir: string): Promise<MetadataRoutes> {
+  let entries;
+  try {
+    entries = await readdir(appDir, { withFileTypes: true });
+  } catch {
+    return {};
+  }
+  const fileNames = new Set(entries.filter(e => e.isFile()).map(e => e.name));
+  const found: MetadataRoutes = {};
+  for (const kind of ['sitemap', 'robots', 'manifest'] as const) {
+    const file = pickByExt(fileNames, kind, HANDLER_EXTS);
+    if (file === null) continue;
+    const filePath = join(appDir, file);
+    const fileUrl = pathToFileURL(filePath).href;
+    found[kind] = { kind, filePath, load: () => loadTsModule<MetadataRouteModule>(fileUrl) };
+  }
+  return found;
+}
+
+/**
+ * Reject a page or route.ts that answers a metadata convention's URL
+ * (app/robots.txt/route.ts beside app/robots.ts): nothing says which one
+ * owns /robots.txt, so boot fails instead of guessing.
+ */
+export function assertNoMetadataRouteConflicts(
+  appDir: string,
+  routes: Map<string, RouteModule>,
+  routeFiles: readonly RouteFile[],
+  metadataRoutes: MetadataRoutes,
+): void {
+  for (const entry of Object.values(metadataRoutes)) {
+    const url = METADATA_ROUTE_PATHS[entry.kind];
+    const page = routes.get(url);
+    const routeFile = routeFiles.find(f => f.urlPattern === url);
+    const other = page?.filePath ?? (routeFile !== undefined ? fileURLToPath(routeFile.filePath) : null);
+    if (other !== null) {
+      throw new Error(
+        `route conflict: ${displayPath(appDir, entry.filePath)} and ${displayPath(appDir, other)} ` +
+          `both serve "${url}" - every URL must be served by exactly one file`,
+      );
+    }
+  }
+}
+
 export interface LayoutModule {
   // path is the current request path - allows layouts to highlight active nav links
   default: React.ComponentType<{ children: React.ReactNode; path?: string }>;
+  /** Static metadata (metadata.ts); merged under the pages below this layout. */
+  metadata?: Metadata;
+  generateMetadata?: (ctx: GsspContext, extras: MetadataExtras) => Metadata | Promise<Metadata>;
 }
 
 export interface LayoutEntry {

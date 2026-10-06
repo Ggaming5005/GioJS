@@ -9,6 +9,7 @@
  */
 import { resolve, sep } from 'node:path';
 import type { SegmentFileKind } from './router.ts';
+import type { MetadataRouteKind } from './metadata-routes.ts';
 
 export interface StandaloneEntrySpec {
   /** Absolute path to giojs-core's standalone-entry.ts. */
@@ -18,6 +19,8 @@ export interface StandaloneEntrySpec {
   routeFiles: Array<{ pattern: string; filePath: string }>;
   /** Per-folder not-found.*, error.* and loading.* files. */
   segmentFiles?: Array<{ kind: SegmentFileKind; dir: string; filePath: string }>;
+  /** app/sitemap.*, app/robots.*, app/manifest.* */
+  metadataRoutes?: Array<{ kind: MetadataRouteKind; filePath: string }>;
   notFoundPath?: string;
   errorPath?: string;
   configPath?: string;
@@ -66,6 +69,14 @@ export function generateStandaloneEntry(spec: StandaloneEntrySpec): string {
     );
   });
 
+  const metadataRouteEntries: string[] = [];
+  (spec.metadataRoutes ?? []).forEach((file, index) => {
+    imports.push(`import * as gioMetadataRoute${index} from ${moduleSpecifier(file.filePath)};`);
+    metadataRouteEntries.push(
+      `    { kind: ${JSON.stringify(file.kind)}, filePath: ${JSON.stringify(file.filePath)}, module: gioMetadataRoute${index} },`,
+    );
+  });
+
   const specialPageFields: string[] = [];
   if (spec.notFoundPath !== undefined) {
     imports.push(`import * as gioNotFound from ${moduleSpecifier(spec.notFoundPath)};`);
@@ -86,6 +97,9 @@ export function generateStandaloneEntry(spec: StandaloneEntrySpec): string {
   }
   if (segmentFileEntries.length > 0) {
     registryFields.push(`  segmentFiles: [\n${segmentFileEntries.join('\n')}\n  ],`);
+  }
+  if (metadataRouteEntries.length > 0) {
+    registryFields.push(`  metadataRoutes: [\n${metadataRouteEntries.join('\n')}\n  ],`);
   }
   if (spec.configPath !== undefined) {
     imports.push(`import * as gioConfig from ${moduleSpecifier(spec.configPath)};`);
