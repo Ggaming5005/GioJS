@@ -596,6 +596,21 @@ async function main() {
         Promise.resolve(/read request credentials/.test(log)), 5_000);
     });
 
+    await test('a revalidate page that reads ctx.host is never cached for another Host', async () => {
+      // Cache poisoning: the attacker's Host must not reach the next visitor.
+      const evil = await rawGet('/hostpage', { host: 'evil.example' });
+      assert.match(evil.body, /href="http:\/\/evil\.example\/reset"/);
+      assert.equal(evil.headers['x-gio-cache'], 'bypass');
+      const visitor = await fetch(`${BASE}/hostpage`);
+      const html = await visitor.text();
+      assert.doesNotMatch(html, /evil\.example/, 'a later visitor must get their own host');
+      assert.match(html, /href="http:\/\/127\.0\.0\.1:39517\/reset"/);
+      assert.equal(visitor.headers.get('x-gio-cache'), 'bypass');
+      // The same through the trusted proxy's X-Forwarded-Host.
+      await rawGet('/hostpage', { 'x-forwarded-host': 'evil.example' });
+      assert.doesNotMatch(await (await fetch(`${BASE}/hostpage`)).text(), /evil\.example/);
+    });
+
     await test('streaming SSR: first bytes arrive before suspended content resolves', async () => {
       // accept-encoding: identity keeps the compression layer from buffering
       // chunks, so the timing below measures the server, not the encoder.
@@ -965,6 +980,39 @@ async function main() {
       const malformed = JSON.parse(await whoami({ 'x-forwarded-for': 'not-an-ip', 'x-forwarded-proto': 'gopher' }));
       assert.equal(malformed.ip, '127.0.0.1');
       assert.equal(malformed.scheme, 'http');
+      // A proxy that appends instead of replacing: the client's own line
+      // comes first and is never read.
+      const appended = JSON.parse(await whoami({
+        'x-forwarded-proto': ['http', 'https'],
+        'x-forwarded-host': ['evil.example', 'app.example'],
+      }));
+      assert.equal(appended.scheme, 'https');
+      assert.equal(appended.host, 'app.example');
+    });
+
+    await test('trusted proxy: nothing a client puts left of its address is read', async () => {
+      // What nginx's $proxy_add_x_forwarded_for forwards: the client's own
+      // header (any bytes it likes), then the address it connected from.
+      const viaProxy = async (path, prefix, clientIp) => {
+        const head = Buffer.concat([
+          Buffer.from(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:39517\r\nConnection: close\r\nX-Forwarded-For: `),
+          prefix,
+          Buffer.from(`, ${clientIp}\r\n\r\n`),
+        ]);
+        const { data } = await rawExchange(head);
+        return { status: Number(data.slice(9, 12)), ip: data.match(/"ip":"([^"]*)"/)?.[1] };
+      };
+      for (const prefix of [Buffer.from([0xff]), Buffer.from('"unterminated'), Buffer.alloc(9000, 'a')]) {
+        const what = `${prefix.length}-byte prefix`;
+        assert.equal((await viaProxy('/api/whoami', prefix, '203.0.113.50')).ip, '203.0.113.50', what);
+        assert.equal((await viaProxy('/api/whoami', prefix, '2001:db8::7')).ip, '2001:db8::7', what);
+        // Never the proxy itself: the metrics allowlist sees the real client.
+        assert.equal((await viaProxy('/_gio/metrics', prefix, '203.0.113.50')).status, 403, what);
+        assert.equal((await viaProxy('/_gio/metrics', prefix, '198.51.100.7')).status, 200, what);
+      }
+      // A hop the proxy itself wrote is unreadable: the client is unknown,
+      // and the allowlist fails closed.
+      assert.equal((await rawGet('/_gio/metrics', { 'x-forwarded-for': '198.51.100.7, unknown' })).status, 403);
     });
 
     await test('trusted proxy: every forwarded client gets its own rate-limit bucket', async () => {
@@ -1291,7 +1339,8 @@ async function untrustedProxyPhase() {
       ...process.env,
       GIO_APP_DIR: join(workDir, 'app'),
       GIO_CACHE_DIR: join(workDir, 'cache'),
-      RUST_LOG: 'info',
+      // Production log level: the request span must survive it.
+      RUST_LOG: 'warn',
       NODE_ENV: 'production',
     },
   });
@@ -1327,7 +1376,14 @@ async function untrustedProxyPhase() {
 
     await test('untrusted peer: a spoofed X-Forwarded-For buys no fresh rate-limit bucket', async () => {
       assert.equal((await rawGet('/api/limited', { 'x-forwarded-for': '198.51.100.1' })).status, 200);
-      assert.equal((await rawGet('/api/limited', { 'x-forwarded-for': '198.51.100.2' })).status, 429);
+      const limited = await rawGet('/api/limited', { 'x-forwarded-for': '198.51.100.2' });
+      assert.equal(limited.status, 429);
+      // At RUST_LOG=warn the warning still carries the request's id.
+      const id = limited.headers['x-request-id'];
+      assert.match(id, /^[0-9a-f-]{36}$/);
+      await waitFor('rate-limit warning with its request id', () =>
+        Promise.resolve(log.replace(/\x1b\[[0-9;]*m/g, '').split('\n').some((line) =>
+          line.includes('rate limit exceeded') && line.includes(`request{request_id=${id}}`))), 5_000);
     });
   } catch (err) {
     console.error('\nintegration (no trusted proxies): FAILED');
