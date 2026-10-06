@@ -27,8 +27,9 @@ renders React. Full docs: https://giojs.com/llms.txt
 - `app/error.tsx` gets `{ error: { message, digest } }`; in production the
   message is always generic - log lookups go by `digest`.
 - Components come from `@gio.js/react`: `<GioLink>` (client nav + prefetch),
-  `<GioImage>` (points at the built-in `/_gio/image` optimizer — never add
-  `sharp` or `next/image`). Route-handler types come from `@gio.js/core`
+  `<GioImage>` (srcset from the gio.toml `[images]` allowed_widths, served by
+  the built-in `/_gio/image` optimizer; `sizes`, `priority` to preload,
+  `unoptimized` for a plain `src` — never add `sharp` or `next/image`). Route-handler types come from `@gio.js/core`
   (`GioRequest`, `GioEventStream` for SSE).
 - WebSockets: export `wsHandler(socket)` from a `route.js`.
 - Config is `gio.toml` (server, TLS, images.remote_patterns, rate_limits,
@@ -42,6 +43,11 @@ renders React. Full docs: https://giojs.com/llms.txt
   `*.server.js`. Using one from getServerSideProps/route handlers is fine;
   importing it from client code rejects that route's bundle (page renders but
   never hydrates).
+- Static export (`gio export` → `out/`): dynamic routes need
+  `export function getStaticPaths()` listing their params; pages still
+  hydrate (client JS ships under `out/_next/`), `GIO_PUBLIC_*` values are
+  frozen at export time, and `<GioImage>` renders plain `src` (no optimizer
+  on a static host).
 
 ## Commands
 

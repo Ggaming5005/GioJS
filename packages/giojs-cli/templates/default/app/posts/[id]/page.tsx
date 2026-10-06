@@ -25,6 +25,8 @@ export default function PostPage({ post }: PostPageProps): React.JSX.Element {
               year: 'numeric',
               month: 'long',
               day: 'numeric',
+              // Fixed zone: the browser re-renders this when it hydrates.
+              timeZone: 'UTC',
             })}
           </time>
         </header>
@@ -53,4 +55,10 @@ export async function getServerSideProps(
     publishedAt: new Date().toISOString(),
   };
   return { props: { post } };
+}
+
+// `gio export` (static sites) pre-renders one page per entry: dynamic routes
+// need the list up front. The server ignores it and renders any id on demand.
+export function getStaticPaths(): { paths: { params: { id: string } }[] } {
+  return { paths: ['1', '2', '3'].map((id) => ({ params: { id } })) };
 }
