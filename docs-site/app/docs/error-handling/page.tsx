@@ -47,7 +47,8 @@ export default function Error({ error }: { error?: { message: string } }) {
         your project it shows a <strong>codeframe</strong>: the failing line
         with four lines of context on each side, fetched from the dev-only{' '}
         <code>/_gio/devtools/codeframe</code> endpoint (reads are confined to
-        source files inside the project root).
+        source files inside the project root, checked after resolving
+        symlinks).
       </p>
       <p>
         Every <code>file:line</code> in the stack is a link -{' '}
@@ -66,6 +67,15 @@ GIO_EDITOR="subl -w" npm run dev`} />
         The overlay, the codeframe endpoint, and open-in-editor exist only in
         dev mode - none of it is compiled into production responses.
       </div>
+      <p>
+        Both endpoints only answer to localhost hosts and refuse cross-site
+        requests; open-in-editor additionally takes same-origin{' '}
+        <code>POST</code> only. If you open the dev server through a LAN IP or
+        hostname, add it to <code>[dev] allowed_hosts</code> in{' '}
+        <code>gio.toml</code> (see{' '}
+        <a href="/docs/configuration">Configuration</a>) or codeframes and
+        editor links will not work from there.
+      </p>
 
       <h2>Static export</h2>
       <p>

@@ -89,7 +89,10 @@ detect_from = ["path", "accept-language", "cookie"]
 [metrics]
 enabled = false         # expose /_gio/metrics (Prometheus); off when this section is absent
 token = ""              # require "Authorization: Bearer <token>" when set
-ip_allowlist = []       # restrict by client IP, e.g. ["10.0.0.5"]`} />
+ip_allowlist = []       # restrict by client IP, e.g. ["10.0.0.5"]
+
+[dev]                   # only read when NODE_ENV=development
+allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer to`} />
 
       <h2>Health &amp; metrics</h2>
       <p>
@@ -131,6 +134,54 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
         logs a warning at startup when neither <code>token</code> nor
         <code>ip_allowlist</code> is set - unauthenticated metrics are fine on
         localhost but should never face the public internet.
+      </div>
+
+      <h2>Dev endpoints &amp; allowed hosts</h2>
+      <p>
+        In development the server also serves <code>/_gio/devtools</code> and
+        its sub-endpoints: the dashboard, its state and event stream (which also
+        drives live reload), error-overlay codeframes that return project
+        source, and open-in-editor. Because the starter binds{' '}
+        <code>0.0.0.0</code>, they are locked down against browser-based
+        attacks:
+      </p>
+      <ul>
+        <li>
+          They only answer requests whose <code>Host</code> is{' '}
+          <code>localhost</code>, <code>*.localhost</code>, a loopback IP
+          (<code>127.0.0.1</code>, <code>[::1]</code>), the{' '}
+          <code>[server] host</code> when it names a specific address, or an
+          entry in <code>[dev] allowed_hosts</code>. Anything else gets a{' '}
+          <code>403</code> - this defeats DNS rebinding, where a malicious site
+          re-points its own domain at your machine.
+        </li>
+        <li>
+          Requests a browser marks as cross-site (<code>Sec-Fetch-Site</code>,
+          or an <code>Origin</code> that is not the requested host) are refused.
+        </li>
+        <li>
+          open-in-editor accepts same-origin <code>POST</code> only, so a link
+          or <code>&lt;img&gt;</code> on another site cannot launch your editor.
+        </li>
+      </ul>
+      <p>
+        If you browse the dev server from another machine or through a name -
+        a VM, a container host, a phone on your LAN, a tunnel - add the
+        hostname or IP you type in the address bar:
+      </p>
+      <CodeBlock lang="toml" code={`[dev]
+allowed_hosts = ["192.168.1.20", "myvm.local", ".tunnel.example"]  # leading "." = any subdomain`} />
+      <p>
+        Pages themselves are unaffected; without the entry only the overlay
+        codeframes, open-in-editor, live reload, and the dashboard stop working
+        from that host. When bound to <code>0.0.0.0</code> with no{' '}
+        <code>allowed_hosts</code>, the server logs a reminder at startup.
+      </p>
+      <div className="callout">
+        These checks stop websites you visit, not people on your network: a
+        client that can reach the port directly can send any headers. On an
+        untrusted network, bind the dev server to <code>127.0.0.1</code> (or
+        publish the container port to <code>127.0.0.1</code> only).
       </div>
 
       <h2>Environment variables</h2>
