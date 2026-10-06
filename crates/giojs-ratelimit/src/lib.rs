@@ -1,10 +1,15 @@
 //! giojs-ratelimit/src/lib.rs
 //!
 //! Token-bucket rate limiter. Multiple rules are evaluated in specificity order
-//! (longest matching path prefix wins). Per-IP by default; per (IP, header
-//! value) when `key_header` is configured - the IP is always part of the key
-//! so a client rotating header values cannot mint unlimited fresh buckets,
-//! and each IP is capped at a fixed number of distinct header-value buckets.
+//! (longest matching path prefix wins). Per client by default; per (client,
+//! header value) when `key_header` is configured - the client is always part
+//! of the key so rotating header values cannot mint unlimited fresh buckets,
+//! and each client is capped at a fixed number of distinct header-value
+//! buckets. A client is an IPv4 address or an IPv6 /64.
+//!
+//! `check` expects the canonical request path (no repeated or trailing
+//! slashes, unreserved escapes decoded) - the server's path_hygiene module
+//! produces it, so every spelling the router treats alike shares a bucket.
 //!
 //! Lock-free hot path: no Mutex per request.
 
@@ -12,7 +17,7 @@ mod bucket;
 mod store;
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
 use store::RateLimitStore;
@@ -24,12 +29,18 @@ const MAX_KEY_HEADER_VALUE_BYTES: usize = 64;
 // Distinct header-value buckets one IP may create per rule before falling
 // back to the shared per-IP bucket (defeats header-rotation bucket minting).
 const MAX_DISTINCT_HEADER_KEYS_PER_IP: u64 = 64;
+/// Default cap on live buckets across all rules and clients (~10-20 MB).
+/// Past it, refilled buckets are swept and then the least recently seen are
+/// evicted, so source-address rotation cannot grow memory without bound.
+pub const DEFAULT_MAX_BUCKETS: usize = 100_000;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct RateLimitRule {
-    /// Glob-style path pattern, e.g. "/api/*" or "/api/auth/*".
+    /// Glob-style path pattern, e.g. "/api/*" or "/api/auth/*". A trailing
+    /// "/*" also covers the bare prefix ("/api/*" matches "/api"); without
+    /// a "*" the match is exact. Matched against the canonical path.
     pub path_pattern: String,
     /// Maximum requests allowed per `window_seconds` per client.
     pub per_ip: u64,
@@ -66,16 +77,24 @@ pub struct RateLimiter {
 // ── RateLimiter impl ──────────────────────────────────────────────────────────
 
 impl RateLimiter {
-    pub fn new(mut rules: Vec<RateLimitRule>) -> Self {
-        // The server lowercases incoming header names; normalize once here so
-        // a mixed-case key_header from gio.toml still matches.
+    pub fn new(rules: Vec<RateLimitRule>) -> Self {
+        Self::with_max_buckets(rules, DEFAULT_MAX_BUCKETS)
+    }
+
+    /// Like `new` with an explicit cap on live buckets.
+    pub fn with_max_buckets(mut rules: Vec<RateLimitRule>, max_buckets: usize) -> Self {
         for rule in &mut rules {
+            // The server lowercases incoming header names; normalize once here
+            // so a mixed-case key_header from gio.toml still matches.
             if let Some(header_name) = rule.key_header.as_mut() {
                 *header_name = header_name.to_ascii_lowercase();
             }
+            // Requests are matched in canonical form, so "/api/login/" in
+            // gio.toml must mean "/api/login" or it could never match.
+            rule.path_pattern = canonical_pattern(&rule.path_pattern);
         }
         Self {
-            store: Arc::new(RateLimitStore::new()),
+            store: Arc::new(RateLimitStore::new(max_buckets)),
             rules,
         }
     }
@@ -95,10 +114,7 @@ impl RateLimiter {
             };
         };
 
-        let key = self.build_key(rule_index, ip, rule, headers);
-        let bucket = self
-            .store
-            .get_or_create(&key, rule.per_ip, rule.window_seconds, rule.burst);
+        let bucket = self.bucket_for(rule_index, ip, rule, headers);
 
         if bucket.try_consume() {
             RateLimitResult::Allowed {
@@ -119,89 +135,165 @@ impl RateLimiter {
         }
     }
 
-    /// Evict idle bucket entries. Call from a periodic background task.
-    pub fn evict_idle(&self, idle_secs: u64) {
-        self.store.evict_idle(idle_secs);
+    /// Drop buckets that have refilled to capacity. Lossless (a recreated
+    /// bucket starts full), so long windows keep their state however idle
+    /// the client is. Call from a periodic background task.
+    pub fn sweep(&self) {
+        self.store.sweep();
     }
 
-    /// Find the most-specific matching rule for `path`.
-    /// Specificity = length of the literal prefix before the first `*`.
+    /// Find the most-specific matching rule for `path` (see `Specificity`).
+    /// Only identical patterns tie; the later one wins, as it always has
+    /// (`max_by_key` returns the last of equal maxima).
     fn find_rule(&self, path: &str) -> Option<(usize, &RateLimitRule)> {
-        let mut best: Option<(usize, &RateLimitRule)> = None;
-        let mut best_specificity: usize = 0;
-
-        for (index, rule) in self.rules.iter().enumerate() {
-            let specificity = match_path_pattern(&rule.path_pattern, path);
-            if let Some(sp) = specificity {
-                if sp >= best_specificity {
-                    best_specificity = sp;
-                    best = Some((index, rule));
-                }
-            }
-        }
-
-        best
+        self.rules
+            .iter()
+            .enumerate()
+            .filter_map(|(index, rule)| {
+                match_path_pattern(&rule.path_pattern, path)
+                    .map(|specificity| (specificity, index, rule))
+            })
+            .max_by_key(|&(specificity, ..)| specificity)
+            .map(|(_, index, rule)| (index, rule))
     }
 
-    /// Build the bucket key for the matched rule. Header-keyed rules always
-    /// compound with the client IP so rotating the header cannot escape the
-    /// IP's budget; once the IP saturates its distinct-key allowance the
-    /// shared per-IP bucket is used instead.
-    fn build_key(
+    /// The bucket for the matched rule. Header-keyed rules always compound
+    /// with the client so rotating the header cannot escape the client's
+    /// budget; once the client saturates its distinct-key allowance the
+    /// shared per-client bucket is used instead.
+    fn bucket_for(
         &self,
         rule_index: usize,
         ip: IpAddr,
         rule: &RateLimitRule,
         headers: &HashMap<String, String>,
-    ) -> String {
-        // '|' cannot appear in an IP (IPv6 Display contains ':'), so the
-        // header value being the final field makes every key unambiguous.
-        let ip_key = format!("{rule_index}|{ip}");
-        let Some(header_name) = rule.key_header.as_deref() else {
-            return ip_key;
-        };
-        let Some(value) = headers.get(header_name) else {
-            return ip_key;
-        };
-        let compound_key = format!(
-            "{rule_index}|{ip}|{}",
-            bounded_prefix(value, MAX_KEY_HEADER_VALUE_BYTES)
-        );
-        if self.store.contains(&compound_key)
-            || self
-                .store
-                .try_admit_distinct(&ip_key, MAX_DISTINCT_HEADER_KEYS_PER_IP)
-        {
-            compound_key
-        } else {
-            ip_key
+    ) -> Arc<bucket::TokenBucket> {
+        // '|' cannot appear in a client key (IPv6 Display contains ':'), so
+        // the header value being the final field makes every key unambiguous.
+        let client = client_key(ip);
+        let client_bucket_key = format!("{rule_index}|{client}");
+        let header_value = rule
+            .key_header
+            .as_deref()
+            .and_then(|header_name| headers.get(header_name));
+        if let Some(value) = header_value {
+            let compound_key = format!(
+                "{client_bucket_key}|{}",
+                bounded_prefix(value, MAX_KEY_HEADER_VALUE_BYTES)
+            );
+            if let Some(bucket) = self.store.get_or_create_in_group(
+                &compound_key,
+                &client_bucket_key,
+                MAX_DISTINCT_HEADER_KEYS_PER_IP,
+                rule.per_ip,
+                rule.window_seconds,
+                rule.burst,
+            ) {
+                return bucket;
+            }
         }
+        self.store.get_or_create(
+            &client_bucket_key,
+            rule.per_ip,
+            rule.window_seconds,
+            rule.burst,
+        )
+    }
+}
+
+/// The identity a client is limited by. An IPv6 host routinely controls a
+/// whole /64 (privacy addresses rotate inside it), so per-/128 keys let one
+/// host mint unlimited fresh buckets; IPv6 clients are keyed by their /64.
+/// IPv4-mapped IPv6 addresses (dual-stack listeners) stay per IPv4 address -
+/// masking them to a /64 would put every IPv4 client in one bucket.
+fn client_key(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let [a, b, c, d, ..] = v6.segments();
+                format!("{}/64", Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
+            }
+        },
     }
 }
 
 // ── Path pattern matching ─────────────────────────────────────────────────────
 
-/// Match `pattern` against `path`. Returns the specificity (length of the
-/// literal prefix before `*`) on success, or `None` if no match.
+/// How specifically a pattern matched a path; the greatest wins. Fields
+/// compare in declaration order:
+///   1. `matched` - how much of the path the pattern's literal text covered
+///      (the documented "longest literal prefix wins"),
+///   2. `exact` - on equal coverage an exact pattern beats a wildcard, so an
+///      exact "/auth" rule keeps "/auth" even though "/auth/*" covers the
+///      bare "/auth" too,
+///   3. `literal` - then the longer literal: on "/auth", "/auth/*" (only
+///      "/auth" and below) beats the broader "/auth*" (also "/authors").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Specificity {
+    matched: usize,
+    exact: bool,
+    literal: usize,
+}
+
+/// Match `pattern` against the canonical `path`. Returns how specific the
+/// match is, or `None` if there is no match.
 ///
 /// Rules:
 ///   - Exact match: "/api/auth" matches only "/api/auth"
-///   - Wildcard: "/api/*" matches "/api/" and any suffix
+///   - Wildcard: "/api/*" matches "/api" and anything below it - the router
+///     serves "/api/" (canonically "/api") from the same handler as "/api".
+///     The bare "/api" is covered by the "/api" part of the literal only, so
+///     that match scores like an exact "/api" rule would, never higher.
 ///   - No wildcard means exact match required
-fn match_path_pattern(pattern: &str, path: &str) -> Option<usize> {
+fn match_path_pattern(pattern: &str, path: &str) -> Option<Specificity> {
     if let Some(prefix) = pattern.strip_suffix('*') {
+        let wildcard = |matched: usize| Specificity {
+            matched,
+            exact: false,
+            literal: prefix.len(),
+        };
         if path.starts_with(prefix) {
-            return Some(prefix.len());
+            return Some(wildcard(prefix.len()));
         }
-        None
+        match prefix.strip_suffix('/') {
+            Some(bare) if !bare.is_empty() && bare == path => Some(wildcard(bare.len())),
+            _ => None,
+        }
+    } else if pattern == path {
+        Some(Specificity {
+            matched: pattern.len(),
+            exact: true,
+            literal: pattern.len(),
+        })
     } else {
-        // Exact match
-        if pattern == path {
-            Some(pattern.len())
-        } else {
-            None
-        }
+        None
     }
+}
+
+/// Collapse repeated slashes and drop a trailing slash (root and a final
+/// "/*" excepted), matching the canonical form requests are compared in.
+fn canonical_pattern(pattern: &str) -> String {
+    if !pattern.starts_with('/') {
+        // Not a path pattern ("*" or a typo): leave it as configured.
+        return pattern.to_string();
+    }
+    let (literal, wildcard) = match pattern.strip_suffix('*') {
+        Some(literal) => (literal, "*"),
+        None => (pattern, ""),
+    };
+    let mut out = String::with_capacity(pattern.len());
+    for segment in literal.split('/').filter(|segment| !segment.is_empty()) {
+        out.push('/');
+        out.push_str(segment);
+    }
+    // Root stays "/", and "/api/*" keeps the separator before its wildcard.
+    if out.is_empty() || (!wildcard.is_empty() && literal.ends_with('/')) {
+        out.push('/');
+    }
+    out.push_str(wildcard);
+    out
 }
 
 /// Longest prefix of `value` that fits in `max_bytes` on a char boundary.
@@ -415,12 +507,12 @@ mod tests {
 
     #[test]
     fn ipv6_ip_and_crafted_header_cannot_collide_with_another_client() {
-        // With ':' as the key delimiter, (ip="::1", header="2:3") and
-        // (ip="::1:2", header="3") both produced "0:::1:2:3". The '|'
-        // delimiter keeps their buckets separate.
+        // With ':' as the key delimiter, (ip="2001:db8::1", header="2:3") and
+        // (ip="2001:db8:0:1::", header="3") could both render as
+        // "0:2001:db8:...:2:3". The '|' delimiter keeps their buckets separate.
         let rl = make_limiter(vec![keyed_rule(1, 3600)]);
-        let attacker: IpAddr = "::1".parse().unwrap();
-        let victim: IpAddr = "::1:2".parse().unwrap();
+        let attacker: IpAddr = "2001:db8::1".parse().unwrap();
+        let victim: IpAddr = "2001:db8:0:1::".parse().unwrap();
 
         assert!(matches!(
             rl.check("/api/data", attacker, &api_key_headers("2:3")),
@@ -472,6 +564,197 @@ mod tests {
         let prefix = bounded_prefix(&value, 63);
         assert!(prefix.len() <= 63);
         assert!(value.starts_with(prefix));
+    }
+
+    // ── client identity ──────────────────────────────────────────────────────
+
+    fn hourly_rule(path: &str, per_ip: u64) -> RateLimitRule {
+        RateLimitRule {
+            path_pattern: path.to_string(),
+            per_ip,
+            window_seconds: 3600,
+            burst: 0,
+            key_header: None,
+        }
+    }
+
+    #[test]
+    fn ipv6_clients_share_one_bucket_per_64() {
+        let rl = make_limiter(vec![hourly_rule("/api/login", 2)]);
+        // Rotating the interface identifier inside one /64 buys nothing.
+        for host in [
+            "2001:db8:1:2::1",
+            "2001:db8:1:2::ffff",
+            "2001:db8:1:2:aaaa:bbbb:cccc:dddd",
+        ] {
+            let _ = rl.check("/api/login", host.parse().unwrap(), &empty_headers());
+        }
+        assert!(matches!(
+            rl.check(
+                "/api/login",
+                "2001:db8:1:2::9".parse().unwrap(),
+                &empty_headers()
+            ),
+            RateLimitResult::Rejected { .. }
+        ));
+        // The neighbouring /64 is a different client.
+        assert!(matches!(
+            rl.check(
+                "/api/login",
+                "2001:db8:1:3::1".parse().unwrap(),
+                &empty_headers()
+            ),
+            RateLimitResult::Allowed { .. }
+        ));
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_clients_stay_per_ipv4_address() {
+        // A dual-stack listener reports IPv4 peers as ::ffff:a.b.c.d; masking
+        // those to a /64 would lump every IPv4 client into one bucket.
+        let rl = make_limiter(vec![hourly_rule("/api/login", 1)]);
+        let first: IpAddr = "::ffff:192.0.2.1".parse().unwrap();
+        let second: IpAddr = "::ffff:192.0.2.2".parse().unwrap();
+        assert!(matches!(
+            rl.check("/api/login", first, &empty_headers()),
+            RateLimitResult::Allowed { .. }
+        ));
+        assert!(matches!(
+            rl.check("/api/login", second, &empty_headers()),
+            RateLimitResult::Allowed { .. }
+        ));
+        // ...and a mapped address is the same client as its plain IPv4 form.
+        assert!(matches!(
+            rl.check("/api/login", "192.0.2.1".parse().unwrap(), &empty_headers()),
+            RateLimitResult::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn client_keys() {
+        assert_eq!(client_key("10.1.2.3".parse().unwrap()), "10.1.2.3");
+        assert_eq!(client_key("::ffff:10.1.2.3".parse().unwrap()), "10.1.2.3");
+        assert_eq!(
+            client_key("2001:db8:a:b:c:d:e:f".parse().unwrap()),
+            "2001:db8:a:b::/64"
+        );
+        assert_eq!(client_key("::1".parse().unwrap()), "::/64");
+    }
+
+    // ── memory bound ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn rotating_source_addresses_cannot_grow_the_store_past_its_cap() {
+        let rl = RateLimiter::with_max_buckets(vec![hourly_rule("/api/login", 5)], 100);
+        for i in 0..5_000u32 {
+            let ip = IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i));
+            let _ = rl.check("/api/login", ip, &empty_headers());
+        }
+        assert!(rl.store.len() <= 100, "store holds {}", rl.store.len());
+    }
+
+    #[test]
+    fn sweep_keeps_drained_buckets_so_long_windows_hold() {
+        // Idle eviction used to reset a 1-per-hour bucket after 5 idle
+        // minutes; the sweep only drops buckets that are full again.
+        let rl = make_limiter(vec![hourly_rule("/api/login", 1)]);
+        assert!(matches!(
+            rl.check("/api/login", LOCAL, &empty_headers()),
+            RateLimitResult::Allowed { .. }
+        ));
+        rl.sweep();
+        assert!(matches!(
+            rl.check("/api/login", LOCAL, &empty_headers()),
+            RateLimitResult::Rejected { .. }
+        ));
+    }
+
+    // ── canonical paths ──────────────────────────────────────────────────────
+
+    #[test]
+    fn wildcard_rule_covers_its_bare_prefix() {
+        let rl = make_limiter(vec![api_rule(1)]);
+        assert!(matches!(
+            rl.check("/api", LOCAL, &empty_headers()),
+            RateLimitResult::Allowed { limit: 1, .. }
+        ));
+        // Same bucket as /api/users: the rule, not the path, keys it.
+        assert!(matches!(
+            rl.check("/api/users", LOCAL, &empty_headers()),
+            RateLimitResult::Rejected { .. }
+        ));
+        assert!(matches!(
+            rl.check("/apix", OTHER, &empty_headers()),
+            RateLimitResult::Allowed { limit: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn exact_rule_beats_wildcard_on_bare_prefix_in_either_order() {
+        // "/auth/*" also covers "/auth", but a stricter exact "/auth" rule
+        // must keep it - whichever of the two is listed first.
+        let exact = || hourly_rule("/auth", 1);
+        let wildcard = || hourly_rule("/auth/*", 100);
+        for rules in [vec![exact(), wildcard()], vec![wildcard(), exact()]] {
+            let rl = make_limiter(rules);
+            assert!(matches!(
+                rl.check("/auth", LOCAL, &empty_headers()),
+                RateLimitResult::Allowed { limit: 1, .. }
+            ));
+            assert!(matches!(
+                rl.check("/auth", LOCAL, &empty_headers()),
+                RateLimitResult::Rejected { limit: 1, .. }
+            ));
+            // Below the prefix the wildcard is the only match.
+            assert!(matches!(
+                rl.check("/auth/login", LOCAL, &empty_headers()),
+                RateLimitResult::Allowed { limit: 100, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn bare_prefix_ties_break_toward_the_narrower_wildcard() {
+        // On "/api", "/api/*" covers four literal bytes, like "/api*". Its
+        // separator only breaks that tie (the narrower pattern wins); it
+        // never makes the bare match count as longer than it is.
+        let narrow = || hourly_rule("/api/*", 1);
+        let broad = || hourly_rule("/api*", 100);
+        for rules in [vec![narrow(), broad()], vec![broad(), narrow()]] {
+            let rl = make_limiter(rules);
+            assert!(matches!(
+                rl.check("/api", LOCAL, &empty_headers()),
+                RateLimitResult::Allowed { limit: 1, .. }
+            ));
+            assert!(matches!(
+                rl.check("/apiary", LOCAL, &empty_headers()),
+                RateLimitResult::Allowed { limit: 100, .. }
+            ));
+        }
+        assert_eq!(
+            match_path_pattern("/api/*", "/api").map(|s| s.matched),
+            match_path_pattern("/api", "/api").map(|s| s.matched)
+        );
+        assert!(match_path_pattern("/api", "/api") > match_path_pattern("/api/*", "/api"));
+        assert!(match_path_pattern("/api/*", "/api/x") > match_path_pattern("/api*", "/api/x"));
+    }
+
+    #[test]
+    fn configured_patterns_are_canonicalized() {
+        assert_eq!(canonical_pattern("/api/login/"), "/api/login");
+        assert_eq!(canonical_pattern("//api//login"), "/api/login");
+        assert_eq!(canonical_pattern("/api/*"), "/api/*");
+        assert_eq!(canonical_pattern("/api//*"), "/api/*");
+        assert_eq!(canonical_pattern("/api*"), "/api*");
+        assert_eq!(canonical_pattern("/"), "/");
+        assert_eq!(canonical_pattern("/*"), "/*");
+        assert_eq!(canonical_pattern("*"), "*");
+
+        let rl = make_limiter(vec![hourly_rule("/api/login/", 1)]);
+        assert!(matches!(
+            rl.check("/api/login", LOCAL, &empty_headers()),
+            RateLimitResult::Allowed { limit: 1, .. }
+        ));
     }
 
     #[test]

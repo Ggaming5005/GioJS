@@ -28,6 +28,24 @@ const EXT = process.platform === 'win32' ? '.exe' : '';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * GET with the request-target sent byte-for-byte. fetch() runs the URL
+ * parser first, which resolves dot segments - exactly the spellings the
+ * path-hygiene tests need to put on the wire.
+ */
+function rawGet(path, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port: 39517, path, headers }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 function findServerBinary() {
   if (process.env.GIO_SERVER_BIN) return process.env.GIO_SERVER_BIN;
   for (const profile of ['debug', 'release']) {
@@ -666,6 +684,95 @@ async function main() {
       assert.match(await allowed.text(), /INTEGRATION_FIXTURE_ADMIN/);
     });
 
+    await test('guards hold for every path spelling the router treats alike', async () => {
+      for (const path of ['/admin/', '//admin', '/admin//', '/%61dmin', '/%61dmin/']) {
+        const res = await rawGet(path);
+        assert.equal(res.status, 302, `${path} must hit the /admin guard`);
+        assert.equal(res.headers.location, '/', path);
+      }
+      // The escape is decoded before Node routes, so the authorized request
+      // reaches the very page the guard protected.
+      const allowed = await rawGet('/%61dmin', { cookie: 'session=int-test' });
+      assert.equal(allowed.status, 200);
+      assert.match(allowed.body, /INTEGRATION_FIXTURE_ADMIN/);
+    });
+
+    await test('dot segments are rejected before any rule or route', async () => {
+      for (const path of ['/x/../admin', '/./admin', '/%2e%2e/admin']) {
+        const res = await rawGet(path);
+        assert.equal(res.status, 400, path);
+        assert.doesNotMatch(res.body, /INTEGRATION_FIXTURE_ADMIN/, path);
+      }
+    });
+
+    await test('malformed percent-escapes are rejected before any rule or route', async () => {
+      // A stray '%' ahead of an escape would be forwarded as a new escape
+      // ("/%61dmin", "/api/%6Cimited") that a later matcher decodes again,
+      // matching a path Node never routes.
+      for (const path of ['/%%361dmin', '/api/%%36Cimited', '/%%32e%%32e/admin', '/%zz', '/trailing%']) {
+        for (const headers of [{}, { cookie: 'session=int-test' }]) {
+          const res = await rawGet(path, headers);
+          assert.equal(res.status, 400, path);
+          assert.doesNotMatch(res.body, /INTEGRATION_FIXTURE_ADMIN|FIXTURE_CUSTOM_404/, path);
+          assert.equal(res.headers['x-ratelimit-limit'], undefined, `${path} must not touch a bucket`);
+        }
+      }
+    });
+
+    await test('/_gio paths never reach a top-level dynamic segment', async () => {
+      const blocked = await fetch(`${BASE}/acme/settings`, { redirect: 'manual' });
+      assert.equal(blocked.status, 302, 'the /:org/settings guard is live');
+      const allowed = await fetch(`${BASE}/acme/settings`, {
+        headers: { cookie: 'session=int-test' },
+      });
+      assert.equal(allowed.status, 200);
+      assert.match(await allowed.text(), /INTEGRATION_FIXTURE_ORG_SETTINGS org=acme/);
+
+      for (const path of ['/_gio/settings', '//_gio/settings', '/%5Fgio/settings', '/_gio']) {
+        for (const headers of [{}, { cookie: 'session=int-test' }]) {
+          const res = await rawGet(path, headers);
+          assert.equal(res.status, 404, `${path} must 404 in Rust`);
+          assert.doesNotMatch(res.body, /INTEGRATION_FIXTURE_ORG_SETTINGS/, path);
+          // Rust's bare 404, not the app's not-found page: Node never saw it.
+          assert.doesNotMatch(res.body, /FIXTURE_CUSTOM_404/, path);
+        }
+      }
+      // Dev-only internals do not exist in production.
+      const devtools = await rawGet('/_gio/devtools');
+      assert.equal(devtools.status, 404);
+      assert.doesNotMatch(devtools.body, /FIXTURE_CUSTOM_404/);
+      assert.equal((await fetch(`${BASE}/_gio/health`)).status, 200);
+    });
+
+    await test('rate limits hold for every path spelling the router treats alike', async () => {
+      const first = await rawGet('/api/limited');
+      assert.equal(first.status, 200);
+      assert.equal(first.headers['x-ratelimit-limit'], '2');
+      // Same handler, same bucket: the trailing slash spends the last token.
+      const second = await rawGet('/api/limited/');
+      assert.equal(second.status, 200);
+      assert.match(second.body, /"limited":true/);
+      for (const path of ['/api/limited', '//api//limited', '/api/limited/', '/api/%6Cimited']) {
+        const res = await rawGet(path);
+        assert.equal(res.status, 429, `${path} must draw from the exhausted bucket`);
+        assert.ok(res.headers['retry-after'], path);
+      }
+    });
+
+    await test('site-wide header rules cover the root and rule redirects', async () => {
+      const root = await fetch(`${BASE}/`);
+      assert.equal(root.headers.get('x-fixture-sitewide'), 'on', '/*rest matches zero segments');
+      const redirect = await fetch(`${BASE}/old-home`, { redirect: 'manual' });
+      assert.equal(redirect.status, 302);
+      assert.equal(redirect.headers.get('x-fixture-sitewide'), 'on');
+      const guarded = await fetch(`${BASE}/admin`, { redirect: 'manual' });
+      assert.equal(guarded.status, 302);
+      assert.equal(guarded.headers.get('x-fixture-sitewide'), 'on');
+      const configured = await fetch(`${BASE}/moved`, { redirect: 'manual' });
+      assert.equal(configured.status, 301);
+      assert.equal(configured.headers.get('x-fixture-sitewide'), 'on');
+    });
+
     await test('query strings survive rule redirects verbatim', async () => {
       const res = await fetch(`${BASE}/moved?a=1&b=two`, { redirect: 'manual' });
       assert.equal(res.status, 301);
@@ -1055,6 +1162,12 @@ async function devWatchPhase() {
         Promise.resolve(/dev watch: change detected/.test(log)), 15_000);
       await waitFor('worker restart completed', () =>
         Promise.resolve(/dev watch: worker restarted/.test(log)), 90_000);
+    });
+
+    await test('dev: dev-only /_gio endpoints still serve in development', async () => {
+      const res = await fetch(`${BASE}/_gio/devtools`);
+      assert.equal(res.status, 200);
+      await res.text();
     });
 
     await test('dev watch: the page cache is cleared so cached routes update too', async () => {

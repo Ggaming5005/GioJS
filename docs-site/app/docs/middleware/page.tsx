@@ -90,16 +90,34 @@ export default defineMiddleware({
         Patterns use the routing conventions and must start with <code>/</code>:
       </p>
       <ul>
-        <li><strong>Literal segments</strong> - <code>/about</code> matches exactly <code>/about</code> (a trailing slash on the request is tolerated)</li>
+        <li><strong>Literal segments</strong> - <code>/about</code> matches exactly <code>/about</code></li>
         <li><strong><code>:param</code></strong> - captures one segment: <code>/posts/:id</code> matches <code>/posts/42</code> but not <code>/posts</code> or <code>/posts/a/b</code></li>
-        <li><strong><code>*rest</code></strong> - captures the entire remainder, slashes included: <code>/docs/*rest</code> matches <code>/docs/a/b/c</code>. It must be the last segment and requires at least one segment (<code>/docs</code> alone does not match)</li>
+        <li><strong><code>*rest</code></strong> - captures the entire remainder, slashes included, and may be empty: <code>/docs/*rest</code> matches <code>/docs/a/b/c</code> and <code>/docs</code> itself. It must be the last segment. A guard on <code>/admin/*rest</code> therefore also protects <code>/admin</code>, and one <code>/*rest</code> header rule covers the whole site, root included</li>
       </ul>
       <p>
-        Captures substitute into <code>to</code> targets by name, in any order:
+        Captures substitute into <code>to</code> targets by name, in any order.
+        An empty catch-all contributes no segment, so{' '}
+        <code>/old/*rest</code> &rarr; <code>/new/*rest</code> sends{' '}
+        <code>/old</code> to <code>/new</code>:
       </p>
       <CodeBlock lang="toml" code={`[[redirects]]
 from = "/u/:user/p/:post"
 to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
+      <p>
+        Rules match the <strong>canonical</strong> request path - the same
+        path the router resolves. Repeated slashes collapse, a trailing slash
+        is ignored, and percent-escapes of unreserved characters (letters,
+        digits, <code>-</code> <code>.</code> <code>_</code> <code>~</code>)
+        are decoded, so <code>/admin/</code>, <code>//admin</code> and{' '}
+        <code>/%61dmin</code> all meet a guard written for{' '}
+        <code>/admin</code>. Your app sees those escapes decoded too, so a
+        rule and the router can never disagree about which page a request
+        reaches. A path containing a <code>.</code> or <code>..</code>{' '}
+        segment (raw or escaped), or a <code>%</code> that does not start a
+        valid escape (<code>/%zz</code>, <code>/a%</code>), is rejected with{' '}
+        <code>400</code> before any rule or route runs.{' '}
+        <code>[[rate_limits]]</code> use the same canonical form.
+      </p>
       <p>
         Every rule is validated when it is loaded, never at request time: a
         relative pattern, a catch-all in the middle, a <code>to</code> target
@@ -142,13 +160,20 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
       <p>
         Header rules stamp response headers and do not short-circuit: every
         header rule whose <code>path</code> matches contributes its headers.
-        They match the path the client requested (before any rewrite), and
-        names/values are validated once at load time.
+        They match the path the client requested (before any rewrite), apply
+        to redirect responses produced by redirect and guard rules as well -
+        so security headers like <code>strict-transport-security</code> cover
+        those too - and names/values are validated once at load time.
       </p>
 
       <div className="callout">
-        Internal <code>/_gio/*</code> endpoints (health, metrics, image
-        optimization, devtools) are exempt from all middleware rules.
+        GioJS&apos;s own <code>/_gio</code> endpoints (health, metrics, image
+        optimization, fonts, and devtools in development) are exempt from all
+        middleware rules. Every other <code>/_gio/...</code> path answers{' '}
+        <code>404</code> from Rust and never reaches your pages, so a
+        top-level dynamic segment like <code>app/[org]/</code> can never be
+        rendered with <code>org = &quot;_gio&quot;</code> behind your
+        rules&apos; back.
       </div>
     </>
   );
