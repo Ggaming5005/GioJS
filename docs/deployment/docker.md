@@ -132,6 +132,7 @@ Each container keeps its own page cache (memory + disk). There is no shared cach
 | `GIO_DEPLOYMENT_ID` | Pin the deployment ID across replicas | content-derived from the build |
 | `GIO_SOCKET_PATH` | IPC socket path | per-instance `.gio/ipc-<pid>-<rand>.sock` |
 | `RUST_LOG` | Rust log level (`info`, `debug`, `trace`) | `info` |
+| `GIO_LOG_FORMAT` | `json` makes server log lines JSON like the worker's, for log drivers and shippers | `text` |
 
 ## .dockerignore
 

@@ -69,7 +69,7 @@ renders React. Full docs: https://giojs.com/llms.txt
   gio.toml (verified in Rust). Build other cookies with `serializeCookie`,
   never by string concatenation.
 - Config is `gio.toml` (server, TLS, images.remote_patterns, rate_limits,
-  fonts, i18n, websocket, metrics, security). There is no `[cache]`/redirects/rewrites
+  fonts, i18n, websocket, metrics, logging, security). There is no `[cache]`/redirects/rewrites
   section.
 - Env: `.env.{mode}.local`, `.env.local`, `.env.{mode}`, `.env` load at server
   start (first wins; real env vars always win; restart after editing). Only

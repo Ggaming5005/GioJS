@@ -36,6 +36,11 @@ The HTTP port is not an environment variable - it comes from the `[server]` sect
 | `GIO_DEPLOYMENT_ID` | Pin the deployment ID (otherwise content-derived from the build) | unset |
 | `GIO_SOCKET_PATH` | IPC socket path (Unix socket; named pipe on Windows) | per-instance `.gio/ipc-<pid>-<rand>.sock` |
 | `RUST_LOG` | Rust log filter (`info`, `debug`, `trace`) | `info` |
+| `GIO_LOG_FORMAT` | `json` for one JSON object per server log line (overrides `[logging] format`), ready for Loki/Datadog/CloudWatch | `text` |
+
+## Process supervision
+
+Stop the server with `SIGTERM`: it stops accepting, closes idle keep-alive connections, lets in-flight requests finish (8 s at most) and takes its Node worker down with it. A server killed without warning (`SIGKILL`, the OOM killer, a crash) never leaves the worker running: the worker's stdin is a pipe the server holds open, and the worker exits when it reads end-of-file. `gio` and a standalone `run.mjs` launch the server the same way (piped stdin plus `GIO_EXIT_ON_STDIN_EOF=1`), so killing the launcher stops the server and frees the port.
 
 ## Multi-instance deployments
 
