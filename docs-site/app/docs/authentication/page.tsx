@@ -67,13 +67,22 @@ export const sessions = createSessionStorage<UserSession>({
   // all optional:
   // cookieName: 'gio_session',
   // maxAge: 60 * 60 * 24 * 7,           // seconds; carried in the token and the cookie
-  // secrets: [process.env.NEW_SECRET!, process.env.OLD_SECRET!],
   // cookie: { sameSite: 'strict' },     // serializeCookie options
 });`} />
       <p>
         Name the module <code>*.server.ts</code>: it is then guaranteed never to reach a client
         bundle - a page that used it outside <code>getServerSideProps</code> would fail its
         client build instead of shipping your session code to the browser.
+      </p>
+      <p>
+        Keys come from <code>GIO_SESSION_SECRET</code> unless you pass a{' '}
+        <code>secrets</code> option. Leave that option unset for any storage a guard checks:{' '}
+        <code>require_session</code> guards verify with <code>GIO_SESSION_SECRET</code> only
+        (in development without one, the server&apos;s ephemeral secret), so sessions signed with other
+        secrets are turned away on every request and the login loops back to{' '}
+        <code>redirect_to</code>. Node logs a warning when a <code>secrets</code> option signs
+        with a key <code>GIO_SESSION_SECRET</code> does not contain. To rotate, put several
+        secrets in <code>GIO_SESSION_SECRET</code> (see Rotating secrets below).
       </p>
 
       <h2>3. Log in</h2>
@@ -121,12 +130,19 @@ export default defineMiddleware({
       <p>
         The guard reads the <code>gio_session</code> cookie (set <code>require_cookie</code> /{' '}
         <code>requireCookie</code> when your storage uses another <code>cookieName</code>),
-        checks its HMAC against every configured secret in constant time, and checks its
+        checks its HMAC against every secret in <code>GIO_SESSION_SECRET</code> in constant
+        time - never against a storage&apos;s <code>secrets</code> option - and checks its
         expiry. A missing, forged, tampered, or expired session gets a <code>302</code> to{' '}
         <code>redirect_to</code> and never reaches Node. Rust only verifies - it never decrypts,
         so the encryption key stays in the worker. A guard with <code>require_cookie</code>{' '}
         alone still only checks that the cookie exists; see{' '}
         <a href="/docs/middleware">Middleware</a> for patterns and evaluation order.
+      </p>
+      <p>
+        A broken guard never leaves its path open: a <code>gio.toml</code> guard with a
+        misspelled key or no requirement stops the server at startup, and a{' '}
+        <code>middleware.ts</code> guard whose requirement is malformed denies every request to
+        its path until fixed, with a warning saying why.
       </p>
 
       <h2>5. Read the session</h2>
@@ -144,7 +160,9 @@ export async function getServerSideProps(ctx) {
         <code>ctx.cookies</code>, which marks the render personalized: it is never cached and
         served to another visitor, even with <code>export const revalidate</code>. A guard
         proves the session is authentic; checks on what is inside it (roles, a disabled
-        account) belong here.
+        account) belong here, in the page: a plugin&apos;s <code>onRequest</code> does not run
+        when the Rust cache answers, and a page that exports <code>revalidate</code> without
+        reading the session is cached and served to anyone the guard lets through.
       </p>
       <p>
         A session exposes <code>get(key)</code>, <code>set(key, value)</code>,{' '}
@@ -207,11 +225,11 @@ export function POST() {
         cross-site <code>POST</code>, <code>fetch</code>, and iframe requests - a malicious site
         cannot submit a form as your logged-in user. Keep every state change behind{' '}
         <code>POST</code>, <code>PUT</code>, <code>PATCH</code>, or <code>DELETE</code> (never{' '}
-        <code>GET</code>, which top-level navigations send cookies with). The Rust server&apos;s
-        cross-site request check on those methods (see the security settings in{' '}
-        <a href="/docs/configuration">Configuration</a>) is the second layer, and{' '}
-        <code>sameSite: &apos;strict&apos;</code> is available when even links from other sites
-        should arrive logged out.
+        <code>GET</code>, which top-level navigations send cookies with).{' '}
+        <code>SameSite</code> is the first layer. Where a server-side cross-site request check
+        on those methods is enabled (see <a href="/docs/configuration">Configuration</a> for
+        whether your version has one), it adds a second. <code>sameSite: &apos;strict&apos;</code>{' '}
+        is available when even links from other sites should arrive logged out.
       </p>
 
       <h2>Cookies</h2>
@@ -226,7 +244,7 @@ export function POST() {
         <tbody>
           <tr><td><code>path</code></td><td><code>/</code></td><td>Must start with <code>/</code>.</td></tr>
           <tr><td><code>httpOnly</code></td><td><code>true</code></td><td>Scripts cannot read the cookie.</td></tr>
-          <tr><td><code>secure</code></td><td>on in production</td><td>Off in development (plain-http localhost). Pass <code>secure: false</code> explicitly to serve production over http.</td></tr>
+          <tr><td><code>secure</code></td><td>on in production</td><td>Off in development (plain-http localhost), except for <code>__Secure-</code>/<code>__Host-</code> names, <code>sameSite: &apos;none&apos;</code> and <code>partitioned</code>, which browsers accept only with it (Chrome and Firefox take <code>Secure</code> cookies from <code>http://localhost</code>). Pass <code>secure: false</code> explicitly to serve production over http.</td></tr>
           <tr><td><code>sameSite</code></td><td><code>&apos;lax&apos;</code></td><td><code>&apos;strict&apos;</code> or <code>&apos;none&apos;</code> (requires <code>secure</code>).</td></tr>
           <tr><td><code>maxAge</code> / <code>expires</code></td><td>-</td><td>Whole seconds / a <code>Date</code>. Neither means a browser-session cookie; <code>maxAge: 0</code> deletes.</td></tr>
           <tr><td><code>domain</code></td><td>-</td><td>Host-only when omitted.</td></tr>
@@ -242,10 +260,15 @@ headers.append('Set-Cookie', serializeCookie('q', encodeURIComponent(search)));`
         Names and values are validated against RFC 6265 and anything invalid throws - a value
         with <code>;</code>, a space, a quote, or a line break could otherwise smuggle extra
         attributes or headers into the response. Values are not encoded for you: encode free
-        text yourself, as above. The <code>__Secure-</code> and <code>__Host-</code> prefixes
-        and other combinations browsers would silently reject also throw.{' '}
+        text yourself, as above. Combinations browsers would silently reject also throw - an
+        explicit <code>secure: false</code> with a <code>__Secure-</code> or{' '}
+        <code>__Host-</code> name, <code>sameSite: &apos;none&apos;</code>, or{' '}
+        <code>partitioned</code>, or a <code>__Host-</code> cookie with a{' '}
+        <code>domain</code> or a <code>path</code> other than <code>/</code>.{' '}
         <code>parseCookies(header)</code> is the parser behind <code>ctx.cookies</code> and{' '}
-        <code>req.cookies</code>.
+        <code>req.cookies</code>; read its result with <code>Object.hasOwn</code> when the
+        cookie name comes from elsewhere, since a plain object also &quot;has&quot;{' '}
+        <code>constructor</code>.
       </p>
 
       <h2>Signed values</h2>
