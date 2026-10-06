@@ -7,8 +7,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// 1 token = TOKEN_SCALE internal units. At 1_000_000, rates as low as
-// 1 request per 1000 seconds maintain sub-percent precision.
+// 1 token = TOKEN_SCALE internal units, so refill accrues in fractions of a
+// token without floating-point arithmetic.
 const TOKEN_SCALE: u64 = 1_000_000;
 
 pub struct TokenBucket {
@@ -18,25 +18,41 @@ pub struct TokenBucket {
     last_refill_ms: AtomicU64,
     // Maximum stored tokens (burst ceiling)
     capacity_scaled: u64,
-    // Refill rate: TOKEN_SCALE units added per millisecond
-    // = per_ip * 1_000 / window_seconds (pre-divided by 1000 for ms conversion)
-    rate_per_ms: u64,
+    // Refill is per_ip tokens per window_ms, kept as the exact ratio: a
+    // pre-divided per-millisecond rate rounded slow windows (1 per hour,
+    // 5 per day) down to zero, so those buckets never refilled at all.
+    per_ip: u64,
+    window_ms: u64,
 }
 
 impl TokenBucket {
     /// Create a new full bucket. `per_ip` requests allowed per `window_seconds`.
     /// `burst` extra requests are permitted as a spike above the steady-state rate.
     pub fn new(per_ip: u64, window_seconds: u64, burst: u64) -> Self {
-        // rate: per_ip tokens per window_seconds seconds = per_ip/window_seconds/1000 per ms
-        // Scaled: per_ip * TOKEN_SCALE / window_seconds / 1000 = per_ip * 1000 / window_seconds
-        let rate_per_ms = (per_ip * 1_000).saturating_div(window_seconds.max(1));
-        let capacity_scaled = (per_ip + burst).saturating_mul(TOKEN_SCALE);
+        let capacity_scaled = per_ip.saturating_add(burst).saturating_mul(TOKEN_SCALE);
         Self {
             tokens_scaled: AtomicU64::new(capacity_scaled),
             last_refill_ms: AtomicU64::new(unix_now_ms()),
             capacity_scaled,
-            rate_per_ms,
+            per_ip,
+            window_ms: window_seconds.max(1).saturating_mul(1_000),
         }
+    }
+
+    /// `current` plus the refill accrued over `elapsed_ms`, capped at capacity.
+    fn refilled(&self, current: u64, elapsed_ms: u64) -> u64 {
+        let added = u128::from(elapsed_ms) * u128::from(self.per_ip) * u128::from(TOKEN_SCALE)
+            / u128::from(self.window_ms);
+        (u128::from(current) + added).min(u128::from(self.capacity_scaled)) as u64
+    }
+
+    /// True once the bucket has refilled to capacity at `now_ms`. Dropping a
+    /// full bucket loses nothing - a recreated one starts full - so the store
+    /// sweeps these without ever granting a client extra budget.
+    pub(crate) fn is_full_at(&self, now_ms: u64) -> bool {
+        let last = self.last_refill_ms.load(Ordering::Acquire);
+        let current = self.tokens_scaled.load(Ordering::Acquire);
+        self.refilled(current, now_ms.saturating_sub(last)) >= self.capacity_scaled
     }
 
     /// Attempt to consume one token. Returns `true` if the request is allowed.
@@ -46,15 +62,15 @@ impl TokenBucket {
     /// Slight over-generosity is possible under extreme concurrency (see
     /// X-RateLimit-Remaining approximation note in SPEC2 §27).
     pub fn try_consume(&self) -> bool {
-        let now = unix_now_ms();
+        self.try_consume_at(unix_now_ms())
+    }
 
+    pub(crate) fn try_consume_at(&self, now: u64) -> bool {
         loop {
             let last = self.last_refill_ms.load(Ordering::Acquire);
             let current = self.tokens_scaled.load(Ordering::Acquire);
 
-            let elapsed = now.saturating_sub(last);
-            let added = self.rate_per_ms.saturating_mul(elapsed);
-            let available = current.saturating_add(added).min(self.capacity_scaled);
+            let available = self.refilled(current, now.saturating_sub(last));
 
             if available < TOKEN_SCALE {
                 return false;
@@ -86,7 +102,7 @@ impl TokenBucket {
     }
 }
 
-fn unix_now_ms() -> u64 {
+pub(crate) fn unix_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -149,6 +165,43 @@ mod tests {
         }
         // 6th should fail - burst exhausted
         assert!(!bucket.try_consume(), "6th request exceeds burst limit");
+    }
+
+    #[test]
+    fn slow_windows_still_refill() {
+        // 1 per hour used to compute a per-ms rate of 1000/3600 = 0 and
+        // never refill; it must be back to one token an hour later.
+        let bucket = TokenBucket::new(1, 3600, 0);
+        let start = unix_now_ms();
+        assert!(bucket.try_consume_at(start));
+        assert!(!bucket.try_consume_at(start + 1_000));
+        assert!(!bucket.try_consume_at(start + 3_599_000));
+        assert!(bucket.try_consume_at(start + 3_600_000));
+    }
+
+    #[test]
+    fn fractional_rates_refill_at_the_exact_ratio() {
+        // 5 per hour = one token every 720s; 1000*5/3600 truncated to 1
+        // unit/ms used to stretch that to 1000s.
+        let bucket = TokenBucket::new(5, 3600, 0);
+        let start = unix_now_ms();
+        for _ in 0..5 {
+            assert!(bucket.try_consume_at(start));
+        }
+        assert!(!bucket.try_consume_at(start + 719_000));
+        assert!(bucket.try_consume_at(start + 720_000));
+    }
+
+    #[test]
+    fn is_full_tracks_refill_to_capacity() {
+        let bucket = TokenBucket::new(2, 10, 0);
+        let start = unix_now_ms();
+        assert!(bucket.is_full_at(start));
+        assert!(bucket.try_consume_at(start));
+        assert!(!bucket.is_full_at(start));
+        // One token refills every 5s.
+        assert!(!bucket.is_full_at(start + 4_999));
+        assert!(bucket.is_full_at(start + 5_000));
     }
 
     #[test]

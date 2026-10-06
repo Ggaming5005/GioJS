@@ -364,7 +364,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                rl_evict.evict_idle(300);
+                rl_evict.sweep();
             }
         });
         Some(rl)
