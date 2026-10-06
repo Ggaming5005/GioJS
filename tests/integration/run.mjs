@@ -690,6 +690,28 @@ async function devWatchPhase() {
       await sleep(3_000);
       assert.equal(changeCount(), changesBefore, 'no change may be detected while idle');
     });
+
+    await test('dev watch: a new top-level directory during an event burst keeps the watcher alive', async () => {
+      // New top-level directories used to be registered by the task that
+      // drains the watcher's bounded channel. A burst arriving while that
+      // task awaited a worker restart (a git checkout, say) filled the
+      // channel, and both sides then waited on each other for good.
+      const banner = join(devDir, 'components', 'Banner.tsx');
+      const changesBefore = changeCount();
+      await writeFile(banner, (await readFile(banner, 'utf8')) + '\n// burst\n');
+      await waitFor('the restart to begin', () => Promise.resolve(changeCount() > changesBefore), 60_000);
+      await mkdir(join(devDir, 'lib'));
+      for (let i = 0; i < 500; i++) {
+        await writeFile(join(devDir, 'components', `burst-${i}.json`), '{}\n');
+      }
+      await waitFor('lib/ to be watched', () => Promise.resolve(/watching new directory/.test(log)), 30_000);
+      await editAndWait(
+        'an edit after the burst to be served',
+        banner,
+        (src) => src.replace('WATCH_UPDATED_COMPONENT', 'AFTER_BURST_COMPONENT'),
+        async () => (await (await fetch(`${BASE}/with-component`)).text()).includes('AFTER_BURST_COMPONENT'),
+      );
+    });
   } catch (err) {
     console.error('\nintegration (dev watch): FAILED');
     console.error(err);

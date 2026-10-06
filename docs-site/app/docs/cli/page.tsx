@@ -21,7 +21,7 @@ giojs-server                        # production`} />
       <h3>Dev mode file watching</h3>
       <p>In dev mode the server watches the whole project, not just app/ - edits to components/, lib/, src/, hooks/, gio.toml, middleware.ts, or tsconfig.json clear the page cache, re-transform app CSS, restart the Node worker, and reload open browser tabs. Edits under public/ refresh which files are served at the site root and reload the browser without a worker restart.</p>
       <ul>
-        <li>Only source-like files trigger a restart (<code>.ts .tsx .js .jsx .mjs .cjs .mts .cts .json .css .toml</code>), so databases, logs, and uploads your app writes into the project never restart the worker that wrote them.</li>
+        <li>Any change under app/ triggers a restart, as pages may read any file there. Elsewhere only source-like files do (<code>.ts .tsx .js .jsx .mjs .cjs .mts .cts .json .css .toml</code>), plus directories created, deleted, or moved in or out, so databases, logs, and uploads your app writes into the project never restart the worker that wrote them.</li>
         <li>Never watched: node_modules/ (at any depth), hidden directories such as .git/ and .gio/ (the worker&apos;s own build output), and the top-level build output directories out/, dist/, build/, target/, standalone/, and coverage/. Editor scratch files (<code>~</code> backups, <code>.swp</code>/<code>.swx</code>, <code>4913</code>, <code>.#</code> locks) are ignored.</li>
         <li>Ignored directories are kept out of the watch registration itself, so a large node_modules/ does not use up Linux inotify watches. If a project is big enough to hit the limit anyway, the server logs which directory went unwatched; raise <code>fs.inotify.max_user_watches</code>.</li>
       </ul>

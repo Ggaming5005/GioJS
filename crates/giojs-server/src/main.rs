@@ -2386,8 +2386,6 @@ async fn image_handler_route(
 /// public/-only changes refresh the root-serving index and reload browsers
 /// without a restart - nothing the worker holds depends on them. Dev only.
 fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
-    use notify::Watcher;
-
     // Classification is prefix-based and event paths come back absolute (on
     // macOS through /private), so compare against canonical paths.
     let root = match std::fs::canonicalize(&project_root) {
@@ -2397,61 +2395,24 @@ fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
             return;
         }
     };
+    let app_path = dev_watch::resolve_dir(std::path::Path::new(&app_dir));
     let public_dir = dev_watch::resolve_dir(state.public_files.root());
-
-    let (fs_tx, mut fs_rx) = tokio::sync::mpsc::channel::<dev_watch::WatchSignal>(64);
-    let event_root = root.clone();
-    let event_public_dir = public_dir.clone();
-    let mut watcher =
-        match notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
-            let Ok(event) = result else {
-                return;
-            };
-            for dir in dev_watch::new_top_level_dirs(&event_root, &event) {
-                let _ = fs_tx.blocking_send(dev_watch::WatchSignal::NewDir(dir));
-            }
-            if let Some(change) = dev_watch::classify_event(&event_root, &event_public_dir, &event)
-            {
-                let _ = fs_tx.blocking_send(dev_watch::WatchSignal::Change(change));
-            }
-        }) {
-            Ok(watcher) => watcher,
-            Err(e) => {
-                warn!(error = %e, "dev watch unavailable");
-                return;
-            }
-        };
-    // The root itself non-recursively: top-level files (gio.toml,
-    // middleware.ts, package.json, tsconfig.json) and new top-level dirs.
-    if let Err(e) = watcher.watch(&root, notify::RecursiveMode::NonRecursive) {
-        warn!(error = %e, root = %root.display(), "dev watch: cannot watch project root");
-        return;
-    }
-    for dir in dev_watch::top_level_watch_dirs(&root) {
-        dev_watch::watch_dir_recursive(&mut watcher, &dir);
-    }
-    if !public_dir.starts_with(&root) && public_dir.is_dir() {
-        dev_watch::watch_dir_recursive(&mut watcher, &public_dir);
-    }
+    let watch = match dev_watch::DevWatch::start(root.clone(), app_path, public_dir) {
+        Ok(watch) => watch,
+        Err(e) => {
+            warn!(error = %e, root = %root.display(), "dev watch unavailable");
+            return;
+        }
+    };
 
     tokio::spawn(async move {
-        // The watcher stops when dropped; it lives as long as this task.
-        let mut watcher = watcher;
+        // The watch stops when dropped; it lives as long as this task.
+        let watch = watch;
         info!(root = %root.display(), app_dir = %app_dir, "dev watch active");
         loop {
-            let Some(first) = fs_rx.recv().await else {
-                return;
-            };
-            let mut batch = dev_watch::WatchBatch::default();
-            batch.absorb(first, &mut watcher);
-            // Debounce bursts - editors emit several events per save.
-            loop {
-                match tokio::time::timeout(Duration::from_millis(300), fs_rx.recv()).await {
-                    Ok(Some(signal)) => batch.absorb(signal, &mut watcher),
-                    Ok(None) => return,
-                    Err(_) => break,
-                }
-            }
+            // Changes made while a batch is processed (a worker restart can
+            // take seconds) are kept and form the next batch.
+            let batch = watch.changes().next_batch(Duration::from_millis(300)).await;
             if batch.public {
                 let public_files = state.public_files.clone();
                 match tokio::task::spawn_blocking(move || public_files.refresh()).await {
