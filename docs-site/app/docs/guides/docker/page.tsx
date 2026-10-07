@@ -1,24 +1,32 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../../components/CodeBlock.tsx';
+import { PmTabs } from '../../../../components/PmTabs.tsx';
+
+export const metadata: Metadata = {
+  title: 'Deploying with Docker',
+  description:
+    'A small production image built from gio build standalone: only Node and one folder, ' +
+    'running as an unprivileged user with a health check.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Guides</div>
       <h1>Deploying with Docker</h1>
       <p className="page-subtitle">
         A small production image built from <code>gio build standalone</code>: only Node and
         one folder, running as an unprivileged user with a health check.
       </p>
 
-      <CodeBlock lang="bash" code={`npm create giojs@latest my-app -- --docker   # a new app
+      <PmTabs command={`npm create giojs@latest my-app -- --docker   # a new app
 npx create-giojs add docker                    # an existing app
 
 docker compose up --build                      # → http://localhost:3000`} />
 
-      <h2>The Dockerfile</h2>
+      <h2 id="the-dockerfile">The Dockerfile</h2>
       <p>
         The build stage installs every dependency, runs <code>npm run build</code> (the
         typecheck, plus the Tailwind build when that feature is on) and packs the app with{' '}
@@ -88,7 +96,7 @@ CMD ["node", "run.mjs"]`} />
         </li>
       </ul>
 
-      <h2>docker-compose.yml</h2>
+      <h2 id="docker-composeyml">docker-compose.yml</h2>
       <CodeBlock lang="text" code={`services:
   app:
     build: .
@@ -121,7 +129,7 @@ volumes:
         <a href="/docs/guides/database">database feature</a> - across rebuilds.
       </p>
 
-      <h2>Without compose</h2>
+      <h2 id="without-compose">Without compose</h2>
       <CodeBlock lang="bash" code={`docker build -t my-app .
 docker run -p 3000:3000 --env-file .env.production.local -v my-app-data:/app/data my-app`} />
       <p>

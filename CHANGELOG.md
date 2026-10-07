@@ -482,7 +482,10 @@ first.
   `async generateMetadata(ctx, { props })`. Segments merge from the root
   layout to the page, the deepest winning per field. Titles support
   `{ default, template: '%s | Site', absolute }`, and relative URLs resolve
-  against `metadataBase` or `GIO_SITE_URL`.
+  against `metadataBase` or `GIO_SITE_URL`. `og:title` and `og:description`
+  default to the page's resolved title and description, so a layout's
+  site-wide `openGraph` (images, site name) gives every page a card with its
+  own title.
 - The tags render into `<head>` on the server, streamed pages included, and
   are replaced on client-side navigation. Reading cookies, the IP or the host
   in `generateMetadata` makes the page uncached. A metadata title replaces a
@@ -925,6 +928,20 @@ first.
 - The sidebar is regrouped by topic. In `docs-site/`, `npm run check-links`
   fails on dead links, missing anchors and pages left out of the sidebar, and
   `npm test` checks facts the docs state against the code.
+- The docs site is rebuilt around finding things. **Search** (Ctrl+K, Cmd+K
+  or `/`) covers every page section by section, ranks an exact API name
+  first, tolerates typos and unfinished words, and runs in the browser
+  with no third-party service. The sidebar has four sections (Getting
+  Started, Guides, API Reference, Architecture) with collapsible groups, and
+  every page gets breadcrumbs, an "On this page" outline, `#` links on its
+  headings, previous/next links, "Edit this page on GitHub", "Copy page" as
+  Markdown (each page is also served as `.md`), its own `<title>` and
+  canonical URL, and a light/dark/system theme switch. `/docs` is a new
+  index page. Code samples are syntax-highlighted (TypeScript, JSX, JSON,
+  TOML, shell, diff, Rust), show the file they belong in, and install
+  commands have npm, pnpm, yarn and bun tabs that remember your pick.
+  `docs-site/AGENTS.md` is the guide to writing a docs page, and CI now
+  typechecks, link-checks, tests and builds the site.
 - "Known Issues" is now **Known Limitations**: what GioJS does not do yet and
   what to use instead.
 - The README's comparison with self-hosted Next.js is corrected and expanded,

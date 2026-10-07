@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Route Handlers',
+  description: 'API endpoints, Server-Sent Events, and WebSockets with route.ts files.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Routing</div>
       <h1>Route Handlers</h1>
       <p className="page-subtitle">API endpoints, Server-Sent Events, and WebSockets with route.ts files.</p>
 
@@ -15,8 +20,7 @@ export default function Page(): React.JSX.Element {
         server endpoint. Export a function per HTTP method - <code>GET</code>,{' '}
         <code>POST</code>, <code>PUT</code>, <code>PATCH</code>, <code>DELETE</code>:
       </p>
-      <CodeBlock lang="ts" code={`// app/api/notes/[id]/route.ts
-import type { GioRequest } from '@gio.js/core';
+      <CodeBlock lang="ts" title="app/api/notes/[id]/route.ts" code={`import type { GioRequest } from '@gio.js/core';
 
 export async function POST(req: GioRequest<'/api/notes/:id'>) {
   const { text } = req.json<{ text: string }>();
@@ -42,7 +46,7 @@ export const GET: RouteHandler<'/api/notes/:id'> = async (req) => {
   return note ?? new Response('gone', { status: 410 });
 };`} />
 
-      <h2>The request object</h2>
+      <h2 id="the-request-object">The request object</h2>
       <p>
         Handlers receive a <code>GioRequest</code>: <code>method</code>, <code>path</code>,{' '}
         <code>params</code>, <code>query</code>, lowercased <code>headers</code>, parsed{' '}
@@ -62,8 +66,7 @@ export const GET: RouteHandler<'/api/notes/:id'> = async (req) => {
         <code>req.host</code>, on the other hand, is whatever the client sent unless your
         proxy pins it - fine for display, never for a security decision.
       </p>
-      <CodeBlock lang="ts" code={`// app/api/audit/route.ts
-import type { GioRequest } from '@gio.js/core';
+      <CodeBlock lang="ts" title="app/api/audit/route.ts" code={`import type { GioRequest } from '@gio.js/core';
 
 export async function POST(req: GioRequest) {
   await audit.record({ ip: req.ip, requestId: req.requestId, action: req.json() });
@@ -98,7 +101,7 @@ export function POST(req: GioRequest) {
         <a href="/docs/forms">Forms and Mutations</a>.
       </p>
 
-      <h2>What you can return</h2>
+      <h2 id="what-you-can-return">What you can return</h2>
       <ul>
         <li>Any JSON-serializable value - sent as <code>application/json</code> with status 200.</li>
         <li>A web-standard <code>Response</code> - its status, headers, and body pass through. Binary bodies (images, files) are supported, and a <code>ReadableStream</code> body streams (see below).</li>
@@ -109,15 +112,14 @@ export function POST(req: GioRequest) {
   return new Response('gone', { status: 202, headers: { 'X-Reason': 'cleanup' } });
 }`} />
 
-      <h2>Setting cookies</h2>
+      <h2 id="setting-cookies">Setting cookies</h2>
       <p>
         Append one <code>Set-Cookie</code> per cookie - each is sent as its own header,
         byte-for-byte (cookies are never comma-joined, so <code>Expires</code> dates stay
         intact). Other repeated headers such as <code>Link</code> or{' '}
         <code>WWW-Authenticate</code> are combined into one comma-separated value.
       </p>
-      <CodeBlock lang="ts" code={`// app/api/login/route.ts
-import { serializeCookie, type GioRequest } from '@gio.js/core';
+      <CodeBlock lang="ts" title="app/api/login/route.ts" code={`import { serializeCookie, type GioRequest } from '@gio.js/core';
 import { sessions } from '../../../lib/session.server.ts';
 
 export async function POST(req: GioRequest) {
@@ -136,9 +138,8 @@ export async function POST(req: GioRequest) {
         <a href="/docs/authentication">Authentication</a>.
       </p>
 
-      <h2>Server-Sent Events</h2>
-      <CodeBlock lang="ts" code={`// app/ticker/route.ts
-import { GioEventStream } from '@gio.js/core';
+      <h2 id="server-sent-events">Server-Sent Events</h2>
+      <CodeBlock lang="ts" title="app/ticker/route.ts" code={`import { GioEventStream } from '@gio.js/core';
 
 export function GET() {
   return new GioEventStream((stream) => {
@@ -147,14 +148,13 @@ export function GET() {
   });
 }`} />
 
-      <h2>Streaming responses</h2>
+      <h2 id="streaming-responses">Streaming responses</h2>
       <p>
         Return a <code>Response</code> whose body is a <code>ReadableStream</code> and the
         client receives each chunk as you produce it - an LLM token stream, a large export, an
         event stream written by hand:
       </p>
-      <CodeBlock lang="ts" code={`// app/api/chat/route.ts
-import type { GioRequest } from '@gio.js/core';
+      <CodeBlock lang="ts" title="app/api/chat/route.ts" code={`import type { GioRequest } from '@gio.js/core';
 
 export async function POST(req: GioRequest) {
   const { prompt } = req.json<{ prompt: string }>();
@@ -237,7 +237,7 @@ export function GET() {
         events for you and runs your cleanup on disconnect.
       </p>
 
-      <h2>Rules</h2>
+      <h2 id="rules">Rules</h2>
       <ul>
         <li>Handler responses are never cached or coalesced - every request runs your code.</li>
         <li>Requests for methods you didn&apos;t export get <code>405</code> with an <code>Allow</code> header.</li>

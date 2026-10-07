@@ -1,12 +1,19 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Caching & Revalidating',
+  description:
+    'Incremental Static Regeneration with stale-while-revalidate semantics and on-demand ' +
+    'purges.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Rendering &amp; Caching</div>
       <h1>Caching & Revalidating</h1>
       <p className="page-subtitle">Incremental Static Regeneration with stale-while-revalidate semantics and on-demand purges.</p>
       <p>Export revalidate from a page to control how long its rendered HTML is cached by the Rust layer.</p>
@@ -18,7 +25,7 @@ export const revalidate = false;
 
 // never cache (default)
 // (omit the export)`} />
-      <h2>How it works</h2>
+      <h2 id="how-it-works">How it works</h2>
       <p>Cached pages are served from memory in microseconds. When a page is stale, GioJS serves the stale copy immediately and revalidates in the background - visitors never wait.</p>
       <div className="callout">Cache keys are deployment-ID aware, and the derived ID changes with the app&apos;s client and server code, so a redeploy of changed code automatically invalidates stale entries. Data read at runtime (files, a database, <code>.env</code> values) is not part of the ID: purge after changing it. See <a href="/docs/caching-layers">Caching layers</a>.</div>
 
@@ -33,14 +40,13 @@ export const revalidate = false;
         copy one more time.
       </p>
 
-      <h3>Tagging pages</h3>
+      <h3 id="tagging-pages">Tagging pages</h3>
       <p>
         Give a page tags to purge it by. Static tags apply to every render of the page;
         tags returned next to <code>props</code> from <code>getServerSideProps</code> are
         added per render:
       </p>
-      <CodeBlock lang="tsx" code={`// app/posts/[id]/page.tsx
-export const revalidate = 3600;
+      <CodeBlock lang="tsx" title="app/posts/[id]/page.tsx" code={`export const revalidate = 3600;
 export const tags = ['posts'];            // every post page
 
 export async function getServerSideProps(ctx) {
@@ -59,13 +65,12 @@ export async function getServerSideProps(ctx) {
         Every cached page is also purgeable by its path - no tag needed.
       </p>
 
-      <h3>revalidateTag() and revalidatePath()</h3>
+      <h3 id="revalidatetag-and-revalidatepath">revalidateTag() and revalidatePath()</h3>
       <p>
         Call them from server code - route handlers, <code>getServerSideProps</code>,
         anything the worker runs - after the data changed:
       </p>
-      <CodeBlock lang="ts" code={`// app/api/posts/[id]/route.ts
-import { revalidatePath, revalidateTag } from '@gio.js/core';
+      <CodeBlock lang="ts" title="app/api/posts/[id]/route.ts" code={`import { revalidatePath, revalidateTag } from '@gio.js/core';
 
 export async function PUT(req) {
   await db.posts.update(req.params.id, req.json());
@@ -118,7 +123,7 @@ export async function PUT(req) {
         after the purge renders on its own instead of joining it, so the purge always wins.
       </p>
 
-      <h3>From outside: POST /_gio/revalidate</h3>
+      <h3 id="from-outside-post-giorevalidate">From outside: POST /_gio/revalidate</h3>
       <p>
         External systems - a CMS webhook, a deploy script - purge through an HTTP endpoint.
         It exists only when you configure a token of at least 32 bytes, in the environment
@@ -158,7 +163,7 @@ export GIO_REVALIDATE_TOKEN=<token>     # or [revalidate] token = "..." in gio.t
         them all the same.
       </div>
 
-      <h2>Personalized pages are never shared</h2>
+      <h2 id="personalized-pages-are-never-shared">Personalized pages are never shared</h2>
       <p>
         A cached page is served to everyone, so it must not depend on who is asking. When{' '}
         <code>getServerSideProps</code> reads the visitor&apos;s credentials - any access to{' '}
@@ -184,7 +189,7 @@ export GIO_REVALIDATE_TOKEN=<token>     # or [revalidate] token = "..." in gio.t
         <code>shell = &apos;cache&apos;</code> plus <code>&lt;Suspense&gt;</code> holes for the
         personalized parts.
       </p>
-      <h2>Browser and CDN caching</h2>
+      <h2 id="browser-and-cdn-caching">Browser and CDN caching</h2>
       <p>
         Page responses tell browsers and CDNs the same thing the Rust cache knows. A page
         cached for everyone gets:

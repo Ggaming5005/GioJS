@@ -5,6 +5,13 @@
  * latest release glows. Standalone (root layout only), linked from the nav.
  */
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
+
+export const metadata: Metadata = {
+  title: 'Releases',
+  description: 'Every GioJS release: what changed, what to upgrade, and what is next.',
+  alternates: { canonical: '/releases' },
+};
 
 export const revalidate = false;
 
@@ -24,6 +31,14 @@ interface Release {
  */
 function isLatest(rel: Release): boolean {
   return rel.tag === 'latest';
+}
+
+/**
+ * A release card's anchor: '0.1.0-beta.8' → 'v0-1-0-beta-8'. Search results
+ * and shared links land on it (build.mjs requires an id on every heading).
+ */
+function releaseId(version: string): string {
+  return `v${version.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
 }
 
 const RELEASES: Release[] = [
@@ -260,7 +275,7 @@ export default function ReleasesPage(): React.JSX.Element {
           GioJS
         </a>
         <div className="docs-header__right">
-          <a className="docs-header__link" href="/docs/getting-started">Docs</a>
+          <a className="docs-header__link" href="/docs">Docs</a>
           <a className="docs-header__link" href="/releases">Releases</a>
           <a className="docs-header__link" href="https://github.com/Ggaming5005/GioJS">GitHub ↗</a>
         </div>
@@ -279,7 +294,7 @@ export default function ReleasesPage(): React.JSX.Element {
               <span className={`rel-node${isLatest(rel) ? ' rel-node--latest' : ''}`} aria-hidden="true" />
               <article className={`rel-card${isLatest(rel) ? ' rel-card--latest' : ''}`}>
                 <div className="rel-head">
-                  <h2 className="rel-version">{rel.version}</h2>
+                  <h2 className="rel-version" id={releaseId(rel.version)}>{rel.version}</h2>
                   {rel.tag && <span className="rel-badge">{rel.tag}</span>}
                   <time className="rel-date">{rel.date}</time>
                 </div>

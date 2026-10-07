@@ -1,12 +1,19 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Security',
+  description:
+    'Security headers, Content-Security-Policy with per-request nonces, CSRF protection, and ' +
+    'WebSocket origin checks - enforced by the Rust server.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Security &amp; Auth</div>
       <h1>Security</h1>
       <p className="page-subtitle">
         Security headers, Content-Security-Policy with per-request nonces, CSRF protection,
@@ -23,7 +30,7 @@ export default function Page(): React.JSX.Element {
         stops the server at startup instead of silently leaving a protection off.
       </p>
 
-      <h2>Default security headers</h2>
+      <h2 id="default-security-headers">Default security headers</h2>
       <p>Every response - pages, cache hits, route handlers, static and public/ files, redirects, errors and <code>/_gio</code> endpoints - carries:</p>
       <table>
         <thead>
@@ -65,7 +72,7 @@ default_headers = false                  # no nosniff, X-Frame-Options or Referr
 [security.headers]
 x-content-type-options = "nosniff"       # but keep this one`} />
 
-      <h3>Precedence</h3>
+      <h3 id="precedence">Precedence</h3>
       <p>
         A default never replaces a header the response already has. Headers set by your
         app - a route handler&apos;s <code>Response</code> headers, headers returned from{' '}
@@ -120,7 +127,7 @@ csp = """
         the error overlay. Line breaks in the policy are allowed; they are sent as spaces.
       </p>
 
-      <h3>How nonces work with caching</h3>
+      <h3 id="how-nonces-work-with-caching">How nonces work with caching</h3>
       <p>
         Pages are cached and PPR shells are replayed, so a page cannot be rendered with the
         nonce of the response that will eventually carry it. Instead the Node worker renders
@@ -153,7 +160,7 @@ csp = """
         are then rendered again. Turning CSP on or off invalidates cached pages automatically.
       </p>
 
-      <h3>Your own inline scripts: cspNonce()</h3>
+      <h3 id="your-own-inline-scripts-cspnonce">Your own inline scripts: cspNonce()</h3>
       <p>
         Inline scripts you write need the nonce too. <code>cspNonce()</code> from{' '}
         <code>@gio.js/core</code> returns it during server rendering (or{' '}
@@ -162,8 +169,7 @@ csp = """
         only final in the response, so never hash, slice or encode it or derive anything else
         from it. Put inline scripts in the root layout, which is server-rendered only:
       </p>
-      <CodeBlock lang="tsx" code={`// app/layout.tsx
-import { cspNonce } from '@gio.js/core';
+      <CodeBlock lang="tsx" title="app/layout.tsx" code={`import { cspNonce } from '@gio.js/core';
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -212,7 +218,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         </li>
       </ul>
 
-      <h3>Rolling out with report-only</h3>
+      <h3 id="rolling-out-with-report-only">Rolling out with report-only</h3>
       <p>
         <code>csp_report_only</code> takes the same syntax and is sent as{' '}
         <code>Content-Security-Policy-Report-Only</code>: browsers report violations in the
@@ -292,7 +298,7 @@ exempt = [                                           # same patterns as [[redire
         it. <code>req.body</code> always has the raw body.
       </p>
 
-      <h2>WebSocket origin checks</h2>
+      <h2 id="websocket-origin-checks">WebSocket origin checks</h2>
       <p>
         Browsers let any website open a WebSocket to your server and send your users&apos;
         cookies with it (cross-site WebSocket hijacking). Upgrade requests get the same check
@@ -311,7 +317,7 @@ exempt = [                                           # same patterns as [[redire
       <CodeBlock lang="toml" code={`[security.websocket]
 check_origin = true      # default; false accepts upgrades from any website`} />
 
-      <h2>Behind a reverse proxy</h2>
+      <h2 id="behind-a-reverse-proxy">Behind a reverse proxy</h2>
       <p>
         The CSRF and WebSocket checks compare <code>Origin</code> with the{' '}
         <code>Host</code> header GioJS receives, so the proxy must pass the original host
@@ -328,7 +334,7 @@ check_origin = true      # default; false accepts upgrades from any website`} />
         also set <code>hsts</code> explicitly (see <a href="#hsts">HSTS</a>).
       </p>
 
-      <h2>Reference</h2>
+      <h2 id="reference">Reference</h2>
       <CodeBlock lang="toml" code={`[security]
 default_headers = true    # false drops nosniff, X-Frame-Options and Referrer-Policy
 csp = "default-src 'self'; script-src 'self' 'nonce-{nonce}' 'strict-dynamic'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'"

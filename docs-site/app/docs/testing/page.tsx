@@ -1,12 +1,21 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+import { PmTabs } from '../../../components/PmTabs.tsx';
+
+export const metadata: Metadata = {
+  title: 'Testing',
+  description:
+    'Test pages and route handlers with @gio.js/core/testing - in-process renders for fast ' +
+    'unit tests, and the real Rust server for end-to-end checks. Works with vitest and ' +
+    'node:test, from TypeScript test files.',
+};
 
 export const revalidate = false;
 
 export default function TestingPage(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Testing</div>
       <h1>Testing</h1>
       <p className="page-subtitle">
         Test pages and route handlers with <code>@gio.js/core/testing</code> - in-process
@@ -14,7 +23,7 @@ export default function TestingPage(): React.JSX.Element {
         with vitest and node:test, from TypeScript test files.
       </p>
 
-      <h2>Three helpers</h2>
+      <h2 id="three-helpers">Three helpers</h2>
       <table>
         <thead>
           <tr><th>Helper</th><th>What runs</th><th>Use it for</th></tr>
@@ -60,15 +69,15 @@ export default function TestingPage(): React.JSX.Element {
         <code>renderPage</code> loaded is not handed down to it, what your test set is.
       </p>
 
-      <h2>Setup</h2>
+      <h2 id="setup">Setup</h2>
       <p>
         Scaffolded apps already depend on <code>@gio.js/core</code>; in an older project
         that only has <code>@gio.js/server</code>, add it with pnpm (no hoisting) - and{' '}
         <code>tsx</code> for node:test as a dev dependency:{' '}
         <code>pnpm add @gio.js/core</code> and <code>pnpm add -D tsx</code>.
       </p>
-      <h3>vitest</h3>
-      <CodeBlock lang="bash" code={`npm install --save-dev vitest`} />
+      <h3 id="vitest">vitest</h3>
+      <PmTabs command={`npm install --save-dev vitest`} />
       <p>
         vitest does not read tsconfig <code>paths</code>, so mirror the scaffold&apos;s{' '}
         <code>@/*</code> alias. It also names CSS Module classes its own way (
@@ -76,8 +85,7 @@ export default function TestingPage(): React.JSX.Element {
         <code>@gio.js/core/vitest</code> makes <code>*.module.css</code> imports - in your
         pages and in your tests - evaluate to the class names the server renders:
       </p>
-      <CodeBlock lang="ts" code={`// vitest.config.ts
-import { fileURLToPath } from 'node:url';
+      <CodeBlock lang="ts" title="vitest.config.ts" code={`import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 import { gioVitest } from '@gio.js/core/vitest';
 
@@ -86,17 +94,15 @@ export default defineConfig({
   resolve: { alias: { '@': fileURLToPath(new URL('.', import.meta.url)) } },
   test: { include: ['tests/**/*.test.ts'] },
 });`} />
-      <CodeBlock lang="json" code={`// package.json
-"scripts": {
+      <CodeBlock lang="json" title="package.json" code={`"scripts": {
   "test": "vitest run"
 }`} />
-      <h3>node:test</h3>
+      <h3 id="nodetest">node:test</h3>
       <p>
         No extra packages: node:test is built in and <code>tsx</code> runs the TypeScript
         (Node 20.6 or newer).
       </p>
-      <CodeBlock lang="json" code={`// package.json
-"scripts": {
+      <CodeBlock lang="json" title="package.json" code={`"scripts": {
   "test": "node --import tsx --test tests/*.test.ts"
 }`} />
       <p>
@@ -104,7 +110,7 @@ export default defineConfig({
         support: <code>{`node --import tsx --test "tests/**/*.test.ts"`}</code>.
       </p>
 
-      <h2>Pages: renderPage</h2>
+      <h2 id="pages-renderpage">Pages: renderPage</h2>
       <CodeBlock lang="ts" code={`// tests/pages.test.ts (vitest)
 import { describe, expect, it } from 'vitest';
 import { renderPage } from '@gio.js/core/testing';
@@ -188,7 +194,7 @@ describe('/posts/[id]', () => {
         asserting on <code>props</code>, or match the HTML with a pattern.
       </p>
 
-      <h2>Route handlers: callRoute</h2>
+      <h2 id="route-handlers-callroute">Route handlers: callRoute</h2>
       <CodeBlock lang="ts" code={`import { expect, it } from 'vitest';
 import { callRoute } from '@gio.js/core/testing';
 
@@ -221,8 +227,7 @@ it('rejects a form post to a JSON endpoint', async () => {
         call - runs <code>createSessionStorage()</code> first, so give the test run a secret
         of its own (under node:test, in the test script&apos;s environment):
       </p>
-      <CodeBlock lang="ts" code={`// vitest.config.ts
-export default defineConfig({
+      <CodeBlock lang="ts" title="vitest.config.ts" code={`export default defineConfig({
   test: { env: { GIO_SESSION_SECRET: 'test-only-secret-at-least-32-bytes-long' } },
 });`} />
       <p>
@@ -243,7 +248,7 @@ export default defineConfig({
         <code>URLSearchParams</code> and assert on the redirect or the re-rendered HTML (see{' '}
         <a href="/docs/forms">Forms and Mutations</a>).
       </p>
-      <h3>Event streams</h3>
+      <h3 id="event-streams">Event streams</h3>
       <p>
         A handler returning a <code>GioEventStream</code> answers with{' '}
         <code>res.stream</code>: the events exactly as a client receives them (
@@ -257,7 +262,7 @@ const { value } = await reader.read();
 expect(new TextDecoder().decode(value)).toContain('data: {"n":1}');
 await reader.cancel();   // runs the cleanup function the handler returned`} />
 
-      <h2>The real server: createTestServer</h2>
+      <h2 id="the-real-server-createtestserver">The real server: createTestServer</h2>
       <CodeBlock lang="ts" code={`import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createTestServer, type TestServer } from '@gio.js/core/testing';
 
@@ -298,7 +303,7 @@ it('blocks cross-site posts', async () => {
         <li>The server speaks plain HTTP; a <code>gio.toml</code> with <code>[server.tls]</code> enabled needs a test copy of the project without it.</li>
       </ul>
 
-      <h2>node:test</h2>
+      <h2 id="nodetest-2">node:test</h2>
       <CodeBlock lang="ts" code={`// tests/app.test.ts - node --import tsx --test tests/app.test.ts
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
@@ -323,7 +328,7 @@ test('served through Rust', async () => {
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
 });`} />
 
-      <h2>Module caching</h2>
+      <h2 id="module-caching">Module caching</h2>
       <p>
         Page, layout and route modules are imported once per process, like in the worker.
         Discovery is cached per app directory too; <code>resetTestApp(appDir?)</code> drops
@@ -335,7 +340,7 @@ test('served through Rust', async () => {
         <code>beforeEach</code>.
       </p>
 
-      <h2>Keep it out of the browser</h2>
+      <h2 id="keep-it-out-of-the-browser">Keep it out of the browser</h2>
       <p>
         <code>@gio.js/core/testing</code> is server-only. Import it from test files only: a
         page or component that imports it has its client bundle rejected, naming the import

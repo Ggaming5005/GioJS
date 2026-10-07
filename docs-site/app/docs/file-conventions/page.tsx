@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'File Conventions',
+  description: 'Special files GioJS recognizes inside app/.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Reference</div>
       <h1>File Conventions</h1>
       <p className="page-subtitle">Special files GioJS recognizes inside app/.</p>
       <table>
@@ -25,7 +30,7 @@ export default function Page(): React.JSX.Element {
         <code>generateMetadata</code> for their <code>&lt;head&gt;</code> tags - see{' '}
         <a href="/docs/metadata">Metadata &amp; SEO</a>.
       </p>
-      <h2>Metadata files</h2>
+      <h2 id="metadata-files">Metadata files</h2>
       <p>
         Only at the root of <code>app/</code>, as <code>.ts</code> or <code>.js</code>. The
         default export is the data, or a function returning it; <code>export const
@@ -59,7 +64,7 @@ export default function Page(): React.JSX.Element {
         <a href="/docs/error-handling">Error Handling</a> and{' '}
         <a href="/docs/layouts-and-pages">Layouts &amp; Pages</a>.
       </p>
-      <h2>Folder conventions</h2>
+      <h2 id="folder-conventions">Folder conventions</h2>
       <table>
         <thead><tr><th>Folder</th><th>Effect</th></tr></thead>
         <tbody>

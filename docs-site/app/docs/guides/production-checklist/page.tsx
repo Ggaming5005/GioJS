@@ -1,12 +1,20 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../../components/CodeBlock.tsx';
+import { PmTabs } from '../../../../components/PmTabs.tsx';
+
+export const metadata: Metadata = {
+  title: 'Production Checklist',
+  description:
+    'What to check before a GioJS app takes real traffic - and what you can leave alone ' +
+    'because the defaults already got it right.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Deployment &amp; Operations</div>
       <h1>Production Checklist</h1>
       <p className="page-subtitle">
         What to check before a GioJS app takes real traffic - and what you can leave alone
@@ -20,7 +28,7 @@ export default function Page(): React.JSX.Element {
         proxy, your traffic. Each item links to the page with the details.
       </p>
 
-      <h2>Runtime mode</h2>
+      <h2 id="runtime-mode">Runtime mode</h2>
       <ul>
         <li>
           <strong>Start in production mode.</strong> Anything but{' '}
@@ -51,7 +59,7 @@ export default function Page(): React.JSX.Element {
         </li>
       </ul>
 
-      <h2>Secrets and environment</h2>
+      <h2 id="secrets-and-environment">Secrets and environment</h2>
       <ul>
         <li>
           <strong>Set <code>GIO_SESSION_SECRET</code></strong> (32+ bytes) if you use{' '}
@@ -80,7 +88,7 @@ export default function Page(): React.JSX.Element {
         </li>
       </ul>
 
-      <h2>Security headers and CSP</h2>
+      <h2 id="security-headers-and-csp">Security headers and CSP</h2>
       <ul>
         <li>
           <strong>Defaults are on</strong>: <code>X-Content-Type-Options</code>,{' '}
@@ -108,7 +116,7 @@ hsts = true
 [security.headers]
 permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
 
-      <h2>CSRF and origins</h2>
+      <h2 id="csrf-and-origins">CSRF and origins</h2>
       <ul>
         <li>
           <strong>Same-origin forms and <code>fetch</code> calls just work</strong>; cross-site{' '}
@@ -132,7 +140,7 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         </li>
       </ul>
 
-      <h2>Reverse proxy and client IPs</h2>
+      <h2 id="reverse-proxy-and-client-ips">Reverse proxy and client IPs</h2>
       <ul>
         <li>
           <strong>Trust exactly your proxy</strong> in <code>[server] trusted_proxies</code>,
@@ -159,7 +167,7 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         </li>
       </ul>
 
-      <h2>Limits</h2>
+      <h2 id="limits">Limits</h2>
       <ul>
         <li>
           <strong>Rate-limit what attackers hammer</strong>: login and signup actions,
@@ -182,7 +190,7 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         </li>
       </ul>
 
-      <h2>Caching</h2>
+      <h2 id="caching">Caching</h2>
       <ul>
         <li>
           <strong>Cache what can be shared.</strong> Pages without{' '}
@@ -209,7 +217,7 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         </li>
       </ul>
 
-      <h2>Render workers</h2>
+      <h2 id="render-workers">Render workers</h2>
       <ul>
         <li>
           <strong>Pick a worker count.</strong> One worker is plenty when most traffic is
@@ -228,7 +236,7 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         </li>
       </ul>
 
-      <h2>Logs, metrics and health</h2>
+      <h2 id="logs-metrics-and-health">Logs, metrics and health</h2>
       <ul>
         <li>
           <strong>JSON logs</strong> for a log shipper: <code>GIO_LOG_FORMAT=json</code> (or{' '}
@@ -261,7 +269,7 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         </li>
       </ul>
 
-      <h2>SEO and URLs</h2>
+      <h2 id="seo-and-urls">SEO and URLs</h2>
       <ul>
         <li>
           <strong>Set <code>GIO_SITE_URL</code></strong> (or <code>metadataBase</code>) so
@@ -274,8 +282,8 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         </li>
       </ul>
 
-      <h2>Before every release</h2>
-      <CodeBlock lang="bash" code={`npm run build            # typecheck (tsc --noEmit) - normal deploys have no other build step
+      <h2 id="before-every-release">Before every release</h2>
+      <PmTabs command={`npm run build            # typecheck (tsc --noEmit) - normal deploys have no other build step
 npm test                 # your tests - @gio.js/core/testing has renderPage, callRoute, createTestServer
 npx gio build standalone # if you ship a standalone folder or image`} />
       <p>

@@ -1,12 +1,19 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Environment Variables',
+  description:
+    'Where configuration and secrets come from, which ones reach the browser, and how to keep ' +
+    'the rest on the server.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Getting Started</div>
       <h1>Environment Variables</h1>
       <p className="page-subtitle">
         Where configuration and secrets come from, which ones reach the browser, and how to
@@ -24,7 +31,7 @@ export default function Page(): React.JSX.Element {
         every variable GioJS itself reads.
       </p>
 
-      <h2>Where values come from</h2>
+      <h2 id="where-values-come-from">Where values come from</h2>
       <p>
         At startup the Rust server reads <code>.env</code> files from the project root (the
         folder holding <code>app/</code> and <code>gio.toml</code>), before it parses{' '}
@@ -76,7 +83,7 @@ export default function Page(): React.JSX.Element {
         <a href="/docs/configuration#env-files">.env files</a> for the details.
       </p>
 
-      <h2>The starter&apos;s .env.example</h2>
+      <h2 id="the-starters-envexample">The starter&apos;s .env.example</h2>
       <p>
         A new app ships an <code>.env.example</code> listing the variables it knows about,
         with comments, and a <code>.gitignore</code> that keeps <code>.env*.local</code> out of
@@ -108,14 +115,13 @@ export default function Page(): React.JSX.Element {
         production.
       </p>
 
-      <h2>Reading variables on the server</h2>
+      <h2 id="reading-variables-on-the-server">Reading variables on the server</h2>
       <p>
         Read secrets where only the server runs: <code>getServerSideProps</code>, actions,
         route handlers, and modules only they import. Collecting them in one server-only
         module gives you a single place that fails loudly when something is missing:
       </p>
-      <CodeBlock lang="ts" code={`// lib/env.server.ts
-import '@gio.js/core/server-only';
+      <CodeBlock lang="ts" title="lib/env.server.ts" code={`import '@gio.js/core/server-only';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -127,8 +133,7 @@ export const env = {
   databaseUrl: required('DATABASE_URL'),
   stripeSecretKey: required('STRIPE_SECRET_KEY'),
 };`} />
-      <CodeBlock lang="tsx" code={`// app/orders/page.tsx
-import { env } from '../../lib/env.server';
+      <CodeBlock lang="tsx" title="app/orders/page.tsx" code={`import { env } from '../../lib/env.server';
 
 export async function getServerSideProps() {
   const orders = await fetchOrders(env.databaseUrl);
@@ -154,7 +159,7 @@ export default function Orders({ orders }) { /* ... */ }`} />
         key, a token or a whole database row with fields the visitor should not see.
       </div>
 
-      <h2>Variables in the browser: GIO_PUBLIC_</h2>
+      <h2 id="variables-in-the-browser-gio-public">Variables in the browser: GIO_PUBLIC_</h2>
       <p>
         In client code, <code>process.env.GIO_PUBLIC_*</code> reads are replaced with the
         value at build time; every other <code>process.env.X</code> is{' '}
@@ -181,7 +186,7 @@ export default function Orders({ orders }) { /* ... */ }`} />
         publishable payment key, an analytics site id - and never for a secret.
       </p>
 
-      <h2>Keeping server code out of the browser</h2>
+      <h2 id="keeping-server-code-out-of-the-browser">Keeping server code out of the browser</h2>
       <p>
         A component that imports a module holding secrets would pull that module into the
         browser bundle. Mark such modules server-only and the mistake becomes a build error
@@ -193,7 +198,7 @@ export default function Orders({ orders }) { /* ... */ }`} />
         <a href="/docs/configuration#server-only">Keeping server code out of the browser</a>.
       </p>
 
-      <h2>Secrets GioJS uses</h2>
+      <h2 id="secrets-giojs-uses">Secrets GioJS uses</h2>
       <table>
         <thead>
           <tr><th>Variable</th><th>Needed when</th><th>Notes</th></tr>
@@ -221,7 +226,7 @@ export default function Orders({ orders }) { /* ... */ }`} />
         if you use one, keep that <code>gio.toml</code> out of public repositories.
       </p>
 
-      <h2>In production</h2>
+      <h2 id="in-production">In production</h2>
       <ul>
         <li>
           Set variables in the platform&apos;s environment (dashboard, <code>fly secrets</code>,

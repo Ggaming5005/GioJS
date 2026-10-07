@@ -1,19 +1,27 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../../components/CodeBlock.tsx';
+import { PmTabs } from '../../../../components/PmTabs.tsx';
+
+export const metadata: Metadata = {
+  title: 'Authentication Example',
+  description:
+    'A working login: encrypted cookie sessions, a page action that checks credentials, a ' +
+    'logout route, and a protected section guarded in Rust.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Guides</div>
       <h1>Authentication Example</h1>
       <p className="page-subtitle">
         A working login: encrypted cookie sessions, a page action that checks credentials, a
         logout route, and a protected section guarded in Rust.
       </p>
 
-      <CodeBlock lang="bash" code={`npm create giojs@latest my-app -- --auth   # a new app
+      <PmTabs command={`npm create giojs@latest my-app -- --auth   # a new app
 npx create-giojs add auth                    # an existing app`} />
       <p>
         Run <code>npm run dev</code>, open <code>/dashboard</code>, and the guard sends you to{' '}
@@ -23,9 +31,8 @@ npx create-giojs add auth                    # an existing app`} />
         the files the feature adds.
       </p>
 
-      <h2>The session storage</h2>
-      <CodeBlock lang="ts" code={`// lib/session.server.ts
-import { createSessionStorage } from '@gio.js/core';
+      <h2 id="the-session-storage">The session storage</h2>
+      <CodeBlock lang="ts" title="lib/session.server.ts" code={`import { createSessionStorage } from '@gio.js/core';
 
 export interface UserSession {
   email: string;
@@ -39,7 +46,7 @@ export const sessions = createSessionStorage<UserSession>();`} />
         name keeps the module out of client bundles.
       </p>
 
-      <h2>Logging in</h2>
+      <h2 id="logging-in">Logging in</h2>
       <p>
         <code>app/(site)/login/page.tsx</code> renders a <code>&lt;GioForm&gt;</code> and handles its
         POST in a page action. Wrong credentials re-render the page with a 422 and the typed
@@ -72,9 +79,8 @@ export const sessions = createSessionStorage<UserSession>();`} />
         <code>scrypt</code>, for one) before going live.
       </p>
 
-      <h2>The protected section</h2>
-      <CodeBlock lang="toml" code={`# gio.toml
-[[guards]]
+      <h2 id="the-protected-section">The protected section</h2>
+      <CodeBlock lang="toml" title="gio.toml" code={`[[guards]]
 path = "/dashboard/*rest"
 require_session = true
 redirect_to = "/login"
@@ -93,9 +99,8 @@ burst = 5`} />
         cached and served to someone else.
       </p>
 
-      <h2>Logging out</h2>
-      <CodeBlock lang="ts" code={`// app/logout/route.ts
-export function POST(): Response {
+      <h2 id="logging-out">Logging out</h2>
+      <CodeBlock lang="ts" title="app/logout/route.ts" code={`export function POST(): Response {
   return new Response(null, {
     status: 303,
     headers: { location: '/', 'set-cookie': sessions.destroySession() },
@@ -107,7 +112,7 @@ export function POST(): Response {
         <a href="/docs/authentication">Authentication</a> for revoking every copy).
       </p>
 
-      <h2>CSRF</h2>
+      <h2 id="csrf">CSRF</h2>
       <p>
         The forms carry no CSRF tokens, and need none: the Rust server refuses cross-site{' '}
         <code>POST</code>, <code>PUT</code>, <code>PATCH</code> and <code>DELETE</code> requests
@@ -116,7 +121,7 @@ export function POST(): Response {
         a <code>GET</code>. See <a href="/docs/security">Security</a>.
       </p>
 
-      <h2>Before you deploy</h2>
+      <h2 id="before-you-deploy">Before you deploy</h2>
       <CodeBlock lang="bash" code={`node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`} />
       <p>
         Set the result as <code>GIO_SESSION_SECRET</code> in the server environment or a

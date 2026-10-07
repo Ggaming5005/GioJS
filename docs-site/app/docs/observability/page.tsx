@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Observability',
+  description: 'Health checks, Prometheus metrics, request IDs and JSON logs, and the dev dashboard.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Deployment &amp; Operations</div>
       <h1>Observability</h1>
       <p className="page-subtitle">Health checks, Prometheus metrics, request IDs and JSON logs, and the dev dashboard.</p>
       <p>Two endpoints are served directly by Rust:</p>
@@ -17,7 +22,7 @@ export default function Page(): React.JSX.Element {
       <CodeBlock lang="toml" code={`[metrics]
 enabled = true
 token = "a-long-random-secret"   # secure it for production`} />
-      <h2>Metrics</h2>
+      <h2 id="metrics">Metrics</h2>
       <p>
         Request series carry a <code>route</code> label: the matched route{' '}
         <em>pattern</em> (<code>/posts/:id</code>), never the raw path, so one series
@@ -76,7 +81,7 @@ token = "a-long-random-secret"   # secure it for production`} />
       </p>
       <CodeBlock lang="bash" code={`histogram_quantile(0.95,
   sum by (route, le) (rate(gio_request_duration_seconds_bucket[5m])))`} />
-      <h2>Request IDs</h2>
+      <h2 id="request-ids">Request IDs</h2>
       <p>
         Every request gets an id, returned as the <code>X-Request-Id</code> response header
         on every response - pages, cache hits, static files, redirects and errors. The same
@@ -111,7 +116,7 @@ ERROR giojs_server::ipc: Node render error [RENDER_ERROR]: Internal Server Error
         stale-while-revalidate refresh, the Suspense holes of a PPR cache hit and the tail
         of a streamed body log under the triggering request&apos;s id in both processes.
       </p>
-      <h2>JSON logs</h2>
+      <h2 id="json-logs">JSON logs</h2>
       <p>
         The Node worker always writes JSON lines; the Rust server writes human-readable
         text by default. For a log shipper (Loki, Datadog, CloudWatch, Elastic), switch the
@@ -138,7 +143,7 @@ format = "json"   # or GIO_LOG_FORMAT=json; "text" is the default`} />
         sides as before. An unknown <code>format</code> in gio.toml is a startup error; an
         unknown <code>GIO_LOG_FORMAT</code> is ignored with a warning.
       </p>
-      <h2>Dev dashboard</h2>
+      <h2 id="dev-dashboard">Dev dashboard</h2>
       <p>In development, /_gio/devtools shows live request logs, route manifest, cache stats, a memory sparkline, and IPC latency - generated entirely in Rust.</p>
       <p>
         The dashboard and its endpoints only answer to localhost hosts

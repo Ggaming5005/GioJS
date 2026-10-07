@@ -1,12 +1,19 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Deploying',
+  description:
+    'Step-by-step recipes for Docker, Fly.io, Railway, Render, and a plain Linux server ' +
+    'behind nginx or Caddy.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Deployment &amp; Operations</div>
       <h1>Deploying</h1>
       <p className="page-subtitle">
         Step-by-step recipes for Docker, Fly.io, Railway, Render, and a plain Linux server
@@ -77,8 +84,7 @@ export default function Page(): React.JSX.Element {
         <code>gio build standalone</code>; the runtime stage is a slim Node image holding
         only the standalone folder, run as an unprivileged user.
       </p>
-      <CodeBlock lang="dockerfile" code={`# Dockerfile
-FROM node:22-slim AS build
+      <CodeBlock lang="dockerfile" title="Dockerfile" code={`FROM node:22-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -94,8 +100,7 @@ USER node
 EXPOSE 3000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=30s CMD node -e "fetch('http://127.0.0.1:' + (process.env.GIO_PORT || process.env.PORT || 3000) + '/_gio/health').then(r => r.json()).then(h => process.exit(h.nodeReady ? 0 : 1)).catch(() => process.exit(1))"
 CMD ["node", "run.mjs"]`} />
-      <CodeBlock lang="text" code={`# .dockerignore
-node_modules
+      <CodeBlock lang="text" title=".dockerignore" code={`node_modules
 .git
 .gio
 out
@@ -153,8 +158,7 @@ docker run -p 3000:3000 --stop-timeout 20 \\
         like this one. With pnpm or Yarn, swap the lockfile and install command in the first
         stage.
       </p>
-      <CodeBlock lang="yaml" code={`# docker-compose.yml
-services:
+      <CodeBlock lang="yaml" title="docker-compose.yml" code={`services:
   app:
     build: .
     ports:
@@ -173,8 +177,7 @@ volumes:
         TLS and forwards to the port in <code>fly.toml</code>. Set <code>PORT</code> to
         that same port:
       </p>
-      <CodeBlock lang="toml" code={`# fly.toml
-app = "my-app"
+      <CodeBlock lang="toml" title="fly.toml" code={`app = "my-app"
 primary_region = "fra"
 kill_timeout = 20   # seconds to drain before a forced stop (Fly's default is 5)
 
@@ -251,8 +254,7 @@ fly deploy`} />
         (10000 by default) and expects the app on <code>0.0.0.0</code>, which is GioJS&apos;s
         default:
       </p>
-      <CodeBlock lang="yaml" code={`# render.yaml
-services:
+      <CodeBlock lang="yaml" title="render.yaml" code={`services:
   - type: web
     name: my-app
     runtime: docker
@@ -288,8 +290,7 @@ export function GET(req) {
         <code>&quot;10.0.0.0/8&quot;</code> or <code>&quot;172.16.0.0/12&quot;</code>), then
         remove the route:
       </p>
-      <CodeBlock lang="toml" code={`# gio.toml
-[server]
+      <CodeBlock lang="toml" title="gio.toml" code={`[server]
 trusted_proxies = ["10.0.0.0/8"]   # the range your platform's router connects from
 accept_request_id = false          # the router may pass a client's X-Request-Id through
 
@@ -311,7 +312,7 @@ hsts = true                        # the platform terminates TLS; send HSTS your
         nothing reaches it around the proxy.
       </p>
 
-      <h3>1. Build and copy the folder</h3>
+      <h3 id="1-build-and-copy-the-folder">1. Build and copy the folder</h3>
       <CodeBlock lang="bash" code={`# On your machine or in CI. From macOS or Windows, add --target linux-x64
 # (after: npm i @gio.js/server-linux-x64 --force).
 npx gio build standalone
@@ -325,7 +326,7 @@ rsync -a --delete --exclude .gio/cache --exclude '.env*.local' \\
       <CodeBlock lang="bash" code={`sudo useradd --system --home /srv/my-app --shell /usr/sbin/nologin gio
 sudo chown -R gio:gio /srv/my-app`} />
 
-      <h3>2. Configure</h3>
+      <h3 id="2-configure">2. Configure</h3>
       <CodeBlock lang="toml" code={`# /srv/my-app/gio.toml (your project's gio.toml, copied by the build)
 [server]
 host = "127.0.0.1"                       # reachable only through the proxy
@@ -338,7 +339,7 @@ GIO_SESSION_SECRET=...
 DATABASE_URL=postgres://...`} />
       <CodeBlock lang="bash" code={`sudo chmod 600 /etc/my-app.env`} />
 
-      <h3>3. The systemd unit</h3>
+      <h3 id="3-the-systemd-unit">3. The systemd unit</h3>
       <CodeBlock lang="ini" code={`# /etc/systemd/system/my-app.service
 [Unit]
 Description=my-app (GioJS)
@@ -461,7 +462,7 @@ example.com {
         builds the client bundles.
       </p>
 
-      <h2>Other targets</h2>
+      <h2 id="other-targets">Other targets</h2>
       <ul>
         <li>
           <strong>Kubernetes</strong>: Deployment, Service, Ingress and HPA manifests in{' '}

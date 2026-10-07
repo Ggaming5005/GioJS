@@ -1,11 +1,16 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
+
+export const metadata: Metadata = {
+  title: 'The Rust ⇄ Node Boundary',
+  description: 'Persistent IPC connections carry cache-missed requests to the Node workers.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Reference</div>
       <h1>The Rust ⇄ Node Boundary</h1>
       <p className="page-subtitle">Persistent IPC connections carry cache-missed requests to the Node workers.</p>
       <p>

@@ -1,12 +1,21 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+import { PmTabs } from '../../../components/PmTabs.tsx';
+
+export const metadata: Metadata = {
+  title: 'Static Export',
+  description:
+    'Pre-render your whole app to plain HTML and deploy it free to any static host - ' +
+    'Cloudflare Pages, GitHub Pages, Netlify, or an S3 bucket. Static when you can, server ' +
+    'when you must.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Rendering &amp; Caching</div>
       <h1>Static Export</h1>
       <p className="page-subtitle">
         Pre-render your whole app to plain HTML and deploy it free to any static
@@ -14,7 +23,7 @@ export default function Page(): React.JSX.Element {
         you can, server when you must.
       </p>
 
-      <h2>Choose at create time</h2>
+      <h2 id="choose-at-create-time">Choose at create time</h2>
       <p>
         When you scaffold a project, pick <strong>Static site</strong> at the prompt.
         That wires <code>npm run build</code> to the exporter (after a{' '}
@@ -26,14 +35,14 @@ export default function Page(): React.JSX.Element {
 # ? Which language?      › TypeScript / JavaScript
 # ? What are you building? › Server app / Static site`} />
       <p>You can also pass it non-interactively:</p>
-      <CodeBlock lang="bash" code={`npm create giojs@latest my-site -- --static`} />
+      <PmTabs command={`npm create giojs@latest my-site -- --static`} />
 
-      <h2>Build</h2>
+      <h2 id="build">Build</h2>
       <p>
         Develop with <code>npm run dev</code> as usual. When you're ready to ship,
         export to the <code>out/</code> folder:
       </p>
-      <CodeBlock lang="bash" code={`npm run build      # runs: gio export  →  ./out`} />
+      <PmTabs command={`npm run build      # runs: gio export  →  ./out`} />
       <p>
         Every static route is rendered through the real SSR pipeline, so what you see
         in dev is what you get in <code>out/</code>. <code>getServerSideProps</code>
@@ -56,7 +65,7 @@ export default function Page(): React.JSX.Element {
         message and stack.
       </p>
 
-      <h2>Interactive pages</h2>
+      <h2 id="interactive-pages">Interactive pages</h2>
       <p>
         Exported pages hydrate exactly like served ones. The exporter builds the
         client bundles in production mode into <code>out/_next/static/chunks/</code> and
@@ -89,7 +98,7 @@ export default function Page(): React.JSX.Element {
         </li>
       </ul>
 
-      <h2>public/ and robots.txt</h2>
+      <h2 id="public-and-robotstxt">public/ and robots.txt</h2>
       <p>
         <code>public/</code> is copied into <code>out/</code> twice, matching the server: at
         the site root, so <code>/favicon.ico</code>, <code>/robots.txt</code>,{' '}
@@ -127,7 +136,7 @@ export default function Page(): React.JSX.Element {
         </li>
       </ul>
 
-      <h2>Dynamic routes</h2>
+      <h2 id="dynamic-routes">Dynamic routes</h2>
       <p>
         A dynamic route like <code>app/posts/[id]/page.tsx</code> needs to know which
         paths to render. Export <code>getStaticPaths</code> to list them:
@@ -141,8 +150,7 @@ export default function Page(): React.JSX.Element {
         array of segments works too), and an optional catch-all exports its bare parent when the
         param is omitted or empty:
       </p>
-      <CodeBlock lang="tsx" code={`// app/docs/[[...slug]]/page.tsx
-export function getStaticPaths() {
+      <CodeBlock lang="tsx" title="app/docs/[[...slug]]/page.tsx" code={`export function getStaticPaths() {
   return {
     paths: [
       { params: {} },                        // out/docs/index.html
@@ -161,7 +169,7 @@ export function getStaticPaths() {
         they can only be served by the GioJS server.
       </div>
 
-      <h2>What can't be static</h2>
+      <h2 id="what-cant-be-static">What can't be static</h2>
       <p>The exporter skips anything that needs a live server, and tells you what it skipped:</p>
       <ul>
         <li><code>route.ts</code> handlers and Server-Sent Events</li>
@@ -181,7 +189,7 @@ export function getStaticPaths() {
       </ul>
       <p>If you need any of those, use <strong>Server</strong> mode instead.</p>
 
-      <h2>Deploy</h2>
+      <h2 id="deploy">Deploy</h2>
       <p>
         <code>out/</code> is a self-contained static site - no runtime required. Drop it
         on any static host:

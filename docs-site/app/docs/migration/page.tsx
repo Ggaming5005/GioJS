@@ -1,38 +1,46 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+import { PmTabs } from '../../../components/PmTabs.tsx';
+
+export const metadata: Metadata = {
+  title: 'Migration Guide',
+  description:
+    'Move a Next.js app (pages or app router) to GioJS with one command, then work through a ' +
+    'report of what needs a human.',
+};
 
 export const revalidate = false;
 
 export default function MigrationPage(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Migration</div>
       <h1>Migration Guide</h1>
       <p className="page-subtitle">
         Move a Next.js app (pages or app router) to GioJS with one command, then work through a
         report of what needs a human.
       </p>
 
-      <h2>Run the migration</h2>
+      <h2 id="run-the-migration">Run the migration</h2>
       <p>Commit your work first - the migration edits files in place. From the project root:</p>
-      <CodeBlock lang="bash" code={`npm create giojs@latest -- migrate            # current directory
+      <PmTabs command={`npm create giojs@latest -- migrate            # current directory
 npx create-giojs migrate ./my-next-app         # same thing, explicit directory`} />
       <p>
         It prints a summary of every move and edit and asks before writing anything. Preview the
         full diff without touching a file, or skip the prompt (CI, scripts):
       </p>
-      <CodeBlock lang="bash" code={`npx create-giojs migrate --dry-run   # summary + diff of every change, writes nothing
+      <PmTabs command={`npx create-giojs migrate --dry-run   # summary + diff of every change, writes nothing
 npx create-giojs migrate --yes       # apply without asking (required when there is no terminal)
 npx create-giojs migrate --help`} />
       <p>
         The <code>gio-migrate</code> bin of the same package runs the same command
         (<code>npx -p create-giojs gio-migrate</code>). Afterwards:
       </p>
-      <CodeBlock lang="bash" code={`npm install          # next is swapped for @gio.js/server + @gio.js/react
+      <PmTabs command={`npm install          # next is swapped for @gio.js/server + @gio.js/react
 npx tsc --noEmit     # catches what the migration could not see
 npm run dev`} />
 
-      <h2>MIGRATION_REPORT.md</h2>
+      <h2 id="migration-reportmd">MIGRATION_REPORT.md</h2>
       <p>
         The migration writes <code>MIGRATION_REPORT.md</code> to the project root: every file
         moved, every change with its <code>file:line</code>, the converted configuration, and a
@@ -41,7 +49,7 @@ npm run dev`} />
         too. Nothing that needs a decision is changed silently.
       </p>
 
-      <h2>pages/ → app/</h2>
+      <h2 id="pages-app">pages/ → app/</h2>
       <p>
         GioJS uses the app router conventions (layouts, route groups, catch-alls,
         <code> not-found</code>/<code>error</code>/<code>loading</code> files), so an app router
@@ -82,7 +90,7 @@ npm run dev`} />
         catch-all route that reads them gets a TODO to use <code>.split('/')</code>.
       </p>
 
-      <h2>Code transforms</h2>
+      <h2 id="code-transforms">Code transforms</h2>
       <p>
         Source files are parsed with the TypeScript compiler (so JSX text, strings and comments
         are never mistaken for code) and edited in place - formatting and comments survive.
@@ -237,7 +245,7 @@ npm run dev`} />
         routes.
       </p>
 
-      <h2>next.config → gio.toml</h2>
+      <h2 id="nextconfig-giotoml">next.config → gio.toml</h2>
       <p>
         The config is read statically (it is never executed). Redirects, rewrites and headers
         become the <code>gio.toml</code> rules the Rust server evaluates before routing, with the
@@ -288,7 +296,7 @@ headers = { "X-Frame-Options" = "DENY" }`} />
         just the config: <code>npx create-giojs migrate --config next.config.js</code>.
       </p>
 
-      <h2>Server Actions → page actions</h2>
+      <h2 id="server-actions-page-actions">Server Actions → page actions</h2>
       <p>
         A form&apos;s Server Action becomes the page&apos;s <code>action</code> export: a POST to
         the page runs it, and <code>&lt;GioForm&gt;</code> (which the migration already put in
@@ -328,7 +336,7 @@ export default function NewPost({ actionData }: WithActionData<typeof action>) {
         the page&apos;s <code>actionData</code> prop. The migration flags each of these.
       </p>
 
-      <h2>What needs a human</h2>
+      <h2 id="what-needs-a-human">What needs a human</h2>
       <ul>
         <li>
           <strong>async Server Components</strong> - every GioJS page hydrates, so data loading

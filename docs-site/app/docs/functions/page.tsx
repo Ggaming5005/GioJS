@@ -1,16 +1,21 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Functions',
+  description: 'Server-side functions, page exports and router hooks.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Reference</div>
       <h1>Functions</h1>
       <p className="page-subtitle">Server-side functions, page exports and router hooks.</p>
 
-      <h2>getServerSideProps(ctx)</h2>
+      <h2 id="getserversidepropsctx">getServerSideProps(ctx)</h2>
       <p>
         Async data loader, run per request. The context carries the full request:{' '}
         <code>method</code>, <code>path</code>, <code>params</code>, <code>query</code>,
@@ -49,13 +54,13 @@ export async function getServerSideProps(ctx) {
         - added to the page&apos;s <code>export const tags</code> for this render.
       </p>
 
-      <h2>export const revalidate</h2>
+      <h2 id="export-const-revalidate">export const revalidate</h2>
       <p>
         A number (seconds), or <code>false</code> to cache indefinitely. Controls the
         ISR cache TTL for the page. Pages without it render on every request.
       </p>
 
-      <h2>export const tags</h2>
+      <h2 id="export-const-tags">export const tags</h2>
       <p>
         Cache tags for every render of a cached page, e.g.{' '}
         <code>{"export const tags = ['posts']"}</code>. <code>revalidateTag()</code> and{' '}
@@ -63,7 +68,7 @@ export async function getServerSideProps(ctx) {
         <a href="/docs/caching">Caching</a>.
       </p>
 
-      <h2>revalidateTag(tag) / revalidatePath(path, options?)</h2>
+      <h2 id="revalidatetagtag-revalidatepathpath-options">revalidateTag(tag) / revalidatePath(path, options?)</h2>
       <p>
         Purge cached pages from server code, so the next request renders them fresh.{' '}
         <code>revalidatePath</code> takes <code>{"{ type: 'page' }"}</code> (default: that
@@ -79,7 +84,7 @@ export async function getServerSideProps(ctx) {
 await revalidateTag('posts');
 await revalidatePath('/blog', { type: 'prefix' });`} />
 
-      <h2>getStaticPaths()</h2>
+      <h2 id="getstaticpaths">getStaticPaths()</h2>
       <p>
         On static export, tells <code>gio export</code> which concrete paths to
         pre-render for a dynamic route: return{' '}
@@ -89,14 +94,14 @@ await revalidatePath('/blog', { type: 'prefix' });`} />
         (<code>{"'guides/setup'"}</code>) or as its segments (<code>{"['guides', 'setup']"}</code>).
       </p>
 
-      <h2>Route handler exports</h2>
+      <h2 id="route-handler-exports">Route handler exports</h2>
       <p>
         <code>route.ts</code> files export <code>GET</code> / <code>POST</code> /{' '}
         <code>PUT</code> / <code>PATCH</code> / <code>DELETE</code> (API endpoints,
         SSE) and <code>wsHandler</code> (WebSockets) - see Route Handlers.
       </p>
 
-      <h2>Router hooks</h2>
+      <h2 id="router-hooks">Router hooks</h2>
       <p>
         From <code>@gio.js/react</code>. They read the page the router matched, on the server
         (root layout included) and in the browser with identical values, and follow soft
@@ -120,7 +125,7 @@ router.refresh();                       // fresh props, same URL and state
 
 await navigate('/login', { replace: true });   // outside components`} />
 
-      <h2>broadcast()</h2>
+      <h2 id="broadcast">broadcast()</h2>
       <p>
         <code>broadcast(room, data, {'{'} except? {'}'})</code> from <code>@gio.js/core</code>{' '}
         sends a text (string) or binary (<code>Uint8Array</code>) message to every WebSocket
@@ -129,7 +134,7 @@ await navigate('/login', { replace: true });   // outside components`} />
         server is connected - see <a href="/docs/websockets">WebSockets</a>.
       </p>
 
-      <h2>cspNonce()</h2>
+      <h2 id="cspnonce">cspNonce()</h2>
       <p>
         The Content-Security-Policy nonce for an inline <code>&lt;script&gt;</code> you
         render, when <code>[security] csp</code> uses <code>{'{nonce}'}</code>;{' '}

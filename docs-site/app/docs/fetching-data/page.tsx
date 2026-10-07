@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Fetching Data',
+  description: 'Load data on the server with getServerSideProps.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Data</div>
       <h1>Fetching Data</h1>
       <p className="page-subtitle">Load data on the server with getServerSideProps.</p>
       <p>Export an async getServerSideProps from a page to fetch data on the server before render. The returned props are passed to your component.</p>
@@ -18,7 +23,7 @@ export async function getServerSideProps(ctx) {
   const post = await db.posts.find(ctx.params.id);
   return { props: { post } };
 }`} />
-      <h2>Types</h2>
+      <h2 id="types">Types</h2>
       <p>
         Type the loader with <code>GetServerSideProps</code> from <code>@gio.js/core</code>:
         the first type argument is the page&apos;s props, the second the route pattern, which
@@ -54,7 +59,7 @@ export default function PostPage({ post }: Props) {
         <code>{"/** @type {import('@gio.js/core').GetServerSideProps<{ post: Post }, '/posts/:id'>} */"}</code>.
         All types are listed under <a href="/docs/functions#types">Functions</a>.
       </p>
-      <h2>Redirects</h2>
+      <h2 id="redirects">Redirects</h2>
       <p>Return a redirect instead of props to send the visitor elsewhere.</p>
       <CodeBlock lang="tsx" code={`return { redirect: { destination: '/login', permanent: false } };`} />
       <p>
@@ -76,7 +81,7 @@ export async function getServerSideProps(ctx) {
   const user = requireUser(ctx.cookies);
   return { props: { user } };
 }`} />
-      <h2>After a form post</h2>
+      <h2 id="after-a-form-post">After a form post</h2>
       <p>
         When a page&apos;s <code>action</code> re-renders it (a validation error, say),{' '}
         <code>getServerSideProps</code> runs for that POST too, with the action&apos;s result in{' '}
@@ -91,7 +96,7 @@ export async function getServerSideProps(ctx) {
   const draft = ctx.actionData?.draft ?? '';
   return { props: { post, draft } };
 }`} />
-      <h2>Not found</h2>
+      <h2 id="not-found">Not found</h2>
       <p>
         When the data does not exist, call <code>notFound()</code> - or return{' '}
         <code>{'{ notFound: true }'}</code>. The page answers 404 with the nearest{' '}
@@ -111,7 +116,7 @@ export async function getServerSideProps(ctx) {
         while rendering too, and in <code>route.ts</code> handlers (a JSON 404). A 404 is
         never cached, even with <code>revalidate</code> set.
       </p>
-      <h2>Response headers and cookies</h2>
+      <h2 id="response-headers-and-cookies">Response headers and cookies</h2>
       <p>
         Return <code>headers</code> next to <code>props</code> (or a <code>redirect</code>) to
         set response headers. Pass an array to <code>set-cookie</code> to set several cookies -
@@ -142,7 +147,7 @@ export async function getServerSideProps() {
         A page that returns headers is never cached, even with <code>revalidate</code> set -
         caching a per-request cookie would hand one visitor&apos;s session to everyone.
       </p>
-      <h2>Cache tags</h2>
+      <h2 id="cache-tags">Cache tags</h2>
       <p>
         On a cached page, return <code>tags</code> next to <code>props</code> to name the data
         this render used; <code>revalidateTag()</code> then purges exactly the pages that
@@ -155,7 +160,7 @@ export async function getServerSideProps(ctx) {
   return { props: { post }, tags: [\`post:\${post.id}\`] };
 }`} />
       <div className="callout">Never fetch data inside the component body - it runs during SSR and inflates time-to-first-byte. Use getServerSideProps.</div>
-      <h2>Cookies and caching</h2>
+      <h2 id="cookies-and-caching">Cookies and caching</h2>
       <p>
         <code>ctx.cookies</code> and <code>ctx.headers</code> carry the visitor&apos;s request.
         Reading <code>ctx.cookies</code> or the <code>cookie</code>/<code>authorization</code>{' '}

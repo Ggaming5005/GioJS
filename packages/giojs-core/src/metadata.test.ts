@@ -203,6 +203,28 @@ describe('tags', () => {
     expect(tags.find(t => t.tag === 'meta' && t.attrs['name'] === 'twitter:card')).toBeDefined();
   });
 
+  it('og:title and og:description default to the page title and description', () => {
+    // A layout's site-wide openGraph (no title of its own) under a page that
+    // sets only title and description: the card names the page.
+    const layout: Metadata = {
+      title: { template: '%s | Docs' },
+      description: 'Site',
+      openGraph: { siteName: 'Acme', images: '/og.png' },
+    };
+    expect(summary(tagsFor([layout, { title: 'Forms', description: 'Forms page' }], 'https://x.example'))).toEqual([
+      'title=Forms | Docs',
+      'description=Forms page',
+      'og:title=Forms | Docs',
+      'og:description=Forms page',
+      'og:site_name=Acme',
+      'og:image=https://x.example/og.png',
+    ]);
+    // Its own values still win, and without openGraph no og tag appears.
+    const own = summary(tagsFor([{ title: 'T', description: 'D', openGraph: { title: 'OG', description: 'OG d' } }]));
+    expect(own).toEqual(['title=T', 'description=D', 'og:title=OG', 'og:description=OG d']);
+    expect(summary(tagsFor([{ title: 'T', description: 'D' }]))).toEqual(['title=T', 'description=D']);
+  });
+
   it('accepts robots and icons shorthands', () => {
     expect(summary(tagsFor([{ robots: 'noindex, nofollow', icons: '/favicon.ico', themeColor: '#123' }]))).toEqual([
       'robots=noindex, nofollow',

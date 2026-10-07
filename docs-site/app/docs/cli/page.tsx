@@ -1,12 +1,19 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'CLI',
+  description:
+    'The gio command runs, inspects and packages GioJS apps. It ships with @gio.js/server; ' +
+    'create-giojs scaffolds new ones.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">API Reference</div>
       <h1>CLI</h1>
       <p className="page-subtitle">
         The <code>gio</code> command runs, inspects and packages GioJS apps. It ships with{' '}
@@ -81,7 +88,7 @@ gio --version          # CLI, server binary and @gio.js/core versions (-v)`} />
         machine only, and for IPv6 <code>::</code> / <code>::1</code> (with or without
         brackets - <code>GIO_HOST</code> receives them bracketed, as the server expects).
       </p>
-      <h3>Dev mode file watching</h3>
+      <h3 id="dev-mode-file-watching">Dev mode file watching</h3>
       <p>In dev mode the server watches the whole project, not just app/ - edits to components/, lib/, src/, hooks/, gio.toml, middleware.ts, or tsconfig.json clear the page cache, re-transform app CSS, restart the Node worker, and reload open browser tabs. Edits under public/ refresh which files are served at the site root and reload the browser without a worker restart.</p>
       <ul>
         <li>Any change under app/ triggers a restart, as pages may read any file there. Elsewhere only source-like files do (<code>.ts .tsx .js .jsx .mjs .cjs .mts .cts .json .css .toml</code>), plus directories created, deleted, or moved in or out, so databases, logs, and uploads your app writes into the project never restart the worker that wrote them.</li>

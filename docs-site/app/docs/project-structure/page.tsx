@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Project Structure',
+  description: 'A tour of the files and folders in a GioJS app.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Getting Started</div>
       <h1>Project Structure</h1>
       <p className="page-subtitle">A tour of the files and folders in a GioJS app.</p>
       <p>A new project is intentionally small. Everything is driven by file conventions under app/.</p>
@@ -32,18 +37,17 @@ export default function Page(): React.JSX.Element {
   tsconfig.json          # includes .gio/routes.d.ts for typed routes
   .gio/                  # generated at startup (route types, client build, caches) - not committed`} />
 
-      <h2>The app directory</h2>
+      <h2 id="the-app-directory">The app directory</h2>
       <p>Routes are folders. A page.tsx (or .jsx) makes a folder a route; a layout.tsx wraps the pages beneath it. Dynamic segments use [brackets] ([...slug] and [[...slug]] for catch-alls), (group) folders organize routes without adding a URL segment, and _private folders are never routable. Any folder can also hold not-found, error and loading files for its part of the tree - see <a href="/docs/layouts-and-pages">Layouts &amp; Pages</a> and <a href="/docs/file-conventions">File Conventions</a>.</p>
 
-      <h2>The root layout</h2>
+      <h2 id="the-root-layout">The root layout</h2>
       <p>
         <code>app/layout.tsx</code> renders the <code>&lt;html&gt;</code> document every
         page shares. It imports the global stylesheet and exports the site&apos;s default{' '}
         <a href="/docs/metadata">metadata</a> - a title template that each page&apos;s own{' '}
         <code>metadata</code> fills in:
       </p>
-      <CodeBlock lang="tsx" code={`// app/layout.tsx
-import type { LayoutProps, Metadata } from '@gio.js/core';
+      <CodeBlock lang="tsx" title="app/layout.tsx" code={`import type { LayoutProps, Metadata } from '@gio.js/core';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -73,7 +77,7 @@ export default function RootLayout({ children }: LayoutProps) {
         <a href="/docs/css">CSS &amp; Styling</a>.
       </p>
 
-      <h2>gio.toml</h2>
+      <h2 id="giotoml">gio.toml</h2>
       <p>
         Server configuration, read once at startup. Every key is optional and an unknown key
         stops the server with a hint, so typos never go unnoticed. The starter self-hosts its
@@ -119,7 +123,7 @@ weight = 600`} />
         <a href="/docs/configuration">gio.toml Configuration</a>.
       </p>
 
-      <h2>.env.example and .gitignore</h2>
+      <h2 id="envexample-and-gitignore">.env.example and .gitignore</h2>
       <p>
         <code>.env.example</code> lists the variables the app reads, with comments - copy it
         to <code>.env.local</code> for your own values. <code>.env*.local</code> files and{' '}
@@ -129,7 +133,7 @@ weight = 600`} />
         <a href="/docs/guides/environment-variables">Environment Variables</a>.
       </p>
 
-      <h2>public/</h2>
+      <h2 id="public">public/</h2>
       <p>Files in public/ are served directly by the Rust layer - images, stylesheets, fonts. Static files never touch Node. Files answer at the site root as well as under /public/*: public/robots.txt is both /robots.txt and /public/robots.txt, so favicon.ico, manifest.json, apple-touch-icon.png, and .well-known/ files land where browsers and crawlers look for them. <code>gio export</code> writes public/ to both places in out/ too.</p>
       <ul>
         <li>A public file wins over a page with the same path (the Next.js precedence). In a static export, where a public file and a rendered page would need the same output file (public/index.html and app/page.tsx), the page is kept and the export lists the file as skipped.</li>
@@ -139,24 +143,13 @@ weight = 600`} />
         <li>The set of root-served files is indexed at startup, so the request path never pays a filesystem lookup. In development, edits to public/ refresh the index; in production, files added after startup need a restart.</li>
       </ul>
 
-      <h2>Optional files</h2>
+      <h2 id="optional-files">Optional files</h2>
       <ul>
         <li><code>middleware.ts</code> - redirects, rewrites, headers and guards in TypeScript (<a href="/docs/middleware">Middleware</a>)</li>
         <li><code>gio.config.ts</code> - Node plugins (<a href="/docs/configuration">Configuration</a>)</li>
         <li><code>app/sitemap.ts</code>, <code>app/robots.ts</code>, <code>app/manifest.ts</code> - generated SEO files (<a href="/docs/metadata">Metadata &amp; SEO</a>)</li>
         <li><code>route.ts</code> in any folder - an API endpoint (<a href="/docs/route-handlers">Route Handlers</a>)</li>
       </ul>
-
-      <div className="docs-pager">
-        <a className="prev" href="/docs/installation">
-          <span className="dir">Previous</span>
-          <span className="label">← Installation</span>
-        </a>
-        <a className="next" href="/docs/guides/environment-variables">
-          <span className="dir">Next</span>
-          <span className="label">Environment Variables →</span>
-        </a>
-      </div>
     </>
   );
 }

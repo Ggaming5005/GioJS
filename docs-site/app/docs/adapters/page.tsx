@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Adapters',
+  description: 'Run the same app on Docker, systemd, a Windows Service, or Kubernetes.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Deployment &amp; Operations</div>
       <h1>Adapters</h1>
       <p className="page-subtitle">Run the same app on Docker, systemd, a Windows Service, or Kubernetes.</p>
       <p>

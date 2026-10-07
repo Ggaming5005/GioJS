@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Image Optimization',
+  description: 'Automatic AVIF/WebP conversion and resizing - no sharp, no CDN.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Styling &amp; Assets</div>
       <h1>Image Optimization</h1>
       <p className="page-subtitle">Automatic AVIF/WebP conversion and resizing - no sharp, no CDN.</p>
       <p>Use GioImage. It points at the Rust /_gio/image endpoint, which converts and resizes on demand through an AVIF → WebP → JPEG pipeline with a two-layer cache.</p>
@@ -15,7 +20,7 @@ export default function Page(): React.JSX.Element {
 // public/hero.png - served at /hero.png (and /public/hero.png)
 <GioImage src="/hero.png" alt="" width={1200} height={630} />`} />
 
-      <h2>Widths and quality come from gio.toml</h2>
+      <h2 id="widths-and-quality-come-from-giotoml">Widths and quality come from gio.toml</h2>
       <p>
         The optimizer only resizes to the widths listed in <code>[images] allowed_widths</code>{' '}
         (any other width is a 400), so GioImage builds its <code>srcset</code> from exactly that
@@ -43,7 +48,7 @@ quality        = 80`} />
       <CodeBlock lang="tsx" code={`<GioImage src="/hero.png" alt="" width={1200} height={630}
   sizes="(max-width: 768px) 100vw, 50vw" />`} />
 
-      <h2>Output formats</h2>
+      <h2 id="output-formats">Output formats</h2>
       <p>
         The optimizer serves the first format in <code>[images] formats</code> that the
         browser&apos;s <code>Accept</code> header names, and JPEG otherwise. AVIF is the
@@ -54,7 +59,7 @@ quality        = 80`} />
       <CodeBlock lang="toml" code={`[images]
 formats = ["webp"]          # default ["avif", "webp"]; [] = always JPEG`} />
 
-      <h2>Above the fold: priority</h2>
+      <h2 id="above-the-fold-priority">Above the fold: priority</h2>
       <p>
         <code>priority</code> loads the image eagerly with <code>fetchpriority=&quot;high&quot;</code> and
         preloads it: the server render adds a{' '}
@@ -64,7 +69,7 @@ formats = ["webp"]          # default ["avif", "webp"]; [] = always JPEG`} />
       </p>
       <CodeBlock lang="tsx" code={`<GioImage src="/hero.png" alt="" width={1200} height={630} priority />`} />
 
-      <h2>Plain src</h2>
+      <h2 id="plain-src">Plain src</h2>
       <p>
         <code>unoptimized</code> skips the optimizer and renders <code>src</code> as-is. SVGs,{' '}
         <code>data:</code> and <code>blob:</code> URLs always do - there is nothing to resize. In a{' '}
@@ -76,14 +81,14 @@ formats = ["webp"]          # default ["avif", "webp"]; [] = always JPEG`} />
       </p>
       <CodeBlock lang="tsx" code={`<GioImage src="/avatar.gif" alt="" width={64} height={64} unoptimized />`} />
 
-      <h2>Remote images</h2>
+      <h2 id="remote-images">Remote images</h2>
       <p>Allow remote sources explicitly in gio.toml with remote_patterns - anything not on the allowlist is rejected.</p>
       <CodeBlock lang="toml" code={`[[images.remote_patterns]]
 protocol = "https"
 hostname = "images.example.com"
 pathname = "/uploads/*"`} />
 
-      <h2>Limits</h2>
+      <h2 id="limits">Limits</h2>
       <p>
         The optimizer bounds what one request can cost. Each limit is an <code>[images]</code>{' '}
         key, and <code>0</code> lifts it (the server warns at startup when one is lifted).

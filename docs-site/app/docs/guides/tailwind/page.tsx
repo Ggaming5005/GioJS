@@ -1,20 +1,28 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../../components/CodeBlock.tsx';
+import { PmTabs } from '../../../../components/PmTabs.tsx';
+
+export const metadata: Metadata = {
+  title: 'Tailwind CSS',
+  description:
+    'Tailwind v4 through its official CLI: one generated stylesheet, rebuilt as you edit and ' +
+    'bundled by GioJS like any other imported CSS.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Guides</div>
       <h1>Tailwind CSS</h1>
       <p className="page-subtitle">
         Tailwind v4 through its official CLI: one generated stylesheet, rebuilt as you edit and
         bundled by GioJS like any other imported CSS.
       </p>
 
-      <h2>Set it up</h2>
-      <CodeBlock lang="bash" code={`npm create giojs@latest my-app -- --tailwind   # a new app
+      <h2 id="set-it-up">Set it up</h2>
+      <PmTabs command={`npm create giojs@latest my-app -- --tailwind   # a new app
 npx create-giojs add tailwind                    # an existing app
 npm install`} />
       <p>
@@ -47,7 +55,7 @@ npm install`} />
   "start": "tailwindcss -i ./app/tailwind.css -o ./app/tailwind.out.css --minify && cross-env NODE_ENV=production giojs-server"
 }`} />
 
-      <h2>Development</h2>
+      <h2 id="development">Development</h2>
       <p>
         <code>npm run dev</code> runs <code>scripts/dev.mjs</code>, a small runner with no
         dependencies: it starts the Tailwind watcher, waits for its first build, then starts
@@ -72,7 +80,7 @@ npm install`} />
         not by string concatenation.
       </p>
 
-      <h2>The starter&apos;s own styles</h2>
+      <h2 id="the-starters-own-styles">The starter&apos;s own styles</h2>
       <p>
         The starter&apos;s stylesheet, <code>app/globals.css</code>, is no longer imported by
         the root layout: the feature replaces that <code>import &apos;./globals.css&apos;;</code>{' '}
@@ -96,7 +104,7 @@ npm install`} />
         starter styles.
       </p>
 
-      <h2>Builds and deploys</h2>
+      <h2 id="builds-and-deploys">Builds and deploys</h2>
       <p>
         <code>npm run build</code>, <code>npm start</code> and (for a static site){' '}
         <code>gio export</code> through <code>npm run build</code> run a minified one-off build

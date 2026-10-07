@@ -1,24 +1,32 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+import { PmTabs } from '../../../components/PmTabs.tsx';
+
+export const metadata: Metadata = {
+  title: 'Starter Features',
+  description:
+    'Start a new app with Tailwind, forms, login, a database, Docker and CI already wired up, ' +
+    'or add them to an existing app with one command.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Getting Started</div>
       <h1>Starter Features</h1>
       <p className="page-subtitle">
         Start a new app with Tailwind, forms, login, a database, Docker and CI already wired up,
         or add them to an existing app with one command.
       </p>
 
-      <h2>When you create an app</h2>
+      <h2 id="when-you-create-an-app">When you create an app</h2>
       <p>
         <code>create-giojs</code> asks which features to add (space toggles, enter confirms).
         Flags skip the question:
       </p>
-      <CodeBlock lang="bash" code={`npm create giojs@latest my-app -- --tailwind --auth --db
+      <PmTabs command={`npm create giojs@latest my-app -- --tailwind --auth --db
 npm create giojs@latest my-app -- --features tailwind,api,auth,db,docker,ci`} />
       <p>
         Features work with both the TypeScript and the JavaScript template. A static site
@@ -30,7 +38,7 @@ npm create giojs@latest my-app -- --features tailwind,api,auth,db,docker,ci`} />
         without feature flags, no features are added.
       </p>
 
-      <h2>In an existing app</h2>
+      <h2 id="in-an-existing-app">In an existing app</h2>
       <CodeBlock lang="bash" code={`gio add tailwind                         # runs create-giojs add
 npx create-giojs add tailwind            # the same, without the gio CLI
 npx create-giojs add auth db --dry-run   # show what would change
@@ -66,7 +74,7 @@ npx create-giojs add --ci --features db  # create's flag spellings work too`} />
         </li>
       </ul>
 
-      <h2>The features</h2>
+      <h2 id="the-features">The features</h2>
       <table>
         <thead>
           <tr><th>Feature</th><th>What it adds</th></tr>

@@ -1,12 +1,19 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Metadata & SEO',
+  description:
+    'Titles, descriptions, Open Graph and Twitter cards, canonical URLs, sitemaps, robots.txt ' +
+    'and structured data.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Rendering &amp; Caching</div>
       <h1>Metadata &amp; SEO</h1>
       <p className="page-subtitle">
         Titles, descriptions, Open Graph and Twitter cards, canonical URLs, sitemaps,
@@ -37,7 +44,7 @@ export const metadata: Metadata = {
   alternates: { canonical: '/pricing' },  // → https://example.com/pricing
 };`} />
 
-      <h2>Titles</h2>
+      <h2 id="titles">Titles</h2>
       <ul>
         <li>
           A string sets the title. The nearest <code>template</code> set by a layout{' '}
@@ -57,7 +64,7 @@ export const metadata: Metadata = {
         </li>
       </ul>
 
-      <h2>generateMetadata</h2>
+      <h2 id="generatemetadata">generateMetadata</h2>
       <p>
         When the head depends on data, export <code>generateMetadata</code> instead (or as
         well - its result is merged over the static <code>metadata</code> of the same
@@ -66,8 +73,7 @@ export const metadata: Metadata = {
         <code>path</code>, <code>locale</code>, ... - and, on pages, the props the page
         renders with as <code>{`{ props }`}</code>, so nothing is fetched twice:
       </p>
-      <CodeBlock lang="tsx" code={`// app/posts/[slug]/page.tsx
-import type { Metadata, MetadataContext, MetadataExtras } from '@gio.js/core';
+      <CodeBlock lang="tsx" title="app/posts/[slug]/page.tsx" code={`import type { Metadata, MetadataContext, MetadataExtras } from '@gio.js/core';
 
 export const revalidate = 300;
 
@@ -121,7 +127,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         </li>
       </ul>
 
-      <h2>How segments merge</h2>
+      <h2 id="how-segments-merge">How segments merge</h2>
       <p>
         Root layout first, then each nested layout, then the page. The merge is shallow and
         the deepest segment wins per top-level field: a page that sets{' '}
@@ -129,8 +135,16 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         (share common values through a variable). <code>undefined</code> inherits,{' '}
         <code>null</code> removes the inherited value. Titles follow the template rules above.
       </p>
+      <p>
+        <code>og:title</code> and <code>og:description</code> default to the page&apos;s
+        resolved title (template applied) and description. A layout can therefore set a
+        site-wide <code>openGraph</code> with only images, site name and type, and every page
+        under it still shares with its own title and description. Leave{' '}
+        <code>twitter.title</code> and <code>twitter.description</code> unset too: X reads the
+        Open Graph tags when its own are missing.
+      </p>
 
-      <h2>Absolute URLs: metadataBase</h2>
+      <h2 id="absolute-urls-metadatabase">Absolute URLs: metadataBase</h2>
       <p>
         Open Graph and Twitter images, <code>openGraph.url</code>, the canonical URL and
         alternate languages must be absolute for crawlers. Relative values resolve against the
@@ -143,7 +157,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         end up in every visitor&apos;s canonical URL.
       </p>
 
-      <h2>Fields</h2>
+      <h2 id="fields">Fields</h2>
       <table>
         <thead><tr><th>Field</th><th>Renders</th></tr></thead>
         <tbody>
@@ -153,7 +167,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
           <tr><td><code>authors</code></td><td><code>&lt;meta name=&quot;author&quot;&gt;</code>, plus <code>&lt;link rel=&quot;author&quot;&gt;</code> for a <code>url</code></td></tr>
           <tr><td><code>robots</code></td><td><code>&lt;meta name=&quot;robots&quot;&gt;</code> from a string or <code>{`{ index, follow, noarchive, nosnippet, noimageindex, nocache, 'max-snippet', 'max-image-preview', 'max-video-preview' }`}</code>; <code>googleBot</code> renders <code>&lt;meta name=&quot;googlebot&quot;&gt;</code></td></tr>
           <tr><td><code>alternates</code></td><td><code>{`{ canonical, languages: { 'en-US': url } }`}</code> → <code>&lt;link rel=&quot;canonical&quot;&gt;</code> and <code>&lt;link rel=&quot;alternate&quot; hreflang&gt;</code></td></tr>
-          <tr><td><code>openGraph</code></td><td><code>og:title</code>, <code>og:description</code>, <code>og:url</code>, <code>og:site_name</code>, <code>og:locale</code>, <code>og:type</code>, and per image <code>og:image</code> (+ <code>:type</code>, <code>:width</code>, <code>:height</code>, <code>:alt</code>)</td></tr>
+          <tr><td><code>openGraph</code></td><td><code>og:title</code> and <code>og:description</code> (default: the page&apos;s title and description), <code>og:url</code>, <code>og:site_name</code>, <code>og:locale</code>, <code>og:type</code>, and per image <code>og:image</code> (+ <code>:type</code>, <code>:width</code>, <code>:height</code>, <code>:alt</code>)</td></tr>
           <tr><td><code>twitter</code></td><td><code>twitter:card</code>, <code>:site</code>, <code>:creator</code>, <code>:title</code>, <code>:description</code>, <code>:image</code> (+ <code>:alt</code>)</td></tr>
           <tr><td><code>icons</code></td><td>A URL, a list, or <code>{`{ icon, apple, shortcut }`}</code> → <code>&lt;link rel=&quot;icon&quot; | &quot;apple-touch-icon&quot; | &quot;shortcut icon&quot;&gt;</code> with <code>type</code>/<code>sizes</code>/<code>media</code></td></tr>
           <tr><td><code>manifest</code></td><td><code>&lt;link rel=&quot;manifest&quot;&gt;</code></td></tr>
@@ -166,7 +180,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         database cannot break out of the head.
       </p>
 
-      <h2>How the tags are rendered</h2>
+      <h2 id="how-the-tags-are-rendered">How the tags are rendered</h2>
       <ul>
         <li>
           The tags are React elements rendered inside the page&apos;s tree; React 19 hoists{' '}
@@ -211,7 +225,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         </li>
       </ul>
 
-      <h2>Structured data (JSON-LD)</h2>
+      <h2 id="structured-data-json-ld">Structured data (JSON-LD)</h2>
       <CodeBlock lang="tsx" code={`import { JsonLd } from '@gio.js/react';
 
 export default function Post({ post }: { post: Post }) {
@@ -235,7 +249,7 @@ export default function Post({ post }: { post: Post }) {
         It is a data block the browser never executes, so it needs no CSP nonce.
       </p>
 
-      <h2>sitemap.xml, robots.txt and the web manifest</h2>
+      <h2 id="sitemapxml-robotstxt-and-the-web-manifest">sitemap.xml, robots.txt and the web manifest</h2>
       <p>
         Three files at the root of <code>app/</code> generate the crawler files. Each default
         export is the data, or a (sync or async) function returning it:
@@ -305,7 +319,7 @@ export default function robots(): MetadataRoute.Robots {
         </li>
       </ul>
 
-      <h2>Not yet available</h2>
+      <h2 id="not-yet-available">Not yet available</h2>
       <p>
         Generated Open Graph images (an <code>opengraph-image.tsx</code> convention rendering
         JSX to PNG) are not part of GioJS yet. Point <code>openGraph.images</code> at a static

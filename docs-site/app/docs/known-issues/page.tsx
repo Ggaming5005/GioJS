@@ -1,11 +1,18 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
+
+export const metadata: Metadata = {
+  title: 'Known Limitations',
+  description:
+    'What GioJS does not do yet, or does differently from Next.js - and what to use instead. ' +
+    'Check this list before committing to a design.',
+};
 
 export const revalidate = false;
 
 export default function KnownLimitationsPage(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Resources</div>
       <h1>Known Limitations</h1>
       <p className="page-subtitle">
         What GioJS does not do yet, or does differently from Next.js - and what to use
@@ -19,7 +26,7 @@ export default function KnownLimitationsPage(): React.JSX.Element {
         and what changed in each version are on the <a href="/releases">releases page</a>.
       </p>
 
-      <h2>Rendering model</h2>
+      <h2 id="rendering-model">Rendering model</h2>
       <ul>
         <li>
           <strong>No React Server Components.</strong> There is no{' '}
@@ -60,7 +67,7 @@ export default function KnownLimitationsPage(): React.JSX.Element {
         </li>
       </ul>
 
-      <h2>Routing and middleware</h2>
+      <h2 id="routing-and-middleware">Routing and middleware</h2>
       <ul>
         <li>
           <strong>The <code>app/</code> directory is the only router.</strong> A Next.js{' '}
@@ -89,7 +96,7 @@ export default function KnownLimitationsPage(): React.JSX.Element {
         </li>
       </ul>
 
-      <h2>Metadata and images</h2>
+      <h2 id="metadata-and-images">Metadata and images</h2>
       <ul>
         <li>
           <strong>No generated Open Graph images.</strong> There is no{' '}
@@ -105,7 +112,7 @@ export default function KnownLimitationsPage(): React.JSX.Element {
         </li>
       </ul>
 
-      <h2>Running several instances</h2>
+      <h2 id="running-several-instances">Running several instances</h2>
       <p>
         Every piece of server state lives in one server process. There is no shared backend
         (Redis or otherwise) yet, so with several instances behind a load balancer:
@@ -132,7 +139,7 @@ export default function KnownLimitationsPage(): React.JSX.Element {
         </li>
       </ul>
 
-      <h2>Static export</h2>
+      <h2 id="static-export">Static export</h2>
       <p>
         <code>gio export</code> produces HTML plus hydration - pages are interactive and{' '}
         <code>GioLink</code> navigation works - but there is no server behind it. These need
@@ -160,7 +167,7 @@ export default function KnownLimitationsPage(): React.JSX.Element {
       </ul>
       <p>See <a href="/docs/static-export">Static Export</a>.</p>
 
-      <h2>Content-Security-Policy</h2>
+      <h2 id="content-security-policy">Content-Security-Policy</h2>
       <ul>
         <li>
           <strong>Nonces need the GioJS server.</strong> The Rust server stamps a fresh nonce
@@ -181,7 +188,7 @@ export default function KnownLimitationsPage(): React.JSX.Element {
       </ul>
       <p>See <a href="/docs/security#csp">Content-Security-Policy</a>.</p>
 
-      <h2>Platforms and packaging</h2>
+      <h2 id="platforms-and-packaging">Platforms and packaging</h2>
       <ul>
         <li>
           <strong>Prebuilt server binaries</strong> exist for Linux x64 (glibc and musl),
@@ -201,7 +208,7 @@ export default function KnownLimitationsPage(): React.JSX.Element {
         </li>
       </ul>
 
-      <h2>Requests and sessions</h2>
+      <h2 id="requests-and-sessions">Requests and sessions</h2>
       <ul>
         <li>
           <strong>Request bodies are buffered.</strong> Uploads are read whole into memory,

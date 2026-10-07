@@ -1,12 +1,20 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Configuration',
+  description:
+    'All GioJS configuration lives in gio.toml at the project root. Every field is optional - ' +
+    'defaults are production-ready - and an unknown key stops the server with a hint instead ' +
+    'of being ignored.',
+};
 
 export const revalidate = false;
 
 export default function ConfigurationPage(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Reference</div>
       <h1>Configuration</h1>
       <p className="page-subtitle">
         All GioJS configuration lives in <code>gio.toml</code> at the project root.
@@ -14,7 +22,7 @@ export default function ConfigurationPage(): React.JSX.Element {
         the server with a hint instead of being ignored.
       </p>
 
-      <h2>Full reference</h2>
+      <h2 id="full-reference">Full reference</h2>
       <p>
         Every key GioJS reads, with its default. Every section and key is optional, and a
         partial table keeps the defaults for what it leaves out (<code>[server]</code> with
@@ -183,7 +191,7 @@ watch_ignore = []       # globs the dev watcher never restarts for, e.g. ["data/
 [x-mytool]              # tables named x-* are left alone, for other tools
 anything = "goes"`} />
 
-      <h2>Strict by design</h2>
+      <h2 id="strict-by-design">Strict by design</h2>
       <p>
         <code>gio.toml</code> is checked against this reference when the server starts. An
         unknown section or key anywhere - a typo, or a setting from another framework - stops
@@ -216,7 +224,7 @@ giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: inval
         </li>
       </ul>
 
-      <h2>Editor autocomplete</h2>
+      <h2 id="editor-autocomplete">Editor autocomplete</h2>
       <p>
         <code>@gio.js/server</code> ships a JSON Schema for <code>gio.toml</code>, generated
         from the server&apos;s own config types, so it always matches what the server accepts.
@@ -268,7 +276,7 @@ giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: inval
         <code>GioJS listening on 0.0.0.0:8080 port_from=&quot;PORT&quot;</code>).
       </p>
 
-      <h2>Page cache, compression &amp; prefetch</h2>
+      <h2 id="page-cache-compression-prefetch">Page cache, compression &amp; prefetch</h2>
       <table>
         <thead>
           <tr><th>Key</th><th>Default</th><th>Description</th></tr>
@@ -290,7 +298,7 @@ giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: inval
         </tbody>
       </table>
 
-      <h2>Dev watcher</h2>
+      <h2 id="dev-watcher">Dev watcher</h2>
       <p>
         In development the server restarts the Node worker when source changes anywhere in
         the project. Outside <code>app/</code> only source-like files count (
@@ -331,15 +339,14 @@ watch_ignore = ["data/**", "*.db.json", "public/uploads"]`} />
         </li>
       </ul>
 
-      <h2>gio.config.ts</h2>
+      <h2 id="gioconfigts">gio.config.ts</h2>
       <p>
         What only JavaScript can express lives in an optional <code>gio.config.ts</code> next
         to <code>gio.toml</code>. Today that is Node plugins (<code>GioNodePlugin</code>:{' '}
         <code>onRequest</code> / <code>onResponse</code> hooks around every request the worker
         handles). <code>defineConfig</code> types it:
       </p>
-      <CodeBlock lang="ts" code={`// gio.config.ts
-import { defineConfig } from '@gio.js/core';
+      <CodeBlock lang="ts" title="gio.config.ts" code={`import { defineConfig } from '@gio.js/core';
 import { auditPlugin } from './lib/audit-plugin';
 
 export default defineConfig({
@@ -512,7 +519,7 @@ trusted_proxies = ["127.0.0.1", "::1", "10.0.0.0/8"]   # IPs and CIDR blocks, IP
         IP. The <a href="/docs/deployment">deployment guide</a> has per-proxy settings.
       </div>
 
-      <h2>Request IDs</h2>
+      <h2 id="request-ids">Request IDs</h2>
       <p>
         Every response carries an <code>X-Request-Id</code> header - cache hits, static
         files, redirects and errors included. The same id is on the server&apos;s log lines
@@ -602,7 +609,7 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
         section, or <code>enabled = false</code>) the endpoint answers <code>404</code>.
       </div>
 
-      <h2>Dev endpoints &amp; allowed hosts</h2>
+      <h2 id="dev-endpoints-allowed-hosts">Dev endpoints &amp; allowed hosts</h2>
       <p>
         In development the server also serves <code>/_gio/devtools</code> and
         its sub-endpoints: the dashboard, its state and event stream (which also
@@ -689,7 +696,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         codeframes, editor links or live reload.
       </p>
 
-      <h2>Security</h2>
+      <h2 id="security">Security</h2>
       <p>
         Without any <code>[security]</code> section every response carries{' '}
         <code>X-Content-Type-Options: nosniff</code>, <code>X-Frame-Options: SAMEORIGIN</code>{' '}
@@ -821,8 +828,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         configuration never gets shadowed by a file left on disk. Add{' '}
         <code>.env*.local</code> to <code>.gitignore</code>.
       </p>
-      <CodeBlock lang="bash" code={`# .env
-DATABASE_URL="postgres://localhost/dev"
+      <CodeBlock lang="bash" title=".env" code={`DATABASE_URL="postgres://localhost/dev"
 GIO_PUBLIC_API_URL=https://api.example.com
 
 # multiline values, single quotes (no substitution), \${VAR} references
@@ -861,7 +867,7 @@ API_ENDPOINT=\${GIO_PUBLIC_API_URL}/v2`} />
         </li>
       </ul>
 
-      <h2>Environment variables in client code</h2>
+      <h2 id="environment-variables-in-client-code">Environment variables in client code</h2>
       <p>
         Pages and components also run in the browser, where there is no{' '}
         <code>process.env</code>. Variables prefixed <code>GIO_PUBLIC_</code> that are set
@@ -905,8 +911,7 @@ API_ENDPOINT=\${GIO_PUBLIC_API_URL}/v2`} />
         server-only - either import the guard or name the file <code>*.server.ts</code>{' '}
         (<code>.tsx</code>, <code>.js</code>, <code>.jsx</code>):
       </p>
-      <CodeBlock lang="ts" code={`// lib/db.ts
-import '@gio.js/core/server-only';
+      <CodeBlock lang="ts" title="lib/db.ts" code={`import '@gio.js/core/server-only';
 
 export const db = createClient(process.env.DATABASE_URL);`} />
       <p>
@@ -939,7 +944,7 @@ is removed from client code.`} />
         build instead of shipping.
       </div>
 
-      <h2>Static page caching</h2>
+      <h2 id="static-page-caching">Static page caching</h2>
       <p>
         Export <code>revalidate</code> from any page module to control caching:
       </p>

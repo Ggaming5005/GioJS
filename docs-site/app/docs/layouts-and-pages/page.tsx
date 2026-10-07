@@ -1,20 +1,25 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Layouts & Pages',
+  description: 'Build routes with page files and share UI with nested layouts.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Routing</div>
       <h1>Layouts & Pages</h1>
       <p className="page-subtitle">Build routes with page files and share UI with nested layouts.</p>
-      <h2>Pages</h2>
+      <h2 id="pages">Pages</h2>
       <p>A page is the default export of a page.tsx file. It renders the UI for a route.</p>
       <CodeBlock lang="tsx" code={`export default function Page() {
   return <h1>Hello, world</h1>;
 }`} />
-      <h2>Layouts</h2>
+      <h2 id="layouts">Layouts</h2>
       <p>A layout.tsx wraps the pages in its folder and all nested folders. The root app/layout.tsx must render <code>&lt;html&gt;</code> and <code>&lt;body&gt;</code>.</p>
       <CodeBlock lang="tsx" code={`// app/layout.tsx - server-only HTML
 export default function RootLayout({ children }) {
@@ -44,7 +49,7 @@ export default function SiteLayout({ children }) {
         folder and the folders above it - never those of the page below it that failed (see{' '}
         <a href="/docs/error-handling">Error Handling</a>).
       </p>
-      <h2>Loading UI</h2>
+      <h2 id="loading-ui">Loading UI</h2>
       <p>
         A <code>loading.tsx</code> wraps everything below its folder - the page and the layouts
         of deeper folders - in a <code>&lt;Suspense&gt;</code> boundary with its default export
@@ -52,8 +57,7 @@ export default function SiteLayout({ children }) {
         <code>use()</code> on a promise, a lazy component), a streamed response sends the
         layouts and the loading UI at once and the page as soon as it is ready.
       </p>
-      <CodeBlock lang="tsx" code={`// app/dashboard/loading.tsx
-export default function Loading() {
+      <CodeBlock lang="tsx" title="app/dashboard/loading.tsx" code={`export default function Loading() {
   return <p>Loading dashboard…</p>;
 }`} />
       <p>
@@ -95,7 +99,7 @@ export default function Loading() {
           only if the new page suspends in the browser.
         </li>
       </ul>
-      <h2>Dynamic routes</h2>
+      <h2 id="dynamic-routes">Dynamic routes</h2>
       <p>Wrap a folder name in brackets to capture URL segments. Params reach{' '}
         <code>ctx.params</code> in getServerSideProps (and the <code>params</code> prop when
         there is none) as strings.</p>
@@ -113,7 +117,7 @@ export default function Loading() {
         empty string. A catch-all must be the last segment of its route, and a param name may
         appear only once per route.
       </p>
-      <h2>Route groups</h2>
+      <h2 id="route-groups">Route groups</h2>
       <p>
         Wrap a folder name in parentheses to organize routes without changing URLs:{' '}
         <code>app/(marketing)/about/page.tsx</code> serves <code>/about</code>. Groups work
@@ -128,13 +132,13 @@ export default function Loading() {
     layout.tsx        # wraps /cart only
     cart/page.tsx     # /cart`} />
       <p>A group layout is always a nested layout; only app/layout.tsx renders the document.</p>
-      <h2>Private folders</h2>
+      <h2 id="private-folders">Private folders</h2>
       <p>
         Folders whose name starts with an underscore (<code>app/_components</code>) are never
         routable - nothing inside them becomes a page, handler, or layout. Use them to colocate
         components and helpers with the routes that use them.
       </p>
-      <h2>Matching order and conflicts</h2>
+      <h2 id="matching-order-and-conflicts">Matching order and conflicts</h2>
       <p>
         When several patterns match a URL, the most specific wins, compared segment by segment
         from the left: a static segment beats <code>[id]</code>, which beats{' '}

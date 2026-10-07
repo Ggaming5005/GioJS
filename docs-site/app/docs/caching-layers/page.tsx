@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Caching Layers',
+  description: 'In-process LRU over a persistent disk tier, per instance.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Rendering &amp; Caching</div>
       <h1>Caching Layers</h1>
       <p className="page-subtitle">In-process LRU over a persistent disk tier, per instance.</p>
       <p>
@@ -53,7 +58,7 @@ disk_max_bytes = 536870912          # L2 cap; 0 = unbounded`} />
         default locale), so changing those settings drops persisted pages too. A pinned{' '}
         <code>GIO_DEPLOYMENT_ID</code> is used as given: change it with every deploy.
       </p>
-      <h2>Observing the cache: X-Gio-Cache</h2>
+      <h2 id="observing-the-cache-x-gio-cache">Observing the cache: X-Gio-Cache</h2>
       <p>
         Every response carries an <code>X-Gio-Cache</code> header saying which tier
         answered and why, so cache behavior is observable from any{' '}
@@ -79,7 +84,7 @@ GET http://localhost:3000/posts/1
   → Served from the Rust page cache without touching Node. "ttl" is the
     seconds until this entry goes stale.`} />
 
-      <h2>Partial prerendering (PPR)</h2>
+      <h2 id="partial-prerendering-ppr">Partial prerendering (PPR)</h2>
       <p>
         A cached page is fast but shared; a personalized page is per-user but pays full render
         cost on every request. PPR splits the page: everything before your{' '}
