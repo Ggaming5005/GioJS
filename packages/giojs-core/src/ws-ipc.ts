@@ -13,7 +13,10 @@ import path from 'node:path';
 import { Buffer } from 'node:buffer';
 import { handshakeProof, writeFrame, makeDroppableFrameWriter } from './ipc.ts';
 import { logger } from './logger.ts';
-import type { WsInbound, WsOutbound, GioSocket } from './context.ts';
+import { parseCookies } from './cookies.ts';
+import { matchWsHandler, type WsHandlerFn } from './ws-router.ts';
+import { assertRoomName, MAX_ROOMS_PER_SOCKET, wsHub } from './ws-hub.ts';
+import type { WsConnectMsg, WsInbound, WsOutbound, GioSocket } from './context.ts';
 
 const IS_WINDOWS = process.platform === 'win32';
 const WS_WINDOWS_PIPE_PATH = String.raw`\\.\pipe\giojs-ws`;
@@ -28,9 +31,28 @@ export const MAX_WS_IPC_FRAME_BYTES = 64 * 1024 * 1024;
 const BASE64_PATTERN =
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
-type WsHandlerFn = (socket: GioSocket) => void;
+/** Close code for a connection its wsHandler rejected (returned false). */
+export const WS_REJECTED_CODE = 4401;
+/** Close code for a path no route.ts wsHandler matches. */
+export const WS_NO_HANDLER_CODE = 4404;
+/**
+ * Messages held while an async wsHandler is still deciding. A client that
+ * floods a socket nobody accepted yet is closed (1008) instead of buffered.
+ */
+export const MAX_HELD_MESSAGES = 256;
+
 type MessageHandler = (data: string | Buffer) => void;
 type CloseHandler = (code: number, reason: string) => void;
+
+/** The upgrade request's context, as the ws_connect frame carried it. */
+export interface WsConnectionContext {
+  path: string;
+  params: Record<string, string>;
+  query: Record<string, string>;
+  headers: Record<string, string>;
+  ip?: string;
+  requestId?: string;
+}
 
 export function encodeBinaryPayload(data: Buffer): string {
   return data.toString('base64');
@@ -56,11 +78,27 @@ export function validateWsInbound(value: unknown): WsInbound | null {
     if (typeof msg['connId'] !== 'string') return null;
     if (typeof msg['routeId'] !== 'string') return null;
     if (typeof msg['addr'] !== 'string') return null;
+    // The connection context is optional (older servers omit it) but never
+    // mistyped: a handler authenticating on headers must see real strings.
+    const context: Pick<WsConnectMsg, 'path' | 'query' | 'headers' | 'ip' | 'requestId'> = {};
+    for (const key of ['path', 'ip', 'requestId'] as const) {
+      const value = msg[key];
+      if (value === undefined) continue;
+      if (typeof value !== 'string') return null;
+      context[key] = value;
+    }
+    for (const key of ['query', 'headers'] as const) {
+      const value = msg[key];
+      if (value === undefined) continue;
+      if (!isStringRecord(value)) return null;
+      context[key] = value;
+    }
     return {
       type: 'ws_connect',
       connId: msg['connId'],
       routeId: msg['routeId'],
       addr: msg['addr'],
+      ...context,
     };
   }
 
@@ -91,17 +129,49 @@ export function validateWsInbound(value: unknown): WsInbound | null {
   return null;
 }
 
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every(v => typeof v === 'string');
+}
+
 export class GioSocketImpl implements GioSocket {
   private readonly messageHandlers: MessageHandler[] = [];
   private readonly closeHandlers: CloseHandler[] = [];
+  private readonly joined = new Set<string>();
+  /** Set by close() or the disconnect: nothing more goes out or comes in. */
+  private closed = false;
+  /** Messages held while an async wsHandler decides; null once accepted. */
+  private held: Array<string | Buffer> | null = null;
+
+  readonly path: string;
+  readonly params: Record<string, string>;
+  readonly query: Record<string, string>;
+  readonly headers: Record<string, string>;
+  readonly cookies: Record<string, string>;
+  readonly ip?: string;
+  readonly requestId?: string;
 
   constructor(
     public readonly id: string,
     public readonly routeId: string,
     private readonly writeFn: (msg: WsOutbound) => void,
-  ) {}
+    context: Partial<WsConnectionContext> = {},
+  ) {
+    this.path = context.path ?? routeId;
+    this.params = context.params ?? {};
+    this.query = context.query ?? {};
+    this.headers = context.headers ?? {};
+    this.cookies = parseCookies(this.headers['cookie']);
+    if (context.ip !== undefined) this.ip = context.ip;
+    if (context.requestId !== undefined) this.requestId = context.requestId;
+  }
+
+  get rooms(): ReadonlySet<string> {
+    return this.joined;
+  }
 
   send(data: string | Buffer): void {
+    if (this.closed) return;
     if (Buffer.isBuffer(data)) {
       this.writeFn({
         type: 'ws_send',
@@ -115,11 +185,44 @@ export class GioSocketImpl implements GioSocket {
   }
 
   close(code: number = 1000, reason: string = ''): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.held = null;
     this.writeFn({ type: 'ws_close', connId: this.id, code, reason });
   }
 
   broadcast(data: string): void {
     this.writeFn({ type: 'ws_broadcast', routeId: this.routeId, data });
+  }
+
+  join(room: string): void {
+    assertRoomName(room);
+    if (this.closed || this.joined.has(room)) return;
+    if (this.joined.size >= MAX_ROOMS_PER_SOCKET) {
+      throw new RangeError(`a socket can join at most ${MAX_ROOMS_PER_SOCKET} rooms`);
+    }
+    this.joined.add(room);
+    this.writeFn({ type: 'ws_join', connId: this.id, room });
+  }
+
+  leave(room: string): void {
+    if (!this.joined.delete(room) || this.closed) return;
+    this.writeFn({ type: 'ws_leave', connId: this.id, room });
+  }
+
+  /** The wsHandler is async: hold messages until it accepts. */
+  _hold(): void {
+    if (!this.closed) this.held = [];
+  }
+
+  /** The wsHandler accepted: deliver what arrived meanwhile, in order. */
+  _accept(): void {
+    const held = this.held;
+    this.held = null;
+    for (const data of held ?? []) {
+      if (this.closed) return;
+      this._dispatchMessage(data);
+    }
   }
 
   on(event: 'message', handler: MessageHandler): void;
@@ -135,6 +238,15 @@ export class GioSocketImpl implements GioSocket {
   // User handlers run inside net socket event listeners; an uncaught throw
   // there would take down the whole SSR worker, so every callback is guarded.
   _dispatchMessage(data: string | Buffer): void {
+    if (this.closed) return;
+    if (this.held !== null) {
+      if (this.held.length >= MAX_HELD_MESSAGES) {
+        this.close(1008, 'too many messages before the connection was accepted');
+        return;
+      }
+      this.held.push(data);
+      return;
+    }
     for (const h of this.messageHandlers) {
       try {
         h(data);
@@ -145,6 +257,10 @@ export class GioSocketImpl implements GioSocket {
   }
 
   _dispatchClose(code: number, reason: string): void {
+    // Rust's registry drops the memberships with the connection.
+    this.closed = true;
+    this.held = null;
+    this.joined.clear();
     for (const h of this.closeHandlers) {
       try {
         h(code, reason);
@@ -171,7 +287,7 @@ function wsSocketPath(): string {
  */
 /** Payload frames may be dropped under backpressure; ws_close never is. */
 export function isDroppableWsFrame(msg: WsOutbound): boolean {
-  return msg.type === 'ws_send' || msg.type === 'ws_broadcast';
+  return msg.type === 'ws_send' || msg.type === 'ws_broadcast' || msg.type === 'ws_room_broadcast';
 }
 
 export function wsAuthIsValid(parsed: unknown, token: string): boolean {
@@ -180,10 +296,131 @@ export function wsAuthIsValid(parsed: unknown, token: string): boolean {
   return msg['type'] === 'ws_auth' && msg['token'] === handshakeProof(token, 'ws');
 }
 
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
+}
+
+/**
+ * Run a connection's wsHandler and apply the accept/reject contract:
+ * `false` (returned or resolved) closes with WS_REJECTED_CODE, a throw or
+ * rejection closes with 1011, anything else accepts. An async handler's
+ * messages are held until it settles.
+ */
+function runWsHandler(handler: WsHandlerFn, socket: GioSocketImpl): void {
+  const fail = (cause: unknown): void => {
+    logger.error('wsHandler threw on connect', {
+      path: socket.path,
+      connId: socket.id,
+      error: cause instanceof Error ? cause.message : String(cause),
+    });
+    socket.close(1011, 'internal error');
+  };
+  const settle = (result: unknown): void => {
+    if (result === false) socket.close(WS_REJECTED_CODE, 'unauthorized');
+    else socket._accept();
+  };
+  let result: unknown;
+  try {
+    result = handler(socket);
+  } catch (cause) {
+    fail(cause);
+    return;
+  }
+  if (isPromiseLike(result)) {
+    socket._hold();
+    Promise.resolve(result).then(settle, fail);
+  } else {
+    settle(result);
+  }
+}
+
+export interface WsDispatcher {
+  /** Apply one validated Rust → Node frame. */
+  handle(msg: WsInbound): void;
+  /** Rust went away: every connection is gone with it. */
+  disconnectAll(code: number, reason: string): void;
+  readonly size: number;
+}
+
+/**
+ * Connection bookkeeping for one WS IPC connection, separate from the pipe
+ * so it is testable frame by frame. Handlers are matched with the page
+ * routing rules (dynamic segments, catch-alls, route groups) - see
+ * matchWsHandler.
+ */
+export function createWsDispatcher(
+  wsHandlers: Map<string, WsHandlerFn>,
+  writeOutbound: (msg: WsOutbound) => void,
+): WsDispatcher {
+  const activeSockets = new Map<string, GioSocketImpl>();
+
+  function connect(msg: WsConnectMsg): void {
+    const path = msg.path ?? msg.routeId;
+    const match = matchWsHandler(path, wsHandlers);
+    const gioSocket = new GioSocketImpl(msg.connId, msg.routeId, writeOutbound, {
+      path,
+      params: match?.params ?? {},
+      query: msg.query ?? {},
+      headers: msg.headers ?? {},
+      ...(msg.ip !== undefined ? { ip: msg.ip } : {}),
+      ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
+    });
+    activeSockets.set(msg.connId, gioSocket);
+    if (match === null) {
+      logger.debug('ws connection to a path without a wsHandler', { path, connId: msg.connId });
+      gioSocket.close(WS_NO_HANDLER_CODE, 'no websocket handler');
+      return;
+    }
+    runWsHandler(match.handler, gioSocket);
+  }
+
+  return {
+    handle(msg: WsInbound): void {
+      if (msg.type === 'ws_connect') {
+        connect(msg);
+      } else if (msg.type === 'ws_message') {
+        const gioSocket = activeSockets.get(msg.connId);
+        if (gioSocket === undefined) {
+          logger.debug('ws-ipc message for unknown connection', { connId: msg.connId });
+          return;
+        }
+        if (msg.isBinary) {
+          const decoded = decodeBinaryPayload(msg.data);
+          if (decoded === null) {
+            logger.warn('ws-ipc dropping binary frame with invalid base64', {
+              connId: msg.connId,
+            });
+            return;
+          }
+          gioSocket._dispatchMessage(decoded);
+        } else {
+          gioSocket._dispatchMessage(msg.data);
+        }
+      } else {
+        const gioSocket = activeSockets.get(msg.connId);
+        gioSocket?._dispatchClose(msg.code, msg.reason);
+        activeSockets.delete(msg.connId);
+      }
+    },
+    disconnectAll(code: number, reason: string): void {
+      for (const [, s] of activeSockets) {
+        s._dispatchClose(code, reason);
+      }
+      activeSockets.clear();
+    },
+    get size(): number {
+      return activeSockets.size;
+    },
+  };
+}
+
 export function createWsIpcServer(wsHandlers: Map<string, WsHandlerFn>): net.Server {
   const server = net.createServer(socket => {
     logger.info('ws-ipc client connected');
-    const activeSockets = new Map<string, GioSocketImpl>();
     let authed = WS_IPC_TOKEN === '';
 
     const writeDroppableFrame = makeDroppableFrameWriter(socket);
@@ -198,6 +435,11 @@ export function createWsIpcServer(wsHandlers: Map<string, WsHandlerFn>): net.Ser
       writeFrame(socket, msg);
     }
 
+    const dispatcher = createWsDispatcher(wsHandlers, writeOutbound);
+    // broadcast(room, ...) from route handlers goes out on the live,
+    // authenticated connection.
+    if (authed) wsHub().write = writeOutbound;
+
     const handler = makeWsFrameHandler(
       (data: Buffer) => {
         let parsed: unknown;
@@ -211,6 +453,7 @@ export function createWsIpcServer(wsHandlers: Map<string, WsHandlerFn>): net.Ser
         if (!authed) {
           if (wsAuthIsValid(parsed, WS_IPC_TOKEN)) {
             authed = true;
+            wsHub().write = writeOutbound;
           } else {
             logger.error('ws-ipc first frame failed auth - destroying connection');
             socket.destroy();
@@ -224,46 +467,7 @@ export function createWsIpcServer(wsHandlers: Map<string, WsHandlerFn>): net.Ser
           return;
         }
 
-        if (msg.type === 'ws_connect') {
-          const gioSocket = new GioSocketImpl(msg.connId, msg.routeId, writeOutbound);
-          activeSockets.set(msg.connId, gioSocket);
-          const wsHandler = wsHandlers.get(msg.routeId);
-          if (wsHandler !== undefined) {
-            try {
-              wsHandler(gioSocket);
-            } catch (cause) {
-              logger.error('wsHandler threw on connect', {
-                routeId: msg.routeId,
-                connId: msg.connId,
-                error: String(cause),
-              });
-            }
-          }
-
-        } else if (msg.type === 'ws_message') {
-          const gioSocket = activeSockets.get(msg.connId);
-          if (gioSocket === undefined) {
-            logger.debug('ws-ipc message for unknown connection', { connId: msg.connId });
-            return;
-          }
-          if (msg.isBinary) {
-            const decoded = decodeBinaryPayload(msg.data);
-            if (decoded === null) {
-              logger.warn('ws-ipc dropping binary frame with invalid base64', {
-                connId: msg.connId,
-              });
-              return;
-            }
-            gioSocket._dispatchMessage(decoded);
-          } else {
-            gioSocket._dispatchMessage(msg.data);
-          }
-
-        } else {
-          const gioSocket = activeSockets.get(msg.connId);
-          gioSocket?._dispatchClose(msg.code, msg.reason);
-          activeSockets.delete(msg.connId);
-        }
+        dispatcher.handle(msg);
       },
       declaredLength => {
         logger.error('ws-ipc frame exceeds max size - destroying connection', {
@@ -277,12 +481,10 @@ export function createWsIpcServer(wsHandlers: Map<string, WsHandlerFn>): net.Ser
     socket.on('data', handler);
     socket.on('error', err => logger.error('ws-ipc socket error', { error: String(err) }));
     socket.on('close', () => {
-      logger.info('ws-ipc client disconnected', { activeConnections: activeSockets.size });
+      logger.info('ws-ipc client disconnected', { activeConnections: dispatcher.size });
+      if (wsHub().write === writeOutbound) wsHub().write = null;
       // Rust disconnected - notify all active sockets
-      for (const [, s] of activeSockets) {
-        s._dispatchClose(1001, 'server disconnected');
-      }
-      activeSockets.clear();
+      dispatcher.disconnectAll(1001, 'server disconnected');
     });
   });
 

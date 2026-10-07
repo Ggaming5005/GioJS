@@ -7,7 +7,9 @@
  */
 export { GioEventStream, isGioEventStream } from './sse.ts';
 export type { SseStream, SseCleanupFn } from './sse.ts';
-export type { GioRequest, GioSocket } from './context.ts';
+export type { GioRequest, GioSocket, WsHandler } from './context.ts';
+export { broadcast } from './ws-hub.ts';
+export type { BroadcastOptions } from './ws-hub.ts';
 export type { GioNodePlugin } from './plugin.ts';
 export { notFound } from './not-found.ts';
 export type { GioErrorProps, GioErrorInfo } from './segment-tree.ts';

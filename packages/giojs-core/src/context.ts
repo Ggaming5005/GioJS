@@ -138,19 +138,79 @@ export interface GioRequest {
   requestId?: string;
 }
 
-/** Server-side handle for a WebSocket connection. Binary frames arrive as Buffer. */
+/**
+ * Server-side handle for a WebSocket connection. Binary frames arrive as
+ * Buffer. The connection context (params, query, headers, cookies, ip,
+ * requestId) is the upgrade request's - enough to authenticate the socket
+ * the way a route.ts handler authenticates a request.
+ */
 export interface GioSocket {
   readonly id: string;
+  /** The URL path the socket connected to (e.g. `/chat/lobby`). */
   readonly routeId: string;
+  /** Same as `routeId`. */
+  readonly path: string;
+  /** Dynamic segments of the matched route.ts (`app/chat/[room]` → `{ room }`). */
+  readonly params: Record<string, string>;
+  readonly query: Record<string, string>;
+  /**
+   * A fixed subset of the upgrade request's headers, lowercase: cookie,
+   * authorization, user-agent, accept-language, origin and x-request-id.
+   */
+  readonly headers: Record<string, string>;
+  /** Cookie header parsed into name → value (works with getSession(socket)). */
+  readonly cookies: Record<string, string>;
+  /**
+   * The client's IP, behind gio.toml `[server] trusted_proxies` (see
+   * GioRequest.ip). Absent when the server did not send it.
+   */
+  readonly ip?: string;
+  /** The upgrade request's id (its X-Request-Id), on every log line. */
+  readonly requestId?: string;
+  /** The rooms this socket joined. */
+  readonly rooms: ReadonlySet<string>;
   send(data: string | Buffer): void;
+  /** Close the connection. 4000-4999 are application codes (4401 = rejected). */
   close(code?: number, reason?: string): void;
+  /** Send to every socket connected to the same path, this one included. */
   broadcast(data: string): void;
+  /**
+   * Join a room: any non-empty string up to 256 bytes, up to 100 rooms per
+   * socket (beyond either limit it throws). Membership ends with leave() or
+   * the connection. Publish to a room with `broadcast(room, data)`.
+   */
+  join(room: string): void;
+  leave(room: string): void;
   on(event: 'message', handler: (data: string | Buffer) => void): void;
   on(event: 'close', handler: (code: number, reason: string) => void): void;
 }
 
+/**
+ * A route.ts `wsHandler`: runs once per connection. Returning (or resolving
+ * to) `false` rejects the connection - it closes with 4401 'unauthorized'.
+ * Messages that arrive while an async handler is still running are held and
+ * delivered once it accepts. A throw closes the connection with 1011.
+ */
+export type WsHandler = (
+  socket: GioSocket,
+) => void | boolean | Promise<void | boolean>;
+
 // WS IPC messages: Rust → Node (over giojs-ws pipe)
-export interface WsConnectMsg  { type: 'ws_connect';    connId: string; routeId: string; addr: string; }
+/**
+ * `path` onwards are additive (absent from older servers): the connection
+ * context the upgrade request carried.
+ */
+export interface WsConnectMsg {
+  type: 'ws_connect';
+  connId: string;
+  routeId: string;
+  addr: string;
+  path?: string;
+  query?: Record<string, string>;
+  headers?: Record<string, string>;
+  ip?: string;
+  requestId?: string;
+}
 export interface WsMessageMsg  { type: 'ws_message';    connId: string; data: string; isBinary: boolean; }
 export interface WsDisconnectMsg { type: 'ws_disconnect'; connId: string; code: number; reason: string; }
 export type WsInbound = WsConnectMsg | WsMessageMsg | WsDisconnectMsg;
@@ -159,7 +219,24 @@ export type WsInbound = WsConnectMsg | WsMessageMsg | WsDisconnectMsg;
 export interface WsSendMsg      { type: 'ws_send';      connId: string; data: string; isBinary: boolean; }
 export interface WsCloseMsg     { type: 'ws_close';     connId: string; code: number; reason: string; }
 export interface WsBroadcastMsg { type: 'ws_broadcast'; routeId: string; data: string; }
-export type WsOutbound = WsSendMsg | WsCloseMsg | WsBroadcastMsg;
+/** Room membership lives in Rust's registry so a room broadcast is one frame. */
+export interface WsJoinMsg      { type: 'ws_join';      connId: string; room: string; }
+export interface WsLeaveMsg     { type: 'ws_leave';     connId: string; room: string; }
+export interface WsRoomBroadcastMsg {
+  type: 'ws_room_broadcast';
+  room: string;
+  data: string;
+  isBinary: boolean;
+  /** A connId to skip (the sender). */
+  except?: string;
+}
+export type WsOutbound =
+  | WsSendMsg
+  | WsCloseMsg
+  | WsBroadcastMsg
+  | WsJoinMsg
+  | WsLeaveMsg
+  | WsRoomBroadcastMsg;
 
 // SSE messages on the HTTP IPC pipe
 export interface SseChunkMsg { type: 'sse_chunk'; id: string; data: string; }

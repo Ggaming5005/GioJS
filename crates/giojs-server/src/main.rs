@@ -1518,11 +1518,18 @@ async fn dynamic_handler(
                 .extensions()
                 .get::<client_identity::ClientInfo>()
                 .map_or(addr, client_identity::ClientInfo::addr);
+            let info = ws_ipc::WsConnectInfo {
+                query: parse_query(req.uri().query().unwrap_or_default()),
+                headers: ws_ipc::forwarded_ws_headers(req.headers()),
+                ip: client.ip,
+                request_id: client.request_id,
+                route_id: path,
+            };
             return ws::handle_ws_upgrade(
                 ws,
                 ws_ipc.clone(),
                 state.ws_registry.clone(),
-                path,
+                info,
                 client_addr,
                 state.ws_config.max_connections,
                 state.ws_config.ping_interval_secs,

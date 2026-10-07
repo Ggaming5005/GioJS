@@ -2,7 +2,9 @@
 //!
 //! Active WebSocket connection registry. DashMap for lock-free concurrent access.
 //! Each connection is identified by a UUID connId; connections are also indexed
-//! by routeId for broadcast operations.
+//! by routeId for broadcast operations, and by the rooms the worker joined
+//! them to (`socket.join(room)`), so a room broadcast crosses the WS IPC
+//! pipe as one frame however many members it fans out to.
 
 use axum::extract::ws::Message;
 use dashmap::{DashMap, DashSet};
@@ -12,6 +14,11 @@ use tokio::sync::mpsc;
 pub struct WsRegistry {
     senders: DashMap<String, mpsc::UnboundedSender<Message>>,
     by_route: DashMap<String, Arc<DashSet<String>>>,
+    /// room → member connIds. Empty rooms are removed, so the map is bounded
+    /// by the live connections' memberships.
+    rooms: DashMap<String, Arc<DashSet<String>>>,
+    /// connId → the rooms it joined, for cleanup on deregister.
+    conn_rooms: DashMap<String, Arc<DashSet<String>>>,
 }
 
 impl WsRegistry {
@@ -19,6 +26,8 @@ impl WsRegistry {
         Self {
             senders: DashMap::new(),
             by_route: DashMap::new(),
+            rooms: DashMap::new(),
+            conn_rooms: DashMap::new(),
         }
     }
 
@@ -35,6 +44,70 @@ impl WsRegistry {
         if let Some(set) = self.by_route.get(route_id) {
             set.remove(conn_id);
         }
+        if let Some((_, joined)) = self.conn_rooms.remove(conn_id) {
+            for room in joined.iter() {
+                self.remove_member(room.as_str(), conn_id);
+            }
+        }
+    }
+
+    /// Add a live connection to `room`. Returns false (and records nothing)
+    /// for an unknown connId - a join racing the browser's disconnect must
+    /// not leave a member nobody will ever clean up.
+    pub fn join(&self, conn_id: &str, room: &str) -> bool {
+        if !self.senders.contains_key(conn_id) {
+            return false;
+        }
+        self.conn_rooms
+            .entry(conn_id.to_string())
+            .or_insert_with(|| Arc::new(DashSet::new()))
+            .insert(room.to_string());
+        self.rooms
+            .entry(room.to_string())
+            .or_insert_with(|| Arc::new(DashSet::new()))
+            .insert(conn_id.to_string());
+        // Deregister may have run between the check and the inserts.
+        if !self.senders.contains_key(conn_id) {
+            self.leave(conn_id, room);
+            self.conn_rooms.remove(conn_id);
+            return false;
+        }
+        true
+    }
+
+    pub fn leave(&self, conn_id: &str, room: &str) {
+        if let Some(joined) = self.conn_rooms.get(conn_id) {
+            joined.remove(room);
+        }
+        self.remove_member(room, conn_id);
+    }
+
+    fn remove_member(&self, room: &str, conn_id: &str) {
+        if let Some(members) = self.rooms.get(room) {
+            members.remove(conn_id);
+        }
+        self.rooms.remove_if(room, |_, members| members.is_empty());
+    }
+
+    /// Send `msg` to every member of `room` except `except` (the sender, for
+    /// "everyone else" messages).
+    pub fn broadcast_room(&self, room: &str, msg: Message, except: Option<&str>) {
+        let Some(members) = self.rooms.get(room).map(|m| Arc::clone(m.value())) else {
+            return;
+        };
+        for conn_id in members.iter() {
+            if except == Some(conn_id.as_str()) {
+                continue;
+            }
+            if let Some(tx) = self.senders.get(conn_id.as_str()) {
+                let _ = tx.send(msg.clone());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn room_count(&self) -> usize {
+        self.rooms.len()
     }
 
     /// Returns `true` if the message was queued, `false` if connId is unknown or channel closed.
@@ -74,8 +147,11 @@ impl WsRegistry {
 
     pub fn close_all(&self) {
         use axum::extract::ws::CloseFrame;
+        // 1001, not 1000: clients treat a normal close as final, while this
+        // one (shutdown, or the worker that held the state restarting) is
+        // exactly when they should reconnect.
         let close = Message::Close(Some(CloseFrame {
-            code: axum::extract::ws::close_code::NORMAL,
+            code: axum::extract::ws::close_code::AWAY,
             reason: std::borrow::Cow::Borrowed("server shutdown"),
         }));
         let ids: Vec<String> = self.senders.iter().map(|e| e.key().clone()).collect();
@@ -85,6 +161,8 @@ impl WsRegistry {
             }
         }
         self.by_route.clear();
+        self.rooms.clear();
+        self.conn_rooms.clear();
     }
 }
 
@@ -132,6 +210,79 @@ mod tests {
         reg.broadcast("/chat", Message::Text("hi everyone".into()));
         assert_eq!(rx1.try_recv().unwrap(), Message::Text("hi everyone".into()));
         assert_eq!(rx2.try_recv().unwrap(), Message::Text("hi everyone".into()));
+    }
+
+    #[test]
+    fn room_broadcast_reaches_members_only_and_honors_except() {
+        let reg = WsRegistry::new();
+        let (tx1, mut rx1) = make_conn();
+        let (tx2, mut rx2) = make_conn();
+        let (tx3, mut rx3) = make_conn();
+        reg.register("conn1", "/chat/a", tx1);
+        reg.register("conn2", "/chat/a", tx2);
+        reg.register("conn3", "/chat/b", tx3);
+        assert!(reg.join("conn1", "a"));
+        assert!(reg.join("conn2", "a"));
+        assert!(reg.join("conn3", "b"));
+
+        reg.broadcast_room("a", Message::Text("to a".into()), None);
+        assert_eq!(rx1.try_recv().unwrap(), Message::Text("to a".into()));
+        assert_eq!(rx2.try_recv().unwrap(), Message::Text("to a".into()));
+        assert!(rx3.try_recv().is_err(), "room b must not see room a traffic");
+
+        reg.broadcast_room("a", Message::Text("not you".into()), Some("conn1"));
+        assert!(rx1.try_recv().is_err());
+        assert_eq!(rx2.try_recv().unwrap(), Message::Text("not you".into()));
+
+        reg.leave("conn2", "a");
+        reg.broadcast_room("a", Message::Text("after leave".into()), None);
+        assert!(rx2.try_recv().is_err());
+        assert_eq!(rx1.try_recv().unwrap(), Message::Text("after leave".into()));
+    }
+
+    #[test]
+    fn rooms_are_cleaned_up_on_leave_and_deregister() {
+        let reg = WsRegistry::new();
+        let (tx1, _rx1) = make_conn();
+        let (tx2, _rx2) = make_conn();
+        reg.register("conn1", "/chat", tx1);
+        reg.register("conn2", "/chat", tx2);
+        reg.join("conn1", "a");
+        reg.join("conn1", "b");
+        reg.join("conn2", "b");
+        assert_eq!(reg.room_count(), 2);
+
+        reg.leave("conn1", "a");
+        assert_eq!(reg.room_count(), 1, "an emptied room is dropped");
+
+        reg.deregister("conn1", "/chat");
+        reg.deregister("conn2", "/chat");
+        assert_eq!(reg.room_count(), 0);
+        assert!(reg.conn_rooms.is_empty());
+    }
+
+    #[test]
+    fn join_refuses_unknown_connections() {
+        let reg = WsRegistry::new();
+        assert!(!reg.join("ghost", "a"));
+        assert_eq!(reg.room_count(), 0);
+        assert!(reg.conn_rooms.is_empty());
+    }
+
+    #[test]
+    fn close_all_uses_going_away_and_clears_rooms() {
+        let reg = WsRegistry::new();
+        let (tx, mut rx) = make_conn();
+        reg.register("conn1", "/chat", tx);
+        reg.join("conn1", "a");
+        reg.close_all();
+        match rx.try_recv().unwrap() {
+            Message::Close(Some(frame)) => {
+                assert_eq!(frame.code, axum::extract::ws::close_code::AWAY)
+            }
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+        assert_eq!(reg.room_count(), 0);
     }
 
     #[test]

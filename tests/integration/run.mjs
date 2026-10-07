@@ -658,6 +658,114 @@ async function main() {
       assert.match(late, /"tick":2/, 'events still arrive past the head deadline');
     });
 
+    /**
+     * A WebSocket client on the fixture: `next()` resolves the next message,
+     * `closed` the close code and reason.
+     */
+    function wsClient(path, headers = {}) {
+      const ws = new WebSocket(`ws://127.0.0.1:39517${path}`, { headers });
+      const inbox = [];
+      const listeners = new Set();
+      ws.addEventListener('message', (event) => {
+        inbox.push(String(event.data));
+        for (const listener of listeners) listener();
+      });
+      const opened = new Promise((resolve, reject) => {
+        ws.addEventListener('open', () => resolve(), { once: true });
+        ws.addEventListener('error', () => reject(new Error(`WebSocket ${path} failed to open`)), { once: true });
+      });
+      const closed = new Promise((resolve) =>
+        ws.addEventListener('close', (event) => resolve({ code: event.code, reason: event.reason }), { once: true }),
+      );
+      let cursor = 0;
+      const next = (timeoutMs = 3000) => new Promise((resolve, reject) => {
+        const check = () => {
+          if (cursor >= inbox.length) return;
+          listeners.delete(check);
+          clearTimeout(timer);
+          resolve(inbox[cursor++]);
+        };
+        const timer = setTimeout(() => {
+          listeners.delete(check);
+          reject(new Error(`no WebSocket message on ${path} within ${timeoutMs}ms (got ${JSON.stringify(inbox)})`));
+        }, timeoutMs);
+        listeners.add(check);
+        check();
+      });
+      return { ws, inbox, opened, closed, next };
+    }
+
+    await test('WebSocket routes match [param] patterns and see the connection context', async () => {
+      const client = wsClient('/ws/rooms/lobby?token=t1', {
+        cookie: 'theme=dark; sid=abc',
+        'user-agent': 'gio-int-ws',
+        'x-forwarded-for': '198.51.100.23',
+        'x-request-id': 'ws-req-1',
+      });
+      await client.opened;
+      const hello = JSON.parse(await client.next());
+      assert.equal(hello.type, 'hello');
+      assert.equal(hello.path, '/ws/rooms/lobby');
+      assert.deepEqual(hello.params, { room: 'lobby' });
+      assert.deepEqual(hello.query, { token: 't1' });
+      assert.deepEqual(hello.cookies, { theme: 'dark', sid: 'abc' });
+      assert.equal(hello.userAgent, 'gio-int-ws');
+      assert.equal(hello.forwardedFor, null, 'only the allowlisted headers reach the worker');
+      assert.equal(hello.ip, '198.51.100.23', 'the trusted proxy names the client');
+      assert.equal(hello.requestId, 'ws-req-1');
+      assert.deepEqual(hello.rooms, ['lobby']);
+      client.ws.close();
+      assert.equal((await client.closed).code, 1005);
+    });
+
+    await test('room broadcasts stay in their room, and route handlers can publish to a room', async () => {
+      const a1 = wsClient('/ws/rooms/a');
+      const a2 = wsClient('/ws/rooms/a');
+      const b = wsClient('/ws/rooms/b');
+      await Promise.all([a1.opened, a2.opened, b.opened]);
+      await Promise.all([a1.next(), a2.next(), b.next()]); // greetings
+      a1.ws.send('ping');
+      assert.equal(await a1.next(), 'a:ping', 'the sender is a member too');
+      assert.equal(await a2.next(), 'a:ping');
+
+      const published = await fetch(`${BASE}/api/rooms/b`, { method: 'POST', body: 'news' });
+      assert.deepEqual(await published.json(), { delivered: true });
+      // Frames are dispatched in order: had b been in room a, a:ping would
+      // have reached it first.
+      assert.equal(await b.next(), 'server:news');
+      await fetch(`${BASE}/api/rooms/a`, { method: 'POST', body: 'marker' });
+      assert.equal(await a1.next(), 'server:marker', 'room a never sees room b traffic');
+      assert.equal(await a2.next(), 'server:marker');
+      for (const client of [a1, a2, b]) client.ws.close();
+      await Promise.all([a1.closed, a2.closed, b.closed]);
+    });
+
+    await test('a wsHandler authenticates with the session cookie and rejects with 4401', async () => {
+      const anonymous = wsClient('/ws/private');
+      await anonymous.opened;
+      anonymous.ws.send('before the verdict');
+      assert.deepEqual(await anonymous.closed, { code: 4401, reason: 'unauthorized' });
+      assert.deepEqual(anonymous.inbox, [], 'a rejected socket never sees a message');
+
+      const cookie = sessionCookieOf(await loginAs('ws-user'));
+      const member = wsClient('/ws/private', { cookie });
+      await member.opened;
+      member.ws.send('early'); // lands while the async handler is still deciding
+      assert.equal(await member.next(), 'welcome ws-user');
+      assert.equal(await member.next(), 'echo:early', 'messages before acceptance are held, not lost');
+      member.ws.close();
+      await member.closed;
+    });
+
+    await test('rejected and unrouted WebSocket connections close with 4401 / 4404', async () => {
+      const denied = wsClient('/ws/rooms/x?deny=1');
+      await denied.opened;
+      assert.deepEqual(await denied.closed, { code: 4401, reason: 'unauthorized' });
+      const nowhere = wsClient('/ws/nowhere');
+      await nowhere.opened;
+      assert.deepEqual(await nowhere.closed, { code: 4404, reason: 'no websocket handler' });
+    });
+
     await test('stalled request heads and idle keep-alive sockets are closed after header_read_timeout_secs', async () => {
       // Both run concurrently so the suite pays the 2s deadline once.
       const [stalled, idle] = await Promise.all([

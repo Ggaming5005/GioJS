@@ -11,7 +11,11 @@ import { describe, it, expect, vi } from 'vitest';
 import type { GioSocket, WsOutbound } from './context.ts';
 import {
   GioSocketImpl,
+  MAX_HELD_MESSAGES,
   MAX_WS_IPC_FRAME_BYTES,
+  WS_NO_HANDLER_CODE,
+  WS_REJECTED_CODE,
+  createWsDispatcher,
   createWsIpcServer,
   decodeBinaryPayload,
   encodeBinaryPayload,
@@ -21,6 +25,8 @@ import {
   wsAuthIsValid,
 } from './ws-ipc.ts';
 import { handshakeProof } from './ipc.ts';
+import { broadcast, MAX_ROOMS_PER_SOCKET, MAX_ROOM_NAME_BYTES, wsHub } from './ws-hub.ts';
+import type { WsHandlerFn } from './ws-router.ts';
 
 describe('isDroppableWsFrame', () => {
   it('marks payload frames droppable under backpressure', () => {
@@ -282,6 +288,35 @@ describe('validateWsInbound', () => {
     ).toBeNull();
   });
 
+  it('accepts the optional connection context of ws_connect', () => {
+    const msg = validateWsInbound({
+      type: 'ws_connect',
+      connId: 'c1',
+      routeId: '/chat/lobby',
+      addr: '203.0.113.9:0',
+      path: '/chat/lobby',
+      query: { token: 't' },
+      headers: { cookie: 'sid=1' },
+      ip: '203.0.113.9',
+      requestId: 'req-1',
+    });
+    expect(msg).toMatchObject({
+      path: '/chat/lobby',
+      query: { token: 't' },
+      headers: { cookie: 'sid=1' },
+      ip: '203.0.113.9',
+      requestId: 'req-1',
+    });
+  });
+
+  it('rejects a ws_connect whose connection context is mistyped', () => {
+    const base = { type: 'ws_connect', connId: 'c1', routeId: '/chat', addr: 'a' };
+    expect(validateWsInbound({ ...base, headers: { cookie: 1 } })).toBeNull();
+    expect(validateWsInbound({ ...base, query: 'a=1' })).toBeNull();
+    expect(validateWsInbound({ ...base, ip: 4 })).toBeNull();
+    expect(validateWsInbound({ ...base, requestId: null })).toBeNull();
+  });
+
   it('rejects ws_message with missing or mistyped fields', () => {
     expect(validateWsInbound({ type: 'ws_message', connId: 'c1', data: 'x' })).toBeNull();
     expect(
@@ -449,5 +484,267 @@ describe.skipIf(process.platform === 'win32')('createWsIpcServer over Unix socke
       delete process.env['GIO_WS_SOCKET_PATH'];
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Connection dispatcher: routing, context, accept/reject, rooms ──────────
+
+function connectFrame(connId: string, path: string, extra: Record<string, unknown> = {}) {
+  return { type: 'ws_connect' as const, connId, routeId: path, addr: '127.0.0.1:9', path, ...extra };
+}
+
+function harness(handlers: Record<string, WsHandlerFn>) {
+  const writes: WsOutbound[] = [];
+  const dispatcher = createWsDispatcher(new Map(Object.entries(handlers)), msg => writes.push(msg));
+  return { writes, dispatcher };
+}
+
+/** Let an async wsHandler settle. */
+const settle = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
+
+describe('ws dispatcher routing', () => {
+  it('matches dynamic segments and passes params', () => {
+    const seen: GioSocket[] = [];
+    const { dispatcher } = harness({ '/chat/:room': socket => void seen.push(socket) });
+    dispatcher.handle(connectFrame('c1', '/chat/lobby'));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.params).toEqual({ room: 'lobby' });
+    expect(seen[0]?.path).toBe('/chat/lobby');
+  });
+
+  it('prefers the most specific pattern, like pages do', () => {
+    const hits: string[] = [];
+    const { dispatcher } = harness({
+      '/chat/:room': () => void hits.push('param'),
+      '/chat/admin': () => void hits.push('static'),
+      '/chat/*rest': () => void hits.push('catch-all'),
+    });
+    dispatcher.handle(connectFrame('c1', '/chat/admin'));
+    dispatcher.handle(connectFrame('c2', '/chat/lobby'));
+    dispatcher.handle(connectFrame('c3', '/chat/a/b'));
+    expect(hits).toEqual(['static', 'param', 'catch-all']);
+  });
+
+  it('passes catch-all params with their slashes', () => {
+    let params: Record<string, string> = {};
+    const { dispatcher } = harness({ '/live/*topic': socket => void (params = socket.params) });
+    dispatcher.handle(connectFrame('c1', '/live/news/eu'));
+    expect(params).toEqual({ topic: 'news/eu' });
+  });
+
+  it('closes a connection no wsHandler matches with 4404', () => {
+    const { dispatcher, writes } = harness({ '/chat/:room': () => {} });
+    dispatcher.handle(connectFrame('c1', '/elsewhere'));
+    expect(writes).toEqual([
+      { type: 'ws_close', connId: 'c1', code: WS_NO_HANDLER_CODE, reason: 'no websocket handler' },
+    ]);
+  });
+
+  it('falls back to routeId when an older server sends no path', () => {
+    const seen: GioSocket[] = [];
+    const { dispatcher } = harness({ '/chat/:room': socket => void seen.push(socket) });
+    dispatcher.handle({ type: 'ws_connect', connId: 'c1', routeId: '/chat/x', addr: 'a' });
+    expect(seen[0]?.params).toEqual({ room: 'x' });
+    expect(seen[0]?.headers).toEqual({});
+    expect(seen[0]?.cookies).toEqual({});
+  });
+});
+
+describe('ws connection context', () => {
+  it('exposes query, headers, parsed cookies, ip and requestId', () => {
+    let socket: GioSocket | undefined;
+    const { dispatcher } = harness({ '/chat/:room': s => void (socket = s) });
+    dispatcher.handle(
+      connectFrame('c1', '/chat/lobby', {
+        query: { token: 'abc' },
+        headers: { cookie: 'gio_session=tok; theme=dark', 'user-agent': 'UA' },
+        ip: '203.0.113.9',
+        requestId: 'req-7',
+      }),
+    );
+    expect(socket?.query).toEqual({ token: 'abc' });
+    expect(socket?.headers['user-agent']).toBe('UA');
+    expect(socket?.cookies).toEqual({ gio_session: 'tok', theme: 'dark' });
+    expect(socket?.ip).toBe('203.0.113.9');
+    expect(socket?.requestId).toBe('req-7');
+  });
+});
+
+describe('ws accept/reject contract', () => {
+  it('returning false closes with 4401 and never delivers messages', () => {
+    const onMessage = vi.fn();
+    const { dispatcher, writes } = harness({
+      '/ws': socket => {
+        socket.on('message', onMessage);
+        return false;
+      },
+    });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    dispatcher.handle({ type: 'ws_message', connId: 'c1', data: 'hi', isBinary: false });
+    expect(writes).toEqual([
+      { type: 'ws_close', connId: 'c1', code: WS_REJECTED_CODE, reason: 'unauthorized' },
+    ]);
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('an async handler holds messages until it accepts, then delivers them in order', async () => {
+    const received: Array<string | Buffer> = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => (release = resolve));
+    const { dispatcher } = harness({
+      '/ws': async socket => {
+        await gate; // e.g. a session lookup
+        socket.on('message', data => received.push(data));
+      },
+    });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    dispatcher.handle({ type: 'ws_message', connId: 'c1', data: 'one', isBinary: false });
+    dispatcher.handle({ type: 'ws_message', connId: 'c1', data: 'two', isBinary: false });
+    await settle();
+    expect(received).toEqual([]);
+    release();
+    await settle();
+    expect(received).toEqual(['one', 'two']);
+    dispatcher.handle({ type: 'ws_message', connId: 'c1', data: 'three', isBinary: false });
+    expect(received).toEqual(['one', 'two', 'three']);
+  });
+
+  it('an async handler resolving false rejects and drops what it held', async () => {
+    const onMessage = vi.fn();
+    const { dispatcher, writes } = harness({
+      '/ws': async socket => {
+        socket.on('message', onMessage);
+        await settle();
+        return false;
+      },
+    });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    dispatcher.handle({ type: 'ws_message', connId: 'c1', data: 'early', isBinary: false });
+    await settle();
+    await settle();
+    expect(writes).toContainEqual({
+      type: 'ws_close',
+      connId: 'c1',
+      code: WS_REJECTED_CODE,
+      reason: 'unauthorized',
+    });
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('socket.close() with a custom code rejects too', () => {
+    const { dispatcher, writes } = harness({
+      '/ws': socket => socket.close(4403, 'forbidden'),
+    });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    expect(writes).toEqual([{ type: 'ws_close', connId: 'c1', code: 4403, reason: 'forbidden' }]);
+  });
+
+  it('a throwing or rejecting handler closes with 1011', async () => {
+    const { dispatcher, writes } = harness({
+      '/sync': () => {
+        throw new Error('bug');
+      },
+      '/async': async () => {
+        throw new Error('bug');
+      },
+    });
+    dispatcher.handle(connectFrame('c1', '/sync'));
+    dispatcher.handle(connectFrame('c2', '/async'));
+    await settle();
+    expect(writes).toEqual([
+      { type: 'ws_close', connId: 'c1', code: 1011, reason: 'internal error' },
+      { type: 'ws_close', connId: 'c2', code: 1011, reason: 'internal error' },
+    ]);
+  });
+
+  it('a flood before an async handler accepts closes the connection with 1008', () => {
+    const { dispatcher, writes } = harness({ '/ws': () => new Promise<void>(() => {}) });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    for (let i = 0; i <= MAX_HELD_MESSAGES; i++) {
+      dispatcher.handle({ type: 'ws_message', connId: 'c1', data: String(i), isBinary: false });
+    }
+    expect(writes.at(-1)).toMatchObject({ type: 'ws_close', connId: 'c1', code: 1008 });
+  });
+
+  it('nothing is sent after close', () => {
+    let socket: GioSocket | undefined;
+    const { dispatcher, writes } = harness({ '/ws': s => void (socket = s) });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    socket?.close();
+    socket?.send('late');
+    socket?.close();
+    expect(writes).toEqual([{ type: 'ws_close', connId: 'c1', code: 1000, reason: '' }]);
+  });
+});
+
+describe('ws rooms', () => {
+  it('join and leave send control frames once per change', () => {
+    let socket: GioSocket | undefined;
+    const { dispatcher, writes } = harness({ '/ws': s => void (socket = s) });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    socket?.join('lobby');
+    socket?.join('lobby');
+    expect([...(socket?.rooms ?? [])]).toEqual(['lobby']);
+    socket?.leave('lobby');
+    socket?.leave('lobby');
+    expect(writes).toEqual([
+      { type: 'ws_join', connId: 'c1', room: 'lobby' },
+      { type: 'ws_leave', connId: 'c1', room: 'lobby' },
+    ]);
+    expect(socket?.rooms.size).toBe(0);
+  });
+
+  it('bounds room names and memberships per socket', () => {
+    const socket = new GioSocketImpl('c1', '/ws', () => {});
+    expect(() => socket.join('')).toThrow(TypeError);
+    expect(() => socket.join('x'.repeat(MAX_ROOM_NAME_BYTES + 1))).toThrow(RangeError);
+    for (let i = 0; i < MAX_ROOMS_PER_SOCKET; i++) socket.join(`room-${i}`);
+    expect(() => socket.join('one-too-many')).toThrow(RangeError);
+    socket.join('room-0'); // already a member: not a new membership
+  });
+
+  it('memberships end with the connection', () => {
+    let socket: GioSocket | undefined;
+    const { dispatcher } = harness({ '/ws': s => void (socket = s) });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    socket?.join('a');
+    dispatcher.handle({ type: 'ws_disconnect', connId: 'c1', code: 1001, reason: '' });
+    expect(socket?.rooms.size).toBe(0);
+    expect(dispatcher.size).toBe(0);
+  });
+
+  it('broadcast(room) frames text and binary payloads and honors except', () => {
+    const writes: WsOutbound[] = [];
+    const hub = wsHub();
+    const previous = hub.write;
+    hub.write = msg => writes.push(msg);
+    try {
+      expect(broadcast('lobby', 'hello')).toBe(true);
+      expect(broadcast('lobby', new Uint8Array([0xff, 0x00]), { except: 'c1' })).toBe(true);
+      expect(() => broadcast('', 'x')).toThrow(TypeError);
+    } finally {
+      hub.write = previous;
+    }
+    expect(writes).toEqual([
+      { type: 'ws_room_broadcast', room: 'lobby', data: 'hello', isBinary: false },
+      { type: 'ws_room_broadcast', room: 'lobby', data: '/wA=', isBinary: true, except: 'c1' },
+    ]);
+  });
+
+  it('broadcast(room) reports false while no WebSocket server is connected', () => {
+    const hub = wsHub();
+    const previous = hub.write;
+    hub.write = null;
+    try {
+      expect(broadcast('lobby', 'hello')).toBe(false);
+    } finally {
+      hub.write = previous;
+    }
+  });
+
+  it('room broadcasts are droppable payload frames; join/leave never are', () => {
+    expect(isDroppableWsFrame({ type: 'ws_room_broadcast', room: 'r', data: '', isBinary: false })).toBe(true);
+    expect(isDroppableWsFrame({ type: 'ws_join', connId: 'c', room: 'r' })).toBe(false);
+    expect(isDroppableWsFrame({ type: 'ws_leave', connId: 'c', room: 'r' })).toBe(false);
   });
 });

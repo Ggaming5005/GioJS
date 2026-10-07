@@ -6,6 +6,7 @@
 //! pipe base64-encoded with `isBinary: true`; text payloads pass through
 //! unchanged for backward compatibility.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +29,54 @@ type BoxWsWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
 pub struct WsIpcClient {
     write_tx: mpsc::Sender<Bytes>,
+}
+
+/// What the worker learns about a connection when it opens: enough for a
+/// `wsHandler` to route on params and authenticate (cookies, Authorization)
+/// before accepting it. Every field past `route_id` / `addr` is additive in
+/// the frame; older workers ignore them.
+#[derive(Debug, Clone, Default)]
+pub struct WsConnectInfo {
+    /// The request path, which is also the route id `ws_broadcast` targets.
+    pub route_id: String,
+    pub query: HashMap<String, String>,
+    /// Only [`WS_FORWARDED_HEADERS`], lowercased.
+    pub headers: HashMap<String, String>,
+    /// The resolved client IP (proxy-aware, see client_identity.rs).
+    pub ip: Option<String>,
+    pub request_id: Option<String>,
+}
+
+/// Upgrade request headers the worker sees. An allowlist, unlike HTTP
+/// requests: a socket lives for hours and its context is copied into every
+/// handler closure, so it carries what authentication and localization need
+/// and nothing else.
+pub const WS_FORWARDED_HEADERS: [&str; 6] = [
+    "cookie",
+    "authorization",
+    "user-agent",
+    "accept-language",
+    "origin",
+    crate::client_identity::REQUEST_ID_HEADER,
+];
+
+/// The forwarded subset of `headers` (repeated headers joined like
+/// `extract_headers` would see them: cookies with `; `, others with `, `).
+pub fn forwarded_ws_headers(headers: &axum::http::HeaderMap) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for name in WS_FORWARDED_HEADERS {
+        let values: Vec<&str> = headers
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        if values.is_empty() {
+            continue;
+        }
+        let separator = if name == "cookie" { "; " } else { ", " };
+        out.insert(name.to_string(), values.join(separator));
+    }
+    out
 }
 
 impl WsIpcClient {
@@ -55,13 +104,13 @@ impl WsIpcClient {
         Ok(Self { write_tx })
     }
 
-    pub fn send_ws_connect(&self, conn_id: &str, route_id: &str, addr: &std::net::SocketAddr) {
-        self.send_frame(json!({
-            "type": "ws_connect",
-            "connId": conn_id,
-            "routeId": route_id,
-            "addr": addr.to_string(),
-        }));
+    pub fn send_ws_connect(
+        &self,
+        conn_id: &str,
+        info: &WsConnectInfo,
+        addr: &std::net::SocketAddr,
+    ) {
+        self.send_frame(ws_connect_frame(conn_id, info, addr));
     }
 
     /// `data` is the raw text for text frames, or base64 (see [`b64`]) for
@@ -172,6 +221,29 @@ async fn ws_ipc_supervisor(
     }
 }
 
+fn ws_connect_frame(
+    conn_id: &str,
+    info: &WsConnectInfo,
+    addr: &std::net::SocketAddr,
+) -> serde_json::Value {
+    let mut frame = json!({
+        "type": "ws_connect",
+        "connId": conn_id,
+        "routeId": info.route_id,
+        "addr": addr.to_string(),
+        "path": info.route_id,
+        "query": info.query,
+        "headers": info.headers,
+    });
+    if let Some(ip) = &info.ip {
+        frame["ip"] = json!(ip);
+    }
+    if let Some(request_id) = &info.request_id {
+        frame["requestId"] = json!(request_id);
+    }
+    frame
+}
+
 /// Dispatch Node → Rust messages until the connection dies.
 async fn ws_reader_loop(mut reader: BoxWsReader, registry: Arc<WsRegistry>) {
     loop {
@@ -234,6 +306,39 @@ fn dispatch_node_message(msg: serde_json::Value, registry: &WsRegistry) {
             let route_id = msg["routeId"].as_str().unwrap_or("");
             let data = msg["data"].as_str().unwrap_or("");
             registry.broadcast(route_id, Message::Text(data.into()));
+        }
+        // Rooms (socket.join / leave, broadcast(room, ...)): membership lives
+        // here so a broadcast is one frame on the pipe, not one per member.
+        Some("ws_join") | Some("ws_leave") => {
+            let conn_id = msg["connId"].as_str().unwrap_or("");
+            let Some(room) = msg["room"].as_str() else {
+                warn!(conn_id = %conn_id, "WS IPC room frame without a room");
+                return;
+            };
+            if msg["type"] == "ws_join" {
+                registry.join(conn_id, room);
+            } else {
+                registry.leave(conn_id, room);
+            }
+        }
+        Some("ws_room_broadcast") => {
+            let Some(room) = msg["room"].as_str() else {
+                warn!("WS IPC room broadcast without a room");
+                return;
+            };
+            let data = msg["data"].as_str().unwrap_or("");
+            let message = if msg["isBinary"].as_bool().unwrap_or(false) {
+                match b64::decode(data) {
+                    Ok(bytes) => Message::Binary(bytes),
+                    Err(e) => {
+                        warn!(room = %room, error = %e, "WS IPC room broadcast binary payload decode failed");
+                        return;
+                    }
+                }
+            } else {
+                Message::Text(data.into())
+            };
+            registry.broadcast_room(room, message, msg["except"].as_str());
         }
         other => {
             warn!(message_type = ?other, "WS IPC unknown message type");
@@ -407,6 +512,74 @@ mod tests {
         assert_eq!(decoded["type"], "ws_connect");
         assert_eq!(decoded["connId"], "test-uuid");
         assert_eq!(decoded["routeId"], "/chat");
+    }
+
+    #[test]
+    fn connect_frame_carries_the_connection_context() {
+        let info = WsConnectInfo {
+            route_id: "/chat/lobby".into(),
+            query: HashMap::from([("token".into(), "t1".into())]),
+            headers: HashMap::from([("cookie".into(), "sid=abc".into())]),
+            ip: Some("203.0.113.9".into()),
+            request_id: Some("req-1".into()),
+        };
+        let addr: std::net::SocketAddr = "203.0.113.9:0".parse().unwrap();
+        let frame = ws_connect_frame("c1", &info, &addr);
+        assert_eq!(frame["routeId"], "/chat/lobby");
+        assert_eq!(frame["path"], "/chat/lobby");
+        assert_eq!(frame["query"]["token"], "t1");
+        assert_eq!(frame["headers"]["cookie"], "sid=abc");
+        assert_eq!(frame["ip"], "203.0.113.9");
+        assert_eq!(frame["requestId"], "req-1");
+
+        let bare = ws_connect_frame("c2", &WsConnectInfo::default(), &addr);
+        assert!(bare.get("ip").is_none() && bare.get("requestId").is_none());
+    }
+
+    #[test]
+    fn forwarded_ws_headers_keep_only_the_allowlist() {
+        use axum::http::{HeaderMap, HeaderValue};
+        let mut headers = HeaderMap::new();
+        headers.append("cookie", HeaderValue::from_static("a=1"));
+        headers.append("cookie", HeaderValue::from_static("b=2"));
+        headers.insert("authorization", HeaderValue::from_static("Bearer t"));
+        headers.insert("origin", HeaderValue::from_static("https://app.example"));
+        headers.insert("x-request-id", HeaderValue::from_static("req-9"));
+        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
+        headers.insert("sec-websocket-key", HeaderValue::from_static("k"));
+        let forwarded = forwarded_ws_headers(&headers);
+        assert_eq!(forwarded["cookie"], "a=1; b=2");
+        assert_eq!(forwarded["authorization"], "Bearer t");
+        assert_eq!(forwarded["origin"], "https://app.example");
+        assert_eq!(forwarded["x-request-id"], "req-9");
+        assert!(!forwarded.contains_key("x-forwarded-for"));
+        assert!(!forwarded.contains_key("sec-websocket-key"));
+    }
+
+    #[test]
+    fn room_frames_drive_the_registry() {
+        let registry = WsRegistry::new();
+        let (tx1, mut rx1) = mpsc::unbounded_channel();
+        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        registry.register("c1", "/chat/a", tx1);
+        registry.register("c2", "/chat/b", tx2);
+        dispatch_node_message(json!({"type": "ws_join", "connId": "c1", "room": "a"}), &registry);
+        dispatch_node_message(json!({"type": "ws_join", "connId": "c2", "room": "b"}), &registry);
+        dispatch_node_message(
+            json!({"type": "ws_room_broadcast", "room": "a", "data": "hi a", "isBinary": false}),
+            &registry,
+        );
+        assert_eq!(rx1.try_recv().unwrap(), Message::Text("hi a".into()));
+        assert!(rx2.try_recv().is_err());
+
+        dispatch_node_message(
+            json!({"type": "ws_room_broadcast", "room": "b", "data": b64::encode(&[0xff, 0x00]), "isBinary": true}),
+            &registry,
+        );
+        assert_eq!(rx2.try_recv().unwrap(), Message::Binary(vec![0xff, 0x00]));
+
+        dispatch_node_message(json!({"type": "ws_leave", "connId": "c1", "room": "a"}), &registry);
+        assert_eq!(registry.room_count(), 1);
     }
 
     #[tokio::test]

@@ -162,8 +162,8 @@ function devOverlayHandOff(): boolean {
   return process.env.NODE_ENV === 'development' && process.env.GIO_EXPORT !== '1';
 }
 
-/** Match a URL path against pattern-keyed entries. */
-function matchIn<T>(
+/** Match a URL path against pattern-keyed entries (pages, handlers, wsHandlers). */
+export function matchIn<T>(
   path: string,
   entries: Map<string, T>,
 ): { entry: T; pattern: string; params: Record<string, string> } | null {
