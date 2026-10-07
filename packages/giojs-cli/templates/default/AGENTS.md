@@ -88,8 +88,10 @@ renders React. Full docs: https://giojs.com/llms.txt
   from app code): `renderPage(path, { cookies, query, headers })` returns
   `{ status, html, props, setCookies, redirect, cacheable }` and
   `callRoute(path, { method, body })` a fetch-like response - both run
-  in-process, without gio.toml/middleware.ts rules. `createTestServer()`
-  starts the real server on a free port (`url`, `close()` in afterAll).
+  in-process with the .env files loaded, without gio.toml/middleware.ts
+  rules or [i18n] detection (pass the unprefixed path plus `locale`).
+  `createTestServer()` starts the real server on a free port (`url`,
+  `close()` in afterAll).
   Under vitest, mirror tsconfig `paths` as `resolve.alias`.
 
 ## Commands

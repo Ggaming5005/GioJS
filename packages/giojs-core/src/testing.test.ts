@@ -6,12 +6,13 @@
  * route handlers with JSON/form/binary bodies, multiple cookies and SSE, and
  * the real server via createTestServer when a giojs-server binary exists.
  */
-import { existsSync, readdirSync, readlinkSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   TEST_ENTRY_SCRIPT,
   callRoute,
@@ -168,6 +169,28 @@ describe('renderPage', () => {
     await expect(renderPage('/api/events', { appDir })).rejects.toThrow(/event stream/);
   });
 
+  it('forwards the path the way the server does, never parsing it as a URL', async () => {
+    // To the server `//greet` is a path (the router skips empty segments),
+    // never a URL with the host "greet".
+    expect((await renderPage('//greet?name=x', { appDir })).props).toMatchObject({ name: 'x' });
+    // Escapes of unreserved characters are decoded, as path_hygiene.rs does.
+    expect((await renderPage('/posts/%37', { appDir })).props).toEqual({ id: '7', title: 'Post 7' });
+    // Encoded like a client sends it; a fragment never leaves the client.
+    expect((await renderPage('/posts/a b', { appDir })).props).toMatchObject({ id: 'a%20b' });
+    expect((await renderPage('/posts/%c3%a9#top', { appDir })).props).toMatchObject({ id: '%C3%A9' });
+    // What the server answers 400 for never reaches a page.
+    for (const path of ['/%2e%2e/', '/posts/../greet', '/posts/./7', '/posts/%2E', '/100%', '/posts/%zz']) {
+      await expect(renderPage(path, { appDir }), path).rejects.toThrow(/answers 400/);
+    }
+  });
+
+  it('loads the project\'s .env files, before gio.config.ts and the app modules', async () => {
+    // gio.config.ts reads its stamp from .env as it is imported.
+    expect((await renderPage('/greet', { appDir })).props).toMatchObject({ plugin: 'on' });
+    const runtime = await callRoute('/api/runtime', { appDir });
+    expect(await runtime.json()).toMatchObject({ dotenv: 'from-dotenv' });
+  });
+
   it('defaults the app directory to GIO_APP_DIR', async () => {
     const previous = process.env.GIO_APP_DIR;
     process.env.GIO_APP_DIR = appDir;
@@ -235,6 +258,55 @@ export default function Late() { return React.createElement('p', null, 'LATE_PAG
     const late = await renderPage('/late', { appDir });
     expect(late.status).toBe(200);
     expect(late.html).toContain('LATE_PAGE');
+  });
+});
+
+describe('renderPage and .env files', () => {
+  const names = ['TK_ENV_FILE', 'TK_ENV_PRESET', 'TK_ENV_LOCAL', 'TK_ENV_DEV', 'TK_ENV_BROKEN'];
+  const page = `import React from 'react';
+export async function getServerSideProps() {
+  const env = (name: string) => process.env[name] ?? null;
+  return {
+    props: { file: env('TK_ENV_FILE'), preset: env('TK_ENV_PRESET'), local: env('TK_ENV_LOCAL'), dev: env('TK_ENV_DEV') },
+  };
+}
+export default function Home() { return React.createElement('p', null, 'ENV_HOME'); }
+`;
+  const roots: string[] = [];
+
+  afterAll(async () => {
+    for (const name of names) delete process.env[name];
+    for (const root of roots) {
+      await resetTestApp(join(root, 'app'));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('loads them by the server\'s rules: precedence, mode, never over a variable already set', async () => {
+    const root = await writeProject('gio-testing-env-', {
+      '.env': 'TK_ENV_FILE=from-env\nTK_ENV_PRESET=from-file\nTK_ENV_LOCAL=from-env\n',
+      '.env.local': 'TK_ENV_LOCAL=from-local\n',
+      // Mode development only when NODE_ENV=development (vitest sets "test").
+      '.env.development': 'TK_ENV_DEV=loaded\n',
+      'app/page.tsx': page,
+    });
+    roots.push(root);
+    expect(process.env.NODE_ENV).not.toBe('development');
+    process.env.TK_ENV_PRESET = 'from-test';
+    const home = await renderPage('/', { appDir: join(root, 'app') });
+    expect(home.props).toEqual({ file: 'from-env', preset: 'from-test', local: 'from-local', dev: null });
+  });
+
+  it('fails like the server\'s startup on a file it cannot parse', async () => {
+    const root = await writeProject('gio-testing-badenv-', {
+      '.env': 'TK_ENV_BROKEN=1\nnot valid\n',
+      'app/page.tsx': page,
+    });
+    roots.push(root);
+    await expect(renderPage('/', { appDir: join(root, 'app') })).rejects.toThrow(
+      'cannot load .env: invalid syntax on line 2',
+    );
+    expect(process.env.TK_ENV_BROKEN).toBeUndefined();
   });
 });
 
@@ -464,9 +536,12 @@ describe('createTestServer', () => {
 
     it('runs the worker as a production process, not a vitest one', async () => {
       // In-process, the handler runs inside this vitest worker.
-      expect(await (await callRoute('/api/runtime', { appDir })).json()).toMatchObject({ vitest: 'true' });
+      expect(await (await callRoute('/api/runtime', { appDir })).json()).toMatchObject({
+        vitest: 'true',
+        dotenv: 'from-dotenv',
+      });
       const res = await fetch(`${server.url}/api/runtime`);
-      expect(await res.json()).toEqual({ vitest: null, nodeEnv: 'production' });
+      expect(await res.json()).toEqual({ vitest: null, nodeEnv: 'production', dotenv: 'from-dotenv' });
     });
 
     it('uses a private cache, so the project cache is never touched', async () => {
@@ -486,5 +561,175 @@ describe('createTestServer', () => {
       await expect(fetch(`${server.url}/_gio/health`)).rejects.toThrow();
       expect(processesIn(fixtureRoot)).toEqual([]);
     }, 30_000);
+  });
+
+  describe.skipIf(binary === undefined)('and .env files', () => {
+    let root: string;
+
+    beforeAll(async () => {
+      root = await writeProject('gio-testing-server-env-', {
+        '.env': 'TK_SERVER_SET_BY_TEST=from-file\n',
+        '.env.production': 'TK_SERVER_MODE=production\n',
+        '.env.development': 'TK_SERVER_MODE=development\n',
+        'app/page.tsx': `import React from 'react';
+export default function Home() { return React.createElement('p', null, 'SERVER_ENV_HOME'); }
+`,
+        'app/api/env/route.ts': `export function GET() {
+  return { mode: process.env.TK_SERVER_MODE ?? null, setByTest: process.env.TK_SERVER_SET_BY_TEST ?? null };
+}
+`,
+      });
+    });
+
+    afterAll(async () => {
+      delete process.env.TK_SERVER_MODE;
+      delete process.env.TK_SERVER_SET_BY_TEST;
+      await resetTestApp(join(root, 'app'));
+      await rm(root, { recursive: true, force: true });
+    });
+
+    it('leaves the files to the server: what renderPage loaded never overrides its own mode', async () => {
+      const appDir = join(root, 'app');
+      expect(await (await callRoute('/api/env', { appDir })).json()).toEqual({
+        mode: 'production',
+        setByTest: 'from-file',
+      });
+      // A value the test sets itself is handed down like any variable.
+      process.env.TK_SERVER_SET_BY_TEST = 'from-test';
+      const dev = await createTestServer({ appDir, binary: binary!, env: { NODE_ENV: 'development' } });
+      try {
+        const res = await fetch(`${dev.url}/api/env`);
+        expect(await res.json()).toEqual({ mode: 'development', setByTest: 'from-test' });
+      } finally {
+        await dev.close();
+      }
+    }, 90_000);
+  });
+
+  describe.skipIf(binary === undefined)('without close()', () => {
+    // test-fixtures/testing-orphans.ts, in a node process of its own, starts
+    // a server for a throwaway project and never closes it.
+    const script = join(packageDir, 'test-fixtures', 'testing-orphans.ts');
+    let root: string;
+    let child: ChildProcess | undefined;
+
+    beforeAll(async () => {
+      root = realpathSync(
+        await writeProject('gio-testing-orphans-', {
+          'app/page.tsx': `import React from 'react';
+export default function Home() { return React.createElement('p', null, 'ORPHANS_HOME'); }
+`,
+        }),
+      );
+    });
+
+    afterEach(() => {
+      child?.kill('SIGKILL');
+      child = undefined;
+      // Whatever a failed test left behind.
+      for (const pid of processesIn(root)) process.kill(pid, 'SIGKILL');
+    });
+
+    afterAll(async () => {
+      await rm(root, { recursive: true, force: true });
+    });
+
+    /** Start the script; resolves with the port it printed and each line it prints. */
+    function run(mode: 'forget' | 'hang' | 'thread'): { port: Promise<number>; line: (text: string) => Promise<void> } {
+      const env: NodeJS.ProcessEnv = { ...process.env, GIO_SERVER_BIN: binary };
+      for (const name of Object.keys(env)) {
+        if (name.startsWith('VITEST')) delete env[name];
+      }
+      // `--import tsx` resolves from the cwd: this package has tsx installed.
+      const started = spawn(process.execPath, ['--import', 'tsx', script, mode, join(root, 'app')], {
+        cwd: packageDir,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      child = started;
+      let output = '';
+      const waiters: Array<() => void> = [];
+      const onOutput = (chunk: Buffer): void => {
+        output += chunk.toString('utf8');
+        for (const wake of waiters.splice(0)) wake();
+      };
+      let closed = false;
+      started.stdout.on('data', onOutput);
+      started.stderr.on('data', onOutput);
+      started.once('close', () => {
+        closed = true;
+        for (const wake of waiters.splice(0)) wake();
+      });
+      const line = (text: string): Promise<void> =>
+        new Promise((resolveLine, reject) => {
+          const check = (): void => {
+            if (output.split('\n').some(l => l.startsWith(text))) resolveLine();
+            else if (closed) reject(new Error(`script ended before "${text}":\n${output}`));
+            else waiters.push(check);
+          };
+          check();
+        });
+      const port = line('port ').then(() => Number(/^port (\d+)$/m.exec(output)?.[1]));
+      return { port, line };
+    }
+
+    /** The exit code, or 'still running' once `ms` passed. */
+    function exitWithin(ms: number): Promise<number | string | null> {
+      const started = child!;
+      if (started.exitCode !== null) return Promise.resolve(started.exitCode);
+      return new Promise(resolveExit => {
+        const timer = setTimeout(() => resolveExit('still running'), ms);
+        started.once('exit', (code, signal) => {
+          clearTimeout(timer);
+          resolveExit(code ?? signal);
+        });
+      });
+    }
+
+    /** Nothing of the server for `root` is left: no process, no listener. */
+    async function expectNothingLeft(port: number): Promise<void> {
+      const answers = (): Promise<boolean> =>
+        fetch(`http://127.0.0.1:${port}/_gio/health`).then(
+          async res => {
+            await res.body?.cancel();
+            return true;
+          },
+          () => false,
+        );
+      // The watchdog acts within milliseconds; SIGKILL lands asynchronously.
+      const deadline = Date.now() + 5_000;
+      while ((processesIn(root).length > 0 || (await answers())) && Date.now() < deadline) {
+        await new Promise(resolveTick => setTimeout(resolveTick, 50));
+      }
+      expect(processesIn(root)).toEqual([]);
+      expect(await answers()).toBe(false);
+    }
+
+    it('a test process that forgets close() still exits, and takes its server along', async () => {
+      const { port } = run('forget');
+      const listening = await port;
+      // An open server used to hold the process (and node:test runs) open forever.
+      expect(await exitWithin(30_000)).toBe(0);
+      await expectNothingLeft(listening);
+    }, 90_000);
+
+    it('a test process killed outright, with no hook run, leaves no server behind', async () => {
+      const { port } = run('hang');
+      const listening = await port;
+      expect((await fetch(`http://127.0.0.1:${listening}/_gio/health`)).status).toBe(200);
+      if (process.platform === 'linux') expect(processesIn(root).length).toBeGreaterThan(1);
+      child!.kill('SIGKILL');
+      expect(await exitWithin(10_000)).toBe('SIGKILL');
+      await expectNothingLeft(listening);
+    }, 90_000);
+
+    it('a worker thread torn down without hooks (vitest pool: threads) leaves no server behind', async () => {
+      const { port, line } = run('thread');
+      const listening = await port;
+      await line('terminated');
+      await expectNothingLeft(listening);
+      // The test process itself lives on: the thread's end was enough.
+      expect(child!.exitCode).toBeNull();
+    }, 90_000);
   });
 });

@@ -40,6 +40,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: '/docs/middleware', label: 'Middleware' },
       { href: '/docs/websockets', label: 'WebSockets' },
       { href: '/docs/i18n', label: 'Internationalization' },
+      { href: '/docs/testing', label: 'Testing' },
     ],
   },
   {

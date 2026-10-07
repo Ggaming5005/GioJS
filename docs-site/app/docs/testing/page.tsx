@@ -46,6 +46,17 @@ export default function TestingPage(): React.JSX.Element {
         in front of the worker (rules, guards, CSRF, headers, caching, locale detection) is
         not applied; test that through <code>createTestServer</code>.
       </p>
+      <p>
+        Your project&apos;s <code>.env</code> files are loaded into the test process before
+        anything of the app is imported, the way the server loads them for its worker: the
+        same files and precedence, the <code>.env.development*</code> files only when{' '}
+        <code>NODE_ENV=development</code> (vitest sets <code>NODE_ENV=test</code>, so{' '}
+        <code>.env.production*</code> apply), and never over a variable that is already set.
+        To give tests their own values, set them in the test environment (the shell, or
+        vitest&apos;s <code>test.env</code>) - those win over every file. A{' '}
+        <code>createTestServer</code> server reads the files itself, by its own mode: what{' '}
+        <code>renderPage</code> loaded is not handed down to it, what your test set is.
+      </p>
 
       <h2>Setup</h2>
       <p>
@@ -123,6 +134,22 @@ describe('/posts/[id]', () => {
         <code>query</code> (merged over the path&apos;s query string) and <code>locale</code>{' '}
         (what <code>[i18n]</code> detection would have picked).
       </p>
+      <p>
+        The path goes to the worker the way the server forwards it: never parsed as a URL (
+        <code>//posts/2</code> routes like <code>/posts/2</code>, never as a host),
+        percent-encoded like a client sends it, escapes normalized. A path the server answers
+        with 400 before any page sees it - a <code>.</code> or <code>..</code> segment, a
+        stray <code>%</code> - throws.
+      </p>
+      <div className="callout">
+        <strong>Apps with <code>[i18n]</code>:</strong> no locale detection runs in-process.
+        The server strips the locale prefix from the path and always forwards a locale (the
+        detected one, else <code>default_locale</code>), so pass the unprefixed path plus the
+        locale: <code>/fr/about</code> is{' '}
+        <code>{`renderPage('/about', { locale: 'fr' })`}</code>, and a page that reads{' '}
+        <code>ctx.locale</code> sees <code>&apos;&apos;</code> unless you pass one. Detection
+        itself is tested through <code>createTestServer</code>.
+      </div>
       <p><strong>Result:</strong></p>
       <ul>
         <li><code>status</code>, <code>headers</code> (the worker&apos;s, lowercase - Rust adds its own on top), and <code>setCookies</code> (every <code>Set-Cookie</code> value, intact).</li>
@@ -225,7 +252,8 @@ it('blocks cross-site posts', async () => {
         <li><strong>Options:</strong> <code>appDir</code>, <code>env</code> (extra variables for the server and worker; <code>undefined</code> removes one - <code>{`{ NODE_ENV: 'development' }`}</code> gives a dev server), <code>port</code>, <code>binary</code>, <code>timeoutMs</code> (default 60 s).</li>
         <li><strong>Result:</strong> <code>url</code> (no trailing slash), <code>port</code>, <code>logs()</code> (server and worker output so far), <code>close()</code>.</li>
         <li><strong>The binary</strong> is <code>GIO_SERVER_BIN</code> if set, else the platform binary <code>@gio.js/server</code> installed. Without one it throws, naming the package to install.</li>
-        <li><strong><code>close()</code></strong> kills the server and its worker&apos;s whole process group (the worker runs in its own group). If a test run ends without it - a crash, Ctrl+C - exit hooks take the servers down with the test process.</li>
+        <li><strong><code>close()</code></strong> kills the server and its worker&apos;s whole process group (the worker runs in its own group). Call it in <code>afterAll</code> / <code>after</code>: it frees the port and the processes right away.</li>
+        <li><strong>A forgotten <code>close()</code></strong> leaves nothing behind either. A running server never keeps the test process alive, so the run still ends, and exit hooks take the servers down with it - also on a crash or Ctrl+C. Where no hook gets to run - the test process killed with <code>SIGKILL</code>, a vitest worker thread (<code>pool: &apos;threads&apos;</code>) torn down - each server&apos;s small watchdog process kills it as soon as the process or thread that started it is gone.</li>
         <li>The server speaks plain HTTP; a <code>gio.toml</code> with <code>[server.tls]</code> enabled needs a test copy of the project without it.</li>
       </ul>
 

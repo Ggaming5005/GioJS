@@ -5,14 +5,17 @@
  * node:test alike.
  *
  * - renderPage / callRoute run a request through the same renderRoute the
- *   worker uses (buffered, no Rust server): routes, layouts, route.ts
- *   handlers, not-found/error files and gio.config plugins are discovered
- *   once per app directory, and notFound(), redirects and error pages
- *   resolve the way the server resolves them. What lives in Rust - gio.toml
- *   and middleware.ts rules, rate limits, CSRF checks, security headers,
+ *   worker uses (buffered, no Rust server): the project's .env files are
+ *   loaded, routes, layouts, route.ts handlers, not-found/error files and
+ *   gio.config plugins are discovered once per app directory, and
+ *   notFound(), redirects and error pages resolve the way the server
+ *   resolves them. What lives in Rust - gio.toml and middleware.ts rules,
+ *   [i18n] locale detection, rate limits, CSRF checks, security headers,
  *   the page cache - is not applied; createTestServer covers that.
  * - createTestServer starts the real giojs-server binary on a free port
  *   with a private cache, and close() takes down its whole process tree.
+ *   A test process that never calls close() still exits, and its servers
+ *   go with it - by exit hook, or by watchdog when no hook gets to run.
  *
  * Page modules are imported once per process: resetTestApp re-runs
  * discovery (added or removed files), but an edit to a module that was
@@ -29,12 +32,13 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { get as httpGet } from 'node:http';
 import { createRequire } from 'node:module';
-import { createServer } from 'node:net';
+import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IPCError, IPCRequest, IPCResponse } from './context.ts';
 import { isValidCookieName } from './cookies.ts';
+import { loadEnvFiles } from './env-files.ts';
 import { formatSseEvent } from './ipc.ts';
 import { loadGioConfig } from './config-loader.ts';
 import { NodePluginRegistry } from './plugin.ts';
@@ -70,12 +74,30 @@ interface TestApp {
 /** Discovery per resolved app directory, shared by every render in the process. */
 const apps = new Map<string, Promise<TestApp>>();
 
+/**
+ * What discovery loaded from .env files into process.env (name -> value). A
+ * test server loads the project's files itself, by its own mode: these are
+ * not handed down to it as if they had been set by hand.
+ */
+const loadedFromEnvFiles = new Map<string, string>();
+
 /** `appDir`, else GIO_APP_DIR, else ./app - the server's own default. */
 function resolveAppDir(appDir: string | undefined): string {
   return resolve(appDir ?? process.env.GIO_APP_DIR ?? join(process.cwd(), 'app'));
 }
 
 async function discoverTestApp(appDir: string): Promise<TestApp> {
+  // The server loads the project's .env files into its environment before
+  // it starts (env_files.rs) and the worker inherits them. Same files, same
+  // rules: mode development only when NODE_ENV=development, and a variable
+  // already set is never overridden. First, because app modules (route.ts,
+  // gio.config.ts) may read process.env as they are imported; a file that
+  // cannot be parsed fails discovery as it fails the server's startup.
+  const before = new Set(Object.keys(process.env));
+  loadEnvFiles(dirname(appDir));
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!before.has(name) && value !== undefined) loadedFromEnvFiles.set(name, value);
+  }
   // Mirrors main.ts (minus client bundles, typed routes and the IPC
   // servers): a conflicting route fails here as it fails the worker boot.
   const [routes, layouts, routeFiles, segmentFiles, specialPages] = await Promise.all([
@@ -122,7 +144,8 @@ function testApp(appDir: string): Promise<TestApp> {
  * their plugins' onShutdown hooks; the next render discovers again, so added
  * and removed files are seen. Modules already imported stay cached by the
  * module system (vi.resetModules() included): an edit to one shows up only
- * in a fresh test process.
+ * in a fresh test process. So do .env values already in process.env - the
+ * next load adds new variables but never overrides one.
  */
 export async function resetTestApp(appDir?: string): Promise<void> {
   const dirs = appDir === undefined ? [...apps.keys()] : [resolveAppDir(appDir)];
@@ -150,7 +173,13 @@ export interface TestRequestOptions {
   cookies?: Record<string, string>;
   /** Query parameters; merged over any query string in the path. */
   query?: Record<string, string>;
-  /** The locale the server would have detected ([i18n]); default none. */
+  /**
+   * The locale the server would have detected; default none. No [i18n]
+   * detection runs here: for an app with [i18n] the server always forwards
+   * a locale (the detected one, else default_locale) and strips a locale
+   * prefix from the path, so pass the unprefixed path plus the locale -
+   * `/fr/about` is `renderPage('/about', { locale: 'fr' })`.
+   */
   locale?: string;
 }
 
@@ -232,6 +261,48 @@ type Outcome =
   | { kind: 'error'; error: IPCError }
   | { kind: 'sse'; stream: GioEventStream };
 
+/** What a client percent-encodes in a path (the WHATWG path set; '?' and '#' are split off first). */
+const CLIENT_ENCODED = /[^\x21-\x7e]|["<>`{}]/gu;
+
+/**
+ * Split `rawPath` into the path and query string the server would forward.
+ * Never parsed as a URL - `//host/x` stays a path, as it does for the
+ * server - but encoded like a client sends it, with escapes normalized the
+ * way path_hygiene.rs normalizes them; what the server refuses with 400
+ * before any page sees it (a `.`/`..` segment, a stray `%`) throws.
+ */
+function splitPath(rawPath: string): { pathname: string; search: string } {
+  if (!rawPath.startsWith('/')) {
+    throw new TypeError(`expected an absolute path such as "/posts/1", got ${JSON.stringify(rawPath)}`);
+  }
+  // A fragment never leaves the client.
+  const hash = rawPath.indexOf('#');
+  const target = hash === -1 ? rawPath : rawPath.slice(0, hash);
+  const queryStart = target.indexOf('?');
+  const encoded = (queryStart === -1 ? target : target.slice(0, queryStart)).replace(
+    CLIENT_ENCODED,
+    ch => [...Buffer.from(ch, 'utf8')].map(byte => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`).join(''),
+  );
+  const pathname = normalizeEscapes(encoded, rawPath);
+  if (pathname.split('/').some(segment => segment === '.' || segment === '..')) {
+    throw refusedPath(rawPath, '"." and ".." segments are refused');
+  }
+  return { pathname, search: queryStart === -1 ? '' : target.slice(queryStart + 1) };
+}
+
+/** path_hygiene.rs normalize_escapes: unreserved characters decoded, every other escape uppercased. */
+function normalizeEscapes(path: string, rawPath: string): string {
+  return path.replace(/%([0-9A-Fa-f]{2})?/g, (_escape, hex: string | undefined) => {
+    if (hex === undefined) throw refusedPath(rawPath, 'a "%" must start an escape such as %20');
+    const decoded = String.fromCharCode(parseInt(hex, 16));
+    return /^[A-Za-z0-9._~-]$/.test(decoded) ? decoded : `%${hex.toUpperCase()}`;
+  });
+}
+
+function refusedPath(rawPath: string, reason: string): TypeError {
+  return new TypeError(`the server answers 400 for ${JSON.stringify(rawPath)} before any page sees it: ${reason}`);
+}
+
 /** Build the request the server would send the worker. */
 function buildRequest(
   rawPath: string,
@@ -239,11 +310,8 @@ function buildRequest(
   options: TestRequestOptions,
   body: { body: string | null; bodyBase64: boolean; contentType?: string },
 ): IPCRequest {
-  if (!rawPath.startsWith('/')) {
-    throw new TypeError(`expected an absolute path such as "/posts/1", got ${JSON.stringify(rawPath)}`);
-  }
-  const url = new URL(rawPath, 'http://localhost');
-  const query: Record<string, string> = Object.fromEntries(url.searchParams);
+  const { pathname, search } = splitPath(rawPath);
+  const query: Record<string, string> = Object.fromEntries(new URLSearchParams(search));
   Object.assign(query, options.query);
 
   const headers: Record<string, string> = {};
@@ -264,7 +332,7 @@ function buildRequest(
   return {
     id: requestId,
     method,
-    path: url.pathname,
+    path: pathname,
     params: {},
     query,
     headers,
@@ -661,10 +729,11 @@ function healthCheck(url: string): Promise<{ nodeReady?: boolean } | null> {
   });
 }
 
-/** A started server: its process and the IPC socket that marks its workers. */
+/** A started server: its process, the IPC socket that marks its workers, and its watchdog. */
 interface ServerProcess {
   child: ChildProcess;
   socketPath: string;
+  watchdog: ChildProcess | undefined;
 }
 
 /** Servers not yet closed: the exit hooks below take them down with the process. */
@@ -723,7 +792,15 @@ async function startServer(
   };
   child.stdout?.on('data', append);
   child.stderr?.on('data', append);
-  const server: ServerProcess = { child, socketPath: env.GIO_SOCKET_PATH ?? '' };
+  // A running server must not keep the test process alive: a run that
+  // forgot close() (node:test, a plain script) would never end, and the
+  // exit hook would never get to take the server down. Whatever is awaited
+  // - the health poll below, a fetch, close() - keeps the loop alive itself.
+  child.unref();
+  (child.stdout as Socket | null)?.unref();
+  (child.stderr as Socket | null)?.unref();
+  const socketPath = env.GIO_SOCKET_PATH ?? '';
+  const server: ServerProcess = { child, socketPath, watchdog: startWatchdog(child, socketPath) };
   liveServers.add(server);
   installExitHooks();
   let exited = false;
@@ -743,6 +820,9 @@ async function startServer(
   let closing: Promise<void> | null = null;
   const close = (): Promise<void> => {
     closing ??= (async () => {
+      // The awaited exit must hold the loop open, or a test process with
+      // nothing else to do would exit with close() still pending.
+      child.ref();
       const workers = killServerTree(server);
       await exitedPromise;
       await waitUntilGone(workers);
@@ -788,6 +868,12 @@ function serverEnv(
   for (const name of Object.keys(env)) {
     if (name.startsWith('VITEST')) delete env[name];
   }
+  // The .env values renderPage loaded stay with their files: the server
+  // reads those again by its own mode (NODE_ENV=development in `env` picks
+  // the development files). A value the test has changed since is passed on.
+  for (const [name, value] of loadedFromEnvFiles) {
+    if (env[name] === value) delete env[name];
+  }
   for (const [name, value] of Object.entries(extra)) {
     if (value === undefined) delete env[name];
     else env[name] = value;
@@ -832,7 +918,14 @@ function isRunning(child: ChildProcess): boolean {
  * returns the worker pids it signalled.
  */
 function killServerTree(server: ServerProcess): number[] {
-  const { child } = server;
+  const { child, watchdog } = server;
+  // Retire the watchdog first, so closing its pipe cannot set it off: it
+  // would sweep after us, when the server's pid may belong to another process.
+  if (watchdog !== undefined) {
+    if (isRunning(watchdog)) watchdog.kill('SIGKILL');
+    watchdog.stdin?.destroy();
+    server.watchdog = undefined;
+  }
   // An exited server's pid may already belong to another process.
   const running = isRunning(child);
   const pid = child.pid;
@@ -981,13 +1074,108 @@ function descendantPids(root: number): number[] {
   return found;
 }
 
+/**
+ * The watchdog's program (plain CommonJS for `node -e`; argv: server pid,
+ * the GIO_SOCKET_PATH=... entry its processes carry). It waits for its
+ * stdin to close, then kills what is left of the server tree: on Linux
+ * every process carrying the server's socket path (the server, its
+ * workers wherever they were reparented, their esbuild), elsewhere the
+ * server and its descendants, each with its process group.
+ */
+const WATCHDOG_SOURCE = String.raw`'use strict';
+const { readdirSync, readFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const serverPid = Number(process.argv[1]);
+const marker = process.argv[2];
+function targets() {
+  const found = [];
+  if (process.platform === 'linux') {
+    for (const name of readdirSync('/proc')) {
+      if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
+      try {
+        if (readFileSync('/proc/' + name + '/environ', 'utf8').split('\0').includes(marker)) found.push(Number(name));
+      } catch {}
+    }
+    return found;
+  }
+  const children = new Map();
+  const ps = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' });
+  for (const line of (ps.stdout || '').split('\n')) {
+    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+    if (Number.isInteger(pid) && Number.isInteger(ppid) && pid !== ppid) {
+      children.set(ppid, (children.get(ppid) || []).concat(pid));
+    }
+  }
+  found.push(serverPid);
+  for (let i = 0; i < found.length; i++) found.push(...(children.get(found[i]) || []));
+  return found;
+}
+let fired = false;
+function sweep() {
+  if (fired) return;
+  fired = true;
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/pid', String(serverPid), '/T', '/F'], { windowsHide: true });
+  } else {
+    for (const pid of targets()) {
+      try { process.kill(-pid, 'SIGKILL'); } catch {}
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+    }
+  }
+  process.exit(0);
+}
+process.stdin.on('end', sweep);
+process.stdin.on('close', sweep);
+process.stdin.on('error', sweep);
+process.stdin.resume();
+`;
+
+/**
+ * Give a server its watchdog: a plain node process holding the read end of
+ * a pipe from this one. The exit and signal hooks below cover a test run
+ * that ends in an orderly way; the pipe closes however this process - or
+ * the thread that started the server - ends: SIGKILL, an OOM kill, a vitest
+ * worker thread (pool: 'threads') torn down without running any hook. The
+ * watchdog then kills the server tree. Best effort: no watchdog when node
+ * cannot be spawned.
+ */
+function startWatchdog(child: ChildProcess, socketPath: string): ChildProcess | undefined {
+  if (child.pid === undefined || socketPath === '') return undefined;
+  const env = { ...process.env };
+  // A loader preloaded into every node process (tsx, coverage) has no business here.
+  delete env.NODE_OPTIONS;
+  let watchdog: ChildProcess;
+  try {
+    watchdog = spawn(
+      process.execPath,
+      ['-e', WATCHDOG_SOURCE, String(child.pid), `GIO_SOCKET_PATH=${socketPath}`],
+      {
+        env,
+        // Its own process group: a Ctrl+C sent to the terminal's group must
+        // not take it down before it has done its job.
+        detached: process.platform !== 'win32',
+        stdio: ['pipe', 'ignore', 'ignore'],
+        windowsHide: true,
+      },
+    );
+  } catch {
+    return undefined;
+  }
+  watchdog.on('error', () => undefined);
+  watchdog.stdin?.on('error', () => undefined);
+  // Like the server itself, it never holds the test process open.
+  watchdog.unref();
+  (watchdog.stdin as Socket | null)?.unref();
+  return watchdog;
+}
+
 let exitHooksInstalled = false;
 
 /**
  * A test run that ends without close() (a crash, Ctrl+C, a forgotten
  * afterAll) must not leave servers and workers behind. The exit hook is
  * synchronous; the signal hooks clean up and then let the signal do what it
- * would have done without us.
+ * would have done without us. Where no hook runs, the watchdog steps in.
  */
 function installExitHooks(): void {
   if (exitHooksInstalled) return;

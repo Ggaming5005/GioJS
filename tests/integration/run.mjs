@@ -1959,28 +1959,38 @@ async function imageConfigCachePhase() {
 /**
  * Phase 1d (testing kit): testing-kit.test.ts runs the `@gio.js/core/testing`
  * helpers under node:test + tsx - the setup the docs describe - including
- * createTestServer against this binary, on free ports. Afterwards no server
+ * createTestServer against this binary, on free ports. Then
+ * testing-kit-forgotten-close.test.ts, under `node --test`, starts a server
+ * it never closes: the run must still end on its own. Afterwards no server
  * or worker of the kit's fixture may be left running (Linux checks the
  * process table; Windows ties workers to the server with a job object).
  */
 async function testingKitPhase() {
   const kitFixture = join(repoRoot, 'packages', 'giojs-core', 'test-fixtures', 'testing-app');
   // `--import tsx` resolves from the cwd: giojs-core has tsx installed.
-  const run = spawnSync(
-    process.execPath,
-    ['--import', 'tsx', join(repoRoot, 'tests', 'integration', 'testing-kit.test.ts')],
-    {
+  const nodeTest = (args, timeout) =>
+    spawnSync(process.execPath, ['--import', 'tsx', ...args], {
       cwd: join(repoRoot, 'packages', 'giojs-core'),
       env: { ...process.env, GIO_SERVER_BIN: findServerBinary() },
       encoding: 'utf8',
-      timeout: 180_000,
-    },
+      timeout,
+    });
+  const run = nodeTest([join(repoRoot, 'tests', 'integration', 'testing-kit.test.ts')], 180_000);
+  const forgotten = nodeTest(
+    ['--test', join(repoRoot, 'tests', 'integration', 'testing-kit-forgotten-close.test.ts')],
+    60_000,
   );
   try {
     await test('testing kit: the node:test suite passes against the real server', async () => {
       assert.equal(run.status, 0, `node:test run failed:\n${run.stdout}\n${run.stderr}`);
       assert.match(run.stdout, /^# fail 0$/m);
       assert.doesNotMatch(run.stdout, /^# pass 0$/m);
+    });
+
+    await test('testing kit: a node --test run that never calls close() still ends', async () => {
+      assert.equal(forgotten.error?.code, undefined, `the run did not end on its own:\n${forgotten.stdout}`);
+      assert.equal(forgotten.status, 0, `node --test run failed:\n${forgotten.stdout}\n${forgotten.stderr}`);
+      assert.match(forgotten.stdout, /^# pass 1$/m);
     });
 
     await test('testing kit: no server or worker outlives the test process', async () => {
