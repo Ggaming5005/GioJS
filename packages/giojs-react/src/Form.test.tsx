@@ -275,8 +275,9 @@ describe('GioForm submission', () => {
     let open!: () => void;
     const gate = new Promise<void>(r => { open = r; });
     const calls = serve(() => pageResponse({ main: 'saved', actionData: { saved: true } }), gate);
+    const onSubmit = vi.fn();
     render(
-      <mod.GioForm>
+      <mod.GioForm onSubmit={onSubmit}>
         <button type="submit">Go</button>
       </mod.GioForm>,
     );
@@ -284,6 +285,7 @@ describe('GioForm submission', () => {
     click('button');
     click('button');
     expect(calls).toHaveLength(1);
+    expect(onSubmit).toHaveBeenCalledTimes(1);
     open();
     await settle();
     click('button');

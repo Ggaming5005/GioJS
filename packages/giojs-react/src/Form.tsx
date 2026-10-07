@@ -209,13 +209,14 @@ export const GioForm = React.forwardRef<HTMLFormElement, GioFormProps>(function 
 
   function handleSubmit(event: FormSubmitEvent): void {
     if (nativeRef.current) return;
-    onSubmit?.(event);
-    if (event.defaultPrevented || reloadDocument === true) return;
-    const form = event.currentTarget;
+    // A submit while one is in flight is dropped, before the app hears of it.
     if (pendingRef.current) {
       event.preventDefault();
       return;
     }
+    onSubmit?.(event);
+    if (event.defaultPrevented || reloadDocument === true) return;
+    const form = event.currentTarget;
     const submitter = asSubmitter((event.nativeEvent as SubmitEvent).submitter);
     // Left to the browser: another target, a GET (or dialog) submission,
     // anything not posted to this origin.
