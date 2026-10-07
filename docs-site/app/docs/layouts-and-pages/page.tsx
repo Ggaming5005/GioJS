@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Routing</div>
       <h1>Layouts & Pages</h1>
       <p className="page-subtitle">Build routes with page files and share UI with nested layouts.</p>
       <h2>Pages</h2>

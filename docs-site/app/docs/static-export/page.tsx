@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Deployment</div>
+      <div className="docs-eyebrow">Rendering &amp; Caching</div>
       <h1>Static Export</h1>
       <p className="page-subtitle">
         Pre-render your whole app to plain HTML and deploy it free to any static

@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Data</div>
       <h1>Forms and Mutations</h1>
       <p className="page-subtitle">Page actions and &lt;GioForm&gt;: forms that work without JavaScript and feel instant with it.</p>
 

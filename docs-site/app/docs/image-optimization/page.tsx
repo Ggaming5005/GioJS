@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Styling &amp; Assets</div>
       <h1>Image Optimization</h1>
       <p className="page-subtitle">Automatic AVIF/WebP conversion and resizing - no sharp, no CDN.</p>
       <p>Use GioImage. It points at the Rust /_gio/image endpoint, which converts and resizes on demand through an AVIF → WebP → JPEG pipeline with a two-layer cache.</p>

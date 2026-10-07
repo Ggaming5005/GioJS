@@ -5,7 +5,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Architecture</div>
+      <div className="docs-eyebrow">Reference</div>
       <h1>The Rust ⇄ Node Boundary</h1>
       <p className="page-subtitle">A single persistent IPC connection carries SSR requests to Node.</p>
       <p>Rust talks to a single long-lived Node worker over a Unix socket (Linux/macOS) or named pipe (Windows), using a length-prefixed JSON protocol. There is no per-request process spawn.</p>

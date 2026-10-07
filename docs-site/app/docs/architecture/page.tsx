@@ -5,7 +5,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Architecture</div>
+      <div className="docs-eyebrow">Reference</div>
       <h1>How GioJS Works</h1>
       <p className="page-subtitle">Rust owns the hot path. Node does what it is best at: rendering React.</p>
       <p>GioJS splits responsibilities across two layers. The compiled Rust server handles everything performance-critical; Node handles React SSR and the npm ecosystem.</p>

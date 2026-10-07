@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Deployment</div>
+      <div className="docs-eyebrow">Deployment &amp; Operations</div>
       <h1>Standalone Deploys</h1>
       <p className="page-subtitle">
         One folder, one command. Build a self-contained deploy directory, copy it to any

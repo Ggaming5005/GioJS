@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Data</div>
       <h1>Fetching Data</h1>
       <p className="page-subtitle">Load data on the server with getServerSideProps.</p>
       <p>Export an async getServerSideProps from a page to fetch data on the server before render. The returned props are passed to your component.</p>

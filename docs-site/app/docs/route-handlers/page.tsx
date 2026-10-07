@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Routing</div>
       <h1>Route Handlers</h1>
       <p className="page-subtitle">API endpoints, Server-Sent Events, and WebSockets with route.ts files.</p>
 

@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Realtime</div>
       <h1>WebSockets</h1>
       <p className="page-subtitle">Routed, authenticated, full-duplex connections with rooms.</p>
       <p>

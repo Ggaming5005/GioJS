@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function TestingPage(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Testing</div>
       <h1>Testing</h1>
       <p className="page-subtitle">
         Test pages and route handlers with <code>@gio.js/core/testing</code> - in-process

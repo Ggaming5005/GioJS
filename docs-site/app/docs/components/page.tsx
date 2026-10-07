@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">API Reference</div>
+      <div className="docs-eyebrow">Reference</div>
       <h1>Components</h1>
       <p className="page-subtitle">The React components exported from @gio.js/react.</p>
       <h2>GioLink</h2>

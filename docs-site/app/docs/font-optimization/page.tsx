@@ -5,7 +5,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Styling &amp; Assets</div>
       <h1>Font Optimization</h1>
       <p className="page-subtitle">Self-host any font as WOFF2 with correct preload headers.</p>
       <p>The giojs-font layer downloads and self-hosts fonts as WOFF2, then injects the correct preload and stylesheet links into your HTML - no third-party font CDN.</p>

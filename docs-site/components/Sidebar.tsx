@@ -23,62 +23,102 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: '/docs/getting-started', label: 'Introduction' },
       { href: '/docs/installation', label: 'Installation' },
       { href: '/docs/project-structure', label: 'Project Structure' },
+      { href: '/docs/guides/environment-variables', label: 'Environment Variables' },
+      { href: '/docs/examples', label: 'Examples' },
     ],
   },
   {
-    title: 'Building Your App',
+    title: 'Routing',
     items: [
       { href: '/docs/layouts-and-pages', label: 'Layouts & Pages' },
       { href: '/docs/linking-and-navigating', label: 'Linking & Navigating' },
-      { href: '/docs/fetching-data', label: 'Fetching Data' },
-      { href: '/docs/caching', label: 'Caching & Revalidating' },
       { href: '/docs/error-handling', label: 'Error Handling' },
-      { href: '/docs/css', label: 'CSS & Styling' },
-      { href: '/docs/image-optimization', label: 'Image Optimization' },
-      { href: '/docs/font-optimization', label: 'Font Optimization' },
-      { href: '/docs/metadata', label: 'Metadata & SEO' },
       { href: '/docs/route-handlers', label: 'Route Handlers' },
       { href: '/docs/middleware', label: 'Middleware' },
-      { href: '/docs/websockets', label: 'WebSockets' },
       { href: '/docs/i18n', label: 'Internationalization' },
+    ],
+  },
+  {
+    title: 'Data',
+    items: [
+      { href: '/docs/fetching-data', label: 'Fetching Data' },
+      { href: '/docs/forms', label: 'Forms & Mutations' },
+      { href: '/docs/guides/database', label: 'Database Example' },
+    ],
+  },
+  {
+    title: 'Rendering & Caching',
+    items: [
+      { href: '/docs/caching', label: 'Caching & Revalidating' },
+      { href: '/docs/caching-layers', label: 'Caching Layers' },
+      { href: '/docs/metadata', label: 'Metadata & SEO' },
+      { href: '/docs/static-export', label: 'Static Export' },
+    ],
+  },
+  {
+    title: 'Styling & Assets',
+    items: [
+      { href: '/docs/css', label: 'CSS & Styling' },
+      { href: '/docs/guides/tailwind', label: 'Tailwind CSS' },
+      { href: '/docs/image-optimization', label: 'Image Optimization' },
+      { href: '/docs/font-optimization', label: 'Font Optimization' },
+    ],
+  },
+  {
+    title: 'Security & Auth',
+    items: [
+      { href: '/docs/security', label: 'Security' },
+      { href: '/docs/authentication', label: 'Authentication & Sessions' },
+      { href: '/docs/guides/authentication-example', label: 'Authentication Example' },
+    ],
+  },
+  {
+    title: 'Realtime',
+    items: [
+      { href: '/docs/websockets', label: 'WebSockets' },
+    ],
+  },
+  {
+    title: 'Deployment & Operations',
+    items: [
+      { href: '/docs/guides/deploying', label: 'Deploying' },
+      { href: '/docs/guides/production-checklist', label: 'Production Checklist' },
+      { href: '/docs/deployment', label: 'Proxies, Sizing & Scaling' },
+      { href: '/docs/standalone', label: 'Standalone Deploys' },
+      { href: '/docs/guides/docker', label: 'Docker Starter' },
+      { href: '/docs/adapters', label: 'Adapters' },
+      { href: '/docs/observability', label: 'Observability' },
+    ],
+  },
+  {
+    title: 'Testing',
+    items: [
       { href: '/docs/testing', label: 'Testing' },
     ],
   },
   {
-    title: 'Architecture',
-    items: [
-      { href: '/docs/architecture', label: 'How GioJS Works' },
-      { href: '/docs/boundary', label: 'The Rust ⇄ Node Boundary' },
-      { href: '/docs/caching-layers', label: 'Caching Layers' },
-    ],
-  },
-  {
-    title: 'API Reference',
+    title: 'Reference',
     items: [
       { href: '/docs/configuration', label: 'gio.toml Configuration' },
       { href: '/docs/cli', label: 'CLI' },
       { href: '/docs/components', label: 'Components' },
       { href: '/docs/functions', label: 'Functions' },
       { href: '/docs/file-conventions', label: 'File Conventions' },
+      { href: '/docs/architecture', label: 'How GioJS Works' },
+      { href: '/docs/boundary', label: 'The Rust ⇄ Node Boundary' },
     ],
   },
   {
-    title: 'Deployment',
+    title: 'Migration',
     items: [
-      { href: '/docs/deployment', label: 'Deploying' },
-      { href: '/docs/standalone', label: 'Standalone Deploys' },
-      { href: '/docs/static-export', label: 'Static Export' },
-      { href: '/docs/adapters', label: 'Adapters' },
-      { href: '/docs/observability', label: 'Observability' },
+      { href: '/docs/migration', label: 'Migrating from Next.js' },
     ],
   },
   {
     title: 'Resources',
     items: [
-      { href: '/docs/migration', label: 'Migrating from Next.js' },
+      { href: '/docs/known-issues', label: 'Known Limitations' },
       { href: '/docs/benchmarks', label: 'Benchmarks' },
-      { href: '/docs/examples', label: 'Examples' },
-      { href: '/docs/known-issues', label: 'Known Issues' },
       { href: '/docs/contributing', label: 'Contributing' },
     ],
   },

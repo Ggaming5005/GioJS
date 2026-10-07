@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Routing</div>
       <h1>Middleware</h1>
       <p className="page-subtitle">Declarative redirects, rewrites, response headers, and auth guards - executed in Rust before routing.</p>
 
