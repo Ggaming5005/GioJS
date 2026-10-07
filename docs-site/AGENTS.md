@@ -37,6 +37,7 @@ page" links, and the per-page `<title>`. A page holds only its content.
 | `components/CodeBlock.tsx` | Code samples, highlighted. |
 | `components/PmTabs.tsx` | A command with npm / pnpm / yarn / bun tabs. |
 | `components/ReferenceTable.tsx` | `PropsTable` and `VersionHistory` for API pages. |
+| `components/ConfigKeyTable.tsx` | `ConfigKeyTable` and `StartupWarnings` for gio.toml section pages. |
 | `lib/highlight.mjs` | The syntax highlighter (in-house, no dependency). |
 | `lib/text.mjs`, `lib/search-index.mjs`, `lib/search.mjs` | Text extraction, the search index, the search engine. |
 | `scripts/check-links.mjs` | Dead links, nav completeness. |
@@ -260,12 +261,45 @@ from the code (here, `redirect()` in `packages/giojs-core/src/action.ts`).
 `'Key'` or `'Field'`. `name`, `type` and `default` are shown as code. `description` can
 hold JSX.
 
-**gio.toml section pages** (`/docs/configuration/<section>`) use a plain table with one
-row per key: key, type, default, what `0` means (for limits and timeouts), the env var
-that overrides it, a description, and what turning it off or loosening it costs. Say
-which keys log a startup warning when loosened (`--check-config` reports the same
-text). Keep the full-reference TOML block on `/docs/configuration` in sync with the
-config structs. The CHANGELOG's Configuration section lists every new key.
+**gio.toml section pages** (`/docs/configuration/<section>`) put their keys in a
+`ConfigKeyTable` under `## Reference`, one row per key: key, type, default, what `0`
+means (for limits and timeouts), the env var that overrides it, a description, and what
+turning it off or loosening it costs:
+
+```tsx
+import { ConfigKeyTable, StartupWarnings } from '../../../../components/ConfigKeyTable.tsx';
+
+<ConfigKeyTable rows={[
+  { key: 'port', type: 'integer', default: '3000', env: 'GIO_PORT', description: <>...</> },
+  { key: 'max_body_bytes', type: 'integer', default: '2097152', zero: 'No limit of its own',
+    description: <>...</> },
+]} />
+```
+
+Write `default` as the TOML literal (`"0.0.0.0"`, `3000`, `true`, `[]`) and leave it out
+for a key with no default. Under `### Startup warnings`, list the keys that log a
+warning when loosened in a `StartupWarnings` table, quoting each warning exactly as the
+server logs it (`--check-config` reports the same text):
+
+```tsx
+<StartupWarnings rows={[
+  { when: <><code>max_body_bytes = 0</code></>, text: '[server] max_body_bytes = 0: ...' },
+]} />
+```
+
+`docs-content.test.mjs` checks both against the code: every key in
+`packages/giojs/gio.schema.json` has a row on its section page, with the schema's
+default; every quoted warning is one `config_check::protections_off_warnings` writes;
+and the full-reference TOML block on `/docs/configuration` names every key under its
+table, so keep that block in sync with the config structs too. A new section also needs
+a page in `nav/api-gio-toml.ts` (checked against the section list in `config.rs`). The
+CHANGELOG's Configuration section lists every new key.
+
+The first column of a `PropsTable` or `ConfigKeyTable` row is what search treats as
+defined there: a query that is exactly an identifier-shaped name (`skew_protection`,
+`onRequest`) opens that table, above any page that only mentions it. So is an h2/h3 on
+an API Reference page whose text the page also writes as code (`GioNodePlugin`,
+`refresh()`) - give an API item's own section that heading, and only one page.
 
 ## Search, Markdown and llms.txt
 
@@ -316,10 +350,13 @@ npm test              # node --test scripts/*.test.mjs (export.test.mjs reads ou
 - the highlighter per language, and every sample on the site round-trips through it;
 - the PmTabs conversions;
 - the search index, the engine and its ranking;
+- reference-table types wrap between words (`public/globals.css`);
 - the exported site, once `npm run export` has run (`export.test.mjs`): every search
-  result anchor exists, exact API names lead with the API reference, every docs page's
-  share card carries its own title and description;
-- facts the docs state that the code decides (`docs-content.test.mjs`).
+  result anchor exists, exact API names lead with the API reference, gio.toml keys,
+  page exports and CLI commands lead to the section that defines them, every docs
+  page's share card carries its own title and description;
+- facts the docs state that the code decides (`docs-content.test.mjs`), including the
+  `ConfigKeyTable` rows and defaults and the `StartupWarnings` texts (above).
 
 When you document a fact that code decides and that could drift (a default, a timeout,
 a flag), add a check for it to `scripts/docs-content.test.mjs`.
