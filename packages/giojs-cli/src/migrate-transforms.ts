@@ -1244,7 +1244,11 @@ class Transformer {
   private nextNavigation(): void {
     for (const info of this.importsFrom(m => m === 'next/navigation')) {
       const plan = this.planFor(info);
-      const moved: string[] = [];
+      // What moved where, by target module, for the change note.
+      const moved = new Map<string, string[]>();
+      const move = (module: string, label: string): void => {
+        moved.set(module, [...(moved.get(module) ?? []), label]);
+      };
       // After redirect(), whose calls drop the RedirectType arguments.
       const ordered = [...info.named].sort((a, b) => Number(a.imported === 'RedirectType') - Number(b.imported === 'RedirectType'));
       for (const named of ordered) {
@@ -1252,21 +1256,21 @@ class Transformer {
           plan.drop.add(named.local);
           this.require(GIO_REACT, named.imported);
           if (named.local !== named.imported) this.renameReferences(named.local, named.imported);
-          moved.push(named.imported);
+          move(GIO_REACT, named.imported);
         } else if (named.imported === 'notFound') {
           plan.drop.add(named.local);
           this.require(GIO_CORE, 'notFound');
           if (named.local !== 'notFound') this.renameReferences(named.local, 'notFound');
-          moved.push('notFound (@gio.js/core)');
+          move(GIO_CORE, 'notFound');
         } else if (named.imported === 'ReadonlyURLSearchParams' && this.isTs) {
           plan.drop.add(named.local);
           this.require(GIO_REACT, 'ReadonlyURLSearchParams', true);
-          moved.push('ReadonlyURLSearchParams (type)');
+          move(GIO_REACT, 'ReadonlyURLSearchParams (type)');
         } else if (named.imported === 'redirect' || named.imported === 'permanentRedirect') {
           plan.drop.add(named.local);
           this.require(GIO_CORE, 'redirect');
           this.navigationRedirect(named.local, named.imported === 'permanentRedirect');
-          moved.push(`${named.imported} → redirect (@gio.js/core)`);
+          move(GIO_CORE, named.imported === 'redirect' ? 'redirect' : `${named.imported} → redirect`);
         } else if (named.imported === 'RedirectType') {
           // Only ever redirect()'s second argument, which navigationRedirect drops.
           plan.drop.add(named.local);
@@ -1277,18 +1281,25 @@ class Transformer {
           plan.todos.push(`'${named.imported}' from next/navigation has no GioJS equivalent`);
         }
       }
-      if (moved.length > 0) this.change(info.decl, `next/navigation → @gio.js/react: ${moved.join(', ')}`);
+      if (moved.size > 0) {
+        this.change(info.decl, `next/navigation → ${[...moved].map(([module, names]) => `${module}: ${names.join(', ')}`).join('; ')}`);
+      }
     }
   }
 
   /**
    * next/navigation's redirect() throws; @gio.js/core's returns the
-   * redirect, which getServerSideProps, generateMetadata and page actions
-   * may return or throw (so a guard helper they call can throw it too).
-   * `redirect(url)` as a statement becomes `throw redirect(url)`;
+   * redirect, which getServerSideProps, generateMetadata, page actions and
+   * the helpers they call may throw - but only getServerSideProps and a
+   * page action read one returned from their own body. So `redirect(url)`
+   * as a statement becomes `throw redirect(url)`, and so does
+   * `return redirect(url)` anywhere else (Next's redirect() never returns:
+   * a guard helper's caller would take the redirect for its value, and
+   * generateMetadata's would be merged as metadata);
    * permanentRedirect(url) is `redirect(url, 308)`. In a route handler,
    * which answers with a Response, it becomes a 307/308 Response; while
-   * rendering a component there is no GioJS contract, so that gets a TODO.
+   * rendering a component (or in a hook) there is no GioJS contract, so
+   * that gets a TODO.
    */
   private navigationRedirect(local: string, permanent: boolean): void {
     for (const id of this.references(local)) {
@@ -1302,10 +1313,11 @@ class Transformer {
       const context = this.redirectContext(call);
       const status = permanent ? 308 : 307;
       const statement = call.parent;
-      if (context === 'route' && ts.isExpressionStatement(statement)) {
+      if (context === 'route' && (ts.isExpressionStatement(statement) || ts.isReturnStatement(statement))) {
         this.handled.add(id);
         if (mode !== undefined) this.removedRanges.push([url.getEnd(), mode.getEnd()]);
-        this.edits.replace(call.getStart(this.sf), call.getEnd(), `return new Response(null, { status: ${status}, headers: { location: ${this.text(url)} } })`);
+        const response = `new Response(null, { status: ${status}, headers: { location: ${this.text(url)} } })`;
+        this.edits.replace(call.getStart(this.sf), call.getEnd(), ts.isReturnStatement(statement) ? response : `return ${response}`);
         this.change(call, `${local}() → a ${status} Response (route handlers answer with a Response)`);
         continue;
       }
@@ -1326,7 +1338,13 @@ class Transformer {
       } else if (ts.isArrowFunction(statement) && statement.body === call) {
         this.edits.insert(call.getStart(this.sf), '{ throw ');
         this.edits.insert(call.getEnd(), '; }');
-      } else if (!ts.isReturnStatement(statement)) {
+      } else if (ts.isReturnStatement(statement)) {
+        if (context !== 'returned') {
+          const start = statement.getStart(this.sf);
+          this.edits.replace(start, start + 'return'.length, 'throw');
+          this.change(statement, `return ${local}() → throw redirect(): only getServerSideProps and a page action read a redirect returned from their own body`);
+        }
+      } else if (!ts.isThrowStatement(statement)) {
         this.todo(call, "@gio.js/core redirect() returns the redirect instead of throwing it: throw it (or return it from getServerSideProps / a page action)");
       }
       if (context === 'component') {
@@ -1335,24 +1353,31 @@ class Transformer {
     }
   }
 
-  /** Where a redirect() call runs, judged by the top-level declaration around it. */
-  private redirectContext(node: ts.Node): 'server' | 'route' | 'route-nested' | 'component' | 'helper' {
+  /**
+   * Where a redirect() call runs, judged by the top-level declaration
+   * around it. `returned`: the own body of getServerSideProps or a page
+   * action, the only places GioJS reads a returned redirect.
+   */
+  private redirectContext(node: ts.Node): 'returned' | 'server' | 'route' | 'route-nested' | 'component' | 'helper' {
     for (let n: ts.Node | undefined = node.parent; n !== undefined; n = n.parent) {
       if (ts.isFunctionLike(n) && this.isServerActionFunction(n)) return 'server';
     }
     let top: ts.Node = node;
     while (top.parent !== undefined && !ts.isSourceFile(top.parent)) top = top.parent;
     const name = topLevelName(top);
-    if (name === 'getServerSideProps' || name === 'getStaticProps' || name === 'generateMetadata' || name === 'action') return 'server';
+    let fn: ts.Node | undefined = node.parent;
+    while (fn !== undefined && !ts.isFunctionLike(fn)) fn = fn.parent;
+    const ownBody = fn !== undefined && fn === topLevelFunction(top);
+    if (name === 'getServerSideProps' || name === 'getStaticProps' || name === 'action') return ownBody ? 'returned' : 'server';
+    if (name === 'generateMetadata') return 'server';
     if (this.options.role === 'app-route') {
       // Only a call in the handler's own body can `return` its Response;
       // a thrown redirect would reach GioJS as a handler failure (500).
-      let fn: ts.Node | undefined = node.parent;
-      while (fn !== undefined && !ts.isFunctionLike(fn)) fn = fn.parent;
-      return name !== undefined && HTTP_METHODS.includes(name) && fn !== undefined && fn === topLevelFunction(top) ? 'route' : 'route-nested';
+      return name !== undefined && HTTP_METHODS.includes(name) && ownBody ? 'route' : 'route-nested';
     }
     const pageLike = this.options.role === 'app-page' || this.options.role === 'app-root-layout' || this.options.role === 'pages-page';
-    if ((name === 'default' && pageLike) || (name !== undefined && /^[A-Z]/.test(name))) return 'component';
+    // A hook (useX) runs while a component renders - in the browser too.
+    if ((name === 'default' && pageLike) || (name !== undefined && /^([A-Z]|use[A-Z])/.test(name))) return 'component';
     return 'helper';
   }
 
@@ -1368,33 +1393,76 @@ class Transformer {
    * own URL, where the page's `action` export takes over from the Server
    * Action (left in place with a TODO: moving it is a human's call). A
    * client function as the action is React 19's own form action and stays.
+   * A button's `formAction={serverAction}` can't post anywhere either (React
+   * would submit to a javascript: URL), so the button names its action for
+   * the page's action to branch on, and its plain `<form>` - a GET once the
+   * formAction is gone - becomes a `<GioForm>` too.
    */
   private serverActionForms(): void {
+    // Server Action formAction attributes, by the <form> around them (if any).
+    const buttons = new Map<ts.Node | undefined, ts.JsxAttribute[]>();
+    forEachDescendant(this.sf, n => {
+      if (!ts.isJsxAttribute(n) || propertyName(n.name) !== 'formAction') return;
+      const expr = n.initializer !== undefined && ts.isJsxExpression(n.initializer) ? n.initializer.expression : undefined;
+      if (expr === undefined || !this.isServerActionExpr(expr)) return;
+      let form: ts.Node | undefined = n.parent.parent.parent;
+      while (form !== undefined && !(ts.isJsxElement(form) && tagText(form.openingElement.tagName) === 'form')) form = form.parent;
+      buttons.set(form, [...(buttons.get(form) ?? []), n]);
+    });
+
+    const gioForms = new Set<ts.Node>();
     for (const el of this.jsxElementsNamed('form')) {
       const opening = ts.isJsxElement(el) ? el.openingElement : el;
       const attr = jsxAttribute(opening, 'action');
       const expr = attr?.initializer !== undefined && ts.isJsxExpression(attr.initializer) ? attr.initializer.expression : undefined;
-      if (attr === undefined || expr === undefined || !this.isServerActionExpr(expr)) continue;
-      const label = oneLine(this.text(expr));
+      const serverAction = attr !== undefined && expr !== undefined && this.isServerActionExpr(expr);
+      if (!serverAction && !(attr === undefined && buttons.has(el))) continue;
+      gioForms.add(el);
       this.edits.replace(opening.tagName.getStart(this.sf), opening.tagName.getEnd(), 'GioForm');
       if (ts.isJsxElement(el)) this.edits.replace(el.closingElement.tagName.getStart(this.sf), el.closingElement.tagName.getEnd(), 'GioForm');
-      this.removeAttribute(attr);
       // GioForm always posts.
       const method = jsxAttribute(opening, 'method');
       if (method !== undefined) this.removeAttribute(method);
       this.require(GIO_REACT, 'GioForm');
+      if (attr === undefined || expr === undefined) {
+        this.todo(el, "<form> with Server Action buttons became <GioForm>, which posts to the page it is on: move each button's action into that page's export async function action(req)");
+        this.change(el, '<form> with formAction={serverAction} buttons → <GioForm> from @gio.js/react');
+        continue;
+      }
+      const label = oneLine(this.text(expr));
+      this.removeAttribute(attr);
       const bound = ts.isCallExpression(unwrapParens(expr))
         ? ' (the values .bind() passed become hidden <input name> fields, read with req.formData())'
         : '';
       this.todo(el, `<form action={${label}}> became <GioForm>, which posts to the page it is on: move ${label} into that page's export async function action(req)${bound}`);
       this.change(el, `<form action={${label}}> (Server Action) → <GioForm> from @gio.js/react`);
     }
-    forEachDescendant(this.sf, n => {
-      if (!ts.isJsxAttribute(n) || propertyName(n.name) !== 'formAction') return;
-      const expr = n.initializer !== undefined && ts.isJsxExpression(n.initializer) ? n.initializer.expression : undefined;
-      if (expr === undefined || !this.isServerActionExpr(expr)) return;
-      this.todo(n, `formAction={${oneLine(this.text(expr))}} (Server Action): give the button name="intent" value="..." and branch on (await req.formData()).get('intent') in the page's action`);
-    });
+
+    for (const [form, attrs] of buttons) {
+      const outside = form !== undefined && gioForms.has(form) ? '' : ' - and render the button inside a <GioForm>, which posts to the page it is on';
+      for (const attr of attrs) {
+        const expr = unwrapParens((attr.initializer as ts.JsxExpression).expression as ts.Expression);
+        const label = oneLine(this.text(expr));
+        // formAction={deletePost} or {deletePost.bind(null, id)}: the button names deletePost.
+        const action = ts.isCallExpression(expr) && ts.isPropertyAccessExpression(expr.expression) ? unwrapParens(expr.expression.expression) : expr;
+        const button = attr.parent.parent;
+        if (!ts.isIdentifier(action)) {
+          // An inline function: its body is the code to move, so it stays until a human moved it.
+          this.todo(attr, `formAction={${label}} (Server Action): move it into the page's action, then replace the formAction with name="intent" value="..." and branch on (await req.formData()).get('intent')${outside}`);
+          continue;
+        }
+        if (jsxAttribute(button, 'name') !== undefined || jsxAttribute(button, 'value') !== undefined) {
+          this.removeAttribute(attr);
+          this.todo(attr, `formAction={${label}} (Server Action) was removed: move ${action.text} into the page's action and branch on the button's name/value in (await req.formData())${outside}`);
+          continue;
+        }
+        const intent = `name="intent" value="${action.text}"`;
+        this.edits.replace(attr.getStart(this.sf), attr.getEnd(), intent);
+        const bound = action !== expr ? ' (the values .bind() passed become hidden <input name> fields)' : '';
+        this.todo(attr, `formAction={${label}} (Server Action) became ${intent}: move ${action.text} into the page's action and branch on (await req.formData()).get('intent')${bound}${outside}`);
+        this.change(attr, `formAction={${label}} (Server Action) → ${intent}`);
+      }
+    }
 
     for (const info of this.importsFrom(m => m === 'react' || m === 'react-dom')) {
       for (const named of info.named) {
@@ -1669,7 +1737,10 @@ class Transformer {
   /** revalidatePath(path, 'page' | 'layout') → revalidatePath(path, { type: 'page' | 'prefix' }). */
   private revalidatePathCall(call: ts.CallExpression): void {
     const [path, type] = call.arguments;
-    if (path !== undefined && /\[[^\]]*\]/.test(this.text(path))) {
+    // Only literal text spells a pattern: in `revalidatePath(paths[0])` the brackets index an array.
+    const literal = path === undefined ? undefined : ts.isStringLiteralLike(path) ? path.text
+      : ts.isTemplateExpression(path) ? [path.head.text, ...path.templateSpans.map(s => s.literal.text)].join('x') : undefined;
+    if (literal !== undefined && /\[[^\]]*\]/.test(literal)) {
       this.todo(call, "revalidatePath() purges a real path in GioJS ('/posts/1'), never a route pattern ('/posts/[id]'): pass the path itself, or the parent with { type: 'prefix' }");
     }
     if (path === undefined || type === undefined) return;
@@ -1819,10 +1890,16 @@ class Transformer {
     }
     const dynamic = exported.get('dynamic');
     const dynamicValue = dynamic !== undefined && pageLike ? exportedString(dynamic) : undefined;
-    if (dynamic !== undefined && dynamicValue === 'force-static' && !exported.has('revalidate') && ts.isVariableStatement(dynamic.statement) &&
+    // GioJS reads revalidate from the page module only; a layout's dynamic covered every page below it.
+    const fileStem = posixStem(this.options.filePath);
+    const isPage = role === 'pages-page' || (role === 'app-page' && fileStem === 'page');
+    const isLayout = role === 'app-root-layout' || (role === 'app-page' && fileStem === 'layout');
+    if (dynamic !== undefined && dynamicValue === 'force-static' && isPage && !exported.has('revalidate') && ts.isVariableStatement(dynamic.statement) &&
       dynamic.statement.declarationList.declarations.length === 1) {
       this.edits.replace(dynamic.statement.getStart(this.sf), dynamic.statement.getEnd(), 'export const revalidate = false;');
       this.change(dynamic.statement, "dynamic = 'force-static' → export const revalidate = false (cached in Rust until the next deploy)");
+    } else if (dynamic !== undefined && dynamicValue === 'force-static' && isLayout) {
+      this.todo(dynamic.statement, "dynamic = 'force-static' on a layout: GioJS reads revalidate from pages only and ignores the dynamic export - add export const revalidate = false to each page under this layout (it caches the page in Rust until the next deploy), then remove this export");
     } else if (dynamic !== undefined && (dynamicValue === 'force-static' || dynamicValue === 'error')) {
       this.todo(dynamic.statement, `dynamic = '${dynamicValue}': GioJS ignores the dynamic export - a page renders per request unless it exports revalidate (false caches it until the next deploy); remove it`);
     } else if (dynamic !== undefined && role === 'app-route' && exportedString(dynamic) === 'force-static') {
@@ -2310,6 +2387,11 @@ function catchAllSegments(filePath: string): Array<{ name: string; optional: boo
     if (match !== null) out.push({ name: match[2] as string, optional: match[1] !== undefined });
   }
   return out;
+}
+
+/** A path's file name without its extension: app/blog/layout.tsx → layout. */
+function posixStem(filePath: string): string {
+  return (filePath.split('/').pop() ?? '').replace(/\.[^.]*$/, '');
 }
 
 function oneLine(text: string): string {

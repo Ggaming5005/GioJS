@@ -40,7 +40,7 @@ const cases: Array<{ name: string; ext: string; options: TransformOptions }> = [
   // metadata/generateMetadata are kept: unsupported fields named, the Next signature converted.
   { name: 'metadata', ext: 'tsx', options: { filePath: 'app/blog/[slug]/page.tsx', role: 'app-page' } },
   { name: 'next-cache', ext: 'ts', options: { filePath: 'lib/posts.ts', role: 'source' } },
-  // next/navigation redirect() throws; @gio.js/core's is returned or thrown.
+  // next/navigation redirect() throws; @gio.js/core's is thrown - or returned straight from getServerSideProps / a page action.
   { name: 'redirect', ext: 'tsx', options: { filePath: 'app/dashboard/page.tsx', role: 'pages-page', originalPath: 'pages/dashboard.tsx' } },
 ];
 
@@ -299,6 +299,7 @@ test('a route handler redirect() becomes a Response; nested deeper it gets a TOD
     "import { redirect } from 'next/navigation';",
     'export async function GET(req) {',
     "  if (!req.cookies.session) redirect('/login');",
+    "  if (req.query.old) return redirect('/new');",
     "  const go = () => redirect('/x');",
     '  return { ok: true };',
     '}',
@@ -307,9 +308,51 @@ test('a route handler redirect() becomes a Response; nested deeper it gets a TOD
   const { output, todos } = transformSource(source, { filePath: 'app/api/me/route.js', role: 'app-route' });
   assert.match(output, /^import \{ redirect \} from '@gio\.js\/core';\n/);
   assert.match(output, /if \(!req\.cookies\.session\) return new Response\(null, \{ status: 307, headers: \{ location: '\/login' \} \}\);/);
+  assert.match(output, /if \(req\.query\.old\) return new Response\(null, \{ status: 307, headers: \{ location: '\/new' \} \}\);/);
   // A thrown redirect would reach GioJS as a failing handler: flagged.
   assert.match(output, /\n {2}\/\/ TODO\(gio-migrate\): redirect\(\) in a route handler: [^\n]+\n {2}const go = \(\) => \{ throw redirect\('\/x'\); \};/);
   assert.equal(todos.length, 1);
+});
+
+test('the next/navigation change note names the module each import moved to', () => {
+  const source = "import { usePathname, notFound, permanentRedirect } from 'next/navigation';\nexport function a() { if (!usePathname()) notFound(); permanentRedirect('/b'); }\n";
+  const { changes } = transformSource(source, { filePath: 'lib/a.ts', role: 'source' });
+  assert.equal(changes[0]?.message, 'next/navigation → @gio.js/react: usePathname; @gio.js/core: notFound, permanentRedirect → redirect');
+});
+
+test("dynamic = 'force-static' becomes revalidate = false on a page only: GioJS reads revalidate from pages", () => {
+  const source = "export const dynamic = 'force-static';\nexport default function X({ children }) { return children; }\n";
+  const page = transformSource(source, { filePath: 'app/blog/page.jsx', role: 'app-page' });
+  assert.match(page.output, /^export const revalidate = false;\n/);
+  assert.deepEqual(page.todos, []);
+  for (const filePath of ['app/blog/layout.jsx', 'app/layout.jsx']) {
+    const layout = transformSource(source, { filePath, role: filePath === 'app/layout.jsx' ? 'app-root-layout' : 'app-page' });
+    assert.match(layout.output, /\nexport const dynamic = 'force-static';\n/, filePath);
+    assert.deepEqual(layout.todos.map(t => t.message), [
+      "dynamic = 'force-static' on a layout: GioJS reads revalidate from pages only and ignores the dynamic export - add export const revalidate = false to each page under this layout (it caches the page in Rust until the next deploy), then remove this export",
+    ], filePath);
+  }
+  const loading = transformSource(source, { filePath: 'app/blog/loading.jsx', role: 'app-page' });
+  assert.match(loading.todos[0]?.message ?? '', /^dynamic = 'force-static': GioJS ignores the dynamic export/);
+});
+
+test('revalidatePath() flags a route pattern in literal text only, not an indexed expression', () => {
+  const source = [
+    "import { revalidatePath } from 'next/cache';",
+    'export async function purge(paths: string[], slug: string) {',
+    '  revalidatePath(paths[0]);',
+    '  revalidatePath(map[slug]);',
+    '  revalidatePath(`/posts/${slug}`);',
+    "  revalidatePath('/posts/[id]');",
+    '  revalidatePath(`/[locale]/posts/${slug}`);',
+    '}',
+    'declare const map: Record<string, string>;',
+    '',
+  ].join('\n');
+  const { output, todos } = transformSource(source, { filePath: 'lib/purge.ts', role: 'source' });
+  // The statement under each TODO.
+  assert.deepEqual(todos.map(t => output.split('\n')[t.line]?.trim()), ["revalidatePath('/posts/[id]');", 'revalidatePath(`/[locale]/posts/${slug}`);']);
+  assert.match(todos[0]?.message ?? '', /^revalidatePath\(\) purges a real path in GioJS/);
 });
 
 test('app/sitemap.ts keeps its shape; generateSitemaps and media entries get TODOs', () => {
@@ -368,16 +411,54 @@ test('Server Action forms become <GioForm>; client form actions and string URLs 
   assert.match(output, /^import \{ useActionState \} from 'react';\n\/\/ TODO\(gio-migrate\): useFormStatus\(\) tracks React form actions only/);
   assert.match(output, /import \{ GioForm \} from '@gio\.js\/react';/);
   assert.match(output, /<GioForm><Submit \/><\/GioForm>/);
-  assert.match(output, /<GioForm><button formAction=\{deletePost\}>x<\/button><\/GioForm>/);
+  // A function formAction would make React submit to a javascript: URL: the button names the action instead.
+  assert.match(output, /<GioForm><button name="intent" value="deletePost">x<\/button><\/GioForm>/);
   assert.match(output, /<form action=\{local\} \/>\n {6}<form action="\/api\/search" \/>/);
   assert.deepEqual(todos.map(t => t.message.slice(0, 50)), [
     'useFormStatus() tracks React form actions only: in',
     'useActionState() with a Server Action: a page acti',
     '<form action={formAction}> became <GioForm>, which',
     '<form action={deletePost.bind(null, id)}> became <',
-    'formAction={deletePost} (Server Action): give the ',
+    'formAction={deletePost} (Server Action) became nam',
   ]);
   assert.match(todos[3]?.message ?? '', /the values \.bind\(\) passed become hidden <input name> fields/);
+});
+
+test('a <form> whose Server Actions are its buttons\' formAction becomes <GioForm>; each button names its action', () => {
+  const source = [
+    "import { createPost, deletePost } from './actions';",
+    '',
+    'export default function Page({ id }: { id: string }) {',
+    '  return (',
+    '    <form method="get">',
+    '      <input name="title" />',
+    '      <button formAction={createPost}>Create</button>',
+    '      <button formAction={deletePost.bind(null, id)}>Delete</button>',
+    '      <button name="op" value="archive" formAction={createPost}>Archive</button>',
+    '    </form>',
+    '  );',
+    '}',
+    '',
+    'export function Remove() {',
+    '  return <button formAction={deletePost}>Remove</button>;',
+    '}',
+    '',
+  ].join('\n');
+  const options: TransformOptions = { filePath: 'app/posts/page.tsx', role: 'app-page', serverActionModule: spec => spec === './actions' };
+  const { output, todos } = transformSource(source, options);
+  assert.equal(transformSource(output, options).output, output, 'a second run changes nothing');
+  // Without its formAction the plain <form> would submit as a GET and the page action would never run.
+  assert.match(output, /\n {4}<GioForm>\n {6}<input name="title" \/>\n {6}<button name="intent" value="createPost">Create<\/button>\n {6}<button name="intent" value="deletePost">Delete<\/button>\n {6}<button name="op" value="archive">Archive<\/button>\n {4}<\/GioForm>\n/);
+  assert.match(output, /return <button name="intent" value="deletePost">Remove<\/button>;/);
+  assert.doesNotMatch(output.replace(/^ *\/\/ TODO.*\n/gm, ''), /formAction|<form/);
+  assert.match(output, /^import \{ createPost, deletePost \} from '\.\/actions';\nimport \{ GioForm \} from '@gio\.js\/react';\n/);
+  assert.deepEqual(todos.map(t => t.message), [
+    "<form> with Server Action buttons became <GioForm>, which posts to the page it is on: move each button's action into that page's export async function action(req)",
+    'formAction={createPost} (Server Action) became name="intent" value="createPost": move createPost into the page\'s action and branch on (await req.formData()).get(\'intent\')',
+    'formAction={deletePost.bind(null, id)} (Server Action) became name="intent" value="deletePost": move deletePost into the page\'s action and branch on (await req.formData()).get(\'intent\') (the values .bind() passed become hidden <input name> fields)',
+    'formAction={createPost} (Server Action) was removed: move createPost into the page\'s action and branch on the button\'s name/value in (await req.formData())',
+    'formAction={deletePost} (Server Action) became name="intent" value="deletePost": move deletePost into the page\'s action and branch on (await req.formData()).get(\'intent\') - and render the button inside a <GioForm>, which posts to the page it is on',
+  ]);
 });
 
 test("'use cache' is removed with a TODO about page caching", () => {

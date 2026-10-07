@@ -112,8 +112,13 @@ npm run dev`} />
               throwing it: <code>redirect(url)</code> as a statement becomes{' '}
               <code>throw redirect(url)</code> (<code>redirect(url, 308)</code> for a permanent one) -
               what <code>getServerSideProps</code>, <code>generateMetadata</code>, page actions and the
-              helpers they call may throw. Directly in a route handler it becomes a 307/308{' '}
-              <code>Response</code>; while rendering a component it gets a TODO (redirect from{' '}
+              helpers they call may throw. <code>return redirect(url)</code> becomes{' '}
+              <code>throw redirect(url)</code> too, except directly in{' '}
+              <code>getServerSideProps</code> or a page action, the only places that read a returned
+              redirect (a guard helper&apos;s caller would take it for a value, and{' '}
+              <code>generateMetadata</code> would merge it as metadata). Directly in a route handler
+              it becomes a 307/308 <code>Response</code>; while rendering a component or in a hook
+              it gets a TODO (redirect from{' '}
               <code>getServerSideProps</code>, or <code>navigate()</code> in the browser)
             </td>
           </tr>
@@ -162,8 +167,11 @@ npm run dev`} />
               becomes <code>&lt;GioForm&gt;</code>, which posts to the page&apos;s own URL, and each
               Server Action gets a TODO to move into that page&apos;s{' '}
               <code>export async function action(req)</code> (a non-form one into a{' '}
-              <code>route.ts</code> handler); the report sketches the result. A client function as a
-              form action is React 19&apos;s own and stays
+              <code>route.ts</code> handler); the report sketches the result. A button&apos;s{' '}
+              <code>formAction={'{serverAction}'}</code> becomes{' '}
+              <code>name="intent" value="serverAction"</code> for the page&apos;s action to branch on,
+              and its <code>&lt;form&gt;</code> becomes a <code>&lt;GioForm&gt;</code> as well. A client
+              function as a form action is React 19&apos;s own and stays
             </td>
           </tr>
           <tr>
@@ -178,8 +186,9 @@ npm run dev`} />
               whole pages (<code>export const revalidate</code> and <code>export const tags</code>),
               and <code>fetch()</code>&apos;s <code>next</code> options are flagged - Node&apos;s{' '}
               <code>fetch</code> has no data cache. <code>noStore()</code> calls are removed, and{' '}
-              <code>export const dynamic = 'force-static'</code> becomes{' '}
-              <code>export const revalidate = false</code>
+              <code>export const dynamic = 'force-static'</code> on a page becomes{' '}
+              <code>export const revalidate = false</code> (on a layout it gets a TODO: GioJS reads{' '}
+              <code>revalidate</code> from pages only, so each page below it needs the export)
             </td>
           </tr>
           <tr>
@@ -188,6 +197,10 @@ npm run dev`} />
               <code>app/sitemap.ts</code>, <code>app/robots.ts</code> and <code>app/manifest.ts</code>{' '}
               are kept: GioJS serves them at the same URLs from the same return shapes (sitemap{' '}
               <code>images</code>/<code>videos</code> and <code>generateSitemaps</code> get a TODO).
+              Next linked the manifest from every page on its own; GioJS renders that{' '}
+              <code>&lt;link rel="manifest"&gt;</code> from metadata only, so{' '}
+              <code>app/manifest.ts</code> gets a TODO to add{' '}
+              <code>manifest: '/manifest.webmanifest'</code> to the root layout&apos;s metadata.
               The static files Next serves from <code>app/</code> - <code>favicon.ico</code>,{' '}
               <code>robots.txt</code>, <code>sitemap.xml</code>, <code>manifest.json</code>,{' '}
               <code>icon.png</code>, <code>opengraph-image.png</code>, ... - move to{' '}

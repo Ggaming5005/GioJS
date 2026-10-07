@@ -83,6 +83,9 @@ const METADATA_IMAGE_FIELD: Record<string, (url: string) => string> = {
 const STATIC_METADATA_FILES = new Set(['favicon.ico', 'robots.txt', 'sitemap.xml', 'manifest.json', 'manifest.webmanifest']);
 /** app/sitemap.ts & co. - what GioJS serves each at. */
 const METADATA_ROUTES: Record<string, string> = { sitemap: '/sitemap.xml', robots: '/robots.txt', manifest: '/manifest.webmanifest' };
+/** Next linked a web app manifest from every page by itself; GioJS renders that link from metadata only. */
+const manifestLinkTodo = (url: string): string =>
+  `Next.js linked the manifest from every page: add manifest: '${url}' to the root layout's metadata export (GioJS renders <link rel="manifest"> from it)`;
 /** A module starting (after comments) with 'use server'. */
 const USE_SERVER_PROLOGUE = /^\uFEFF?(?:\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*(['"])use server\1/;
 
@@ -308,18 +311,22 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
     const url = urlSegments.every(s => !/[[\]@]/.test(s) && !s.startsWith('_')) ? '/' + [...urlSegments, base].join('/') : undefined;
     if (STATIC_METADATA_FILES.has(base) && (dirSegments.length === 0 || base === 'sitemap.xml') && url !== undefined) {
       if (claim(f, `public${url}`) && base.startsWith('manifest.')) {
-        plan.todos.push({ file: `public${url}`, message: `Next.js linked the manifest from every page: add manifest: '${url}' to the root layout's metadata export` });
+        plan.todos.push({ file: `public${url}`, message: manifestLinkTodo(url) });
       }
       return;
     }
     if (stem in METADATA_ROUTES && SOURCE_EXTENSIONS.has(ext)) {
       if (dirSegments.length > 0) {
         plan.todos.push({ file: target, message: `only app/${stem}.ts at the app root is served (at ${METADATA_ROUTES[stem] as string}) - merge this one into it, or serve it from a route.ts` });
-      } else if (ext === '.tsx' || ext === '.jsx') {
+        return;
+      }
+      if (ext === '.tsx' || ext === '.jsx') {
         plan.todos.push({ file: target, message: `rename it to app/${stem}.${ext === '.tsx' ? 'ts' : 'js'} - GioJS loads app/${stem}.ts or .js` });
       } else {
         plan.notes.push(`${target} works as it is: GioJS serves it at ${METADATA_ROUTES[stem] as string}, resolves relative URLs against GIO_SITE_URL (set it to the site's origin) and caches the output for its revalidate export (default 3600 seconds).`);
       }
+      // GioJS serves the manifest but links it only from metadata.
+      if (stem === 'manifest') plan.todos.push({ file: target, message: manifestLinkTodo(METADATA_ROUTES[stem] as string) });
       return;
     }
     const image = METADATA_IMAGE.exec(stem);

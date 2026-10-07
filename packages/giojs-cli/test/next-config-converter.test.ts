@@ -232,7 +232,7 @@ test('experimental flags GioJS has its own form of point at it; the rest are lis
     'next.config.mjs',
   );
   assert.deepEqual(config.todos, [
-    'experimental.serverActions: Server Actions become page actions (export async function action) posted by <GioForm> - see the TODOs in the code; bodySizeLimit → gio.toml [server] max_body_bytes, allowedOrigins → [security.csrf] trusted_origins',
+    'experimental.serverActions: Server Actions become page actions (export async function action) posted by <GioForm> - see the TODOs in the code; bodySizeLimit → gio.toml [server] max_body_bytes, allowedOrigins → [security.csrf] trusted_origins as full origins (scheme://host[:port], e.g. "https://proxy.example.com") - Next\'s bare hosts and wildcards such as "*.my-proxy.com" are rejected at startup, so list each origin',
     "experimental.ppr: partial prerendering is per page in GioJS - export const shell = 'cache' next to export const revalidate on the pages that should serve a cached shell",
     'experimental: optimizeCss, scrollRestoration - no GioJS equivalent',
   ]);

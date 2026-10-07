@@ -298,7 +298,7 @@ const NOT_CONVERTED: Record<string, string> = {
 /** experimental.* flags whose feature GioJS has in its own form. */
 const EXPERIMENTAL: Record<string, { note?: string; todo?: string }> = {
   serverActions: {
-    todo: 'experimental.serverActions: Server Actions become page actions (export async function action) posted by <GioForm> - see the TODOs in the code; bodySizeLimit → gio.toml [server] max_body_bytes, allowedOrigins → [security.csrf] trusted_origins',
+    todo: 'experimental.serverActions: Server Actions become page actions (export async function action) posted by <GioForm> - see the TODOs in the code; bodySizeLimit → gio.toml [server] max_body_bytes, allowedOrigins → [security.csrf] trusted_origins as full origins (scheme://host[:port], e.g. "https://proxy.example.com") - Next\'s bare hosts and wildcards such as "*.my-proxy.com" are rejected at startup, so list each origin',
   },
   ppr: { todo: "experimental.ppr: partial prerendering is per page in GioJS - export const shell = 'cache' next to export const revalidate on the pages that should serve a cached shell" },
   typedRoutes: { note: 'experimental.typedRoutes: GioJS always generates typed routes (.gio/routes.d.ts, used by href() from @gio.js/react)' },

@@ -137,7 +137,7 @@ export function buildReport(plan: MigrationPlan, date: Date): string {
     '',
     '- Every page hydrates in the browser: there are no React Server Components or `\'use client\'`. Server data comes from `getServerSideProps` (with `export const revalidate = N` to cache the result in Rust).',
     '- Forms post to the page\'s own `export async function action(req)` (rendered with `<GioForm>` from `@gio.js/react`) instead of Server Actions; other mutations are `route.ts` handlers.',
-    '- `export const metadata`, `generateMetadata(ctx, { props })`, `app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts` work like in Next.js. Set `GIO_SITE_URL` (or `metadataBase`) so relative URLs become absolute.',
+    '- `export const metadata`, `generateMetadata(ctx, { props })`, `app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts` work like in Next.js, except that pages link the manifest only when the metadata says so (`manifest: \'/manifest.webmanifest\'`). Set `GIO_SITE_URL` (or `metadataBase`) so relative URLs become absolute.',
     '- Caching is per page, in Rust: `export const revalidate` and `export const tags`, purged with `revalidatePath()` / `revalidateTag()` from `@gio.js/core`. `fetch()` has no data cache.',
     '- The root `app/layout` renders `<html>`, `<head>` and `<body>` on the server only - it is never hydrated.',
     '- Redirects, rewrites, headers and auth guards run in the Rust server from `gio.toml` / `middleware.ts`, before any page code.',
@@ -153,7 +153,7 @@ const SERVER_ACTIONS_SECTION = [
   '',
   'GioJS has no Server Actions. A form\'s action becomes the page\'s `action` export - a POST to the page runs it - and `<GioForm>` posts to it ' +
     '(a real `<form method="post">`, so it works without JavaScript too; once hydrated it submits through the client router). ' +
-    'The migration turned every `<form action={serverAction}>` it recognized into `<GioForm>`; move each action\'s body into the page:',
+    'The migration turned every `<form action={serverAction}>` it recognized into `<GioForm>` (and a button\'s `formAction={serverAction}` into `name="intent" value="serverAction"`, for the action to branch on); move each action\'s body into the page:',
   '',
   '```tsx',
   '// app/posts/new/page.tsx',

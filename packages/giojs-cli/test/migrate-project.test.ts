@@ -337,7 +337,7 @@ test('app router metadata files: conventions GioJS serves stay, static files mov
 
     const todos = plan.todos.map(t => `${t.file ?? ''}: ${t.message}`);
     const has = (pattern: RegExp): void => assert.ok(todos.some(t => pattern.test(t)), `${pattern} in\n${todos.join('\n')}`);
-    has(/^public\/manifest\.json: Next\.js linked the manifest from every page: add manifest: '\/manifest\.json' to the root layout's metadata export$/);
+    has(/^public\/manifest\.json: Next\.js linked the manifest from every page: add manifest: '\/manifest\.json' to the root layout's metadata export \(GioJS renders <link rel="manifest"> from it\)$/);
     has(/^public\/icon\.png: Next\.js linked this icon automatically; GioJS links it from metadata - add icons: \{ icon: '\/icon\.png' \} to the metadata export of app\/layout$/);
     has(/^public\/blog\/opengraph-image\.png: [^\n]+add openGraph: \{ images: '\/blog\/opengraph-image\.png' \} to the metadata export of app\/\(site\)\/blog\/layout \(or page\) - its alt text is in opengraph-image\.alt\.txt$/);
     has(/^app\/\(site\)\/blog\/\[slug\]\/opengraph-image\.jpg: file-based opengraph-image images are not picked up by GioJS, and this folder has no static URL/);
@@ -350,8 +350,28 @@ test('app router metadata files: conventions GioJS serves stay, static files mov
     assert.match(report, /\n## Server Actions\n\nGioJS has no Server Actions\. A form's action becomes the page's `action` export/);
     assert.match(report, /export async function action\(req: ActionArgs\) \{\n {2}const form = await req\.formData\(\);/);
     assert.match(report, /<GioForm> \{\/\* was <form action=\{createPost\}> \*\/\}/);
-    assert.match(report, /- `export const metadata`, `generateMetadata\(ctx, \{ props \}\)`, `app\/sitemap\.ts`, `app\/robots\.ts` and `app\/manifest\.ts` work like in Next\.js/);
+    assert.match(report, /- `export const metadata`, `generateMetadata\(ctx, \{ props \}\)`, `app\/sitemap\.ts`, `app\/robots\.ts` and `app\/manifest\.ts` work like in Next\.js, except that pages link the manifest only when the metadata says so \(`manifest: '\/manifest\.webmanifest'`\)/);
     assert.doesNotMatch(report, /there are no Server Components, `'use client'` or Server Actions/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('app/manifest.ts is kept, with a TODO to link it from the root layout metadata the way Next linked it on its own', async () => {
+  const manifest = "import type { MetadataRoute } from 'next';\n\nexport default function manifest(): MetadataRoute.Manifest {\n  return { name: 'Meta', start_url: '/', display: 'standalone' };\n}\n";
+  const root = await writeTree({
+    'package.json': '{"name":"pwa","dependencies":{"next":"15.0.0","react":"19.0.0","react-dom":"19.0.0"}}\n',
+    'app/layout.tsx': "export default function RootLayout({ children }: { children: React.ReactNode }) {\n  return (\n    <html lang=\"en\">\n      <body>{children}</body>\n    </html>\n  );\n}\n",
+    'app/manifest.ts': manifest,
+  });
+  try {
+    const plan = await planMigration(root);
+    assert.equal(plan.files.find(f => f.to === 'app/manifest.ts')?.content, manifest.replace("from 'next'", "from '@gio.js/core'"));
+    // GioJS serves it at /manifest.webmanifest, but renders <link rel="manifest"> from metadata only.
+    assert.deepEqual(plan.todos.filter(t => t.file === 'app/manifest.ts').map(t => t.message), [
+      "Next.js linked the manifest from every page: add manifest: '/manifest.webmanifest' to the root layout's metadata export (GioJS renders <link rel=\"manifest\"> from it)",
+    ]);
+    assert.ok(plan.notes.some(n => /^app\/manifest\.ts works as it is: GioJS serves it at \/manifest\.webmanifest/.test(n)), plan.notes.join('\n'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

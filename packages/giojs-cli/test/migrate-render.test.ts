@@ -120,13 +120,16 @@ test('a migrated JavaScript app-router project renders: JSX moved to .jsx, Commo
     'src/app/layout.js': "export const metadata = { title: { default: 'JS app', template: '%s | JS app' }, applicationName: 'JS app' };\n\nexport default function RootLayout({ children }) {\n  return (\n    <html lang=\"en\">\n      <body>{children}</body>\n    </html>\n  );\n}\n",
     'src/app/search/page.js': "export async function generateMetadata({ params, searchParams }, parent) {\n  const { q } = await searchParams;\n  return { title: `Search: ${q}`, description: `${Object.keys(await params).length} params` };\n}\n\nexport default function Search() {\n  return <p>search</p>;\n}\n",
     'src/app/old/page.js': "import { permanentRedirect } from 'next/navigation';\n\nexport async function getServerSideProps() {\n  permanentRedirect('/');\n}\n\nexport default function Old() {\n  return null;\n}\n",
+    // Next's redirect() throws, so `return redirect()` in a guard helper or generateMetadata still redirected.
+    'src/app/admin/page.js': "import { redirect } from 'next/navigation';\n\nasync function requireUser(ctx) {\n  const user = ctx.cookies.session ? { name: ctx.cookies.session } : null;\n  if (!user) return redirect('/login');\n  return user;\n}\n\nexport async function getServerSideProps(ctx) {\n  const user = await requireUser(ctx);\n  return { props: { user } };\n}\n\nexport default function Admin({ user }) {\n  return <p>secret admin page for {String(user.name)}</p>;\n}\n",
+    'src/app/post/page.js': "import { redirect } from 'next/navigation';\n\nexport async function generateMetadata({ searchParams }) {\n  const { id } = await searchParams;\n  if (!id) return redirect('/posts');\n  return { title: id };\n}\n\nexport default function Post() {\n  return <p>post</p>;\n}\n",
     'src/app/sitemap.js': "export default function sitemap() {\n  return [{ url: 'https://example.com/', changeFrequency: 'daily' }];\n}\n",
     'src/app/robots.txt': 'User-agent: *\n',
     'src/app/page.js': "import Link from 'next/link';\nimport { Hello } from '../components/Hello';\nimport site from '../lib/site';\n\nexport default function Home() {\n  return (\n    <main>\n      <Hello name={site.name} />\n      <Link href=\"/blog/a/b\">Blog</Link>\n    </main>\n  );\n}\n",
     'src/app/blog/[...slug]/page.js': "export default function Post({ params }) {\n  return <p>slug={String(params.slug)}</p>;\n}\n",
     'src/components/Hello.js': "'use client';\nimport { usePathname } from 'next/navigation';\n\nexport function Hello({ name }) {\n  return <b>hello {name} at {usePathname()}</b>;\n}\n",
     'src/lib/site.js': "module.exports = { name: 'GioJS' };\n",
-  }, ['/', '/blog/a/b', '/search?q=gio', '/old', '/sitemap.xml']);
+  }, ['/', '/blog/a/b', '/search?q=gio', '/old', '/admin', '/post', '/post?id=7', '/sitemap.xml']);
   const home = assertOk(results, '/');
   assert.match(home, /<b>hello (<!-- -->)?GioJS(<!-- -->)? at (<!-- -->)?\/<\/b>/);
   assert.match(home, /<a [^>]*href="\/blog\/a\/b"/);
@@ -141,6 +144,13 @@ test('a migrated JavaScript app-router project renders: JSX moved to .jsx, Commo
   // permanentRedirect() → throw redirect(url, 308) from getServerSideProps.
   assert.equal(results['/old']?.status, 308);
   assert.deepEqual(results['/old']?.redirect, { destination: '/', permanent: true });
+  // `return redirect()` outside getServerSideProps' own body → throw redirect(): the guard still guards...
+  assert.equal(results['/admin']?.status, 303, results['/admin']?.html);
+  assert.deepEqual(results['/admin']?.redirect, { destination: '/login', permanent: false });
+  // ...and generateMetadata still redirects instead of merging the redirect as metadata.
+  assert.equal(results['/post']?.status, 303, results['/post']?.html);
+  assert.deepEqual(results['/post']?.redirect, { destination: '/posts', permanent: false });
+  assert.match(assertOk(results, '/post?id=7'), /<title>7 \| JS app<\/title>/);
   // app/sitemap.js is served as it was written.
   assert.match(assertOk(results, '/sitemap.xml'), /<url>\n<loc>https:\/\/example\.com\/<\/loc>\n<changefreq>daily<\/changefreq>\n<\/url>/);
 });
