@@ -21,6 +21,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadTsModule } from './load-ts.ts';
 import type { GioRequest } from './context.ts';
 import type { GioEventStream } from './sse.ts';
+import type { PageAction } from './action.ts';
 
 // JSX-bearing files (page, layout) may be .tsx/.jsx/.js; pure handlers
 // (route) may be .ts/.js. Order is precedence when several coexist.
@@ -103,6 +104,11 @@ export interface GsspContext {
   readonly host?: string | undefined;
   /** This request's id (X-Request-Id). Reading it does not make a render personal. */
   requestId?: string;
+  /**
+   * The page action's result, on the render that answers a POST to this
+   * page (see action.ts); absent on every GET.
+   */
+  actionData?: unknown;
 }
 
 /** `{ notFound: true }` form of a getServerSideProps result (same as calling notFound()). */
@@ -124,6 +130,8 @@ export interface PageModule {
   dynamic?: 'force-dynamic' | 'force-static' | 'auto';
   /** SSE route handler - return a GioEventStream to switch to streaming mode. */
   GET?: (req: GioRequest) => GioEventStream;
+  /** Handles POSTs to the page's URL (action.ts). */
+  action?: PageAction;
 }
 
 export interface RouteFile {

@@ -328,6 +328,9 @@ export default function Page() {
     // A helper guarded by server-only, used only by gSSP.
     'guarded-helper': page('FORM_GUARDED_HELPER', `import { query } from '../../lib/db.ts';
 export async function getServerSideProps() { return { props: { rows: query() } }; }`),
+    // A page action (forms) and the server-only helper only it uses.
+    action: page('FORM_ACTION', `import { query } from '../../lib/db.ts';
+export async function action() { return { marker: 'GIO_TEST_ACTION_DO_NOT_BUNDLE', rows: query() }; }`),
     // An npm SDK used only by gSSP, next to a bare side-effect import.
     'npm-sdk': page('FORM_NPM_SDK', `import '../../lib/polyfill.ts';
 import { Sdk } from 'gio-test-server-sdk';
@@ -388,6 +391,13 @@ export class Sdk { toString() { return 'GIO_TEST_SDK_CLASS'; } }
     expect(chunks).not.toContain('GIO_TEST_DB_DO_NOT_BUNDLE');
     expect(chunks).not.toContain('server-only module bundled for the browser');
     expect(clientBuildErrorFor('/guarded-helper')).toBeUndefined();
+  });
+
+  it('drops a page action and the server-only code only it uses', () => {
+    expect(chunks).toContain('FORM_ACTION');
+    expect(clientBuildErrorFor('/action')).toBeUndefined();
+    expect(chunks).not.toContain('GIO_TEST_ACTION_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('GIO_TEST_DB_DO_NOT_BUNDLE');
   });
 
   it('drops npm packages that only gSSP uses but keeps bare side-effect imports', () => {

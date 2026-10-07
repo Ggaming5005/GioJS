@@ -13,7 +13,23 @@ export { notFound } from './not-found.ts';
 export type { GioErrorProps, GioErrorInfo } from './segment-tree.ts';
 export { defineMiddleware } from './middleware.ts';
 export { cspNonce } from './csp.ts';
-export { UnsupportedMediaTypeError, isUnsupportedMediaTypeError } from './request-body.ts';
+export {
+  UnsupportedMediaTypeError,
+  isUnsupportedMediaTypeError,
+  MalformedBodyError,
+  isMalformedBodyError,
+} from './request-body.ts';
+export { redirect, isActionRedirect } from './action.ts';
+export type {
+  ActionArgs,
+  ActionResult,
+  ActionData,
+  ActionDataResult,
+  ActionRedirect,
+  RedirectInit,
+  PageAction,
+  WithActionData,
+} from './action.ts';
 export type {
   MiddlewareRules,
   MiddlewareRedirect,
