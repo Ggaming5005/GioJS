@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Security &amp; Auth</div>
       <h1>Security</h1>
       <p className="page-subtitle">
         Security headers, Content-Security-Policy with per-request nonces, CSRF protection,
@@ -85,7 +85,7 @@ hsts = true                                     # max-age=31536000
         and preload lists are hard to leave.
       </div>
 
-      <h2>Content-Security-Policy</h2>
+      <h2 id="csp">Content-Security-Policy</h2>
       <p>
         A CSP with a nonce is the strongest defense against cross-site scripting: the
         browser runs only scripts carrying the nonce of the current response, so markup an
@@ -208,7 +208,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         value removes the policy for those paths.
       </p>
 
-      <h2>CSRF protection</h2>
+      <h2 id="csrf">CSRF protection</h2>
       <p>
         On by default. Requests that change state - every method except{' '}
         <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code> and <code>TRACE</code> - to

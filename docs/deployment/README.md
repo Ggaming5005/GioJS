@@ -4,10 +4,13 @@ GioJS ships as two processes: the `giojs-server` Rust binary (handles HTTP, rout
 
 ## Which adapter to use
 
+Step-by-step recipes live on the docs site: [Deploying](https://giojs.com/docs/guides/deploying) (Docker, Fly.io, Railway, Render, systemd with nginx or Caddy) and the [production checklist](https://giojs.com/docs/guides/production-checklist). This file is the reference they point to, kept in sync with https://giojs.com/docs/deployment.
+
 | Situation | Recommended adapter |
 |-----------|---------------------|
-| Linux VPS or bare metal, long-running service | [Linux systemd](linux-systemd.md) |
-| Containerized, single instance or scaling | [Docker](docker.md) |
+| Linux VPS or bare metal, long-running service | [Linux systemd](https://giojs.com/docs/guides/deploying#vps) |
+| Containerized, single instance or scaling | [Docker](https://giojs.com/docs/guides/deploying#docker) |
+| Managed platform | [Fly.io](https://giojs.com/docs/guides/deploying#fly), [Railway](https://giojs.com/docs/guides/deploying#railway), [Render](https://giojs.com/docs/guides/deploying#render) |
 | Kubernetes, multi-instance behind a load balancer | [Kubernetes](kubernetes.md) |
 | Windows Server host | [Windows NSSM](windows-nssm.md) |
 
@@ -77,7 +80,7 @@ GioJS closes an HTTP/1.1 keep-alive connection after `header_read_timeout_secs` 
 
   The proxy reads each request head in full before forwarding it, so the longer head deadline costs nothing as long as clients can reach GioJS only through the proxy.
 
-A plain `proxy_pass` with no `upstream { keepalive }` block, as in the [systemd guide](linux-systemd.md), opens a fresh upstream connection per request and needs neither. See *Connection limits* on the configuration docs page for every connection setting.
+A plain `proxy_pass` with no `upstream { keepalive }` block, as in the [systemd guide](https://giojs.com/docs/guides/deploying#nginx), opens a fresh upstream connection per request and needs neither. See *Connection limits* on the configuration docs page for every connection setting.
 
 ### Client IPs, HTTPS and request IDs
 
@@ -99,7 +102,7 @@ The client IP is the first address in `X-Forwarded-For` that is not a trusted pr
 
 | Proxy | What to configure |
 |-------|-------------------|
-| nginx | `proxy_set_header Host $host;` `X-Forwarded-For $proxy_add_x_forwarded_for;` `X-Forwarded-Proto $scheme;` `X-Forwarded-Host $host;` `X-Request-Id $request_id;` - see the [systemd guide](linux-systemd.md). `trusted_proxies = ["127.0.0.1", "::1"]` on the same host. |
+| nginx | `proxy_set_header Host $host;` `X-Forwarded-For $proxy_add_x_forwarded_for;` `X-Forwarded-Proto $scheme;` `X-Forwarded-Host $host;` `X-Request-Id $request_id;` - see the [systemd guide](https://giojs.com/docs/guides/deploying#nginx). `trusted_proxies = ["127.0.0.1", "::1"]` on the same host. |
 | Caddy | `reverse_proxy 127.0.0.1:3000` already sets the three forwarding headers, keeps `Host`, and ignores spoofed ones. It passes a client's `X-Request-Id` through: add `header_up X-Request-Id {http.request.uuid}` inside the `reverse_proxy` block. Trust Caddy's address. |
 | Traefik | Sets the three forwarding headers and keeps `Host` by default. It passes a client's `X-Request-Id` through: strip it with a headers middleware (`customRequestHeaders: { X-Request-Id: "" }`) or set `accept_request_id = false`. Trust the network Traefik connects from (in Docker, e.g. `"172.16.0.0/12"`). |
 | AWS ALB | Appends `X-Forwarded-For`, sets `X-Forwarded-Proto`, keeps `Host`. It neither sets nor removes `X-Request-Id` and `X-Forwarded-Host`, so a client's own arrive as if the ALB sent them: set `accept_request_id = false`, and treat the host as client-supplied. Trust your VPC CIDR, e.g. `"10.0.0.0/16"`. |

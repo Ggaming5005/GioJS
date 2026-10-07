@@ -318,7 +318,7 @@ export default defineConfig({
         file.
       </p>
 
-      <h2>Connection limits</h2>
+      <h2 id="connection-limits">Connection limits</h2>
       <p>
         The Rust server bounds what a single client can hold open, so slow or idle
         connections cannot exhaust it. Every field lives in <code>[server]</code>, and
@@ -421,7 +421,7 @@ workers = 4        # or "auto": one per CPU core, at most 8`} />
         worker&apos;s load and restarts.
       </p>
 
-      <h2>Reverse proxies &amp; client IPs</h2>
+      <h2 id="reverse-proxies">Reverse proxies &amp; client IPs</h2>
       <p>
         Behind a reverse proxy or load balancer, every connection GioJS sees comes from
         the proxy. The real client is in a forwarding header the proxy adds - which any
@@ -502,7 +502,7 @@ trusted_proxies = ["127.0.0.1", "::1", "10.0.0.0/8"]   # IPs and CIDR blocks, IP
       <CodeBlock lang="toml" code={`[server]
 accept_request_id = false   # ignore incoming X-Request-Id, even from trusted proxies`} />
 
-      <h2>Health &amp; metrics</h2>
+      <h2 id="health-and-metrics">Health &amp; metrics</h2>
       <p>
         GioJS serves two built-in observability endpoints directly from the Rust
         layer - no Node round-trip, so they stay responsive even under load:
@@ -633,7 +633,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         <a href="/docs/security">Security</a> for every option.
       </p>
 
-      <h2>Rate limits</h2>
+      <h2 id="rate-limits">Rate limits</h2>
       <p>
         Each <code>[[rate_limits]]</code> rule is a token bucket per client:
         <code>per_ip</code> requests per <code>window_seconds</code>, plus{' '}
@@ -674,7 +674,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         </li>
       </ul>
 
-      <h2>Environment variables</h2>
+      <h2 id="environment-variables">Environment variables</h2>
       <p>
         A few runtime knobs live in the environment rather than
         <code>gio.toml</code>:
@@ -703,7 +703,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         </tbody>
       </table>
 
-      <h2>.env files</h2>
+      <h2 id="env-files">.env files</h2>
       <p>
         The server loads <code>.env</code> files from the project root (the parent of{' '}
         <code>app/</code>) at startup - before <code>gio.toml</code> is read and before
@@ -788,7 +788,7 @@ API_ENDPOINT=\${GIO_PUBLIC_API_URL}/v2`} />
         always read at runtime.
       </div>
 
-      <h2>Keeping server code out of the browser</h2>
+      <h2 id="server-only">Keeping server code out of the browser</h2>
       <p>
         Each route's client bundle imports only the page's (and its layouts') default
         export. <code>getServerSideProps</code> and <code>getStaticPaths</code> are

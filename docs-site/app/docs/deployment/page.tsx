@@ -2,92 +2,50 @@ import React from 'react';
 
 export const revalidate = false;
 
-interface DeploymentOption {
-  title: string;
-  description: string;
-  guide: string;
-  when: string;
-}
-
-const OPTIONS: DeploymentOption[] = [
-  {
-    title: 'Linux systemd',
-    description: 'Run GioJS as a systemd service on any Linux VPS or bare metal server. Survives reboots, logs to journald, supports nginx as a TLS reverse proxy.',
-    guide: '/docs/deployment#linux',
-    when: 'Linux VPS or bare metal, long-running service',
-  },
-  {
-    title: 'Docker',
-    description: 'Multi-stage Dockerfile keeps the final image small (~80MB) by building Rust and Node separately.',
-    guide: '/docs/deployment#docker',
-    when: 'Containerized, single instance or scaling',
-  },
-  {
-    title: 'Kubernetes',
-    description: 'Deployment, Service, Ingress, and HPA YAMLs. Uses a readinessProbe on /_gio/health and scales on CPU utilization.',
-    guide: '/docs/deployment#kubernetes',
-    when: 'Kubernetes, multi-instance behind a load balancer',
-  },
-  {
-    title: 'Windows NSSM',
-    description: 'Run GioJS as a Windows Service using NSSM. Survives reboots, writes to Event Viewer, and can be managed with PowerShell cmdlets.',
-    guide: '/docs/deployment#windows',
-    when: 'Windows Server host',
-  },
-];
-
 export default function DeploymentPage(): React.JSX.Element {
   return (
     <>
+      <div className="docs-eyebrow">Deployment &amp; Operations</div>
       <h1>Deployment</h1>
       <p className="page-subtitle">
-        GioJS ships as two processes: the <code>giojs-server</code> Rust binary (HTTP, routing,
-        caching) and a Node.js worker (React SSR). Both start automatically.
+        How a GioJS server behaves in production: static files, health checks, reverse
+        proxies, process supervision, sizing, and running several instances.
       </p>
 
       <p>
-        The simplest deploy is a standalone folder: <code>gio build standalone</code> packages
-        the server binary and a bundled worker into one directory that runs with{' '}
-        <code>node run.mjs</code> on any server that has only Node installed - see{' '}
-        <a href="/docs/standalone">Standalone Deploys</a>. The methods below run the app from
-        source instead, which keeps <code>npm update</code> as your upgrade path.
+        A GioJS server is two kinds of process: the <code>giojs-server</code> Rust binary
+        (HTTP, routing, caching, compression) and the Node.js worker(s) it spawns for React
+        rendering. Starting the server starts everything. For step-by-step setups - Docker,
+        Fly.io, Railway, Render, or a Linux server with systemd and nginx or Caddy - follow{' '}
+        <a href="/docs/guides/deploying">Deploying</a>; before going live, work through the{' '}
+        <a href="/docs/guides/production-checklist">production checklist</a>. This page is
+        the reference those guides point to.
       </p>
 
-      <h2>Before deploying</h2>
-      <ol>
-        <li>Typecheck your app with <code>tsc --noEmit</code> - there is no separate build step; the server compiles and scans routes at startup</li>
-        <li>Ensure Node.js 20+ is installed on the target host</li>
-        <li>Place the <code>giojs-server</code> binary and your app directory on the host</li>
-        <li>Set <code>NODE_ENV=production</code></li>
-      </ol>
-
-      <h2>Choose a deployment method</h2>
       <table>
         <thead>
-          <tr><th>Method</th><th>When to use</th></tr>
+          <tr><th>Situation</th><th>Recipe</th></tr>
         </thead>
         <tbody>
-          {OPTIONS.map(opt => (
-            <tr key={opt.title}>
-              <td><strong>{opt.title}</strong></td>
-              <td>{opt.when}</td>
-            </tr>
-          ))}
+          <tr><td>Container, single instance or scaling</td><td><a href="/docs/guides/deploying#docker">Docker</a> (a standalone build in a slim Node image)</td></tr>
+          <tr><td>Managed platform</td><td><a href="/docs/guides/deploying#fly">Fly.io</a>, <a href="/docs/guides/deploying#railway">Railway</a>, <a href="/docs/guides/deploying#render">Render</a></td></tr>
+          <tr><td>Linux VPS or bare metal</td><td><a href="/docs/guides/deploying#vps">systemd + nginx or Caddy</a></td></tr>
+          <tr><td>Kubernetes, Windows Server</td><td><code>docs/deployment/kubernetes.md</code> and <code>docs/deployment/windows-nssm.md</code> in the repository</td></tr>
+          <tr><td>No server features needed</td><td><a href="/docs/static-export">Static export</a> to any static host</td></tr>
         </tbody>
       </table>
 
-      {OPTIONS.map(opt => (
-        <section key={opt.title}>
-          <h2>{opt.title}</h2>
-          <p>{opt.description}</p>
-          <p>
-            Full guide: <code>docs/deployment/{opt.title.toLowerCase().replace(/\s+/g, '-')}.md</code>
-            {' '}in the repository.
-          </p>
-        </section>
-      ))}
+      <p>
+        Ship either a <a href="/docs/standalone">standalone folder</a> (
+        <code>gio build standalone</code>: the server binary and a bundled worker that run with{' '}
+        <code>node run.mjs</code> on any host with Node 20+) or the project itself (
+        <code>npm ci --omit=dev</code> and <code>npm start</code> - no build step, and{' '}
+        <code>npm update</code> stays your upgrade path). Either way, run with{' '}
+        <code>NODE_ENV=production</code> (or unset) and typecheck before you ship (
+        <code>tsc --noEmit</code>).
+      </p>
 
-      <h2>Static files</h2>
+      <h2 id="static-files">Static files</h2>
       <p>
         Ship <code>public/</code> next to <code>app/</code>. Rust serves its files at the
         site root (<code>/robots.txt</code>, <code>/favicon.ico</code>,{' '}
@@ -106,7 +64,7 @@ export default function DeploymentPage(): React.JSX.Element {
         the same URLs.
       </p>
 
-      <h2>Health check</h2>
+      <h2 id="health-check">Health check</h2>
       <p>
         <code>/_gio/health</code> returns JSON and always answers 200 - cached and static
         content keeps serving even while the Node worker is respawning. <code>nodeReady</code>{' '}
@@ -128,7 +86,7 @@ export default function DeploymentPage(): React.JSX.Element {
 }`}</code>
       </pre>
 
-      <h2>Behind a reverse proxy or load balancer</h2>
+      <h2 id="reverse-proxy">Behind a reverse proxy or load balancer</h2>
       <p>
         GioJS closes an HTTP/1.1 keep-alive connection after{' '}
         <code>header_read_timeout_secs</code> (10 seconds by default) without a new request,
@@ -160,7 +118,7 @@ idle_timeout_secs = 65`}</code>
         See <a href="/docs/security">Security</a>.
       </p>
 
-      <h3>Client IPs, HTTPS and request IDs</h3>
+      <h3 id="client-ips">Client IPs, HTTPS and request IDs</h3>
       <p>
         Behind a proxy, every connection comes from the proxy, so rate limits would put all
         visitors in one bucket and <code>req.ip</code> would be the proxy&apos;s address.
@@ -265,7 +223,7 @@ accept_request_id = false   # the LB would pass a client's X-Request-Id through`
         <a href="/docs/observability">Observability</a>.
       </p>
 
-      <h2>Process supervision</h2>
+      <h2 id="process-supervision">Process supervision</h2>
       <p>
         One GioJS server is two processes: the Rust server (the one your supervisor -
         systemd, Docker, Kubernetes, PM2 - starts) and the Node worker it spawns and
@@ -347,7 +305,7 @@ workers = "auto"   # one per CPU core, at most 8 - or an exact count`}</code>
         total memory under load.
       </p>
 
-      <h2>Multi-instance deployments</h2>
+      <h2 id="multi-instance">Multi-instance deployments</h2>
       <p>
         The page cache is per-instance (in-memory LRU plus a local disk tier) - there is no
         shared cache backend yet. When running multiple instances (Kubernetes, multiple VMs),
