@@ -4642,6 +4642,62 @@ async function strictConfigPhase() {
       assert.match(JSON.parse(check.stdout).errors[0], /^\[cache\] disk_path: .*inside the public\/ directory/);
       assert.equal(existsSync(join(projectDir, 'public', '_cache')), false, '--check-config creates nothing');
     });
+
+    // Refusals that come after gio.toml parses: --check-config shares
+    // startup's validation, so it must refuse exactly what startup refuses,
+    // with the same message - and never echo a token.
+    const secret = 's3cr3t-revalidate-token-0123456789abcdef';
+    const refusals = [
+      [
+        'a CSRF trusted origin without a scheme',
+        server + '[security.csrf]\ntrusted_origins = ["admin.example.com"]\n',
+        {},
+        /\[security\.csrf\] trusted_origins entry "admin\.example\.com" is not an origin/,
+      ],
+      [
+        'a revalidation token that is too short',
+        server + '[revalidate]\ntoken = "short"\n',
+        {},
+        /the revalidation token \(\[revalidate\] token\) is 5 bytes; at least 32 are required/,
+      ],
+      [
+        'a GIO_REVALIDATE_TOKEN that is too short',
+        server,
+        { GIO_REVALIDATE_TOKEN: 'tiny' },
+        /the revalidation token \(GIO_REVALIDATE_TOKEN\) is 4 bytes/,
+      ],
+      [
+        'TLS without a certificate',
+        server + '[server.tls]\nenabled = true\n',
+        {},
+        /TLS enabled but cert_path not set in gio\.toml/,
+      ],
+      [
+        'a syntax error on a line holding a token',
+        server + `[revalidate]\ntoken = "${secret}" extra\n`,
+        {},
+        /cannot parse \S*gio\.toml:6:52: expected newline/,
+      ],
+    ];
+    for (const [label, toml, extraEnv, expected] of refusals) {
+      await writeFile(join(projectDir, 'gio.toml'), toml);
+      const env = { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production', ...extraEnv };
+      if (!extraEnv.GIO_REVALIDATE_TOKEN) delete env.GIO_REVALIDATE_TOKEN;
+      await test(`${label}: startup and --check-config both refuse it`, async () => {
+        const run = spawnSync(binary, [], { cwd: projectDir, env, encoding: 'utf8', timeout: 30_000 });
+        assert.equal(run.status, 1, `exit status ${run.status} (signal ${run.signal}), stderr:\n${run.stderr}`);
+        assert.match(run.stderr, /configuration error: /);
+        assert.match(run.stderr, expected);
+        const check = spawnSync(binary, ['--check-config'], { cwd: projectDir, env, encoding: 'utf8', timeout: 30_000 });
+        assert.equal(check.status, 1, `--check-config said ok:\n${check.stdout}`);
+        const report = JSON.parse(check.stdout);
+        assert.equal(report.ok, false);
+        assert.match(report.errors.join('\n'), expected);
+        for (const output of [check.stdout, run.stderr]) {
+          assert.ok(!output.includes(secret), `a token value leaked:\n${output}`);
+        }
+      });
+    }
   } catch (err) {
     console.error(`\nintegration (strict gio.toml): FAILED\n${err?.stack ?? err}`);
     process.exitCode = 1;

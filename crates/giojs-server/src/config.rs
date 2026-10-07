@@ -33,9 +33,14 @@ pub enum ConfigError {
         path: String,
         source: std::io::Error,
     },
-    #[error("cannot parse {path}: {source}")]
+    /// `location` is `path:line:column` when toml reports a position. Not
+    /// toml's own rendering, which quotes the offending line: gio.toml holds
+    /// secrets (`[revalidate] token`, `[metrics] token`) and this message
+    /// reaches logs and `--check-config` reports - like a .env error, it
+    /// carries a position and the reason only.
+    #[error("cannot parse {location}: {}", one_line(.source.message()))]
     Parse {
-        path: String,
+        location: String,
         source: toml::de::Error,
     },
     /// `location` is `path:line`; `hint` starts with " - " when present.
@@ -1387,6 +1392,16 @@ fn location(file: &str, line: Option<usize>) -> String {
     }
 }
 
+/// toml's multi-line messages ("invalid string\nexpected `\"`") on one line.
+fn one_line(message: &str) -> String {
+    message
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// A deserialization error with the key path and line it belongs to, and
 /// for an unknown key the closest valid key at that level (or what replaced
 /// a retired one).
@@ -1400,10 +1415,17 @@ fn describe_error(
         config_diagnostics::key_at(doc, span.start).map(|key| (key, span.start))
     });
     let Some((key, offset)) = located else {
-        return ConfigError::Parse {
-            path: file.to_string(),
-            source,
+        let location = match source.span() {
+            Some(span) => {
+                let before = raw.get(..span.start).unwrap_or(raw);
+                let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+                let column = before[line_start..].chars().count() + 1;
+                let line = config_diagnostics::line_of(raw, before.len());
+                format!("{}:{column}", location(file, Some(line)))
+            }
+            None => file.to_string(),
         };
+        return ConfigError::Parse { location, source };
     };
     let location = location(file, Some(config_diagnostics::line_of(raw, offset)));
     let message = source.message().trim_end();
@@ -1952,6 +1974,30 @@ check_origin = true
                 "{body} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn syntax_errors_give_a_position_never_the_line() {
+        let secret = "s3cr3t-revalidate-token-0123456789abcdef";
+        for (raw, position) in [
+            (format!("[revalidate]\ntoken = \"{secret}\" extra\n"), "gio.toml:2:"),
+            (format!("[revalidate]\ntoken = \"{secret}\n"), "gio.toml:2:"),
+            (format!("[metrics]\ntoken = '{secret}' = 1\n"), "gio.toml:2:"),
+            (format!("[revalidate]\ntoken = {secret}\n"), "gio.toml:2:"),
+            (format!("[metrics]\ntoken = \"{secret}\"\ntoken = \"{secret}\"\n"), "gio.toml:3:"),
+        ] {
+            let err = GioConfig::parse(&raw, "gio.toml").expect_err(&raw);
+            let message = err.to_string();
+            assert!(matches!(err, ConfigError::Parse { .. }), "{raw}: {message}");
+            assert!(!message.contains("s3cr3t"), "the value leaked: {message}");
+            assert!(message.starts_with(&format!("cannot parse {position}")), "{message}");
+            assert!(!message.contains('\n'), "one line: {message}");
+        }
+        let err = GioConfig::parse("[revalidate]\ntoken = \"x\" extra\n", "gio.toml").unwrap_err();
+        assert!(
+            err.to_string().starts_with("cannot parse gio.toml:2:13: "),
+            "line and column of the stray text: {err}"
+        );
     }
 
     #[test]

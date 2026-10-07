@@ -60,7 +60,8 @@ gio --version          # CLI, server binary and @gio.js/core versions (-v)`} />
       <CodeBlock lang="bash" code={`gio dev [--port <port>] [--host <ip>] [--open]
 
   -p, --port <port>   port to listen on (sets GIO_PORT)
-  -H, --host <ip>     address to bind (sets GIO_HOST); "localhost" means 127.0.0.1
+  -H, --host <ip>     address to bind (sets GIO_HOST); "localhost" means 127.0.0.1,
+                      IPv6 as :: or [::] (every interface), ::1
       --open          open the app in a browser once it is ready`} />
       <p>
         Starts the server with <code>NODE_ENV=development</code>. Once{' '}
@@ -77,7 +78,8 @@ gio --version          # CLI, server binary and @gio.js/core versions (-v)`} />
         <code>0.0.0.0:3000</code> (see{' '}
         <a href="/docs/configuration#listen-address">Listen address</a>). The host must be an
         IP address: <code>0.0.0.0</code> for every interface, <code>127.0.0.1</code> for this
-        machine only.
+        machine only, and for IPv6 <code>::</code> / <code>::1</code> (with or without
+        brackets - <code>GIO_HOST</code> receives them bracketed, as the server expects).
       </p>
       <h3>Dev mode file watching</h3>
       <p>In dev mode the server watches the whole project, not just app/ - edits to components/, lib/, src/, hooks/, gio.toml, middleware.ts, or tsconfig.json clear the page cache, re-transform app CSS, restart the Node worker, and reload open browser tabs. Edits under public/ refresh which files are served at the site root and reload the browser without a worker restart.</p>
@@ -165,12 +167,28 @@ gio build standalone [--out <dir>] [--target <platform>]`} />
         <code>&quot;.gio/routes.d.ts&quot;</code> in <code>include</code> (TypeScript&apos;s
         wildcards skip dot-folders).
       </p>
+      <p>
+        <code>gio routes</code> and <code>gio typegen</code> exit 1 when there is no{' '}
+        <code>app/</code> directory (run them from the project root, or set{' '}
+        <code>GIO_APP_DIR</code>), so a CI step in the wrong directory fails instead of
+        writing <code>.gio/</code> somewhere else.
+      </p>
 
       <h2 id="doctor">gio doctor</h2>
-      <CodeBlock lang="bash" code={`gio doctor [--json]`} />
+      <CodeBlock lang="bash" code={`gio doctor [--dev | --prod] [--json]`} />
       <p>
         Checks what most often breaks a GioJS app, and prints a fix for every problem. Exits 1
         when a check fails; warnings and hints do not.
+      </p>
+      <p>
+        The configuration checked is the one <code>NODE_ENV</code> selects, as for the server:
+        development (<code>.env.development*</code>, the ephemeral dev session secret) when{' '}
+        <code>NODE_ENV=development</code>, production (what <code>gio start</code> runs)
+        otherwise. The output says which one it checked. <code>--dev</code> and{' '}
+        <code>--prod</code> choose it explicitly. When production is only assumed because{' '}
+        <code>NODE_ENV</code> is unset, a missing <code>GIO_SESSION_SECRET</code> is a warning,
+        not an error: <code>gio dev</code> runs the project fine. Use <code>--prod</code> in a
+        deploy pipeline to make it fail.
       </p>
       <table>
         <thead>
@@ -183,15 +201,15 @@ gio build standalone [--out <dir>] [--target <platform>]`} />
           <tr><td>App directory</td><td>There is no <code>app/</code> (run from the project root, or set <code>GIO_APP_DIR</code>)</td></tr>
           <tr><td>gio.toml</td><td>The server would refuse to start with it - validated by the server binary itself (<a href="#check-config"><code>--check-config</code></a>); rules it would skip are warnings</td></tr>
           <tr><td>tsconfig</td><td><code>tsconfig.json</code> / <code>jsconfig.json</code> does not include <code>.gio/routes.d.ts</code> (warning)</td></tr>
-          <tr><td>Session secret</td><td><code>require_session</code> guards (gio.toml or <code>middleware.ts</code>) exist but <code>GIO_SESSION_SECRET</code> is unset in production, or the secret is invalid</td></tr>
+          <tr><td>Session secret</td><td><code>require_session</code> guards (gio.toml or <code>middleware.ts</code>) exist but <code>GIO_SESSION_SECRET</code> is unset in production (a warning when production is only assumed), or the secret is invalid</td></tr>
           <tr><td>Port</td><td>The port the server would bind is already in use (warning)</td></tr>
           <tr><td>Proxy</td><td>Deploy files (Dockerfile, fly.toml, ...) or rate limits suggest a reverse proxy but <code>[server] trusted_proxies</code> is empty (hint)</td></tr>
           <tr><td>Cache directory</td><td>The page cache directory is not writable</td></tr>
         </tbody>
       </table>
       <p>
-        <code>--json</code> prints <code>{'{ ok, environment, checks }'}</code> - attach it to
-        bug reports.
+        <code>--json</code> prints <code>{'{ ok, mode, environment, checks }'}</code> - attach
+        it to bug reports.
       </p>
 
       <h2 id="info">gio info</h2>
@@ -240,14 +258,23 @@ gio bench --suite /,/posts/1 [--base <url>]`} />
         <code>npx</code>, <code>pnpm dlx</code>, <code>bunx</code>), so both stay on the same
         release. <code>npm create giojs@latest -- migrate ./my-next-app</code> does the same.
       </p>
+      <p>
+        Older <code>create-giojs</code> releases treat any argument they do not know as the
+        name of a new project and scaffold it, so <code>gio</code> never runs one to find out
+        what it supports. It reads the subcommands from <code>create-giojs</code>&apos;s{' '}
+        <code>package.json</code> instead (each one is exported as{' '}
+        <code>create-giojs/&lt;name&gt;</code>): from disk for an installed copy, from the
+        registry (<code>npm view</code>, which downloads and runs nothing) before{' '}
+        <code>npx</code>. A release without the subcommand is reported, with the version to
+        install, and never run.
+      </p>
 
       <h2 id="add">gio add</h2>
       <CodeBlock lang="bash" code={`gio add <feature>
 gio add --help         # the features this create-giojs offers`} />
       <p>
         Adds a feature to the current app by running <code>create-giojs add</code>, resolved
-        like <code>gio migrate</code>. A <code>create-giojs</code> release without the{' '}
-        <code>add</code> command is reported as such and never run.
+        and checked like <code>gio migrate</code>.
       </p>
 
       <h2 id="environment">Environment variables</h2>
@@ -300,10 +327,15 @@ gio add --help         # the features this create-giojs offers`} />
       <p>
         Loads the <code>.env</code> files and <code>gio.toml</code> exactly as startup does,
         prints a JSON report and exits - <code>0</code> when the server would start,{' '}
-        <code>1</code> with the startup error in <code>errors</code> - without binding a port
-        or starting the worker. Useful as a CI step; <code>gio doctor</code>,{' '}
-        <code>gio dev</code> and <code>gio start</code> use it. Secrets are reported only as{' '}
-        <code>unset</code> / <code>valid</code> / <code>invalid</code>.
+        <code>1</code> with the startup errors in <code>errors</code> - without binding a port
+        or starting the worker. It runs the same validation as startup:{' '}
+        <code>gio.toml</code> itself, the page cache directory&apos;s placement, <code>[security]</code> (headers,
+        CSP, CSRF origins and exemptions), the revalidation token (<code>[revalidate]
+        token</code> or <code>GIO_REVALIDATE_TOKEN</code>) and the TLS certificate and key.
+        Useful as a CI step; <code>gio doctor</code>, <code>gio dev</code> and{' '}
+        <code>gio start</code> use it. Secrets are reported only as <code>unset</code> /{' '}
+        <code>valid</code> / <code>invalid</code>, and a <code>gio.toml</code> syntax error is
+        reported by line and column, without quoting the line.
       </p>
 
       <h2 id="create-giojs">create-giojs</h2>

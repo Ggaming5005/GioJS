@@ -8,8 +8,14 @@
 //! JavaScript, and `gio dev` / `gio start` to learn the listen address the
 //! environment, the .env files and gio.toml resolve to before printing URLs.
 //!
+//! Startup and the check share `validate`: every refusal startup makes after
+//! gio.toml parses ([cache] placement, [security], the revalidation token,
+//! TLS) lives there once, so the check cannot say yes to a configuration the
+//! server refuses.
+//!
 //! The report never carries a value that may be a secret (session secrets,
-//! metrics tokens, .env contents) - only whether one is set and valid.
+//! metrics and revalidation tokens, .env contents) - only whether one is set
+//! and valid. Config errors name a key or a position, never a quoted line.
 
 use std::path::{Path, PathBuf};
 
@@ -18,7 +24,9 @@ use serde_json::{json, Value};
 use crate::client_identity::ProxyHeaders;
 use crate::config::{self, ConfigError, GioConfig};
 use crate::env_files::{EnvFileError, LoadedEnvFiles};
+use crate::revalidate;
 use crate::rules::RuleSet;
+use crate::security::SecurityPolicy;
 use crate::session_token::{self, SessionKeys};
 
 /// The argument that selects this mode; only ever the first one.
@@ -29,35 +37,120 @@ pub fn requested() -> bool {
     std::env::args_os().nth(1).is_some_and(|arg| arg == FLAG)
 }
 
+/// The process environment startup checks gio.toml against: where the app,
+/// public/ and the page cache live, and the revalidation token override.
+pub struct StartupEnv {
+    pub project_root: PathBuf,
+    pub app_dir: String,
+    pub public_dir: PathBuf,
+    /// GIO_CACHE_DIR, when set and non-empty.
+    pub cache_dir_env: Option<String>,
+    /// GIO_REVALIDATE_TOKEN, as set (resolve_token ignores an empty one).
+    pub revalidate_token_env: Option<String>,
+}
+
+impl StartupEnv {
+    pub fn from_process() -> Self {
+        let project_root = GioConfig::project_root();
+        // public/ sits next to app/ like gio.toml does, so a server started
+        // from another directory (GIO_APP_DIR=path/to/app) still finds it.
+        let public_dir = std::env::var("GIO_PUBLIC_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| project_root.join("public"));
+        StartupEnv {
+            app_dir: std::env::var("GIO_APP_DIR").unwrap_or_else(|_| "app".to_string()),
+            public_dir,
+            cache_dir_env: std::env::var("GIO_CACHE_DIR")
+                .ok()
+                .filter(|dir| !dir.is_empty()),
+            revalidate_token_env: std::env::var(revalidate::TOKEN_ENV).ok(),
+            project_root,
+        }
+    }
+}
+
+/// What startup builds from a configuration `validate` accepted.
+pub struct Validated {
+    /// The page cache directory (not created yet).
+    pub cache_dir: PathBuf,
+    /// [security], compiled; the nonce placeholder is installed later.
+    pub security: SecurityPolicy,
+    /// The revalidation endpoint's token; None leaves the endpoint off.
+    pub revalidate_token: Option<String>,
+    /// Present when [server.tls] is enabled.
+    pub tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+}
+
+/// Every check startup makes on a parsed gio.toml before it creates a
+/// directory, spawns the worker or binds: the page cache directory's
+/// placement, [security] (headers, CSP, CSRF origins and exemptions), the
+/// revalidation token (GIO_REVALIDATE_TOKEN or [revalidate] token) and the
+/// TLS certificate and key. Errors are the messages startup prints after
+/// "configuration error:", all of them rather than the first.
+pub fn validate(config: &GioConfig, env: &StartupEnv) -> Result<Validated, Vec<String>> {
+    let mut errors = Vec::new();
+
+    let cache_dir = config
+        .cache
+        .disk_dir(&env.project_root, env.cache_dir_env.as_deref());
+    // A directory inside public/ must not even appear.
+    if let Err(error) =
+        config::check_cache_dir_placement(&cache_dir, Path::new(&env.app_dir), &env.public_dir)
+    {
+        let source = match env.cache_dir_env {
+            Some(_) => "GIO_CACHE_DIR",
+            None => "[cache] disk_path",
+        };
+        errors.push(format!("{source}: {error}"));
+    }
+
+    let security = SecurityPolicy::new(&config.security, config.server.tls.enabled)
+        .map_err(|error| errors.push(error.to_string()))
+        .ok();
+
+    let revalidate_token = revalidate::resolve_token(
+        env.revalidate_token_env.as_deref(),
+        &config.revalidate.token,
+    )
+    .map_err(|error| errors.push(error.to_string()))
+    .ok();
+
+    let tls_acceptor = if config.server.tls.enabled {
+        crate::load_tls_acceptor(&config.server.tls)
+            .map(Some)
+            .map_err(|error| errors.push(format!("{error:#}")))
+            .ok()
+    } else {
+        Some(None)
+    };
+
+    match (security, revalidate_token, tls_acceptor) {
+        (Some(security), Some(revalidate_token), Some(tls_acceptor)) if errors.is_empty() => {
+            Ok(Validated {
+                cache_dir,
+                security,
+                revalidate_token,
+                tls_acceptor,
+            })
+        }
+        _ => Err(errors),
+    }
+}
+
 /// The process inputs the report depends on, gathered once so the report
 /// itself is a pure function of them.
 struct CheckEnv {
     /// gio.toml as startup would read it, when the file exists.
     config_file: Option<PathBuf>,
-    project_root: PathBuf,
-    app_dir: PathBuf,
-    public_dir: PathBuf,
-    cache_dir_env: Option<String>,
+    startup: StartupEnv,
     session_secret: String,
 }
 
 impl CheckEnv {
     fn from_process() -> Self {
-        let project_root = GioConfig::project_root();
-        let config_file = Some(GioConfig::path()).filter(|path| path.exists());
-        // The same defaults `run` in main.rs applies.
-        let app_dir = PathBuf::from(std::env::var("GIO_APP_DIR").unwrap_or_else(|_| "app".into()));
-        let public_dir = std::env::var("GIO_PUBLIC_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| project_root.join("public"));
         CheckEnv {
-            config_file,
-            project_root,
-            app_dir,
-            public_dir,
-            cache_dir_env: std::env::var("GIO_CACHE_DIR")
-                .ok()
-                .filter(|dir| !dir.is_empty()),
+            config_file: Some(GioConfig::path()).filter(|path| path.exists()),
+            startup: StartupEnv::from_process(),
             session_secret: std::env::var(session_token::SECRET_ENV).unwrap_or_default(),
         }
     }
@@ -98,17 +191,10 @@ fn report(
         Err(error) => return with_fields(base, json!({ "ok": false, "errors": [error.to_string()] })),
     };
 
-    let mut errors = Vec::new();
+    let errors = validate(&config, &env.startup).err().unwrap_or_default();
     let cache_dir = config
         .cache
-        .disk_dir(&env.project_root, env.cache_dir_env.as_deref());
-    if let Err(error) = config::check_cache_dir_placement(&cache_dir, &env.app_dir, &env.public_dir) {
-        let source = match env.cache_dir_env {
-            Some(_) => "GIO_CACHE_DIR",
-            None => "[cache] disk_path",
-        };
-        errors.push(format!("{source}: {error}"));
-    }
+        .disk_dir(&env.startup.project_root, env.startup.cache_dir_env.as_deref());
 
     let (session_secret, session_secret_error) =
         if env.session_secret.split(',').all(|secret| secret.trim().is_empty()) {
@@ -181,10 +267,13 @@ mod tests {
     fn env_in(root: &Path) -> CheckEnv {
         CheckEnv {
             config_file: Some(root.join("gio.toml")),
-            project_root: root.to_path_buf(),
-            app_dir: root.join("app"),
-            public_dir: root.join("public"),
-            cache_dir_env: None,
+            startup: StartupEnv {
+                project_root: root.to_path_buf(),
+                app_dir: root.join("app").display().to_string(),
+                public_dir: root.join("public"),
+                cache_dir_env: None,
+                revalidate_token_env: None,
+            },
             session_secret: String::new(),
         }
     }
@@ -252,11 +341,125 @@ mod tests {
     fn cache_dir_inside_public_fails_the_check() {
         let root = test_root();
         let mut env = env_in(&root);
-        env.cache_dir_env = Some(root.join("public/cache").display().to_string());
+        env.startup.cache_dir_env = Some(root.join("public/cache").display().to_string());
         let report = report(&loaded(&[]), parse(""), &env);
         assert_eq!(report["ok"], false);
         let error = report["errors"][0].as_str().unwrap();
         assert!(error.starts_with("GIO_CACHE_DIR: "), "{error}");
+    }
+
+    #[test]
+    fn security_settings_startup_refuses_fail_the_check() {
+        let root = test_root();
+        for (toml, expected) in [
+            (
+                "[security.csrf]\ntrusted_origins = [\"admin.example.com\"]\n",
+                "[security.csrf] trusted_origins entry \"admin.example.com\"",
+            ),
+            (
+                "[security.csrf]\nexempt = [\"api/webhooks\"]\n",
+                "[security.csrf] exempt entry \"api/webhooks\"",
+            ),
+            (
+                "[security.headers]\n\"bad header\" = \"x\"\n",
+                "[security.headers] \"bad header\" is not a valid header name",
+            ),
+        ] {
+            let report = report(&loaded(&[]), parse(toml), &env_in(&root));
+            assert_eq!(report["ok"], false, "{toml}: {report}");
+            let error = report["errors"][0].as_str().unwrap();
+            assert!(error.starts_with(expected), "{toml}: {error}");
+            assert!(report["listen"].is_object(), "the rest of the report is still there");
+        }
+    }
+
+    #[test]
+    fn a_short_revalidation_token_fails_the_check_without_its_value() {
+        let root = test_root();
+        let report_value = report(
+            &loaded(&[]),
+            parse("[revalidate]\ntoken = \"short-token\"\n"),
+            &env_in(&root),
+        );
+        assert_eq!(report_value["ok"], false);
+        let error = report_value["errors"][0].as_str().unwrap();
+        assert!(error.contains("[revalidate] token) is 11 bytes"), "{error}");
+        assert!(!report_value.to_string().contains("short-token"));
+
+        // GIO_REVALIDATE_TOKEN outranks gio.toml, as at startup.
+        let mut env = env_in(&root);
+        env.startup.revalidate_token_env = Some("tiny".into());
+        let report_value = report(&loaded(&[]), parse(""), &env);
+        let error = report_value["errors"][0].as_str().unwrap();
+        assert!(error.contains("GIO_REVALIDATE_TOKEN) is 4 bytes"), "{error}");
+        env.startup.revalidate_token_env = Some("t".repeat(32));
+        assert_eq!(report(&loaded(&[]), parse(""), &env)["ok"], true);
+    }
+
+    #[test]
+    fn tls_without_a_certificate_fails_the_check() {
+        let root = test_root();
+        let no_cert = report(
+            &loaded(&[]),
+            parse("[server.tls]\nenabled = true\n"),
+            &env_in(&root),
+        );
+        assert_eq!(no_cert["ok"], false);
+        let error = no_cert["errors"][0].as_str().unwrap();
+        assert_eq!(error, "TLS enabled but cert_path not set in gio.toml");
+
+        let missing_files = report(
+            &loaded(&[]),
+            parse(
+                "[server.tls]\nenabled = true\ncert_path = \"/nonexistent/cert.pem\"\n\
+                 key_path = \"/nonexistent/key.pem\"\n",
+            ),
+            &env_in(&root),
+        );
+        let error = missing_files["errors"][0].as_str().unwrap();
+        assert!(error.contains("cert not found at /nonexistent/cert.pem"), "{error}");
+    }
+
+    #[test]
+    fn every_refusal_is_reported_not_just_the_first() {
+        let root = test_root();
+        let mut env = env_in(&root);
+        env.startup.cache_dir_env = Some(root.join("public/cache").display().to_string());
+        let errors = validate(
+            &parse("[security.csrf]\ntrusted_origins = [\"nope\"]\n\n[revalidate]\ntoken = \"x\"\n")
+                .unwrap(),
+            &env.startup,
+        )
+        .err()
+        .expect("refused");
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(errors[0].starts_with("GIO_CACHE_DIR: "));
+        assert!(errors[1].starts_with("[security.csrf] "));
+        assert!(errors[2].starts_with("the revalidation token "));
+    }
+
+    #[test]
+    fn validate_accepts_the_defaults() {
+        let root = test_root();
+        let validated = validate(&parse("").unwrap(), &env_in(&root).startup)
+            .unwrap_or_else(|errors| panic!("{errors:?}"));
+        assert!(validated.cache_dir.starts_with(&root));
+        assert!(validated.revalidate_token.is_none());
+        assert!(validated.tls_acceptor.is_none());
+    }
+
+    #[test]
+    fn a_syntax_error_never_copies_a_secret_into_the_report() {
+        let root = test_root();
+        let report = report(
+            &loaded(&[]),
+            parse("[revalidate]\ntoken = \"s3cr3t-revalidate-token-0123456789abcdef\" extra\n"),
+            &env_in(&root),
+        );
+        assert_eq!(report["ok"], false);
+        assert!(!report.to_string().contains("s3cr3t"), "{report}");
+        let error = report["errors"][0].as_str().unwrap();
+        assert!(error.starts_with("cannot parse gio.toml:2:"), "{error}");
     }
 
     #[test]

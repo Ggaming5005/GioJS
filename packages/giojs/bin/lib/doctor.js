@@ -14,7 +14,7 @@ const net = require('net');
 const os = require('os');
 const { dirname, join } = require('path');
 const { locateBinary, missingBinaryMessage } = require('../find-binary');
-const { resolveConfig } = require('./config');
+const { bareHost, displayAddress, resolveConfig } = require('./config');
 const { detectPackageManager, findPackage, ownPackage, projectPaths, readJson } = require('./project');
 
 const MIN_NODE = '>=20';
@@ -121,11 +121,12 @@ function readText(path) {
   }
 }
 
+/** Whether `host` (as the server writes it: IPv6 in brackets) : `port` can be bound. */
 function portState(host, port) {
   return new Promise((resolve) => {
     const probe = net.createServer();
     probe.once('error', (err) => resolve(err.code === 'EADDRINUSE' ? 'in-use' : err.code || 'error'));
-    probe.listen({ host, port, exclusive: true }, () => probe.close(() => resolve('free')));
+    probe.listen({ host: bareHost(host), port, exclusive: true }, () => probe.close(() => resolve('free')));
   });
 }
 
@@ -156,8 +157,24 @@ function libc() {
   }
 }
 
+/**
+ * The configuration doctor checks: `mode` ('development' from --dev,
+ * 'production' from --prod) wins, else NODE_ENV decides as it does for the
+ * server - development only when it says so. `explicit` is false when
+ * production was only assumed because NODE_ENV is unset or unusual.
+ */
+function checkedMode(env, mode = null) {
+  if (mode) return { name: mode, explicit: true, source: mode === 'development' ? '--dev' : '--prod' };
+  const explicit = env.NODE_ENV === 'development' || env.NODE_ENV === 'production';
+  return {
+    name: env.NODE_ENV === 'development' ? 'development' : 'production',
+    explicit,
+    source: explicit ? 'NODE_ENV' : null,
+  };
+}
+
 /** Everything the report and the checks look at, gathered once. */
-async function gatherFacts({ env = process.env, cwd = process.cwd(), probePort = true } = {}) {
+async function gatherFacts({ env = process.env, cwd = process.cwd(), probePort = true, mode = null } = {}) {
   const { projectRoot, appDir } = projectPaths(env, cwd);
   const own = ownPackage();
   const ownDir = join(__dirname, '..', '..');
@@ -169,7 +186,11 @@ async function gatherFacts({ env = process.env, cwd = process.cwd(), probePort =
     '@gio.js/react': (findPackage('@gio.js/react', [projectRoot]) || {}).version || null,
     'create-giojs': (findPackage('create-giojs', [projectRoot]) || {}).version || null,
   };
-  const config = resolveConfig({ binary, env, projectRoot, cliVersion: own.version });
+  const checked = checkedMode(env, mode);
+  // The server picks its .env files (and the dev session secret) by
+  // NODE_ENV, so the config is resolved under the mode being checked.
+  const configEnv = mode ? { ...env, NODE_ENV: mode } : env;
+  const config = resolveConfig({ binary, env: configEnv, projectRoot, cliVersion: own.version });
 
   let tsconfig = null;
   for (const name of ['tsconfig.json', 'jsconfig.json']) {
@@ -205,6 +226,7 @@ async function gatherFacts({ env = process.env, cwd = process.cwd(), probePort =
     binary,
     packages,
     config,
+    mode: checked,
     nodeEnv: env.NODE_ENV || null,
     tsconfig,
     middlewareSessionGuards: middleware !== null && /requireSession\s*:\s*true/.test(middleware),
@@ -383,6 +405,16 @@ function sessionSecretCheck(facts) {
       fix: `Set GIO_SESSION_SECRET (environment or .env) before deploying. ${hint}`,
     });
   }
+  if (facts.mode && !facts.mode.explicit) {
+    // Production was only assumed: `gio dev` runs this project fine.
+    return check('session', 'warn', 'require_session guards need GIO_SESSION_SECRET under `gio start`, and it is not set', {
+      detail: `Checked as production because NODE_ENV is ${facts.nodeEnv ? `"${facts.nodeEnv}"` : 'unset'}; ` +
+        '`gio dev` uses an ephemeral secret instead. ' +
+        'In production every guarded request is denied until a secret is configured. ' +
+        '`gio doctor --dev` checks the development setup, `--prod` makes this an error.',
+      fix: `Set GIO_SESSION_SECRET in the deploy environment. ${hint}`,
+    });
+  }
   return check('session', 'error', 'require_session guards exist but GIO_SESSION_SECRET is not set', {
     detail: 'In production every guarded request is denied until a secret is configured.',
     fix: `Set GIO_SESSION_SECRET in the deploy environment. ${hint}`,
@@ -392,7 +424,7 @@ function sessionSecretCheck(facts) {
 function portCheck(facts) {
   const listen = facts.config.listen;
   if (!listen || facts.port === null) return check('port', 'skip', 'Port not checked');
-  const where = `${listen.host}:${listen.port}`;
+  const where = displayAddress(listen.host, listen.port);
   if (facts.port === 'free') return check('port', 'ok', `Port ${listen.port} is free (${where}, from ${listen.portSource})`);
   if (facts.port === 'in-use') {
     return check('port', 'warn', `Port ${listen.port} is in use (${where}) - is a server already running?`, {
@@ -402,6 +434,11 @@ function portCheck(facts) {
   if (facts.port === 'EACCES') {
     return check('port', 'warn', `Binding ${where} needs elevated privileges`, {
       fix: 'Use a port above 1024 behind a reverse proxy, or grant the capability (setcap cap_net_bind_service).',
+    });
+  }
+  if (facts.port === 'EAFNOSUPPORT') {
+    return check('port', 'warn', `Cannot bind ${where}: this machine has no IPv6 support`, {
+      fix: 'Bind an IPv4 address instead ([server] host / GIO_HOST / --host 0.0.0.0 or 127.0.0.1).',
     });
   }
   return check('port', 'warn', `Cannot bind ${where} (${facts.port})`, {
@@ -470,20 +507,30 @@ function formatChecks(checks) {
   return lines.join('\n');
 }
 
+/** Which configuration the checks looked at, and why. */
+function formatMode(mode, nodeEnv) {
+  const command = mode.name === 'development' ? '`gio dev`' : '`gio start`';
+  const head = `Checking the ${mode.name} configuration (what ${command} runs)`;
+  if (mode.source === '--dev' || mode.source === '--prod') return `${head}, as ${mode.source} asked.`;
+  if (mode.source === 'NODE_ENV') return `${head}: NODE_ENV=${nodeEnv}.`;
+  return `${head}: NODE_ENV is ${nodeEnv ? `"${nodeEnv}"` : 'unset'}. Use --dev to check \`gio dev\` instead.`;
+}
+
 async function runInfo({ json }) {
   const report = infoReport(await gatherFacts({ probePort: false }));
   console.log(json ? JSON.stringify(report, null, 2) : formatInfo(report));
 }
 
-async function runDoctor({ json }) {
-  const facts = await gatherFacts();
+async function runDoctor({ json, mode = null }) {
+  const facts = await gatherFacts({ mode });
   const report = infoReport(facts);
   const checks = runChecks(facts);
   const failed = checks.some((item) => item.status === 'error');
   if (json) {
-    console.log(JSON.stringify({ ok: !failed, environment: report, checks }, null, 2));
+    console.log(JSON.stringify({ ok: !failed, mode: facts.mode, environment: report, checks }, null, 2));
   } else {
-    console.log(`GioJS doctor\n\n${formatInfo(report)}\n\n${formatChecks(checks)}`);
+    console.log(`GioJS doctor\n\n${formatInfo(report)}\n\n${formatMode(facts.mode, facts.nodeEnv)}\n\n` +
+      formatChecks(checks));
   }
   process.exitCode = failed ? 1 : 0;
 }
@@ -491,6 +538,9 @@ async function runDoctor({ json }) {
 module.exports = {
   satisfiesRange,
   parseJsonc,
+  portState,
+  checkedMode,
+  formatMode,
   gatherFacts,
   infoReport,
   formatInfo,

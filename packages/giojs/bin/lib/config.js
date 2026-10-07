@@ -267,15 +267,36 @@ function resolveConfig({ binary, env, projectRoot, cliVersion }) {
 
 // ── URLs ─────────────────────────────────────────────────────────────────
 
-function hostForUrl(host) {
-  return isIP(host) === 6 ? `[${host}]` : host;
+// The server writes IPv6 listen hosts in brackets (`[::1]`, as in a URL);
+// Node's net and the checks below want the bare address.
+
+/** `[::1]` -> `::1`; any other host unchanged. */
+function bareHost(host) {
+  const match = /^\[(.*)\]$/.exec(String(host));
+  return match ? match[1] : String(host);
 }
 
-/** Where to connect to reach a server bound to `host` from this machine. */
+function hostForUrl(host) {
+  const bare = bareHost(host);
+  return isIP(bare) === 6 ? `[${bare}]` : bare;
+}
+
+/** `host:port` for messages, IPv6 bracketed. */
+function displayAddress(host, port) {
+  return `${hostForUrl(host)}:${port}`;
+}
+
+function isWildcard(host) {
+  const bare = bareHost(host);
+  return bare === '0.0.0.0' || bare === '::' || bare === '';
+}
+
+/** Where to connect (bare address) to reach a server bound to `host` from this machine. */
 function connectHost(host) {
-  if (host === '0.0.0.0' || host === '') return '127.0.0.1';
-  if (host === '::') return '::1';
-  return host;
+  const bare = bareHost(host);
+  if (bare === '0.0.0.0' || bare === '') return '127.0.0.1';
+  if (bare === '::') return '::1';
+  return bare;
 }
 
 /** The base URL this machine reaches the server on. */
@@ -285,7 +306,8 @@ function connectBaseUrl(listen) {
 }
 
 function isLoopback(host) {
-  return host === '::1' || /^127\./.test(host);
+  const bare = bareHost(host);
+  return bare === '::1' || /^127\./.test(bare);
 }
 
 /**
@@ -295,8 +317,7 @@ function isLoopback(host) {
 function serverUrls(listen, interfaces = networkInterfaces()) {
   const scheme = listen.tls ? 'https' : 'http';
   const url = (host) => `${scheme}://${hostForUrl(host)}:${listen.port}`;
-  const wildcard = listen.host === '0.0.0.0' || listen.host === '::';
-  if (!wildcard) {
+  if (!isWildcard(listen.host)) {
     return {
       local: url(isLoopback(listen.host) ? 'localhost' : listen.host),
       network: isLoopback(listen.host) ? [] : [url(listen.host)],
@@ -319,6 +340,8 @@ module.exports = {
   envWithFiles,
   fallbackReport,
   resolveConfig,
+  bareHost,
+  displayAddress,
   connectHost,
   connectBaseUrl,
   serverUrls,

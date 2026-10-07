@@ -12,7 +12,9 @@ import { createRequire } from 'node:module';
 import { fakeServerBinary, run, tempProject } from './helpers.mjs';
 
 const require = createRequire(import.meta.url);
-const { satisfiesRange, parseJsonc, runChecks, formatChecks, infoReport, formatInfo } = require('../bin/lib/doctor.js');
+const {
+  satisfiesRange, parseJsonc, runChecks, formatChecks, infoReport, formatInfo, checkedMode, formatMode, portState,
+} = require('../bin/lib/doctor.js');
 
 const VERSION = '1.2.3';
 
@@ -34,6 +36,7 @@ function facts(overrides = {}) {
       source: 'package', key: 'linux-x64', packageName: '@gio.js/server-linux-x64', version: VERSION,
     },
     packages: { '@gio.js/server': VERSION, '@gio.js/core': VERSION, '@gio.js/react': VERSION, 'create-giojs': null },
+    mode: { name: 'production', explicit: true, source: 'NODE_ENV' },
     config: {
       ok: true, errors: [], warnings: [], mode: 'production', configFile: 'gio.toml', envFiles: [],
       listen: { host: '0.0.0.0', port: 3000, portSource: 'default', tls: false },
@@ -142,11 +145,48 @@ describe('doctor checks', () => {
     assert.equal(checkOf(facts(), 'session').status, 'ok');
   });
 
+  test('with production only assumed (NODE_ENV unset), a missing secret is a warning', () => {
+    const assumed = { name: 'production', explicit: false, source: null };
+    const missing = checkOf(facts({ mode: assumed, config: { sessionGuards: 1 } }), 'session');
+    assert.equal(missing.status, 'warn');
+    assert.match(missing.detail, /NODE_ENV is unset/);
+    assert.match(missing.detail, /gio doctor --dev/);
+    assert.equal(checkOf(facts({ mode: assumed, nodeEnv: 'test', config: { sessionGuards: 1 } }), 'session').detail
+      .includes('NODE_ENV is "test"'), true);
+    // An invalid secret is broken in every mode.
+    assert.equal(checkOf(facts({ mode: assumed, config: { sessionSecret: 'invalid' } }), 'session').status, 'error');
+  });
+
+  test('the checked mode: --dev / --prod, else NODE_ENV, else assumed production', () => {
+    assert.deepEqual(checkedMode({}, 'development'), { name: 'development', explicit: true, source: '--dev' });
+    assert.deepEqual(checkedMode({ NODE_ENV: 'development' }, 'production'), { name: 'production', explicit: true, source: '--prod' });
+    assert.deepEqual(checkedMode({ NODE_ENV: 'development' }), { name: 'development', explicit: true, source: 'NODE_ENV' });
+    assert.deepEqual(checkedMode({ NODE_ENV: 'production' }), { name: 'production', explicit: true, source: 'NODE_ENV' });
+    assert.deepEqual(checkedMode({}), { name: 'production', explicit: false, source: null });
+    assert.deepEqual(checkedMode({ NODE_ENV: 'test' }), { name: 'production', explicit: false, source: null });
+    assert.match(formatMode(checkedMode({}), null), /production configuration \(what `gio start` runs\): NODE_ENV is unset\. Use --dev/);
+    assert.match(formatMode(checkedMode({}, 'development'), null), /development configuration \(what `gio dev` runs\), as --dev asked/);
+  });
+
   test('a busy port is a warning with another port to use', () => {
     const busy = checkOf(facts({ port: 'in-use' }), 'port');
     assert.equal(busy.status, 'warn');
     assert.match(busy.fix, /gio dev --port 3001/);
     assert.equal(checkOf(facts({ port: null }), 'port').status, 'skip');
+    const v6 = checkOf(facts({ port: 'free', config: { listen: { host: '[::1]', port: 3000, portSource: 'gio.toml', tls: false } } }), 'port');
+    assert.match(v6.title, /\(\[::1\]:3000, from gio\.toml\)/);
+    const noV6 = checkOf(facts({ port: 'EAFNOSUPPORT', config: { listen: { host: '[::]', port: 3000, portSource: 'default', tls: false } } }), 'port');
+    assert.match(noV6.title, /Cannot bind \[::\]:3000: this machine has no IPv6 support/);
+  });
+
+  test('the port probe binds IPv6 hosts written in brackets, as gio.toml has them', async () => {
+    // Whatever this machine's IPv6 support ('free', or EAFNOSUPPORT without
+    // it), [::1] must behave as ::1 - never a DNS lookup of "[::1]" (ENOTFOUND).
+    for (const [bracketed, bare] of [['[::1]', '::1'], ['[::]', '::']]) {
+      const state = await portState(bracketed, 0);
+      assert.notEqual(state, 'ENOTFOUND');
+      assert.equal(state, await portState(bare, 0), bracketed);
+    }
   });
 
   test('trusted_proxies is suggested when a proxy is likely', () => {
@@ -239,8 +279,43 @@ describe('gio doctor end to end', { skip: process.platform === 'win32' && 'fake 
     assert.equal(byId.app, 'error', 'no app/ directory');
     assert.equal(byId.tsconfig, 'warn');
     assert.equal(byId.config, 'skip', 'the fake binary cannot validate');
-    assert.equal(byId.session, 'error', 'guard without a secret (read by the fallback reader)');
+    assert.equal(byId.session, 'warn', 'guard without a secret (read by the fallback reader), production assumed');
+    assert.deepEqual(report.mode, { name: 'production', explicit: false, source: null });
     assert.equal(report.environment.serverBinary.source, 'env');
+  });
+
+  test('a dev project passes with NODE_ENV unset; --prod checks what gio start needs', () => {
+    // `gio dev` runs this project fine (ephemeral dev secret): doctor must
+    // not fail it just because NODE_ENV is unset in the shell.
+    const project = tempProject({
+      'package.json': '{"name":"app"}',
+      'tsconfig.json': '{ "include": ["app", ".gio/routes.d.ts"] }',
+      'app/page.tsx': 'export default function Page() { return null; }\n',
+      'gio.toml': '[[guards]]\npath = "/admin/*rest"\nrequire_session = true\nredirect_to = "/login"\n',
+      '.env.development': `GIO_SESSION_SECRET=${'d'.repeat(32)}\n`,
+    });
+    const env = { GIO_SERVER_BIN: fakeServerBinary(), FAKE_SERVER_NO_CHECK: '1' };
+    const sessionOf = (result) => JSON.parse(result.stdout).checks.find((c) => c.id === 'session');
+
+    const assumed = run(['doctor', '--json'], { cwd: project, env });
+    assert.equal(assumed.status, 0, assumed.stdout);
+    assert.equal(sessionOf(assumed).status, 'warn');
+
+    const prod = run(['doctor', '--json', '--prod'], { cwd: project, env });
+    assert.equal(prod.status, 1);
+    assert.equal(sessionOf(prod).status, 'error');
+    assert.equal(JSON.parse(prod.stdout).mode.source, '--prod');
+
+    // --dev reads .env.development, where this project keeps its secret.
+    const dev = run(['doctor', '--json', '--dev'], { cwd: project, env });
+    assert.equal(dev.status, 0, dev.stdout);
+    assert.equal(sessionOf(dev).status, 'ok');
+    assert.equal(JSON.parse(dev.stdout).mode.name, 'development');
+
+    const text = run(['doctor'], { cwd: project, env });
+    assert.match(text.stdout, /Checking the production configuration \(what `gio start` runs\): NODE_ENV is unset/);
+    assert.equal(run(['doctor', '--dev', '--prod'], { cwd: project, env }).status, 2);
+    assert.equal(run(['info', '--dev'], { cwd: project, env }).status, 2, 'info has no mode');
   });
 
   test('gio info --json needs no project', () => {

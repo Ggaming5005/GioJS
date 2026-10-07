@@ -11,7 +11,7 @@
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -128,6 +128,9 @@ describe('unknown commands and options', () => {
     const host = run(['dev', '--host', 'example.com']);
     assert.equal(host.status, 2);
     assert.match(host.stderr, /--host expects an IP address/);
+    for (const bad of ['[127.0.0.1]', '[::1', '[]', '::1]']) {
+      assert.equal(run(['dev', '--host', bad]).status, 2, bad);
+    }
   });
 
   test('build and cache subcommands are checked', () => {
@@ -194,6 +197,14 @@ describe('dev / start / giojs-server environment', { skip: !posix && 'fake binar
     assert.equal(server.env.NODE_ENV, 'production');
     assert.equal(server.env.GIO_PORT, '8080');
     assert.equal(server.env.GIO_HOST, '127.0.0.1');
+  });
+
+  test('IPv6 --host values reach the server bracketed, as GIO_HOST requires', () => {
+    for (const [flag, expected] of [['::', '[::]'], ['[::]', '[::]'], ['::1', '[::1]'], ['[::1]', '[::1]'], ['2001:db8::5', '[2001:db8::5]']]) {
+      const { status, server } = recorded(['start', '--host', flag]);
+      assert.equal(status, 0, flag);
+      assert.equal(server.env.GIO_HOST, expected, flag);
+    }
   });
 
   test('without flags the listen variables are left to PORT and gio.toml', () => {
@@ -308,6 +319,19 @@ describe('gio routes / gio typegen', () => {
     assert.match(stderr, /route conflict/);
     assert.equal(hasStackTrace(stderr), false, stderr);
   });
+
+  test('outside a project both fail and write nothing', () => {
+    const elsewhere = tempDir();
+    for (const command of ['typegen', 'routes']) {
+      const { status, stdout, stderr } = run([command], { cwd: elsewhere });
+      assert.equal(status, 1, `${command}: ${stdout}`);
+      assert.match(stderr, new RegExp(`gio ${command}: no app/ directory at .*\\n.*project root.*GIO_APP_DIR`));
+    }
+    assert.equal(existsSync(join(elsewhere, '.gio')), false, 'no stray .gio/');
+    const missing = run(['typegen'], { cwd: project, env: { GIO_APP_DIR: 'src/app' } });
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /no app\/ directory at .*src[\\/]app/);
+  });
 });
 
 describe('gio cache explain base URL', { skip: !posix && 'fake binary needs a shebang' }, () => {
@@ -360,29 +384,49 @@ describe('gio cache explain base URL', { skip: !posix && 'fake binary needs a sh
 });
 
 describe('gio add / gio migrate delegation', () => {
-  function projectWithCreateGiojs(helpText) {
-    return tempProject({
-      'node_modules/create-giojs/package.json': JSON.stringify({ name: 'create-giojs', version: '0.0.0-test' }),
+  /**
+   * A project with a fake create-giojs that records every invocation - with
+   * any arguments, `--help` included - in invocations.log, the way an old
+   * release would scaffold a new app for any argument it does not know.
+   */
+  function projectWithCreateGiojs(pkg) {
+    const project = tempProject({
+      'node_modules/create-giojs/package.json': JSON.stringify({ name: 'create-giojs', version: '0.0.0-test', ...pkg }),
       'node_modules/create-giojs/dist/index.js':
-        `if (process.argv[2] === '--help') { console.log(${JSON.stringify(helpText)}); process.exit(0); }\n` +
+        'const { appendFileSync } = require("fs");\n' +
+        `appendFileSync(${JSON.stringify('LOG')}, process.argv.slice(2).join(" ") + "\\n");\n` +
         'console.log("create-giojs got: " + process.argv.slice(2).join(" "));\n',
     });
+    const log = join(project, 'invocations.log');
+    const entry = join(project, 'node_modules/create-giojs/dist/index.js');
+    writeFileSync(entry, readFileSync(entry, 'utf8').replace('"LOG"', JSON.stringify(log)));
+    return { project, invocations: () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []) };
   }
 
-  test('runs the installed create-giojs subcommand with the arguments', () => {
-    const project = projectWithCreateGiojs('Usage:\n  create-giojs migrate [dir]\n  create-giojs add <feature>');
+  test('runs the installed create-giojs subcommand with the arguments, and nothing else', () => {
+    const { project, invocations } = projectWithCreateGiojs({
+      exports: { './migrate': './dist/migrate-command.js', './add': './dist/add.js', './package.json': './package.json' },
+    });
     const { status, stdout } = run(['add', 'tailwind', '--yes'], { cwd: project });
     assert.equal(status, 0);
     assert.match(stdout, /create-giojs got: add tailwind --yes/);
     assert.match(run(['migrate', './next-app'], { cwd: project }).stdout, /create-giojs got: migrate \.\/next-app/);
+    assert.deepEqual(invocations(), ['add tailwind --yes', 'migrate ./next-app'], 'no --help probe ran first');
   });
 
-  test('a create-giojs without the subcommand is reported, never run', () => {
-    // Older create-giojs would scaffold a project named "add".
-    const project = projectWithCreateGiojs('Usage:\n  create-giojs [name]\n  create-giojs migrate [dir]');
-    const { status, stdout, stderr } = run(['add', 'tailwind'], { cwd: project });
-    assert.equal(status, 1);
-    assert.doesNotMatch(stdout, /create-giojs got/);
-    assert.match(stderr, /has no `add` command/);
+  test('a create-giojs without the subcommand is reported and never run, not even with --help', () => {
+    // create-giojs <= 0.1.0-beta.7 has no exports map and scaffolds a new
+    // app for any argument it does not know: `--help`, `add`, ...
+    const { project, invocations } = projectWithCreateGiojs({ bin: { 'create-giojs': 'dist/index.js' } });
+    for (const subcommand of ['add', 'migrate']) {
+      const { status, stdout, stderr } = run([subcommand, 'x'], { cwd: project });
+      assert.equal(status, 1);
+      assert.doesNotMatch(stdout, /create-giojs got/);
+      assert.match(stderr, new RegExp(`installed create-giojs 0\\.0\\.0-test \\(.*\\) is too old for \`gio ${subcommand}\`: ` +
+        `it does not export create-giojs/${subcommand}, so it was not run`));
+      assert.match(stderr, /npm install --save-dev create-giojs@/);
+    }
+    assert.deepEqual(invocations(), []);
+    assert.equal(existsSync(join(project, 'my-giojs-app')), false);
   });
 });

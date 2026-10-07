@@ -15,9 +15,13 @@ import { tempProject } from './helpers.mjs';
 const require = createRequire(import.meta.url);
 const { didYouMean } = require('../bin/lib/commands.js');
 const findBinary = require('../bin/find-binary.js');
-const { parseTomlLite, fallbackReport, serverUrls, connectBaseUrl } = require('../bin/lib/config.js');
+const {
+  parseTomlLite, fallbackReport, serverUrls, connectBaseUrl, bareHost, displayAddress,
+} = require('../bin/lib/config.js');
 const { serverEnv, browserCommand, formatBanner } = require('../bin/lib/server.js');
-const { execCommand, supportsSubcommand, shellQuote } = require('../bin/lib/delegate.js');
+const {
+  execCommand, declaresSubcommand, parseViewOutput, registryManifest, installDevCommand, shellQuote,
+} = require('../bin/lib/delegate.js');
 const { targetUrl } = require('../bin/lib/cache-explain.js');
 const { detectPackageManager } = require('../bin/lib/project.js');
 
@@ -218,6 +222,30 @@ describe('URLs', () => {
     assert.equal(connectBaseUrl({ host: '10.1.2.3', port: 8080, tls: false }), 'http://10.1.2.3:8080');
   });
 
+  test('IPv6 hosts as the server reports them (bracketed) are understood', () => {
+    // [::1] is loopback: the local URL only, never a "network" URL.
+    assert.deepEqual(serverUrls({ host: '[::1]', port: 3000, tls: false }, interfaces), {
+      local: 'http://localhost:3000',
+      network: [],
+    });
+    // [::] is the wildcard, like 0.0.0.0.
+    assert.deepEqual(serverUrls({ host: '[::]', port: 3000, tls: false }, interfaces), {
+      local: 'http://localhost:3000',
+      network: ['http://192.168.1.20:3000'],
+    });
+    assert.deepEqual(serverUrls({ host: '[2001:db8::5]', port: 8080, tls: false }, interfaces), {
+      local: 'http://[2001:db8::5]:8080',
+      network: ['http://[2001:db8::5]:8080'],
+    });
+    assert.equal(connectBaseUrl({ host: '[::]', port: 3000, tls: false }), 'http://[::1]:3000');
+    assert.equal(connectBaseUrl({ host: '[::1]', port: 3000, tls: false }), 'http://[::1]:3000');
+    assert.equal(bareHost('[::1]'), '::1');
+    assert.equal(bareHost('127.0.0.1'), '127.0.0.1');
+    assert.equal(displayAddress('[::1]', 3000), '[::1]:3000');
+    assert.equal(displayAddress('::1', 3000), '[::1]:3000');
+    assert.equal(displayAddress('0.0.0.0', 3000), '0.0.0.0:3000');
+  });
+
   test('cache explain targets', () => {
     assert.equal(targetUrl('/posts/1', 'http://127.0.0.1:4000/'), 'http://127.0.0.1:4000/posts/1');
     assert.equal(targetUrl('https://example.com/a', 'http://127.0.0.1:4000'), 'https://example.com/a');
@@ -257,12 +285,63 @@ describe('server launch helpers', () => {
 });
 
 describe('create-giojs delegation', () => {
-  test('subcommand detection reads create-giojs --help', () => {
-    const help = 'Usage:\n  npm create giojs@latest [name] -- [options]\n  npm create giojs@latest -- migrate [dir]   Migrate';
-    assert.equal(supportsSubcommand(help, 'migrate'), true);
-    assert.equal(supportsSubcommand(help, 'add'), false);
-    assert.equal(supportsSubcommand('  add <feature>  Add a feature', 'add'), true);
-    assert.equal(supportsSubcommand('address the issue', 'add'), false);
+  test('a subcommand exists when create-giojs/<name> is exported, never by running it', () => {
+    const current = { version: '1.2.3', exports: { './migrate': './dist/migrate-command.js', './package.json': './package.json' } };
+    assert.equal(declaresSubcommand(current, 'migrate'), true);
+    assert.equal(declaresSubcommand(current, 'add'), false);
+    // Published releases up to 0.1.0-beta.7 have no exports map at all.
+    assert.equal(declaresSubcommand({ version: '0.1.0-beta.7', bin: { 'create-giojs': 'dist/index.js' } }, 'migrate'), false);
+    assert.equal(declaresSubcommand(null, 'migrate'), false);
+    assert.equal(declaresSubcommand({ exports: './dist/index.js' }, 'migrate'), false);
+    assert.equal(declaresSubcommand({ exports: { '.': './x.js' } }, 'toString'), false, 'no prototype keys');
+  });
+
+  test('npm view answers: exports object, bare version, or nothing usable', () => {
+    assert.deepEqual(parseViewOutput('{"version":"1.2.3","exports":{"./add":"./dist/add.js"}}'),
+      { version: '1.2.3', exports: { './add': './dist/add.js' } });
+    assert.deepEqual(parseViewOutput('"0.1.0-beta.7"\n'), { version: '0.1.0-beta.7' });
+    assert.equal(parseViewOutput(''), null);
+    assert.equal(parseViewOutput('{"error":{"code":"E404"}}'), null);
+    assert.equal(parseViewOutput('not json'), null);
+  });
+
+  test('the registry lookup runs npm view only, and reports why it failed', () => {
+    const calls = [];
+    const answer = (result) => (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0, stdout: '', stderr: '', ...result };
+    };
+    const found = registryManifest('1.2.3', {
+      platform: 'linux',
+      spawn: answer({ stdout: '{"version":"1.2.3","exports":{"./migrate":"./m.js"}}' }),
+    });
+    assert.deepEqual(found, { ok: true, manifest: { version: '1.2.3', exports: { './migrate': './m.js' } } });
+    assert.equal(calls[0].command, 'npm');
+    assert.deepEqual(calls[0].args, ['view', 'create-giojs@1.2.3', 'version', 'exports', '--json']);
+    assert.equal(calls[0].options.shell, false);
+
+    const missing = registryManifest('9.9.9', {
+      platform: 'linux',
+      spawn: answer({
+        status: 1,
+        stdout: '{"error":{"code":"E404","summary":"No match found for version 9.9.9"}}',
+        stderr: 'npm error code E404\nnpm error 404 No match found for version 9.9.9\n',
+      }),
+    });
+    assert.deepEqual(missing, { ok: false, reason: 'No match found for version 9.9.9' });
+
+    const noNpm = registryManifest('1.2.3', { platform: 'linux', spawn: answer({ error: new Error('spawn npm ENOENT'), status: null }) });
+    assert.equal(noNpm.ok, false);
+    assert.match(noNpm.reason, /npm could not run: spawn npm ENOENT/);
+
+    registryManifest('1.2.3', { platform: 'win32', spawn: answer({ stdout: '"1.2.3"' }) });
+    assert.equal(calls[calls.length - 1].command, 'npm view create-giojs@1.2.3 version exports --json', 'a .cmd shim needs a shell');
+  });
+
+  test('install hints follow the package manager', () => {
+    assert.equal(installDevCommand('create-giojs@1.2.3', 'npm'), 'npm install --save-dev create-giojs@1.2.3');
+    assert.equal(installDevCommand('create-giojs@1.2.3', 'pnpm'), 'pnpm add --save-dev create-giojs@1.2.3');
+    assert.equal(installDevCommand('create-giojs@1.2.3', 'bun'), 'bun add --dev create-giojs@1.2.3');
   });
 
   test('runs create-giojs@<version> through the detected package manager', () => {

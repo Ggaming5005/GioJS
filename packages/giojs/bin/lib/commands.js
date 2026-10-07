@@ -19,7 +19,8 @@ const SERVER_OPTIONS = `Options:
   -p, --port <port>   port to listen on (sets GIO_PORT; default: PORT, then
                       gio.toml [server] port, then 3000)
   -H, --host <ip>     address to bind (sets GIO_HOST; default: gio.toml
-                      [server] host, then 0.0.0.0). "localhost" means 127.0.0.1
+                      [server] host, then 0.0.0.0). "localhost" means
+                      127.0.0.1; IPv6 as :: or [::] (every interface), ::1
       --open          open the app in a browser once it is ready
   -h, --help          show this help`;
 
@@ -105,7 +106,7 @@ Your tsconfig.json must include ".gio/routes.d.ts".`,
   },
   doctor: {
     summary: 'Check the environment and project for problems',
-    usage: 'gio doctor [--json]',
+    usage: 'gio doctor [--dev | --prod] [--json]',
     help: `Checks the things that most often break a GioJS app, and says how to fix
 each: Node.js version, the platform server binary, @gio.js/* versions in
 lockstep, gio.toml (validated by the server's own parser), tsconfig
@@ -113,7 +114,14 @@ including .gio/routes.d.ts, GIO_SESSION_SECRET for require_session guards,
 whether the port is free, trusted_proxies behind a proxy, and a writable
 cache directory. Exits 1 when a check fails (warnings do not).
 
+The configuration checked is the one NODE_ENV selects, as for the server:
+development when NODE_ENV=development, else production (what \`gio start\`
+runs). With NODE_ENV unset, production problems that \`gio dev\` would not
+have (no GIO_SESSION_SECRET) are warnings; --prod makes them errors.
+
 Options:
+  --dev         check the development configuration (what gio dev runs)
+  --prod        check the production configuration (what gio start runs)
   --json        print the environment report and checks as JSON
   -h, --help    show this help`,
   },

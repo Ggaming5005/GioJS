@@ -539,38 +539,32 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         cfg.images.worker_json(),
     )];
 
-    let app_dir = std::env::var("GIO_APP_DIR").unwrap_or_else(|_| "app".to_string());
-    // public/ sits next to app/ like gio.toml does, so a server started from
-    // another directory (GIO_APP_DIR=path/to/app) still finds it.
-    let public_dir = std::env::var("GIO_PUBLIC_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| project_root.join("public"));
-
-    let cache_dir_env = std::env::var("GIO_CACHE_DIR")
-        .ok()
-        .filter(|dir| !dir.is_empty());
-    let cache_dir = cfg.cache.disk_dir(&project_root, cache_dir_env.as_deref());
-    // Before creating it: a directory inside public/ must not even appear.
-    if let Err(error) =
-        config::check_cache_dir_placement(&cache_dir, std::path::Path::new(&app_dir), &public_dir)
-    {
-        let source = match cache_dir_env {
-            Some(_) => "GIO_CACHE_DIR",
-            None => "[cache] disk_path",
-        };
-        eprintln!("giojs-server: configuration error: {source}: {error}");
-        std::process::exit(1);
-    }
-    tokio::fs::create_dir_all(&cache_dir).await?;
-
-    // Before the worker spawns: it renders with the nonce placeholder.
-    let security = match security::SecurityPolicy::new(&cfg.security, cfg.server.tls.enabled) {
-        Ok(policy) => policy,
-        Err(error) => {
-            eprintln!("giojs-server: configuration error: {error}");
+    // Every refusal that depends on more than gio.toml's syntax, before
+    // anything is created or spawned. Shared with --check-config, so the
+    // check and startup cannot disagree.
+    let startup_env = config_check::StartupEnv::from_process();
+    let config_check::Validated {
+        cache_dir,
+        security,
+        revalidate_token,
+        tls_acceptor,
+    } = match config_check::validate(&cfg, &startup_env) {
+        Ok(validated) => validated,
+        Err(errors) => {
+            for error in errors {
+                eprintln!("giojs-server: configuration error: {error}");
+            }
             std::process::exit(1);
         }
     };
+    let config_check::StartupEnv {
+        app_dir,
+        public_dir,
+        ..
+    } = startup_env;
+    tokio::fs::create_dir_all(&cache_dir).await?;
+
+    // Before the worker spawns: it renders with the nonce placeholder.
     let nonce_placeholder = security.uses_nonces().then(|| {
         // A subdirectory: the cache's eviction and dev clearing only touch
         // the entry files at the top level. Keyed by the deployment id the
@@ -607,17 +601,6 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         );
     }
     let security = Arc::new(security);
-
-    let revalidate_token = match revalidate::resolve_token(
-        std::env::var(revalidate::TOKEN_ENV).ok().as_deref(),
-        &cfg.revalidate.token,
-    ) {
-        Ok(token) => token,
-        Err(error) => {
-            eprintln!("giojs-server: configuration error: {error}");
-            std::process::exit(1);
-        }
-    };
 
     let workers = render_worker_count(
         cfg.server.workers,
@@ -1123,12 +1106,6 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     ));
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-
-    let tls_acceptor = if cfg.server.tls.enabled {
-        Some(load_tls_acceptor(&cfg.server.tls)?)
-    } else {
-        None
-    };
 
     info!(http2 = %http2, tls = %tls_enabled, port_from = cfg.port_source, "GioJS listening on {bind_addr}");
     let conn_settings = conn::ConnSettings::from_config(&cfg.server);

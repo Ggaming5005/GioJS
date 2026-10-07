@@ -59,15 +59,20 @@ function parsePort(value, command) {
   return Number(value);
 }
 
+/**
+ * --host as the server reads GIO_HOST: an IPv4 address, or IPv6 in
+ * brackets (`::1` and `[::1]` are both accepted and passed bracketed).
+ */
 function parseHost(value, command) {
   if (value === undefined) return null;
   // The server binds IP addresses only (shells set HOST to the machine's
   // name, so names are never resolved); localhost is the one obvious alias.
   if (value === 'localhost') return '127.0.0.1';
-  if (require('net').isIP(value) === 0) {
-    usageError(`--host expects an IP address such as 0.0.0.0 (every interface) or 127.0.0.1 (this machine only), got "${value}"`, command);
-  }
-  return value;
+  const { isIP } = require('net');
+  const bare = /^\[(.*)\]$/.exec(value);
+  if (bare ? isIP(bare[1]) === 6 : isIP(value) === 4) return value;
+  if (!bare && isIP(value) === 6) return `[${value}]`;
+  usageError(`--host expects an IP address such as 0.0.0.0 (every interface), 127.0.0.1 (this machine only) or [::] (every IPv6 interface), got "${value}"`, command);
 }
 
 function runNodeScript(script, args, env = process.env) {
@@ -151,10 +156,15 @@ function cmdTypegen(args) {
 }
 
 async function cmdDoctor(command, args) {
-  const { values } = parseFlags(command, args, { json: { type: 'boolean' } });
+  const modes = command === 'doctor' ? { dev: { type: 'boolean' }, prod: { type: 'boolean' } } : {};
+  const { values } = parseFlags(command, args, { json: { type: 'boolean' }, ...modes });
+  if (values.dev && values.prod) usageError('--dev and --prod cannot be combined', command);
   const doctor = require('./lib/doctor');
   if (command === 'info') await doctor.runInfo({ json: Boolean(values.json) });
-  else await doctor.runDoctor({ json: Boolean(values.json) });
+  else {
+    const mode = values.dev ? 'development' : values.prod ? 'production' : null;
+    await doctor.runDoctor({ json: Boolean(values.json), mode });
+  }
 }
 
 function cmdCache(args) {

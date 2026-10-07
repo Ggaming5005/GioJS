@@ -18,6 +18,14 @@ const RESULT_MARKER = 'GIO_RESULT ';
 
 /** Run routes-cli.ts `command`; returns the parsed result or exits 1. */
 function runRoutesCli(command) {
+  const { appDir } = projectPaths();
+  // Discovery in a missing directory finds nothing, and typegen would write
+  // .gio/ wherever gio was run: the wrong directory must fail, not pass.
+  if (!existsSync(appDir)) {
+    console.error(`gio ${command}: no app/ directory at ${appDir}.\n` +
+      '  Run gio from your project root (the folder with package.json and app/), or set GIO_APP_DIR.');
+    process.exit(1);
+  }
   const coreDir = findCoreDir();
   const entry = coreDir && join(coreDir, 'src', 'routes-cli.ts');
   if (!entry || !existsSync(entry)) {
@@ -30,7 +38,6 @@ function runRoutesCli(command) {
     console.error(`gio ${command}: tsx not found (a dependency of @gio.js/core). Run your package manager's install.`);
     process.exit(1);
   }
-  const { appDir } = projectPaths();
   const result = spawnSync(process.execPath, [tsxCli, entry, command], {
     env: { ...process.env, GIO_APP_DIR: appDir },
     encoding: 'utf8',
