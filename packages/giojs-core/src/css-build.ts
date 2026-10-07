@@ -30,7 +30,8 @@
  */
 import { build, type Loader, type Metafile, type OutputFile, type Plugin } from 'esbuild';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import {
   emptySegmentFiles,
@@ -62,6 +63,14 @@ export interface CssBuildOptions {
   dev: boolean;
   /** Static export: stylesheets go to `<outDir>/_next/static/css`, entries under `.gio/export/`. */
   staticExportDir?: string;
+  /**
+   * false: compute the manifest only (the testing kit's renderPage). The URLs
+   * are the ones a written build links, but nothing under `.gio/` is removed
+   * or written - a dev server running next to the tests keeps serving its
+   * stylesheets, and parallel test processes never race on the directory.
+   * Default true.
+   */
+  write?: boolean;
 }
 
 /** Files CSS may reference with url() - emitted next to the stylesheet, content-hashed. */
@@ -315,17 +324,29 @@ export async function buildRouteStylesheets(options: CssBuildOptions): Promise<S
     exportDir !== undefined
       ? join(resolve(exportDir), ...PUBLIC_CSS_PATH.split('/').filter(Boolean))
       : join(projectRoot, '.gio', 'build', 'static', 'css');
-  const entriesDir =
-    exportDir !== undefined
-      ? join(projectRoot, '.gio', 'export', 'css-entries')
-      : join(projectRoot, '.gio', 'build', 'css-entries');
+  const write = options.write !== false;
   const segmentFiles = options.segmentFiles ?? emptySegmentFiles();
+  let entriesDir: string | undefined;
+  // Output paths only name the outputs (esbuild runs with write: false), so
+  // a manifest-only build keeps outDir - and with it every URL - unchanged.
+  const emit = async (files: OutputFile[]): Promise<void> => {
+    if (write) await writeOutputs(files);
+  };
 
   try {
-    await rm(outDir, { recursive: true, force: true });
-    await rm(entriesDir, { recursive: true, force: true });
-    await mkdir(outDir, { recursive: true });
-    await mkdir(entriesDir, { recursive: true });
+    if (write) {
+      entriesDir =
+        exportDir !== undefined
+          ? join(projectRoot, '.gio', 'export', 'css-entries')
+          : join(projectRoot, '.gio', 'build', 'css-entries');
+      await rm(outDir, { recursive: true, force: true });
+      await rm(entriesDir, { recursive: true, force: true });
+      await mkdir(outDir, { recursive: true });
+      await mkdir(entriesDir, { recursive: true });
+    } else {
+      entriesDir = await mkdtemp(join(tmpdir(), 'gio-css-entries-'));
+    }
+    const entriesRoot = entriesDir;
 
     const usedNames = new Set<string>();
     const makeEntry = async (
@@ -336,7 +357,7 @@ export async function buildRouteStylesheets(options: CssBuildOptions): Promise<S
       let name = base;
       while (usedNames.has(name)) name += '_';
       usedNames.add(name);
-      const file = join(entriesDir, `${name}.js`);
+      const file = join(entriesRoot, `${name}.js`);
       await writeFile(file, entrySource(files), 'utf8');
       return { name, file, key };
     };
@@ -350,7 +371,7 @@ export async function buildRouteStylesheets(options: CssBuildOptions): Promise<S
       const rootEntry = await makeEntry('root', { kind: 'root', id: '' }, [rootLayout.filePath]);
       try {
         const built = await runCssBuild([rootEntry], new Set(), outDir, options);
-        await writeOutputs(built.outputFiles);
+        await emit(built.outputFiles);
         rootUrl = built.urls.get(resolve(rootEntry.file));
         rootInputs = built.inputs;
       } catch (rootError) {
@@ -392,13 +413,13 @@ export async function buildRouteStylesheets(options: CssBuildOptions): Promise<S
     const urls = new Map<string, string>();
     try {
       const built = await runCssBuild(entries, rootInputs, outDir, options);
-      await writeOutputs(built.outputFiles);
+      await emit(built.outputFiles);
       for (const [file, url] of built.urls) urls.set(file, url);
     } catch {
       for (const entry of entries) {
         try {
           const built = await runCssBuild([entry], rootInputs, outDir, options);
-          await writeOutputs(built.outputFiles);
+          await emit(built.outputFiles);
           for (const [file, url] of built.urls) urls.set(file, url);
         } catch (entryError) {
           logger.error('stylesheet failed to build - page renders without its own CSS', {
@@ -415,7 +436,7 @@ export async function buildRouteStylesheets(options: CssBuildOptions): Promise<S
       if (entry.key.kind === 'route') manifest.routes.set(entry.key.id, sheets);
       else manifest.segmentPages.set(entry.key.id, sheets);
     }
-    logger.info('route stylesheets built', {
+    logger[write ? 'info' : 'debug']('route stylesheets built', {
       stylesheets: urls.size + (rootUrl !== undefined ? 1 : 0),
       durationMs: Date.now() - started,
     });
@@ -423,6 +444,11 @@ export async function buildRouteStylesheets(options: CssBuildOptions): Promise<S
     logger.error('stylesheet build failed - pages render without imported CSS', {
       error: buildError instanceof Error ? buildError.message : String(buildError),
     });
+  } finally {
+    // A manifest-only build leaves nothing behind.
+    if (!write && entriesDir !== undefined) {
+      await rm(entriesDir, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
   return manifest;
 }

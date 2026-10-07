@@ -70,13 +70,18 @@ export default function TestingPage(): React.JSX.Element {
       <CodeBlock lang="bash" code={`npm install --save-dev vitest`} />
       <p>
         vitest does not read tsconfig <code>paths</code>, so mirror the scaffold&apos;s{' '}
-        <code>@/*</code> alias:
+        <code>@/*</code> alias. It also names CSS Module classes its own way (
+        <code>_card_80010d</code>); the <code>gioVitest()</code> plugin from{' '}
+        <code>@gio.js/core/vitest</code> makes <code>*.module.css</code> imports - in your
+        pages and in your tests - evaluate to the class names the server renders:
       </p>
       <CodeBlock lang="ts" code={`// vitest.config.ts
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
+import { gioVitest } from '@gio.js/core/vitest';
 
 export default defineConfig({
+  plugins: [gioVitest()],
   resolve: { alias: { '@': fileURLToPath(new URL('.', import.meta.url)) } },
   test: { include: ['tests/**/*.test.ts'] },
 });`} />
@@ -155,7 +160,7 @@ describe('/posts/[id]', () => {
       <p><strong>Result:</strong></p>
       <ul>
         <li><code>status</code>, <code>headers</code> (the worker&apos;s, lowercase - Rust adds its own on top), and <code>setCookies</code> (every <code>Set-Cookie</code> value, intact).</li>
-        <li><code>html</code> - the full document, rendered with the hydration envelope like a served page.</li>
+        <li><code>html</code> - the full document, rendered with the hydration envelope and the route&apos;s stylesheet links like a served page.</li>
         <li><code>props</code> - the hydration props exactly as serialized into the page; <code>null</code> for redirects, 404s, errors, or props that are not JSON-serializable (that page renders but never hydrates).</li>
         <li><code>redirect</code> - <code>{`{ destination, permanent }`}</code> for 3xx answers.</li>
         <li><code>cacheable</code> / <code>cacheMaxAge</code> - whether the Rust page cache would store this response, by the server&apos;s own rule: <code>revalidate</code> set, no cookies or per-request headers sent, and no credentials read (a page that reads <code>ctx.cookies</code> is never shared).</li>
@@ -167,6 +172,15 @@ describe('/posts/[id]', () => {
         show only a digest, like for real visitors. The message and stack are on the{' '}
         <code>ssr render failed</code> log line (stderr) under the same digest.
       </div>
+      <p>
+        <strong>CSS:</strong> the page links its route stylesheets (
+        <code>{'<link rel="stylesheet" href="/_next/static/css/...">'}</code>) with the URLs
+        the server links in the same mode, and CSS Modules render the server&apos;s class
+        names - under node:test as is, under vitest with <code>gioVitest()</code> (see
+        Setup). The stylesheets are not written to disk (<code>.gio/</code> stays whatever
+        a dev server running next to your tests put there); fetch them from a{' '}
+        <code>createTestServer</code> server.
+      </p>
       <p>
         React separates adjacent text with <code>{'<!-- -->'}</code> in server HTML (
         <code>{`Hello {name}`}</code> renders as <code>{'Hello <!-- -->Ada'}</code>), so prefer

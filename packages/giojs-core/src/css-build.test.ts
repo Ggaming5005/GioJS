@@ -7,6 +7,7 @@
  * the worker's SSR import and the client bundle name them, url() assets, and
  * failure isolation.
  */
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -180,6 +181,33 @@ describe('buildRouteStylesheets', () => {
   it('ships no JavaScript into the stylesheet directory', async () => {
     expect((await readdir(cssDir)).filter(f => f.endsWith('.js'))).toEqual([]);
   });
+});
+
+describe('buildRouteStylesheets with write: false', () => {
+  // The testing kit's renderPage: the links a served page carries, without
+  // touching the .gio/ directory a dev server next to the tests serves from.
+  it.each([true, false])('links exactly what a written build links and writes nothing (dev: %s)', async dev => {
+    const root = await writeProject('gio-css-dry-', FIXTURE);
+    try {
+      const discovered = await discover(root);
+      const dry = await buildRouteStylesheets({ ...discovered, projectRoot: root, dev, write: false });
+      expect(existsSync(join(root, '.gio'))).toBe(false);
+      expect(dry.routes.get('/')).toHaveLength(2);
+      expect(dry.routes.get('/docs')).toHaveLength(2);
+      expect(dry.segmentPages.get(segmentStylesheetKey('notFound', ''))).toHaveLength(2);
+
+      const written = await buildRouteStylesheets({ ...discovered, projectRoot: root, dev });
+      expect(dry).toEqual(written);
+      // ...and a later manifest-only build leaves the written one alone.
+      const cssDir = join(root, '.gio', 'build', 'static', 'css');
+      const files = (await readdir(cssDir)).sort();
+      await buildRouteStylesheets({ ...discovered, projectRoot: root, dev, write: false });
+      expect((await readdir(cssDir)).sort()).toEqual(files);
+      expect(await readdir(join(root, '.gio', 'build', 'css-entries'))).not.toHaveLength(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
 
 describe('buildRouteStylesheets in production', () => {

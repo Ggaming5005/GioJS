@@ -130,7 +130,9 @@ renders React. Full docs: https://giojs.com/llms.txt
   rules or [i18n] detection (pass the unprefixed path plus `locale`).
   `createTestServer()` starts the real server on a free port (`url`,
   `close()` in afterAll).
-  Under vitest, mirror tsconfig `paths` as `resolve.alias`.
+  Under vitest, mirror tsconfig `paths` as `resolve.alias`, and add
+  `gioVitest()` from `@gio.js/core/vitest` to `plugins` so CSS Modules get
+  the server's class names (vitest names them its own way).
 
 ## Commands
 

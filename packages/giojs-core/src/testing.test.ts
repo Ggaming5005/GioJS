@@ -8,11 +8,12 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { defineConfig } from 'vitest/config';
 import {
   TEST_ENTRY_SCRIPT,
   callRoute,
@@ -22,8 +23,12 @@ import {
   type TestServer,
 } from '@gio.js/core/testing';
 import { buildClientBundles, clientBuildErrorFor } from './client-build.ts';
+import { buildRouteStylesheets } from './css-build.ts';
+import { compileCssModuleClasses } from './css-modules.ts';
 import { logger } from './logger.ts';
-import { discoverLayouts, discoverRoutes } from './router.ts';
+import { discoverLayouts, discoverRoutes, discoverSegmentFiles } from './router.ts';
+import { segmentStylesheetKey } from './style-manifest.ts';
+import { gioVitest } from './vitest-plugin.js';
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const repoRoot = dirname(dirname(packageDir));
@@ -43,6 +48,20 @@ async function writeProject(prefix: string, files: Record<string, string>): Prom
     await symlink(join(packageDir, 'node_modules', dep), join(root, 'node_modules', dep), linkType);
   }
   return root;
+}
+
+/** What buildRouteStylesheets needs, discovered like main.ts discovers it. */
+async function discoverForCss(appDir: string): Promise<{
+  routes: Awaited<ReturnType<typeof discoverRoutes>>;
+  layouts: Awaited<ReturnType<typeof discoverLayouts>>;
+  segmentFiles: Awaited<ReturnType<typeof discoverSegmentFiles>>;
+}> {
+  const [routes, layouts, segmentFiles] = await Promise.all([
+    discoverRoutes(appDir),
+    discoverLayouts(appDir),
+    discoverSegmentFiles(appDir),
+  ]);
+  return { routes, layouts, segmentFiles };
 }
 
 let quiet: ReturnType<typeof vi.spyOn>[] = [];
@@ -296,6 +315,154 @@ export default function Home() { return React.createElement('p', null, 'KIT_HOME
     expect(sitemap.headers['content-type']).toMatch(/^application\/xml/);
     expect(await sitemap.text()).toContain('<loc>https://kit.example/</loc>');
     expect((await renderPage('/', { appDir })).html).toContain('<title>KIT_HOME_TITLE</title>');
+  });
+});
+
+describe('renderPage and CSS', () => {
+  let root: string;
+
+  beforeAll(async () => {
+    root = await writeProject('gio-testing-css-', {
+      'app/layout.tsx': `import React from 'react';
+import './root.css';
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return React.createElement('html', null, React.createElement('body', null, children));
+}
+`,
+      'app/root.css': '.kit-root-marker { color: red; }\n',
+      'app/page.tsx': `import React from 'react';
+import './home.css';
+import styles from './card.module.css';
+export default function Home() { return React.createElement('p', { className: styles.card }, 'KIT_STYLED'); }
+`,
+      'app/home.css': '.kit-home-marker { order: 1; }\n',
+      'app/card.module.css': '.card { color: teal; }\n',
+      'app/plain/page.tsx': `import React from 'react';
+export default function Plain() { return React.createElement('p', null, 'KIT_PLAIN'); }
+`,
+      'app/not-found.tsx': `import React from 'react';
+import './not-found.css';
+export default function NotFound() { return React.createElement('p', null, 'KIT_MISSING'); }
+`,
+      'app/not-found.css': '.kit-missing-marker { order: 2; }\n',
+    });
+  });
+
+  afterAll(async () => {
+    await resetTestApp(join(root, 'app'));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const links = (html: string): string[] =>
+    [...html.matchAll(/<link rel="stylesheet" href="([^"]+)" data-precedence="[^"]+"\/>/g)].map(m => m[1] as string);
+
+  it("links the stylesheets the worker links, and renders the server's CSS Module class names", async () => {
+    const appDir = join(root, 'app');
+    const home = await renderPage('/', { appDir });
+    const plain = await renderPage('/plain', { appDir });
+    const missing = await renderPage('/nope', { appDir });
+    // Nothing written: .gio/ belongs to whatever server runs next to the tests.
+    expect(existsSync(join(root, '.gio'))).toBe(false);
+
+    // What the worker builds at boot, in the same mode (production here).
+    const served = await buildRouteStylesheets({
+      ...(await discoverForCss(appDir)),
+      projectRoot: root,
+      dev: false,
+    });
+    const homeSheets = served.routes.get('/') ?? [];
+    expect(homeSheets).toHaveLength(2);
+    expect(links(home.html)).toEqual(homeSheets);
+    expect(links(plain.html)).toEqual(served.routes.get('/plain'));
+    expect(links(plain.html)).toEqual([homeSheets[0]]);
+    expect(missing.status).toBe(404);
+    expect(missing.html).toContain('KIT_MISSING');
+    expect(links(missing.html)).toEqual(served.segmentPages.get(segmentStylesheetKey('notFound', '')));
+    expect(links(missing.html)).toHaveLength(2);
+
+    // The css-modules.ts name, not vitest's own (`_card_<hash>`): the
+    // package's vitest.config.ts runs the @gio.js/core/vitest plugin.
+    const classes = await compileCssModuleClasses(join(appDir, 'card.module.css'));
+    expect(classes['card']).toMatch(/^card_[0-9a-f]{6}_card$/);
+    expect(home.html).toContain(`<p class="${classes['card']}">KIT_STYLED</p>`);
+    const homeCss = await readFile(
+      join(root, '.gio', 'build', 'static', 'css', homeSheets[1]?.split('/').pop() ?? ''),
+      'utf8',
+    );
+    expect(homeCss).toContain(`.${classes['card']}{color:teal}`);
+  }, 60_000);
+});
+
+describe('the @gio.js/core/vitest plugin', () => {
+  let root: string;
+
+  beforeAll(async () => {
+    root = await writeProject('gio-testing-vitest-', {
+      'package.json': '{ "name": "kit-vitest-app", "private": true, "type": "module" }\n',
+      // The setup the testing docs give: an npm import of the plugin, which
+      // Node loads itself (vite externalizes a config's dependencies).
+      'vitest.config.mjs': `import { gioVitest } from '@gio.js/core/vitest';
+export default { plugins: [gioVitest()], test: { include: ['tests/*.test.ts'] } };
+`,
+      'tests/css.test.ts': `import { writeFileSync } from 'node:fs';
+import { expect, it } from 'vitest';
+import { renderPage } from '@gio.js/core/testing';
+import styles from '../app/card.module.css';
+it('renders', async () => {
+  const page = await renderPage('/');
+  expect(page.status).toBe(200);
+  writeFileSync(new URL('../result.json', import.meta.url), JSON.stringify({ html: page.html, direct: styles }));
+});
+`,
+      'app/page.tsx': `import React from 'react';
+import './home.css';
+import styles from './card.module.css';
+export default function Home() { return React.createElement('p', { className: styles.card }, 'KIT_STYLED'); }
+`,
+      'app/home.css': '.kit-home-marker { order: 1; }\n',
+      'app/card.module.css': '.card { color: teal; }\n.title { composes: card; font-weight: bold; }\n',
+    });
+    const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+    await mkdir(join(root, 'node_modules', '@gio.js'));
+    await symlink(packageDir, join(root, 'node_modules', '@gio.js', 'core'), linkType);
+    await symlink(join(packageDir, 'node_modules', 'vitest'), join(root, 'node_modules', 'vitest'), linkType);
+  });
+
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("gives a project's own vitest run the server's CSS Module class names", async () => {
+    // A vitest run of the project's own, with its config - not this suite's.
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const name of Object.keys(env)) {
+      if (name.startsWith('VITEST')) delete env[name];
+    }
+    const vitestCli = join(packageDir, 'node_modules', 'vitest', 'vitest.mjs');
+    const run = await new Promise<{ code: number | null; output: string }>(resolveRun => {
+      const child = spawn(process.execPath, [vitestCli, 'run'], { cwd: root, env });
+      let output = '';
+      child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString()));
+      child.stderr.on('data', (chunk: Buffer) => (output += chunk.toString()));
+      child.on('close', code => resolveRun({ code, output }));
+    });
+    expect(run.code, run.output).toBe(0);
+
+    const result = JSON.parse(await readFile(join(root, 'result.json'), 'utf8')) as {
+      html: string;
+      direct: Record<string, string>;
+    };
+    const classes = await compileCssModuleClasses(join(root, 'app', 'card.module.css'));
+    expect(classes['card']).toMatch(/^card_[0-9a-f]{6}_card$/);
+    // A test's own import and the rendered page alike, composes included.
+    expect(result.direct).toEqual(classes);
+    expect(result.html).toContain(`<p class="${classes['card']}">KIT_STYLED</p>`);
+    expect(result.html).toMatch(/<link rel="stylesheet" href="\/_next\/static\/css\/route-index-[A-Z0-9]+\.css"/);
+  }, 120_000);
+
+  it('types as a vite plugin', () => {
+    // Also a compile-time check: the declared types fit vite's PluginOption.
+    expect(defineConfig({ plugins: [gioVitest()] }).plugins).toHaveLength(1);
   });
 });
 

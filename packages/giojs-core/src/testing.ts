@@ -9,9 +9,13 @@
  *   loaded, routes, layouts, route.ts handlers, not-found/error files and
  *   gio.config plugins are discovered once per app directory, and
  *   notFound(), redirects and error pages resolve the way the server
- *   resolves them. What lives in Rust - gio.toml and middleware.ts rules,
- *   [i18n] locale detection, rate limits, CSRF checks, security headers,
- *   the page cache - is not applied; createTestServer covers that.
+ *   resolves them. Pages link the route stylesheets the worker links
+ *   (same URLs; nothing is written to .gio/), and CSS Modules carry the
+ *   server's class names - under vitest with the `@gio.js/core/vitest`
+ *   plugin, as vitest otherwise names them its own way. What lives in Rust
+ *   - gio.toml and middleware.ts rules, [i18n] locale detection, rate
+ *   limits, CSRF checks, security headers, the page cache - is not
+ *   applied; createTestServer covers that.
  * - createTestServer starts the real giojs-server binary on a free port
  *   with a private cache, and close() takes down its whole process tree.
  *   A test process that never calls close() still exits, and its servers
@@ -41,6 +45,8 @@ import { isValidCookieName } from './cookies.ts';
 import { loadEnvFiles } from './env-files.ts';
 import { formatSseEvent } from './ipc.ts';
 import { loadGioConfig } from './config-loader.ts';
+import { buildRouteStylesheets } from './css-build.ts';
+import { isDevMode } from './mode.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import {
   assertNoMetadataRouteConflicts,
@@ -114,6 +120,17 @@ async function discoverTestApp(appDir: string): Promise<TestApp> {
   assertNoRouteConflicts(appDir, routes, routeFiles);
   assertNoMetadataRouteConflicts(appDir, routes, routeFiles, metadataRoutes);
   const { handlers } = await discoverRouteModules(routeFiles);
+  // The <link> tags each page carries, built like the worker builds them -
+  // same URLs for the same mode - but nothing is written: .gio/ belongs to
+  // whatever server runs next to the tests.
+  const stylesheets = await buildRouteStylesheets({
+    routes,
+    layouts,
+    segmentFiles,
+    projectRoot: dirname(appDir),
+    dev: isDevMode(),
+    write: false,
+  });
   const config = await loadGioConfig(appDir);
   // Not startPluginRegistry: that one owns the worker's SIGTERM handler.
   const registry = new NodePluginRegistry();
@@ -126,7 +143,7 @@ async function discoverTestApp(appDir: string): Promise<TestApp> {
     layouts,
     registry,
     clientScripts: new Map([...routes.keys()].map(pattern => [pattern, TEST_ENTRY_SCRIPT])),
-    extras: { handlers, specialPages, segmentFiles, metadataRoutes },
+    extras: { handlers, specialPages, segmentFiles, metadataRoutes, stylesheets },
   };
 }
 

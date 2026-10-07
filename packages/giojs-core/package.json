@@ -13,6 +13,7 @@
     ".": "./src/public.ts",
     "./server-only": "./src/server-only.ts",
     "./testing": "./src/testing.ts",
+    "./vitest": "./src/vitest-plugin.js",
     "./package.json": "./package.json"
   },
   "scripts": {
