@@ -261,3 +261,58 @@ test('the function reference states the server limits it quotes', () => {
   assert.match(read(server('main.rs')), /load_or_create_nonce_placeholder\(\s*&cache_dir\.join\("meta"\)/);
   assert.match(page('csp-nonce'), /<code>meta\/csp-nonce-placeholder-\*<\/code>[\s\S]*<code>\.gio\/cache\/pages<\/code>/);
 });
+
+test('the file-convention pages state the router and metadata-route facts the code decides', () => {
+  // app/sitemap.ts, robots.ts and manifest.ts: the default revalidate.
+  const routes = read('packages/giojs-core/src/metadata-routes.ts');
+  const revalidate = /export const DEFAULT_METADATA_REVALIDATE = (\d+);/.exec(routes)?.[1];
+  assert.ok(revalidate, 'DEFAULT_METADATA_REVALIDATE not found - update this test');
+  for (const page of ['sitemap', 'robots', 'manifest']) {
+    assert.match(docsPage(`file-conventions/${page}`), new RegExp(`default: '${revalidate}'`), page);
+  }
+  assert.match(docsPage('file-conventions'), new RegExp(`default ${revalidate} seconds`));
+
+  // route.ts: the method handlers a file may export.
+  const methods = /HANDLER_METHODS = \[([^\]]+)\]/.exec(read('packages/giojs-core/src/router.ts'))?.[1];
+  assert.ok(methods, 'HANDLER_METHODS not found - update this test');
+  const routePage = docsPage('file-conventions/route');
+  for (const method of methods.match(/[A-Z]+/g)) {
+    assert.match(routePage, new RegExp(`name: '${method}'`), `the route.ts page lacks ${method}`);
+  }
+
+  // .env files: the candidates, highest precedence first.
+  const rust = read('crates/giojs-server/src/env_files.rs');
+  const candidates = /pub fn candidate_files[\s\S]*?\[([\s\S]*?)\]\n\}/.exec(rust)?.[1] ?? '';
+  const order = [...candidates.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(order, ['.env.{mode}.local', '.env.local', '.env.{mode}', '.env'],
+    'env_files.rs changed the .env order - update the .env files page');
+  const envPage = docsPage('file-conventions/env-files');
+  const shown = ['<code>.env.development.local</code>', '<code>.env.local</code></td>', '<code>.env.development</code>', '<code>.env</code></td>']
+    .map((s) => envPage.indexOf(s));
+  assert.ok(shown.every((at, n) => at > 0 && (n === 0 || at > shown[n - 1])), `the .env files page shows another order: ${shown}`);
+});
+
+test('the public/ and route.ts pages state the limits the server decides', () => {
+  // public/: the root files' Cache-Control and the size of the root index.
+  const publicFiles = read('crates/giojs-server/src/public_files.rs');
+  const cacheControl = /PUBLIC_ROOT_CACHE_CONTROL: &str = "([^"]+)";/.exec(publicFiles)?.[1];
+  const maxIndexed = /MAX_INDEXED_FILES: usize = ([\d_]+);/.exec(publicFiles)?.[1];
+  assert.ok(cacheControl && maxIndexed, 'public_files.rs constants not found - update this test');
+  const publicPage = docsPage('file-conventions/public-folder');
+  assert.ok(publicPage.includes(`<code>Cache-Control: ${cacheControl}</code>`), 'public/ page: root Cache-Control');
+  const indexSize = Number(maxIndexed.replace(/_/g, '')).toLocaleString('en-US');
+  assert.ok(publicPage.includes(`holds up to ${indexSize} files`), 'public/ page: root index size');
+
+  // route.ts: the default [server] max_body_bytes.
+  const config = read('crates/giojs-server/src/config.rs');
+  const body = /fn default_max_body_bytes\(\) -> usize \{\s*(\d+) \* 1024 \* 1024\s*\}/.exec(config)?.[1];
+  assert.ok(body, 'default_max_body_bytes not found - update this test');
+  assert.match(docsPage('file-conventions/route'), new RegExp(`${body} MiB by default`));
+
+  // route.ts and page.tsx: the 405 body.
+  const ssr = read('packages/giojs-core/src/ssr.ts');
+  assert.match(ssr, /body: JSON\.stringify\(\{ error: 'Method Not Allowed' \}\)/, 'the 405 body changed - update the route.ts and page.tsx pages');
+  for (const page of ['file-conventions/route', 'file-conventions/page']) {
+    assert.ok(docsPage(page).includes(`{'{"error":"Method Not Allowed"}'}`), `${page}: 405 body`);
+  }
+});

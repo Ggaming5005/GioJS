@@ -1,0 +1,176 @@
+import React from 'react';
+import type { Metadata } from '@gio.js/core';
+import { CodeBlock } from '../../../../components/CodeBlock.tsx';
+import { PropsTable, VersionHistory } from '../../../../components/ReferenceTable.tsx';
+
+export const metadata: Metadata = {
+  title: 'middleware.ts',
+  description:
+    'Redirects, rewrites, response headers and auth guards declared in TypeScript at the project root, and enforced by the Rust server before routing.',
+};
+
+export const revalidate = false;
+
+export default function Page(): React.JSX.Element {
+  return (
+    <>
+      <h1>middleware.ts</h1>
+      <p className="page-subtitle">
+        Redirects, rewrites, response headers and auth guards declared in TypeScript at the
+        project root, and enforced by the Rust server before routing.
+      </p>
+      <CodeBlock lang="ts" title="middleware.ts" code={`import { defineMiddleware } from '@gio.js/core';
+
+export default defineMiddleware({
+  redirects: [{ from: '/old-blog/*rest', to: '/blog/*rest', status: 308 }],
+  rewrites: [{ from: '/docs/*rest', to: '/guide/*rest' }],
+  headers: [{ path: '/api/*rest', headers: { 'x-api-version': '1' } }],
+  guards: [{ path: '/account/*rest', requireSession: true, redirectTo: '/login' }],
+});`} />
+
+      <h2 id="reference">Reference</h2>
+      <h3 id="file-name-and-location">File name and location</h3>
+      <p>
+        <code>middleware.ts</code> or <code>middleware.js</code> (<code>.ts</code> first) in
+        the project root, next to <code>app/</code> - not inside it, and not in a{' '}
+        <code>src/</code> folder. It is optional.
+      </p>
+
+      <h3 id="default-export">Default export</h3>
+      <p>
+        An object with up to four lists. <a href="/docs/functions/define-middleware"><code>defineMiddleware()</code></a>{' '}
+        returns it unchanged and types it as <code>MiddlewareRules</code>.
+      </p>
+      <PropsTable kind="Key" rows={[
+        { name: 'redirects', type: '{ from: string; to: string; status?: 301 | 302 | 307 | 308 }[]', description: <>Answer with a redirect. <code>status</code> defaults to <code>302</code>.</> },
+        { name: 'rewrites', type: '{ from: string; to: string }[]', description: 'Serve another path while the browser URL stays the same.' },
+        { name: 'headers', type: '{ path: string; headers: Record<string, string> }[]', description: 'Add or override response headers on matching paths.' },
+        { name: 'guards', type: 'MiddlewareGuard[]', description: <>Redirect requests without a cookie (<code>requireCookie</code>) or without a valid session (<code>requireSession: true</code>, checking the <code>gio_session</code> cookie or the one <code>requireCookie</code> names) to <code>redirectTo</code>, a path starting with <code>/</code>, with a <code>302</code>.</> },
+      ]} />
+      <p>
+        Patterns are the routing ones: literal segments, <code>:param</code> for one segment
+        and <code>*rest</code> for the rest of the path (which may be empty), substituted into{' '}
+        <code>to</code> by name. The <a href="/docs/middleware#pattern-language">pattern
+        language</a> and each rule kind are explained in the Middleware guide.
+      </p>
+
+      <h3 id="how-it-runs">How it runs</h3>
+      <ul>
+        <li>
+          <strong>Once, at worker startup.</strong> The worker imports the file and sends the
+          rules to the Rust server, which compiles them next to the rules from{' '}
+          <code>gio.toml</code>. No JavaScript runs per request: a request is redirected,
+          rewritten or refused before it reaches Node, and no header the client sends can
+          skip a rule.
+        </li>
+        <li>
+          <strong>Order.</strong> Guards, then redirects, then rewrites; the first matching
+          rule of a phase wins, and <code>gio.toml</code> rules are tried before{' '}
+          <code>middleware.ts</code> rules within each phase. Header rules apply to the
+          response, redirects and guard answers included.
+        </li>
+        <li>
+          <strong>Reloads.</strong> The rules are read again whenever the worker restarts. In
+          development, saving the file restarts it.
+        </li>
+        <li>
+          <strong><code>/_gio/*</code></strong> (the server&apos;s own endpoints) is never
+          matched.
+        </li>
+      </ul>
+
+      <h3 id="validation">Validation</h3>
+      <p>Problems never stop the server, but they are never silent either:</p>
+      <ul>
+        <li>
+          A file that fails to import, or a default export that is not an object: the worker
+          logs a warning and runs with no <code>middleware.ts</code> rules.
+        </li>
+        <li>
+          A malformed redirect, rewrite or header entry is dropped with a warning (
+          <code>middleware redirects entry is malformed - entry dropped</code>). The server
+          also skips, with a warning, a rule whose pattern or header it cannot compile.
+        </li>
+        <li>
+          A guard with a misspelled key, no requirement or a bad <code>redirectTo</code> is{' '}
+          <strong>not</strong> dropped: it denies every request to its path, redirecting to
+          its <code>redirectTo</code> (or <code>/</code>), until it is fixed. A{' '}
+          <code>requireSession</code> guard does the same while{' '}
+          <code>GIO_SESSION_SECRET</code> is missing or invalid.
+        </li>
+        <li>
+          A guard whose <code>path</code> is missing or is not a valid pattern (no leading{' '}
+          <code>/</code>, a <code>*rest</code> that is not the last segment) has nothing to
+          close: it is skipped with a warning (<code>invalid guard rule skipped</code>), and
+          the path it meant to protect stays open. Check the startup log after editing
+          guards.
+        </li>
+      </ul>
+
+      <h2 id="examples">Examples</h2>
+      <h3 id="rules-built-from-code">Rules built from code</h3>
+      <p>
+        The file is a module: it can import data and read the environment, as long as the
+        result is plain rules. It is evaluated once per worker start.
+      </p>
+      <CodeBlock lang="ts" title="middleware.ts" code={`import { defineMiddleware } from '@gio.js/core';
+import { MOVED_PAGES } from './lib/moved-pages';
+
+export default defineMiddleware({
+  redirects: MOVED_PAGES.map(({ from, to }) => ({ from, to, status: 301 })),
+  headers: process.env.STAGING === '1'
+    ? [{ path: '/*rest', headers: { 'x-robots-tag': 'noindex' } }]
+    : [],
+});`} />
+
+      <h3 id="protect-a-members-area">Protect a members area</h3>
+      <CodeBlock lang="ts" title="middleware.ts" code={`import { defineMiddleware } from '@gio.js/core';
+
+export default defineMiddleware({
+  guards: [
+    // Verified in Rust with GIO_SESSION_SECRET: signature and expiry of the gio_session cookie.
+    { path: '/members/*rest', requireSession: true, redirectTo: '/login' },
+  ],
+});`} />
+
+      <h2 id="good-to-know">Good to know</h2>
+      <ul>
+        <li>
+          This is not Next.js middleware: there is no function that runs per request and no{' '}
+          <code>NextResponse</code>. Logic that must look at each request in JavaScript
+          belongs in <code>getServerSideProps</code>, a page action, a <code>route.ts</code>, or
+          an <code>onRequest</code> plugin in <a href="/docs/file-conventions/gio-config">gio.config.ts</a>.
+        </li>
+        <li>
+          Everything here can also be written in <code>gio.toml</code> (
+          <code>[[redirects]]</code>, <code>[[rewrites]]</code>, <code>[[headers]]</code>,{' '}
+          <code>[[guards]]</code>, with snake_case guard keys). Use <code>middleware.ts</code>{' '}
+          when the rules come from code or should be type-checked.
+        </li>
+        <li>
+          Unlike <code>gio.toml</code>, an invalid guard here does not stop startup: it closes
+          its path and logs why, or, when its <code>path</code> itself is invalid, is skipped
+          with a warning. Watch the startup log after editing guards.
+        </li>
+        <li>
+          Rules see the canonical path: repeated and trailing slashes collapsed, escapes of
+          unreserved characters decoded.
+        </li>
+      </ul>
+
+      <h2 id="related">Related</h2>
+      <ul>
+        <li><a href="/docs/middleware">Middleware</a> - the guide.</li>
+        <li><a href="/docs/functions/define-middleware"><code>defineMiddleware</code></a></li>
+        <li><a href="/docs/configuration/redirects"><code>[[redirects]]</code></a>, <a href="/docs/configuration/rewrites"><code>[[rewrites]]</code></a>, <a href="/docs/configuration/headers"><code>[[headers]]</code></a>, <a href="/docs/configuration/guards"><code>[[guards]]</code></a></li>
+        <li><a href="/docs/authentication">Authentication</a></li>
+      </ul>
+
+      <h2 id="version-history">Version history</h2>
+      <VersionHistory entries={[
+        { version: 'v0.1.0-beta.8', changes: <>A malformed guard denies every request to its path instead of being dropped. <code>*rest</code> also matches zero segments. Header rules also apply to redirect and guard responses. <code>requireSession</code> guards verify the session in Rust.</> },
+        { version: 'v0.1.0-beta.6', changes: <>Introduced: redirects, rewrites, headers and cookie guards from a project-root <code>middleware.ts</code>.</> },
+      ]} />
+    </>
+  );
+}
