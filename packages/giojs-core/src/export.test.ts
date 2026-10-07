@@ -573,6 +573,7 @@ interface Envelope {
   pattern: string;
   entry: string;
   images?: { widths: number[]; quality: number; unoptimized: boolean };
+  locale?: string;
 }
 
 function envelopeOf(html: string): Envelope {
@@ -654,6 +655,13 @@ describe('exportSite hydration', () => {
     expect(chunks.some(js => js.includes('EXPORT_PUBLIC_VALUE'))).toBe(true);
     // getServerSideProps never ships.
     expect(chunks.some(js => js.includes('from-gssp'))).toBe(false);
+  });
+
+  it("carries the locale the server sends without i18n (''), not a made-up one", async () => {
+    // useLocale()/<LocaleLink> read it: 'en' would prefix links with /en/ on
+    // a site that has no such pages (<LocaleLink defaultLocale="fr">).
+    const html = await readFile(join(outDir, 'posts', '1', 'index.html'), 'utf8');
+    expect(envelopeOf(html).locale).toBe('');
   });
 
   it('images render their plain src (no optimizer on a static host), identically after hydration', async () => {

@@ -176,7 +176,7 @@ describe('generated entries', () => {
     const dom = installDom('complete');
     dom.elements.set('__gio_props', { textContent: ENVELOPE });
     const runtime = await import('./client-runtime.ts');
-    const { buildSegmentTree, SegmentErrorBoundary } = await import('./segment-tree.ts');
+    const { buildSegmentTree, SegmentErrorScope } = await import('./segment-tree.ts');
     const { navigationContext } = await import('./navigation-context.ts');
     expect(runtime.buildSegmentTree).toBe(buildSegmentTree);
     const ErrorView = (): null => null;
@@ -198,7 +198,7 @@ describe('generated entries', () => {
       pattern: '/ppr',
     });
     const element = provider?.props.children;
-    expect(element?.type).toBe(SegmentErrorBoundary);
+    expect(element?.type).toBe(SegmentErrorScope);
     expect(element?.props.fallback).toBe(ErrorView);
   });
 });

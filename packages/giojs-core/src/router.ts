@@ -324,6 +324,12 @@ export function nearestSegmentFiles(
 /** One folder of a page's hydrated tree (see segment-tree.ts). */
 export interface SegmentChainLevel {
   dir: string;
+  /**
+   * The dynamic segment names from app/ down to `dir`, outermost first
+   * ('teams/[team]' gives ['team']): the level's subtree remounts when one
+   * of their values changes.
+   */
+  params: string[];
   /** Never set for app/ itself: the root layout stays server-only HTML. */
   layout?: LayoutEntry;
   error?: SegmentFileEntry;
@@ -349,12 +355,24 @@ export function segmentChainForDir(
     if (layout === undefined && error === undefined && loading === undefined) continue;
     chain.push({
       dir: ancestor,
+      params: dirParamNames(ancestor),
       ...(layout !== undefined ? { layout } : {}),
       ...(error !== undefined ? { error } : {}),
       ...(loading !== undefined ? { loading } : {}),
     });
   }
   return chain;
+}
+
+/** The param names of the dynamic folders in `dir` ('[id]', '[...slug]', '[[...slug]]'), outermost first. */
+function dirParamNames(dir: string): string[] {
+  if (dir === '') return [];
+  const names: string[] = [];
+  for (const name of dir.split('/')) {
+    const match = OPTIONAL_CATCH_ALL_RE.exec(name) ?? CATCH_ALL_RE.exec(name) ?? DYNAMIC_RE.exec(name);
+    if (match?.[1] !== undefined) names.push(match[1]);
+  }
+  return names;
 }
 
 /** Walk app/ recursively and collect route files, mapping them to URL patterns. */

@@ -103,11 +103,17 @@ function pathToFile(outDir: string, urlPath: string): string | null {
   return rel.startsWith(`..${sep}`) || isAbsolute(rel) ? null : file;
 }
 
+/**
+ * The request a page is exported for. `locale` is '' - what the Rust server
+ * sends for an app without i18n (the export has no locale routing): it
+ * reaches useLocale() and <LocaleLink> through the navigation context, so a
+ * made-up 'en' would prefix their hrefs with a locale no exported page has.
+ */
 function makeRequest(path: string, params: Record<string, string>): IPCRequest {
   return {
     id: 'export', method: 'GET', path, params,
     query: {}, headers: {}, body: null, bodyBase64: false,
-    deploymentId: 'static', locale: 'en',
+    deploymentId: 'static', locale: '',
   };
 }
 

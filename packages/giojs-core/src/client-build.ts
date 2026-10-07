@@ -120,7 +120,8 @@ function generateEntrySource(
     const layout = binding('Layout', level.layout);
     const error = binding('SegmentError', level.error);
     const loading = binding('Loading', level.loading);
-    return `  { layout: ${layout}, error: ${error}, loading: ${loading} },`;
+    const params = level.params.length > 0 ? `, params: ${JSON.stringify(level.params)}` : '';
+    return `  { layout: ${layout}, error: ${error}, loading: ${loading}${params} },`;
   });
   return `import React from 'react';
 import { registerRoute, buildSegmentTree } from ${importPath(runtimePath)};

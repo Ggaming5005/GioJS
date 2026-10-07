@@ -1199,6 +1199,7 @@ async function loadSegmentLevels(
       layout: layoutMod?.default ?? null,
       error: (errorMod?.default as React.ComponentType<GioErrorProps> | undefined) ?? null,
       loading: loadingMod?.default ?? null,
+      ...(level.params.length > 0 ? { params: level.params } : {}),
     };
     if (loadingMod !== undefined) {
       const state: ProbeState = {

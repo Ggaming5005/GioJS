@@ -5,8 +5,9 @@
  * The persistent root behind soft navigation, against a real DOM: the
  * first load hydrates the server HTML (navigation context included) without
  * a mismatch, `__GIO_RUNTIME__.commit` renders the next route into the SAME
- * root so a shared layout keeps its state, a caught error clears on
- * navigation, and server-only pages swap their HTML in and out of the root.
+ * root so a shared layout keeps its state (unless the dynamic segment it
+ * lives under changed), a caught error clears on navigation - a query-only
+ * one too - and server-only pages swap their HTML in and out of the root.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React, { act } from 'react';
@@ -114,12 +115,16 @@ function serverContent(html: string): HTMLElement {
   return div;
 }
 
-async function loadFirstPage(spec: PageSpec, page: React.ComponentType<{ label: string }>): Promise<Runtime> {
+async function loadFirstPage(
+  spec: PageSpec,
+  page: React.ComponentType<{ label: string }>,
+  pageLevels: SegmentLevel[] = levels,
+): Promise<Runtime> {
   const runtime = await import('./client-runtime.ts');
   const tree = runtime.buildSegmentTree(
     React.createElement(page, spec.props as { label: string }),
     spec.path,
-    levels,
+    pageLevels,
   );
   // The server render: the provider around the document, #__gio inside.
   const html = renderToString(withNavigation(navState(spec), React.createElement('div', { id: '__gio' }, tree)));
@@ -127,7 +132,7 @@ async function loadFirstPage(spec: PageSpec, page: React.ComponentType<{ label: 
   swapEnvelope(spec);
   await act(async () => {
     runtime.registerRoute(spec.pattern, (props, path) =>
-      runtime.buildSegmentTree(React.createElement(page, props as { label: string }), path, levels),
+      runtime.buildSegmentTree(React.createElement(page, props as { label: string }), path, pageLevels),
     );
   });
   return runtime;
@@ -206,6 +211,63 @@ describe('persistent root', () => {
     act(() => runtimeApi().commit(null));
     expect(text('caught')).toBeNull();
     expect(document.querySelector('h1')?.textContent).toBe('Y');
+  });
+
+  it('clears a caught error on a query-only navigation', async () => {
+    consoleError.mockImplementation(() => undefined);
+    function SearchPage(): React.ReactElement {
+      const search = React.useContext(navigationContext())?.search;
+      if (search === '?q=bad') throw new Error('bad query');
+      return React.createElement('main', null, React.createElement('h1', null, `results ${search}`));
+    }
+    await loadFirstPage({ path: '/search', pattern: '/search', search: '?q=ok', props: { label: 's' } }, SearchPage);
+    act(() => document.getElementById('count')?.click());
+
+    swapEnvelope({ path: '/search', pattern: '/search', search: '?q=bad', props: { label: 's' } });
+    act(() => runtimeApi().commit(null));
+    expect(text('caught')).not.toBeNull();
+
+    // Same path, same route: only the query changed.
+    swapEnvelope({ path: '/search', pattern: '/search', search: '?q=good', props: { label: 's' } });
+    act(() => runtimeApi().commit(null));
+    expect(text('caught')).toBeNull();
+    expect(document.querySelector('h1')?.textContent).toBe('results ?q=good');
+    expect(text('count')).toBe('count=1');
+  });
+
+  it('remounts a layout below a dynamic segment when its value changes', async () => {
+    function TeamLayout({ children }: { children: React.ReactNode }): React.ReactElement {
+      const [count, setCount] = React.useState(0);
+      return React.createElement(
+        'div',
+        null,
+        React.createElement('button', { id: 'team-count', onClick: () => setCount(c => c + 1) }, `team=${count}`),
+        children,
+      );
+    }
+    // app/(site)/layout.tsx and app/teams/[team]/layout.tsx.
+    const teamLevels: SegmentLevel[] = [{ layout: CounterLayout }, { layout: TeamLayout, params: ['team'] }];
+    const pattern = '/teams/:team/:tab';
+    await loadFirstPage(
+      { path: '/teams/a/settings', pattern, params: { team: 'a', tab: 'settings' }, props: { label: 'A' } },
+      Page,
+      teamLevels,
+    );
+    expect(consoleError).not.toHaveBeenCalled();
+    act(() => document.getElementById('count')?.click());
+    act(() => document.getElementById('team-count')?.click());
+
+    // Another tab of the same team: the team's layout keeps its state.
+    swapEnvelope({ path: '/teams/a/members', pattern, params: { team: 'a', tab: 'members' }, props: { label: 'A2' } });
+    act(() => runtimeApi().commit(null));
+    expect(text('team-count')).toBe('team=1');
+
+    // Another team: its layout mounts fresh; the layout above it is kept.
+    swapEnvelope({ path: '/teams/b/members', pattern, params: { team: 'b', tab: 'members' }, props: { label: 'B' } });
+    act(() => runtimeApi().commit(null));
+    expect(document.querySelector('h1')?.textContent).toBe('B');
+    expect(text('team-count')).toBe('team=0');
+    expect(text('count')).toBe('count=1');
   });
 
   it("shows the folder's loading.* while the next page suspends, inside the kept layout", async () => {
