@@ -5343,6 +5343,306 @@ async function configSettingsPhase() {
 }
 
 /**
+ * Phase 1g (feature switches): every gio.toml switch that turns a feature
+ * off, and every limit lifted to 0, against the real server. Run 1 turns
+ * features off ([prefetch], [images], [cache] enabled = false, [css]
+ * minify = false, a font without preload, unlimited and ping-less
+ * WebSockets, a short render timeout); run 2 lifts limits to 0 and turns
+ * the cache's sub-features off. The defaults stay covered by the main
+ * phase and by what each run leaves alone.
+ */
+async function featureSwitchesPhase() {
+  const binary = findServerBinary();
+  const appRoot = await copyFixtureForDev('.switches-fixture');
+  await mkdir(join(appRoot, 'app', 'api', 'sleep'), { recursive: true });
+  await writeFile(
+    join(appRoot, 'app', 'api', 'sleep', 'route.ts'),
+    [
+      '// Answers after ?ms= milliseconds: renders slower than [server] render_timeout_secs.',
+      'export async function GET(req: { query: Record<string, string> }): Promise<unknown> {',
+      "  const ms = Number(req.query['ms']) || 0;",
+      '  await new Promise((resolve) => setTimeout(resolve, ms));',
+      '  return { slept: ms };',
+      '}',
+      '',
+    ].join('\n'),
+  );
+  // Any bytes do: fonts are served as-is.
+  await mkdir(join(appRoot, 'public', 'fonts'), { recursive: true });
+  await writeFile(join(appRoot, 'public', 'fonts', 'preloaded.woff2'), 'wOF2-preloaded');
+  await writeFile(join(appRoot, 'public', 'fonts', 'lazy.woff2'), 'wOF2-lazy');
+  const tomlPath = join(appRoot, 'gio.toml');
+  const fixtureToml = await readFile(tomlPath, 'utf8');
+  assert.match(fixtureToml, /^http2 = false$/m, 'fixture gio.toml sets [server] http2');
+  assert.match(fixtureToml, /^quality\s*=\s*70$/m, 'fixture gio.toml sets [images] quality');
+  const tomlWith = ({ server, images, tail }) =>
+    fixtureToml
+      .replace(/^http2 = false$/m, `http2 = false\n${server.join('\n')}`)
+      .replace(/^quality\s*=\s*70$/m, `quality = 70\n${images.join('\n')}`)
+      + ['', ...tail, ''].join('\n');
+
+  /** The stylesheets a page links, fetched. */
+  const linkedStylesheets = async (html) => {
+    const hrefs = [...html.matchAll(/href="(\/_next\/static\/css\/[^"]+\.css)"/g)].map((m) => m[1]);
+    assert.ok(hrefs.length > 0, 'the page links its stylesheets');
+    return Promise.all(hrefs.map(async (href) => (await fetch(`${BASE}${href}`)).text()));
+  };
+  const cacheFiles = async (dir) =>
+    (await readdir(dir, { recursive: true }).catch(() => [])).filter((f) => f.endsWith('.json'));
+
+  /** Start the fixture copy with `toml`, run `fn`, stop it. */
+  async function run(label, toml, fn) {
+    await writeFile(tomlPath, toml);
+    const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-switches-'));
+    const env = {
+      ...process.env,
+      GIO_APP_DIR: join(appRoot, 'app'),
+      GIO_CACHE_DIR: cacheDir,
+      RUST_LOG: 'info',
+      NODE_ENV: 'production',
+    };
+    let log = '';
+    const server = spawn(binary, [], { cwd: repoRoot, env });
+    server.stdout.on('data', (d) => { log += d.toString(); });
+    server.stderr.on('data', (d) => { log += d.toString(); });
+    let serverGone = false;
+    const serverExited = new Promise((r) =>
+      server.on('exit', () => { serverGone = true; r(); }),
+    );
+    try {
+      await waitFor(`server health (${label})`, async () => {
+        const res = await fetch(`${BASE}/_gio/health`);
+        return res.ok && (await res.json()).nodeReady === true;
+      }, 30_000);
+      await fn({ cacheDir, env, log: () => log.replace(/\x1b\[[0-9;]*m/g, '') });
+    } catch (err) {
+      console.error(`\nintegration (feature switches, ${label}): FAILED`);
+      console.error(err);
+      console.error('\n── server log tail ──');
+      console.error(significantLogTail(log));
+      process.exitCode = 1;
+    } finally {
+      if (!serverGone) server.kill();
+      await serverExited;
+      await rm(cacheDir, { recursive: true, force: true });
+    }
+  }
+
+  try {
+    await run('switched off', tomlWith({
+      server: ['render_timeout_secs = 2'],
+      images: ['enabled = false'],
+      tail: [
+        '[prefetch]', 'enabled = false', '',
+        '[cache]', 'enabled = false', '',
+        '[css]', 'minify = false', '',
+        '[websocket]', 'max_connections = 0', 'ping_interval_secs = 0', '',
+        '[[fonts]]', 'family = "Preloaded"', 'url = "/fonts/preloaded.woff2"', '',
+        '[[fonts]]', 'family = "Lazy"', 'url = "/fonts/lazy.woff2"', 'preload = false',
+      ],
+    }), async ({ cacheDir }) => {
+      await test('[prefetch] enabled = false answers every prefetch 429, other requests as usual', async () => {
+        for (const path of ['/gio-test.png', '/cached']) {
+          const res = await fetch(`${BASE}${path}`, { headers: { purpose: 'prefetch' } });
+          await res.arrayBuffer();
+          assert.equal(res.status, 429, path);
+        }
+        const plain = await fetch(`${BASE}/gio-test.png`);
+        await plain.arrayBuffer();
+        assert.equal(plain.status, 200);
+      });
+
+      await test('[images] enabled = false: /_gio/image is a 404 and <GioImage> renders plain src', async () => {
+        const res = await fetch(`${BASE}/_gio/image?src=/gio-test.png&w=96`);
+        await res.arrayBuffer();
+        assert.equal(res.status, 404);
+        const html = await (await fetch(`${BASE}/image`)).text();
+        assert.match(html, /IMAGE_FIXTURE/);
+        assert.doesNotMatch(html, /\/_gio\/image/, 'no optimizer URL anywhere');
+        assert.doesNotMatch(html, /srcSet=/i);
+        assert.match(html, /<img [^>]*src="\/gio-test\.png"/);
+        const envelope = JSON.parse(html.match(/<script id="__gio_props" type="application\/json">([^<]*)</)[1]);
+        assert.equal(envelope.images.unoptimized, true, 'hydration renders the same plain src');
+      });
+
+      await test('[cache] enabled = false renders every request, Cache-Control still public', async () => {
+        for (let i = 0; i < 2; i++) {
+          const res = await fetch(`${BASE}/cached`);
+          await res.text();
+          assert.equal(res.status, 200);
+          assert.equal(res.headers.get('x-gio-cache'), 'bypass', `request ${i + 1}`);
+          assert.match(
+            res.headers.get('cache-control') ?? '',
+            /^public, max-age=0, s-maxage=\d+, stale-while-revalidate=\d+$/,
+          );
+        }
+        await sleep(500);
+        assert.deepEqual(await cacheFiles(cacheDir), [], 'nothing written to the page cache directory');
+      });
+
+      await test('[css] minify = false leaves the bundled stylesheets unminified', async () => {
+        const html = await (await fetch(`${BASE}/styled`)).text();
+        assert.match(html, /FIXTURE_STYLED_PAGE/);
+        const sheets = await linkedStylesheets(html);
+        assert.ok(
+          sheets.some((css) => /\{\n {2}color: rebeccapurple;\n\}/.test(css)),
+          `card.module.css as written: ${sheets.join('\n---\n').slice(0, 400)}`,
+        );
+      });
+
+      await test('[[fonts]] preload = false drops that font\'s preload link only', async () => {
+        const html = await (await fetch(`${BASE}/`)).text();
+        const preloads = [...html.matchAll(/<link rel="preload" href="\/_gio\/fonts\/([^"]+)" as="font"/g)]
+          .map((m) => m[1]);
+        assert.equal(preloads.length, 1, `${preloads}`);
+        assert.match(preloads[0], /^preloaded/i);
+        assert.match(html, /<link rel="stylesheet" href="\/_gio\/fonts\/fonts\.css">/);
+        const css = await (await fetch(`${BASE}/_gio/fonts/fonts.css`)).text();
+        assert.match(css, /font-family: ?['"]?Lazy/, 'the lazy font keeps its @font-face');
+      });
+
+      await test('[websocket] max_connections = 0 and ping_interval_secs = 0 accept and keep sockets', async () => {
+        // 0 used to close every socket with 1013, and a 0 ping interval
+        // panicked the connection task before any message was relayed.
+        const ws = new WebSocket('ws://127.0.0.1:39517/ws/rooms/switches');
+        const messages = [];
+        ws.addEventListener('message', (event) => messages.push(String(event.data)));
+        const closed = new Promise((resolve) =>
+          ws.addEventListener('close', (event) => resolve(event.code), { once: true }),
+        );
+        await new Promise((resolve, reject) => {
+          ws.addEventListener('open', resolve, { once: true });
+          ws.addEventListener('error', () => reject(new Error('socket failed to open')), { once: true });
+        });
+        await waitFor('the room greeting', () => Promise.resolve(messages.length > 0), 5_000);
+        assert.equal(JSON.parse(messages[0]).type, 'hello');
+        ws.send('ping-less');
+        await waitFor('the room broadcast', () =>
+          Promise.resolve(messages.includes('switches:ping-less')), 5_000);
+        ws.close();
+        assert.equal(await closed, 1005);
+      });
+
+      await test('[server] render_timeout_secs bounds how long a render may take', async () => {
+        const started = Date.now();
+        const slow = await fetch(`${BASE}/api/sleep?ms=6000`);
+        await slow.text();
+        assert.equal(slow.status, 504);
+        assert.ok(Date.now() - started < 5_000, `answered after ${Date.now() - started}ms`);
+        const quick = await fetch(`${BASE}/api/sleep?ms=50`);
+        assert.equal(quick.status, 200);
+        assert.deepEqual(await quick.json(), { slept: 50 });
+      });
+    });
+    if (process.exitCode === 1) return;
+
+    await run('limits lifted', tomlWith({
+      server: ['render_timeout_secs = 0', 'rate_limit_max_buckets = 0'],
+      images: [
+        'max_remote_bytes = 0', 'remote_timeout_secs = 0',
+        'max_source_dimension = 0', 'max_decode_bytes = 0',
+      ],
+      tail: [
+        '[prefetch]', 'max_concurrent = 0', 'max_per_second = 0', '',
+        '[cache]', 'disk_enabled = false', 'etag = false', 'swr_multiplier = 0', '',
+        '[[rate_limits]]', 'path = "/keyed-limit"', 'per_ip = 1', 'window_seconds = 3600',
+        'burst = 0', 'key_header = "x-api-key"', 'max_keys_per_client = 0',
+      ],
+    }), async ({ cacheDir, env, log }) => {
+      const expected = [
+        '[server] render_timeout_secs = 0: ',
+        '[server] rate_limit_max_buckets = 0: ',
+        '[[rate_limits]] /keyed-limit: max_keys_per_client = 0 - ',
+        '[images] max_remote_bytes = 0: ',
+        '[images] remote_timeout_secs = 0: ',
+        '[images] max_source_dimension = 0: ',
+        '[images] max_decode_bytes = 0: ',
+      ];
+
+      await test('limits lifted to 0 are startup warnings and --check-config warnings', async () => {
+        for (const line of expected) {
+          assert.ok(
+            log().split('\n').some((l) => l.includes('WARN') && l.includes(line)),
+            `startup warns: ${line}`,
+          );
+        }
+        const check = spawnSync(binary, ['--check-config'], {
+          cwd: repoRoot, env, encoding: 'utf8', timeout: 30_000,
+        });
+        assert.equal(check.status, 0, check.stderr);
+        const report = JSON.parse(check.stdout);
+        assert.equal(report.ok, true);
+        for (const line of expected) {
+          assert.ok(report.warnings.some((w) => w.startsWith(line)), `--check-config: ${line}`);
+        }
+      });
+
+      await test('[prefetch] budgets of 0 are unlimited', async () => {
+        const statuses = await Promise.all(Array.from({ length: 40 }, async () => {
+          const res = await fetch(`${BASE}/gio-test.png`, { headers: { purpose: 'prefetch' } });
+          await res.arrayBuffer();
+          return res.status;
+        }));
+        assert.deepEqual([...new Set(statuses)], [200], `${statuses}`);
+      });
+
+      await test('[cache] disk_enabled = false keeps pages in memory only', async () => {
+        const miss = await fetch(`${BASE}/cached`);
+        await miss.text();
+        assert.equal(miss.headers.get('x-gio-cache'), 'miss; stored');
+        const hit = await fetch(`${BASE}/cached`);
+        await hit.text();
+        assert.match(hit.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/, 'memory still serves hits');
+        await sleep(500);
+        assert.deepEqual(await cacheFiles(cacheDir), [], 'no entry files');
+      });
+
+      await test('[cache] etag = false sends no page ETag and never a 304', async () => {
+        const hit = await rawGet('/cached', { 'if-none-match': '*' });
+        assert.match(hit.headers['x-gio-cache'] ?? '', /^hit; /);
+        assert.equal(hit.status, 200);
+        assert.equal(hit.headers.etag, undefined);
+      });
+
+      await test('[cache] swr_multiplier = 0 drops stale-while-revalidate', async () => {
+        const hit = await fetch(`${BASE}/cached`);
+        await hit.text();
+        assert.match(hit.headers.get('cache-control') ?? '', /^public, max-age=0, s-maxage=\d+$/);
+      });
+
+      await test('[[rate_limits]] max_keys_per_client = 0 gives every key its own budget', async () => {
+        // Past 64 keys from one client they used to share one bucket.
+        const statuses = [];
+        for (let i = 0; i < 70; i++) {
+          const res = await rawGet('/keyed-limit', { 'x-api-key': `gateway-key-${i}` });
+          statuses.push(res.status);
+        }
+        assert.deepEqual([...new Set(statuses)], [404], `${statuses}`);
+        const again = await rawGet('/keyed-limit', { 'x-api-key': 'gateway-key-0' });
+        assert.equal(again.status, 429, 'each key still has its own limit');
+      });
+
+      await test('the optimizer and stylesheets keep their defaults', async () => {
+        const image = await fetch(`${BASE}/_gio/image?src=/gio-test.png&w=96`, { headers: { accept: 'image/webp' } });
+        await image.arrayBuffer();
+        assert.equal(image.status, 200, 'decoding without limits still works');
+        const html = await (await fetch(`${BASE}/styled`)).text();
+        const sheets = await linkedStylesheets(html);
+        assert.ok(sheets.every((css) => !css.includes('\n  color:')), 'production CSS is minified by default');
+      });
+
+      await test('[server] render_timeout_secs = 0 serves renders as usual', async () => {
+        const res = await fetch(`${BASE}/api/sleep?ms=1500`);
+        assert.equal(res.status, 200);
+        assert.deepEqual(await res.json(), { slept: 1500 });
+      });
+    });
+  } finally {
+    await rm(appRoot, { recursive: true, force: true });
+  }
+}
+
+/**
  * Phase 1f (gio CLI): the launcher and the binary together. `--check-config`
  * reports what the fixture's gio.toml, .env files and environment resolve to
  * without binding anything; `gio doctor` validates through it; `gio start`
@@ -5486,6 +5786,9 @@ if (process.exitCode !== 1) {
 }
 if (process.exitCode !== 1) {
   await configSettingsPhase();
+}
+if (process.exitCode !== 1) {
+  await featureSwitchesPhase();
 }
 if (process.exitCode !== 1) {
   await cliPhase();
