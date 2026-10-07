@@ -104,8 +104,9 @@ export default function MigrationPage(): React.JSX.Element {
           <strong>Route Handlers</strong> (<code>route.ts</code>) - supported, no changes needed
         </li>
         <li>
-          <strong>Server Actions</strong> - not yet supported (see{' '}
-          <a href="/docs/known-issues">Known Issues</a>)
+          <strong>Server Actions</strong> - no <code>&apos;use server&apos;</code>: move a
+          form&apos;s action into the page&apos;s <code>action</code> export and render it with{' '}
+          <code>&lt;GioForm&gt;</code> (see <a href="/docs/forms">Forms and Mutations</a>)
         </li>
       </ul>
 

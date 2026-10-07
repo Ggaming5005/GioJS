@@ -235,8 +235,10 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         The whole request body is limited by <code>max_body_bytes</code> in{' '}
         <code>gio.toml</code>&apos;s <code>[server]</code> section (default 2 MiB): the Rust
         server answers <code>413 Payload Too Large</code> before the action runs. Raise it for
-        larger uploads - the body is buffered in memory and handed to the worker in one piece, so
-        send large media straight to object storage (a presigned URL) instead. Never trust{' '}
+        larger uploads - the body is buffered in memory and handed to the worker in one piece
+        (binary bodies base64-encoded, so above roughly 48 MiB a body is a 413 whatever the
+        setting says). Send large media straight to object storage (a presigned URL)
+        instead. Never trust{' '}
         <code>file.name</code> or <code>file.type</code>: they are whatever the client sent.
       </p>
 
@@ -307,6 +309,12 @@ export async function action(req: ActionArgs) {
   revalidatePath('/blog');                    // the cached blog index shows it now
   return redirect('/blog');
 }`} />
+
+      <h2>Static export</h2>
+      <p>
+        Actions run in the server. A site deployed with <code>gio export</code> to a static host
+        has no server to post to - point such forms at an external endpoint instead.
+      </p>
 
       <h2>Testing</h2>
       <p>
