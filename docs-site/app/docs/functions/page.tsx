@@ -61,6 +61,15 @@ export async function getServerSideProps(ctx) {
         SSE) and <code>wsHandler</code> (WebSockets) - see Route Handlers.
       </p>
 
+      <h2>broadcast()</h2>
+      <p>
+        <code>broadcast(room, data, {'{'} except? {'}'})</code> from <code>@gio.js/core</code>{' '}
+        sends a text (string) or binary (<code>Uint8Array</code>) message to every WebSocket
+        that joined <code>room</code> with <code>socket.join(room)</code>, from any route
+        handler or <code>wsHandler</code>. It returns <code>false</code> when no WebSocket
+        server is connected - see <a href="/docs/websockets">WebSockets</a>.
+      </p>
+
       <h2>cspNonce()</h2>
       <p>
         The Content-Security-Policy nonce for an inline <code>&lt;script&gt;</code> you

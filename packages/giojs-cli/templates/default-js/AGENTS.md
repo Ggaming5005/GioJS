@@ -48,8 +48,14 @@ renders React. Full docs: https://giojs.com/llms.txt
   `<GioImage>` (srcset from the gio.toml `[images]` allowed_widths, served by
   the built-in `/_gio/image` optimizer; `sizes`, `priority` to preload,
   `unoptimized` for a plain `src` — never add `sharp` or `next/image`). Route-handler types come from `@gio.js/core`
-  (`GioRequest`, `GioEventStream` for SSE).
-- WebSockets: export `wsHandler(socket)` from a `route.js`.
+  (`GioRequest`, `GioEventStream` for SSE). A `Response` with a
+  `ReadableStream` body streams to the client (LLM tokens, downloads, a
+  hand-written `text/event-stream`); its `cancel()` runs on disconnect.
+- WebSockets: export `wsHandler(socket)` from a `route.js` (dynamic segments
+  arrive in `socket.params`; `socket.cookies`/`headers`/`ip` authenticate it -
+  return `false` to reject with close code 4401). Rooms: `socket.join(room)`,
+  and `broadcast(room, data)` from `@gio.js/core` in any handler. Client:
+  `useWebSocket(url)` from `@gio.js/react` reconnects with backoff.
 - Security runs in Rust: default headers (nosniff, `X-Frame-Options:
   SAMEORIGIN`, referrer policy) on every response, and cross-site
   POST/PUT/PATCH/DELETE or WebSocket upgrades get 403 (CSRF) - endpoints other
