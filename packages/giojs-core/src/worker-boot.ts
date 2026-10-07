@@ -7,6 +7,7 @@
  * lifecycle, and starting the two IPC servers - and imports nothing that
  * needs tsx or esbuild, so standalone bundles boot without node_modules.
  */
+import { writeFileSync } from 'node:fs';
 import { createIPCServer } from './ipc.ts';
 import { createWsIpcServer } from './ws-ipc.ts';
 import { NodePluginRegistry, type GioNodePlugin } from './plugin.ts';
@@ -81,8 +82,29 @@ function shutdownWorker(): void {
 }
 
 /**
+ * Where the Rust server wants the error that ends this worker (a JSON
+ * `{"error": message}`), so a boot failure - an invalid gio.config.ts, a
+ * route conflict, a middleware.ts that throws - is reported as the server's
+ * own final words instead of a lost log line. Mirrors BOOT_ERROR_FILE_ENV in
+ * crates/giojs-server/src/ipc.rs.
+ */
+export const BOOT_ERROR_FILE_ENV = 'GIO_WORKER_ERROR_FILE';
+
+/** Leave `message` where the server reads it; best effort - the log has it too. */
+function reportFatalError(message: string): void {
+  const file = process.env[BOOT_ERROR_FILE_ENV];
+  if (file === undefined || file === '') return;
+  try {
+    writeFileSync(file, JSON.stringify({ error: message }));
+  } catch {
+    // The server falls back to pointing at the log.
+  }
+}
+
+/**
  * Last-resort guards: log structured context before the supervisor-driven
- * respawn instead of dying with a bare stack trace on stderr. Also starts the
+ * respawn instead of dying with a bare stack trace on stderr, and report the
+ * error to the server (reportFatalError). Also starts the
  * parent watch (see parent-watch.ts) when the server asked for it, first
  * thing at boot: a server killed while the worker is still bundling must not
  * leave it running either.
@@ -101,13 +123,16 @@ export function installProcessGuards(): void {
       error: error.message,
       stack: error.stack ?? '',
     });
+    reportFatalError(error.message);
     process.exit(1);
   });
   process.on('unhandledRejection', (reason: unknown) => {
+    const message = reason instanceof Error ? reason.message : String(reason);
     logger.error('unhandled promise rejection - worker exiting for respawn', {
-      error: reason instanceof Error ? reason.message : String(reason),
+      error: message,
       stack: reason instanceof Error ? (reason.stack ?? '') : '',
     });
+    reportFatalError(message);
     process.exit(1);
   });
 }

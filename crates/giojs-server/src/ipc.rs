@@ -12,8 +12,9 @@
 //! A worker that cannot boot - it exits before READY (a gio.config.ts or
 //! middleware.ts error, a route conflict), or its READY carries rules that
 //! cannot be enforced - fails startup with a `WorkerBootError` holding the
-//! worker's own error, taken from its stderr (which is forwarded line by
-//! line and its tail kept, see `forward_stderr`).
+//! worker's own error, which it writes to a file the server names
+//! (`BOOT_ERROR_FILE_ENV`) before it exits. Its stderr stays inherited, so
+//! its log lines reach the terminal directly, even after the server dies.
 //!
 //! The first worker is the builder: only it bundles the client code into
 //! `.gio/build` (and writes `.gio/routes.d.ts`). The others start once it is
@@ -21,7 +22,7 @@
 //! never race on the same files - and in production a respawned worker,
 //! the builder included, reuses the build too.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -30,7 +31,7 @@ use std::time::Duration;
 use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
@@ -133,83 +134,29 @@ impl std::fmt::Display for WorkerBootError {
 
 impl std::error::Error for WorkerBootError {}
 
-/// Lines of a worker's stderr kept for a boot failure, and the bytes of
-/// each: enough for a stack trace, bounded however much it writes.
-const STDERR_TAIL_LINES: usize = 40;
-const STDERR_TAIL_LINE_BYTES: usize = 8 * 1024;
-/// How long a boot failure waits for the rest of a dead worker's stderr.
-const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Where a worker writes the error that ends its boot, as JSON
+/// (`{"error": "..."}`): the uncaught-exception guard in giojs-core
+/// worker-boot.ts writes it before exiting. The server reads it when the
+/// worker exits before READY. Mirrors BOOT_ERROR_FILE_ENV in worker-boot.ts.
+pub const BOOT_ERROR_FILE_ENV: &str = "GIO_WORKER_ERROR_FILE";
 
-/// The last lines a worker wrote to stderr.
-#[derive(Clone, Default)]
-struct StderrTail(Arc<std::sync::Mutex<VecDeque<String>>>);
-
-impl StderrTail {
-    fn push(&self, line: &[u8]) {
-        let line = String::from_utf8_lossy(&line[..line.len().min(STDERR_TAIL_LINE_BYTES)])
-            .trim_end()
-            .to_string();
-        if line.is_empty() {
-            return;
-        }
-        let mut lines = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if lines.len() == STDERR_TAIL_LINES {
-            lines.pop_front();
-        }
-        lines.push_back(line);
-    }
-
-    fn lines(&self) -> Vec<String> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .cloned()
-            .collect()
-    }
+/// The boot error file of pool worker `index` of this server process.
+fn boot_error_file(index: usize) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "giojs-worker-error-{}-{index}.json",
+        std::process::id()
+    ))
 }
 
-/// Copy a worker's stderr to the server's, line by line, keeping the tail.
-/// The task ends at end of file: when the worker and every process that
-/// inherited the pipe are gone.
-fn forward_stderr(stderr: tokio::process::ChildStderr) -> (StderrTail, tokio::task::JoinHandle<()>) {
-    let tail = StderrTail::default();
-    let kept = tail.clone();
-    let task = tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(stderr);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    use std::io::Write;
-                    let _ = std::io::stderr().lock().write_all(&line);
-                    kept.push(&line);
-                }
-            }
-        }
-    });
-    (tail, task)
-}
-
-/// What a worker that exited before READY said, for its `WorkerBootError`:
-/// the `error` of its last error log line (the logger writes JSON lines -
-/// the uncaught boot error is one), with the file it names; otherwise its
-/// last lines as written.
-fn boot_failure_message(status: &str, lines: &[String]) -> String {
-    let logged = lines.iter().rev().find_map(|line| {
-        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
-        if entry["level"] != "error" {
-            return None;
-        }
-        entry["error"].as_str().map(str::to_string)
-    });
-    let detail = match logged {
-        Some(error) => error,
-        None if lines.is_empty() => "(it wrote nothing to stderr)".to_string(),
-        None => lines[lines.len().saturating_sub(10)..].join("\n"),
-    };
+/// The `WorkerBootError` message of a worker that exited with `status`
+/// before READY: the error from its boot error file, else a pointer to its
+/// own output (a worker that died before its guard was installed - node
+/// or tsx failing to start - writes no file).
+fn boot_failure_message(status: &str, written: Option<&str>) -> String {
+    let error = written
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|entry| entry["error"].as_str().map(str::to_string));
+    let detail = error.unwrap_or_else(|| "(it reported no error - see its output above)".to_string());
     let detail = detail
         .lines()
         .map(|line| format!("  {line}"))
@@ -962,8 +909,8 @@ struct WorkerProcess {
     /// Captured at spawn: child.id() is None once the wrapper is gone, but
     /// its process group (and any orphaned runtime child) may live on.
     pid: Option<u32>,
-    /// The tail of its stderr, and the task forwarding it.
-    stderr: Option<(StderrTail, tokio::task::JoinHandle<()>)>,
+    /// Where it writes the error that ends its boot (BOOT_ERROR_FILE_ENV).
+    error_file: std::path::PathBuf,
 }
 
 impl WorkerProcess {
@@ -976,23 +923,16 @@ impl WorkerProcess {
         !matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// The boot failure of a worker that exited with `status` before READY,
-    /// once the rest of its stderr has been read.
+    /// The boot failure of a worker that exited with `status` before READY.
     async fn boot_failure(&mut self, status: std::io::Result<std::process::ExitStatus>) -> WorkerBootError {
         let status = match status {
             Ok(status) => status.to_string(),
             Err(error) => format!("wait failed: {error}"),
         };
-        let lines = match self.stderr.as_mut() {
-            Some((tail, task)) => {
-                // A grandchild may hold the pipe open; the tail so far will do.
-                let _ = timeout(STDERR_DRAIN_TIMEOUT, task).await;
-                tail.lines()
-            }
-            None => Vec::new(),
-        };
+        let written = tokio::fs::read_to_string(&self.error_file).await.ok();
+        let _ = tokio::fs::remove_file(&self.error_file).await;
         WorkerBootError {
-            message: boot_failure_message(&status, &lines),
+            message: boot_failure_message(&status, written.as_deref()),
         }
     }
 }
@@ -1009,10 +949,17 @@ impl NodeWorker {
         ));
         env.push((WORKER_INDEX_ENV.to_string(), self.index.to_string()));
         env.push((WORKER_COUNT_ENV.to_string(), self.pool_size.to_string()));
+        env.push((
+            BOOT_ERROR_FILE_ENV.to_string(),
+            boot_error_file(self.index).display().to_string(),
+        ));
         env
     }
 
     fn spawn(&self) -> anyhow::Result<WorkerProcess> {
+        let error_file = boot_error_file(self.index);
+        // A file left by an earlier boot must not be read as this one's.
+        let _ = std::fs::remove_file(&error_file);
         let env = self.env();
         let mut child = spawn_node_tsx(
             &self.script,
@@ -1023,13 +970,12 @@ impl NodeWorker {
             &env,
         )?;
         let stdin = child.stdin.take();
-        let stderr = child.stderr.take().map(forward_stderr);
         let pid = child.id();
         Ok(WorkerProcess {
             child,
             stdin,
             pid,
-            stderr,
+            error_file,
         })
     }
 }
@@ -1958,8 +1904,7 @@ fn spawn_worker_command(
         // supervisor drops the child or this process dies in any way.
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
-        // Forwarded to ours line by line, its tail kept for a boot failure.
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         // Reap the worker when the supervisor drops it (panic/unwind paths).
         .kill_on_drop(true);
     // The CSP nonce placeholder the worker renders with (security.rs). Never
@@ -4189,50 +4134,38 @@ mod tests {
     }
 
     #[test]
-    fn boot_failures_quote_the_workers_logged_error() {
-        let logged = [
-            r#"{"ts":"t","level":"info","msg":"discovering routes"}"#.to_string(),
-            r#"{"ts":"t","level":"error","msg":"uncaught exception - worker exiting for respawn","error":"gio.config.ts: unknown key \"plugin\" - did you mean \"plugins\"?","stack":"Error: ..."}"#.to_string(),
-        ];
+    fn boot_failures_quote_the_workers_error_file() {
         assert_eq!(
-            boot_failure_message("exit status: 1", &logged),
+            boot_failure_message(
+                "exit status: 1",
+                Some(r#"{"error":"gio.config.ts: unknown key \"plugin\" - did you mean \"plugins\"?"}"#)
+            ),
             "the Node worker exited before it was ready (exit status: 1):\n  \
              gio.config.ts: unknown key \"plugin\" - did you mean \"plugins\"?"
         );
-        // Not our logger's output (node itself failed): the last lines as written.
-        let raw = ["node:internal/modules/cjs/loader:1228".to_string(), "Error: Cannot find module 'tsx'".to_string()];
         assert_eq!(
-            boot_failure_message("exit status: 1", &raw),
-            "the Node worker exited before it was ready (exit status: 1):\n  \
-             node:internal/modules/cjs/loader:1228\n  Error: Cannot find module 'tsx'"
+            boot_failure_message("exit status: 1", Some("{\"error\":\"a.ts is invalid:\\n  - one\"}")),
+            "the Node worker exited before it was ready (exit status: 1):\n  a.ts is invalid:\n    - one"
         );
-        assert!(boot_failure_message("signal: 9", &[]).ends_with("(it wrote nothing to stderr)"));
-    }
-
-    #[test]
-    fn the_stderr_tail_is_bounded() {
-        let tail = StderrTail::default();
-        for index in 0..100 {
-            tail.push(format!("line {index}\n").as_bytes());
+        // Node or tsx failed before the worker's guard existed: no file.
+        for written in [None, Some("not json")] {
+            assert!(boot_failure_message("signal: 9", written)
+                .ends_with("(it reported no error - see its output above)"));
         }
-        tail.push(&vec![b'x'; STDERR_TAIL_LINE_BYTES * 2]);
-        let lines = tail.lines();
-        assert_eq!(lines.len(), STDERR_TAIL_LINES);
-        assert_eq!(lines[0], "line 61");
-        assert_eq!(lines.last().unwrap().len(), STDERR_TAIL_LINE_BYTES);
     }
 
     #[tokio::test]
     async fn a_worker_that_exits_before_ready_fails_startup_with_its_own_error() {
-        // A stand-in worker that logs its boot error the way worker-boot.ts
-        // does and exits: startup must report that error at once, instead of
+        // A stand-in worker that reports its boot error the way
+        // worker-boot.ts does and exits: startup must report that error at once, instead of
         // an IPC connect error after the attempts run out.
         let dir = std::env::temp_dir().join(format!("gio_boot_fail_{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("worker.mjs");
         std::fs::write(
             &script,
-            "process.stderr.write(JSON.stringify({ level: 'error', msg: 'uncaught exception - worker exiting for respawn', error: 'middleware.ts failed to load: boom' }) + '\\n');\n\
+            "import { writeFileSync } from 'node:fs';\nwriteFileSync(process.env.GIO_WORKER_ERROR_FILE, \
+             JSON.stringify({ error: 'middleware.ts failed to load: boom' }));\n\
              process.exit(1);\n",
         )
         .unwrap();
