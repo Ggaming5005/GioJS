@@ -8,7 +8,7 @@
  * boot performs no filesystem discovery, no tsx transform, and no esbuild
  * client build - the bundle runs on a bare Node install.
  */
-import type { GioConfig } from './config-loader.ts';
+import { validateGioConfig, type GioConfig } from './gio-config.ts';
 import type {
   HandlerEntry,
   LayoutEntry,
@@ -86,7 +86,7 @@ export interface StandaloneRegistry {
 export async function runStandaloneServer(registry: StandaloneRegistry): Promise<void> {
   installProcessGuards();
 
-  const pluginRegistry = await startPluginRegistry(registry.config?.plugins ?? []);
+  const pluginRegistry = await startPluginRegistry(validateGioConfig(registry.config).plugins ?? []);
 
   const routes = new Map<string, RouteModule>();
   for (const entry of registry.routes) {

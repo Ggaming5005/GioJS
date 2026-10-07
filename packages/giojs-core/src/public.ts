@@ -43,6 +43,8 @@ export type {
   Manifest,
 } from './metadata-routes.ts';
 export { defineMiddleware } from './middleware.ts';
+export { defineConfig } from './gio-config.ts';
+export type { GioConfig } from './gio-config.ts';
 export { cspNonce } from './csp.ts';
 export {
   UnsupportedMediaTypeError,
