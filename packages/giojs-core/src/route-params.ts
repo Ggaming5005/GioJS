@@ -46,7 +46,8 @@ type PatternSegments<Pattern extends string> = Pattern extends `${infer Head}/${
   ? SegmentParams<Head> & PatternSegments<Rest>
   : SegmentParams<Pattern>;
 
-type Simplify<T> = { [K in keyof T]: T[K] };
+// `& {}` makes editors show the flattened object, not `Simplify<...>`.
+type Simplify<T> = { [K in keyof T]: T[K] } & {};
 
 /**
  * Params parsed from a pattern string: `:name` and `*name` are strings (a
