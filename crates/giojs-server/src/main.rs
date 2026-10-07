@@ -647,6 +647,11 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             config::WORKER_CSS_CONFIG_ENV.to_string(),
             cfg.css.worker_json(),
         ),
+        // <LocaleLink> leaves [i18n] default_locale unprefixed.
+        (
+            config::WORKER_I18N_CONFIG_ENV.to_string(),
+            cfg.i18n.worker_json(),
+        ),
     ];
 
     // Every refusal that depends on more than gio.toml's syntax, before
@@ -714,12 +719,14 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     // Everything the deployment ID covers besides the build the worker is
     // about to produce: the worker's render settings, and what the server
     // composes into cached pages itself - the font links above and the
-    // deployment script's default locale (see `deployment_script`).
+    // deployment script's default locale and locales (see
+    // `deployment_script`; the locales are in GIO_I18N_CONFIG).
     let default_locale = if cfg.i18n.locales.is_empty() {
         "en".to_string()
     } else {
         cfg.i18n.default_locale.clone()
     };
+    install_deployment_script_locales(&cfg.i18n.locales);
     let deployment = ipc::DeploymentInputs::from_process(
         &project_root,
         &worker_env,
@@ -2250,17 +2257,12 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
     response
 }
 
+/// Set the buffered document's `<html lang>` to the request locale,
+/// replacing the root layout's own (see `stream_inject::extend_with_html_lang`).
 fn inject_html_lang(html: Bytes, locale: &str) -> Bytes {
-    let needle = b"<html";
-    let Some(pos) = html.windows(needle.len()).position(|w| w == needle) else {
-        return html;
-    };
-    let attr = format!(" lang=\"{}\"", locale);
-    let mut out = BytesMut::with_capacity(html.len() + attr.len());
-    out.extend_from_slice(&html[..pos + needle.len()]);
-    out.extend_from_slice(attr.as_bytes());
-    out.extend_from_slice(&html[pos + needle.len()..]);
-    Bytes::from(out)
+    let mut out = BytesMut::with_capacity(html.len() + locale.len() + 8);
+    stream_inject::extend_with_html_lang(&mut out, &html, locale);
+    out.freeze()
 }
 
 /// Router fallback. Files in public/ answer at the site root (/favicon.ico,
@@ -3307,12 +3309,44 @@ fn sse_response_headers(worker_headers: &HashMap<String, String>) -> axum::http:
 #[derive(Debug, Clone, Copy)]
 struct StreamedBody;
 
-/// The inline script handing the deployment id and default locale to the
-/// client runtime. Carries the CSP nonce placeholder when nonces are on
-/// (substituted per response, see security.rs).
+/// `[i18n] locales` as a JS array literal for the deployment script, or
+/// empty when i18n is off. Installed once at startup; a process global
+/// (like the CSP nonce placeholder) because every page composer writes the
+/// deployment script, most of them far from any state.
+static DEPLOYMENT_SCRIPT_LOCALES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn install_deployment_script_locales(locales: &[String]) {
+    let _ = DEPLOYMENT_SCRIPT_LOCALES.set(deployment_script_locales(locales));
+}
+
+fn deployment_script_locales(locales: &[String]) -> String {
+    if locales.is_empty() {
+        return String::new();
+    }
+    let items: Vec<String> = locales.iter().map(|l| script_json_string(l)).collect();
+    format!("[{}]", items.join(","))
+}
+
+/// The inline script handing the deployment id, the default locale and the
+/// configured locales to the client (`<LocaleLink>` outside a GioJS-rendered
+/// tree reads the locales). Carries the CSP nonce placeholder when nonces
+/// are on (substituted per response, see security.rs).
 fn deployment_script(deployment_id: &str, default_locale: &str) -> String {
+    deployment_script_with(
+        deployment_id,
+        default_locale,
+        DEPLOYMENT_SCRIPT_LOCALES.get().map_or("", String::as_str),
+    )
+}
+
+fn deployment_script_with(deployment_id: &str, default_locale: &str, locales: &str) -> String {
+    let locales = if locales.is_empty() {
+        String::new()
+    } else {
+        format!("window.__GIO_LOCALES__={locales};")
+    };
     format!(
-        r#"<script{}>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#,
+        r#"<script{}>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";{locales}</script>"#,
         security::nonce_attr()
     )
 }
@@ -6136,6 +6170,24 @@ mod tests {
     }
 
     #[test]
+    fn deployment_script_carries_the_configured_locales_when_i18n_is_on() {
+        assert_eq!(deployment_script_locales(&[]), "");
+        assert_eq!(
+            deployment_script_with("d", "en", ""),
+            r#"<script>window.__GIO_DEPLOYMENT_ID__="d";window.__GIO_DEFAULT_LOCALE__="en";</script>"#
+        );
+        let locales = deployment_script_locales(&[
+            "de".to_string(),
+            "pt-BR".to_string(),
+            "</script>".to_string(),
+        ]);
+        assert_eq!(locales, r#"["de","pt-BR","\u003c/script\u003e"]"#);
+        let script = deployment_script_with("d", "de", &locales);
+        assert!(script
+            .ends_with(r#"window.__GIO_LOCALES__=["de","pt-BR","\u003c/script\u003e"];</script>"#));
+    }
+
+    #[test]
     fn critical_css_snippet_without_nonces_keeps_the_onload_swap() {
         let snippet = critical_css_snippet("a{b:c}", "");
         assert!(snippet.starts_with("<style>a{b:c}</style>"));
@@ -8364,6 +8416,16 @@ mod tests {
         assert_eq!(
             &out[..],
             br#"<html lang="fr"><head><script>D</script></head><body><p>SHELL</p>"#
+        );
+    }
+
+    #[test]
+    fn buffered_lang_injection_replaces_the_root_layouts_lang() {
+        let html =
+            Bytes::from(r#"<!DOCTYPE html><html lang="en"><head></head><body></body></html>"#);
+        assert_eq!(
+            &inject_html_lang(html, "de")[..],
+            br#"<!DOCTYPE html><html lang="de"><head></head><body></body></html>"#
         );
     }
 

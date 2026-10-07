@@ -1133,12 +1133,32 @@ pub const WORKER_IMAGE_CONFIG_ENV: &str = "GIO_IMAGE_CONFIG";
 /// Env var the Node worker reads its `[css]` settings from.
 pub const WORKER_CSS_CONFIG_ENV: &str = "GIO_CSS_CONFIG";
 
+/// Env var the Node worker reads its `[i18n]` settings from.
+pub const WORKER_I18N_CONFIG_ENV: &str = "GIO_I18N_CONFIG";
+
 /// Worker env vars whose values change the rendered HTML. They are hashed
 /// into the derived deployment ID, so a restart with different values never
 /// serves persisted pages rendered with the old ones. Never list a secret or
 /// a per-boot value here: the ID is public, and must stay stable across
 /// restarts of the same build and config.
-pub const WORKER_RENDER_SETTINGS_ENV: &[&str] = &[WORKER_IMAGE_CONFIG_ENV, WORKER_CSS_CONFIG_ENV];
+pub const WORKER_RENDER_SETTINGS_ENV: &[&str] = &[
+    WORKER_IMAGE_CONFIG_ENV,
+    WORKER_CSS_CONFIG_ENV,
+    WORKER_I18N_CONFIG_ENV,
+];
+
+impl I18nConfig {
+    /// The `[i18n]` settings `<LocaleLink>` renders with, as JSON for the
+    /// worker: the locale that gets no prefix, and the locales an href may
+    /// already start with. An empty `locales` means i18n is off.
+    pub fn worker_json(&self) -> String {
+        serde_json::json!({
+            "locales": self.locales,
+            "defaultLocale": self.default_locale,
+        })
+        .to_string()
+    }
+}
 
 impl CssConfig {
     /// The `[css]` settings the worker's stylesheet build follows, as JSON:
@@ -2159,6 +2179,26 @@ mod tests {
         // It changes the stylesheets pages link, so persisted pages must not
         // outlive a change to it.
         assert!(WORKER_RENDER_SETTINGS_ENV.contains(&WORKER_CSS_CONFIG_ENV));
+    }
+
+    #[test]
+    fn i18n_worker_json_carries_locales_and_feeds_the_deployment_id() {
+        let off: serde_json::Value =
+            serde_json::from_str(&parse("").unwrap().i18n.worker_json()).unwrap();
+        assert_eq!(
+            off,
+            serde_json::json!({ "locales": [], "defaultLocale": "en" })
+        );
+        let i18n = parse("[i18n]\nlocales = [\"de\", \"pt-BR\"]\ndefault_locale = \"de\"\n")
+            .unwrap()
+            .i18n;
+        let json: serde_json::Value = serde_json::from_str(&i18n.worker_json()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "locales": ["de", "pt-BR"], "defaultLocale": "de" })
+        );
+        // <LocaleLink> hrefs depend on it.
+        assert!(WORKER_RENDER_SETTINGS_ENV.contains(&WORKER_I18N_CONFIG_ENV));
     }
 
     #[test]

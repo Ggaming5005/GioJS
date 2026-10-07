@@ -502,7 +502,8 @@ first.
   restart of the same code keeps the ID and the disk cache. Before, only `gio build standalone` output changed the ID, so after
   a `gio start` deploy cached pages served for up to ten times their
   `revalidate` with broken stylesheet and chunk links. The ID also covers
-  `[images]`, the served `[[fonts]]` files and the i18n default locale, and a
+  `[images]`, the served `[[fonts]]` files and `[i18n]` (`locales` and
+  `default_locale`), and a
   standalone build's `.gio/manifest.json` is now read from the project root
   instead of the working directory. A pinned `GIO_DEPLOYMENT_ID` still wins
   and should change with every deploy.
@@ -1022,6 +1023,42 @@ first.
   them to everyone.
 - `[security.csrf] enabled = false` turned CSRF protection off silently; it
   now logs a warning, like `[security.websocket] check_origin = false`.
+- A locale detected from `Accept-Language` was the header's tag lowercased,
+  not the configured locale: with `locales = ["pt-BR"]`, `Accept-Language:
+  pt-BR` gave `pt-br`, so `useLocale()`, `<html lang>`, the page cache key
+  and `<LocaleLink>` prefixes (`/pt-br/...`, which the path detection never
+  recognized) all differed from a `/pt-BR/` URL. Detection now always
+  returns the configured spelling.
+- `Accept-Language` q-values were ignored: the first supported language as
+  written won, so `en;q=0.1, fr` picked `en`. Languages are now tried from
+  the highest q-value down (written order breaks ties), and one marked
+  `q=0` ("not this one") or with a malformed q is never picked.
+- Pages in a non-default locale rendered `<html lang="de" lang="en">`: the
+  server added the request locale's `lang` next to the root layout's own,
+  and browsers keep the first. The root layout's `lang` is now replaced.
+- `<LocaleLink>` left only `en` unprefixed unless every link passed
+  `defaultLocale`: with `[i18n] default_locale = "de"`, German pages linked
+  to `/de/...`. Its default is now `default_locale` - the server hands
+  `[i18n]` to the worker (`GIO_I18N_CONFIG`) and the hydration envelope
+  carries it to the browser, so both render the same `href` - and an
+  explicit `defaultLocale` still wins. It also prefixed every `href`
+  blindly (`/fr/fr/x`, `/frhttps://...`): absolute and protocol-relative
+  URLs, relative paths, `?query` and `#hash` hrefs and paths that already
+  start with a configured locale are now left as they are. A `LocaleLink`
+  outside a GioJS page tree (a React root of your own) reads the default
+  locale and the locales from the deployment script, which now also sets
+  `window.__GIO_LOCALES__`.
+- `<Animate>` in the root layout stayed at `opacity: 0` for good: the root
+  layout never hydrates, so its effect never ran, and the inline observer
+  fallback was only written into pages without a root layout. Outside the
+  hydrated page - the root layout, pages without a client bundle,
+  `not-found` and `error` pages - the server now renders a small nonced
+  inline script after each `<Animate>` that observes it (or shows it at
+  once for `when="immediate"`), and the client router hands the ones in a
+  server-only page it swaps in to the same observer, setting it up when no
+  such script ran on the page yet, and brings along their stylesheet, which
+  the previous page may not have had. The document-wide observer script is gone:
+  it also touched hydrated elements before React did.
 - A standalone build whose app had a module that throws while it is imported
   (a missing `GIO_SESSION_SECRET`) never started: `worker.js` evaluated every
   module at load, the worker died and the server gave up with

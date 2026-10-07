@@ -103,6 +103,19 @@ export default function Home() {
         element animates once. With <code>prefers-reduced-motion: reduce</code> the content is
         shown at once, with no animation.
       </p>
+      <p>
+        HTML that never hydrates runs no effects: the{' '}
+        <a href="/docs/file-conventions/layout">root layout</a>, a page without a client bundle,
+        and the <code>not-found</code> and <code>error</code> pages. There the server renders a
+        small inline <code>&lt;script&gt;</code> right after the element that does the same job
+        as soon as the browser parses it, carrying the{' '}
+        <a href="/docs/guides/content-security-policy">CSP nonce</a> when your policy uses one.
+        When a soft navigation swaps in such a page, the client router hands its elements to
+        the same observer instead, as scripts in swapped-in HTML never run, and adds the
+        stylesheet if the previous page had none. Inside the hydrated
+        page no such script is rendered. A browser without{' '}
+        <code>IntersectionObserver</code> shows these elements at once.
+      </p>
 
       <h2 id="initanimateobserver"><code>initAnimateObserver</code></h2>
       <CodeBlock lang="ts" code={`import { initAnimateObserver } from '@gio.js/react';
@@ -186,10 +199,9 @@ export function ChangelogList({ entries }: { entries: string[] }) {
       <ul>
         <li>
           <strong>The content is invisible until JavaScript runs.</strong> It is in the HTML
-          (search engines read it), but at <code>opacity: 0</code> until the page hydrates. In the
-          server-only root layout, which never hydrates, an <code>&lt;Animate&gt;</code> stays
-          invisible for good - use it in pages and nested layouts only. Do not wrap the main
-          heading or the largest image: they would show late.
+          (search engines read it), but at <code>opacity: 0</code> until the page hydrates (or,
+          in the root layout, until its inline script runs). With JavaScript off it stays
+          invisible. Do not wrap the main heading or the largest image: they would show late.
         </li>
         <li>
           The wrapper is a <code>&lt;div&gt;</code>, so <code>&lt;Animate&gt;</code> cannot go
@@ -216,7 +228,10 @@ export function ChangelogList({ entries }: { entries: string[] }) {
       </ul>
 
       <h2 id="version-history">Version history</h2>
-      <VersionHistory entries={[{ version: 'v0.1.0-beta.1', changes: <>Introduced, with <code>initAnimateObserver</code> and <code>observeElement</code>.</> }]} />
+      <VersionHistory entries={[
+        { version: 'v0.1.0-beta.8', changes: <>Works in the root layout and in other HTML that never hydrates, through an inline script after the element. The document-wide observer script that pages without a root layout carried is gone.</> },
+        { version: 'v0.1.0-beta.1', changes: <>Introduced, with <code>initAnimateObserver</code> and <code>observeElement</code>.</> },
+      ]} />
     </>
   );
 }

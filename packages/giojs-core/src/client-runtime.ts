@@ -52,6 +52,8 @@ export interface GioEnvelope {
   locale: string;
   /** image-config.ts ImageRenderConfig, opaque here. */
   images?: Record<string, unknown>;
+  /** i18n-config.ts I18nRenderConfig (apps with `[i18n] locales`), opaque here. */
+  i18n?: Record<string, unknown>;
   /** The page's head tags (metadata-tags.ts). */
   metadata?: MetadataTag[];
 }
@@ -116,6 +118,9 @@ function readEnvelope(): GioEnvelope | null {
       ...(typeof env['images'] === 'object' && env['images'] !== null
         ? { images: env['images'] as Record<string, unknown> }
         : {}),
+      ...(typeof env['i18n'] === 'object' && env['i18n'] !== null
+        ? { i18n: env['i18n'] as Record<string, unknown> }
+        : {}),
       ...(Array.isArray(env['metadata']) ? { metadata: sanitizeMetadataTags(env['metadata']) } : {}),
     };
   } catch {
@@ -136,11 +141,14 @@ function navigationState(envelope: GioEnvelope): GioNavigationState {
 /**
  * The route's tree with its metadata head tags in front, at the boundary's
  * useId tree position (`treeId`), inside the navigation provider, image
- * config installed.
+ * and i18n config installed.
  */
 function routeElement(envelope: GioEnvelope, build: BuildFn, treeId: string | null): React.ReactNode {
   if (envelope.images !== undefined) {
     (globalThis as Record<string, unknown>)['__GIO_IMAGES__'] = envelope.images;
+  }
+  if (envelope.i18n !== undefined) {
+    (globalThis as Record<string, unknown>)['__GIO_I18N__'] = envelope.i18n;
   }
   return withNavigation(
     navigationState(envelope),
@@ -227,7 +235,10 @@ function commit(content: Element | null): void {
     activeTreeId = null;
   }
   const current = document.getElementById('__gio');
-  if (content !== null && current !== null && content !== current) current.replaceWith(content);
+  if (content !== null && current !== null && content !== current) {
+    current.replaceWith(content);
+    if (envelope === null) startServerOnlyAnimations(content);
+  }
   if (envelope === null || build === undefined) return;
   const container = document.getElementById('__gio');
   if (container === null) return;
@@ -239,6 +250,58 @@ function commit(content: Element | null): void {
   activeTreeId = treeIdOfBoundary(container);
   const element = routeElement(envelope, build, activeTreeId);
   updateRoot(rendersTitle(envelope), () => flushSync(() => fresh.render(element)));
+}
+
+/**
+ * A server-only page's `<Animate>` elements start through the inline script
+ * the server put after each one (@gio.js/react's Animate.tsx), but scripts
+ * in swapped-in HTML never run - and a nonce from another response would
+ * not pass the page's CSP anyway. So do their job: hand each element to the
+ * `__GIO_ANIMATE__` observer (`immediate` is the script's last argument).
+ */
+function startServerOnlyAnimations(content: Element): void {
+  const start = animateStarter();
+  for (const el of Array.from(content.querySelectorAll<HTMLElement>('[data-gio-animate]'))) {
+    const script = el.nextElementSibling;
+    const immediate = script?.tagName === 'SCRIPT' && (script.textContent ?? '').endsWith(',1)');
+    start(el, immediate ? 1 : 0);
+  }
+}
+
+/** The inline script passes its previous sibling, which may be missing. */
+type AnimateStart = (el: HTMLElement | null, immediate: number) => void;
+
+/**
+ * The page's `__GIO_ANIMATE__`, which the first server-only `<Animate>`
+ * script on a document defines. When none ran here yet, define the same
+ * one: a shared observer that marks an element entered the first time it is
+ * 10% visible, or at once for `immediate` and in a browser without
+ * IntersectionObserver. Later inline scripts then share it too.
+ */
+function animateStarter(): AnimateStart {
+  const registry = window as unknown as { __GIO_ANIMATE__?: unknown };
+  if (typeof registry.__GIO_ANIMATE__ === 'function') return registry.__GIO_ANIMATE__ as AnimateStart;
+  let observer: IntersectionObserver | undefined;
+  const start: AnimateStart = (el, immediate) => {
+    if (el === null) return;
+    if (immediate !== 0 || typeof IntersectionObserver !== 'function') {
+      el.dataset['gioAnimateState'] = 'entered';
+      return;
+    }
+    observer ??= new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          (entry.target as HTMLElement).dataset['gioAnimateState'] = 'entered';
+          observer?.unobserve(entry.target);
+        }
+      },
+      { threshold: 0.1 },
+    );
+    observer.observe(el);
+  };
+  registry.__GIO_ANIMATE__ = start;
+  return start;
 }
 
 /** Called by each generated route entry when its module loads. */

@@ -115,7 +115,10 @@ export function POST(req: GioRequest): Response {
       <p>
         Every script GioJS writes already carries the nonce: the hydration bootstrap and its
         preloads, React&apos;s streaming Suspense scripts, the deployment script, the
-        critical-CSS loader, and the development error overlay. Your own inline scripts need{' '}
+        critical-CSS loader, the script <code>&lt;Animate&gt;</code> writes in{' '}
+        <a href="/docs/components/animate#behavior">HTML that never hydrates</a> (the root
+        layout, a page without a client bundle, the not-found and error pages), and the
+        development error overlay. Your own inline scripts need{' '}
         <code>nonce={'{cspNonce()}'}</code>. Put them in the root layout, which renders only on
         the server:
       </p>
@@ -195,9 +198,11 @@ content-security-policy: default-src 'self'; script-src 'self' 'nonce-SqGohrjsp6
       <p>
         A policy without <code>{'{nonce}'}</code> is sent exactly as written, and pages stay
         cacheable by CDNs. GioJS still renders a few inline scripts (the deployment script,
-        and React&apos;s Suspense scripts on streamed pages), so <code>script-src</code> needs{' '}
-        <code>&apos;unsafe-inline&apos;</code> - without it, deployment-skew reloads and
-        streamed Suspense content stop working. That leaves little protection against
+        React&apos;s Suspense scripts on streamed pages, and <code>&lt;Animate&gt;</code> in{' '}
+        <a href="/docs/components/animate#behavior">HTML that never hydrates</a>, such as the
+        root layout), so <code>script-src</code> needs{' '}
+        <code>&apos;unsafe-inline&apos;</code> - without it, deployment-skew reloads,
+        streamed Suspense content and those animations stop working. That leaves little protection against
         injected scripts, but the other directives still help:
       </p>
       <CodeBlock lang="toml" title="gio.toml" code={`[security]

@@ -48,16 +48,24 @@ default_locale = "en"`} />
           <code>/admin/*rest</code> also protects <code>/de/admin</code>.
         </li>
         <li>
-          <code>Accept-Language</code> entries are read in the order the browser sends them (quality
-          values are not compared). An entry matches a locale exactly, ignoring case (
-          <code>pt-BR</code>), or by its language (<code>de-AT</code> picks <code>de</code>).
+          <code>Accept-Language</code> entries are tried by quality value, highest first (the
+          browser&apos;s order breaks ties); <code>q=0</code> or a malformed <code>q</code> rules
+          an entry out. An entry matches a locale exactly, ignoring case (<code>pt-br</code>{' '}
+          picks <code>pt-BR</code>), or by its language (<code>de-AT</code> picks{' '}
+          <code>de</code>). The result is always spelled as in <code>locales</code>.
         </li>
         <li>
           The <code>gio_locale</code> cookie must hold one of the configured locales. GioJS reads
-          it; your app sets it, for example from a language switcher.
+          it and never sets it; your app sets it, for example from a language switcher.
         </li>
         <li>
-          When the locale is not the default, the server writes it into <code>&lt;html lang&gt;</code>.
+          When the locale is not the default, the server writes it into <code>&lt;html lang&gt;</code>,
+          replacing the root layout&apos;s <code>lang</code>.
+        </li>
+        <li>
+          <a href="/docs/components/locale-link"><code>&lt;LocaleLink&gt;</code></a> leaves{' '}
+          <code>default_locale</code> unprefixed. The server passes this section to the worker
+          (<code>GIO_I18N_CONFIG</code>), so changing it changes the deployment id.
         </li>
         <li>
           Cached pages are stored per locale. While <code>detect_from</code> reads a header or the
@@ -97,15 +105,14 @@ detect_from = ["path", "cookie", "accept-language"]`} />
       <h2 id="good-to-know">Good to know</h2>
       <ul>
         <li>
-          Prefer lowercase locale names: an exact <code>Accept-Language</code> match yields the
-          tag in lowercase (<code>pt-br</code>), while the URL prefix and the cookie keep the
-          spelling in <code>locales</code>.
+          The URL prefix and the cookie match <code>locales</code> exactly: <code>/pt-br/</code>{' '}
+          is not the <code>pt-BR</code> locale. Only <code>Accept-Language</code> ignores case.
         </li>
         <li>
           <code>revalidatePath</code> and <code>POST /_gio/revalidate</code> drop a leading locale
           from a path, so a purge reaches every language of the page.
         </li>
-        <li>The default locale is part of the deployment id: changing it drops persisted pages.</li>
+        <li>The section is part of the deployment id: changing it drops persisted pages.</li>
       </ul>
 
       <h2 id="related">Related</h2>
@@ -117,7 +124,7 @@ detect_from = ["path", "cookie", "accept-language"]`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>An unknown <code>detect_from</code> value, a <code>default_locale</code> outside a non-empty <code>locales</code>, and an empty or duplicate locale stop startup (they were ignored). Pages whose locale was negotiated from request headers are never <code>public</code> and get no ETag. <code>useLocale()</code> returns the request locale during server rendering too.</> },
+        { version: 'v0.1.0-beta.8', changes: <>An unknown <code>detect_from</code> value, a <code>default_locale</code> outside a non-empty <code>locales</code>, and an empty or duplicate locale stop startup (they were ignored). Pages whose locale was negotiated from request headers are never <code>public</code> and get no ETag. <code>useLocale()</code> returns the request locale during server rendering too. <code>Accept-Language</code> is read by quality value and gives the locale as spelled in <code>locales</code> (an exact match was lowercased). <code>&lt;html lang&gt;</code> replaces the root layout&apos;s <code>lang</code> instead of adding a second one. <code>&lt;LocaleLink&gt;</code> defaults to <code>default_locale</code>.</> },
         { version: 'v0.1.0-beta.1', changes: <>Introduced with <code>locales</code>, <code>default_locale</code> and <code>detect_from</code>.</> },
       ]} />
     </>

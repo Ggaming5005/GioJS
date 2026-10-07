@@ -451,6 +451,66 @@ describe('persistent root', () => {
     expect(text('count')).toBe('count=0');
   });
 
+  it('starts the <Animate> elements of a swapped-in server-only page', async () => {
+    await loadFirstPage({ path: '/a', pattern: '/a', props: { label: 'A' } }, Page);
+    // The inline scripts after each element never run in swapped-in HTML.
+    const html =
+      '<div data-gio-animate="fade-in" id="later"></div><script>(...)(document.currentScript,0)</script>' +
+      '<div data-gio-animate="fade-in" id="now"></div><script>(...)(document.currentScript,1)</script>';
+    swapEnvelope(null);
+    const registry = window as unknown as Record<string, unknown>;
+    type Report = (entries: Array<{ target: Element; isIntersecting: boolean }>) => void;
+    try {
+      // No inline script ran on this document: the runtime defines the
+      // shared observer itself, so the element waits until it scrolls in.
+      const observed: Element[] = [];
+      let report: Report = () => {};
+      vi.stubGlobal(
+        'IntersectionObserver',
+        class {
+          constructor(callback: Report, options: { threshold: number }) {
+            expect(options.threshold).toBe(0.1);
+            report = callback;
+          }
+          observe(el: Element): void {
+            observed.push(el);
+          }
+          unobserve(el: Element): void {
+            observed.splice(observed.indexOf(el), 1);
+          }
+        },
+      );
+      act(() => runtimeApi().commit(serverContent(html)));
+      const later = document.getElementById('later');
+      expect(observed).toEqual([later]);
+      expect(later?.dataset['gioAnimateState']).toBeUndefined();
+      expect(document.getElementById('now')?.dataset['gioAnimateState']).toBe('entered');
+      expect(typeof registry['__GIO_ANIMATE__']).toBe('function');
+      report([{ target: later as Element, isIntersecting: true }]);
+      expect(later?.dataset['gioAnimateState']).toBe('entered');
+      expect(observed).toEqual([]);
+      vi.unstubAllGlobals();
+      delete registry['__GIO_ANIMATE__'];
+
+      // Without IntersectionObserver: shown at once rather than never.
+      vi.stubGlobal('IntersectionObserver', undefined);
+      act(() => runtimeApi().commit(serverContent(html)));
+      expect(document.getElementById('later')?.dataset['gioAnimateState']).toBe('entered');
+      vi.unstubAllGlobals();
+
+      // One defined by an earlier server-only element: it gets them.
+      const started: Array<[string, number]> = [];
+      registry['__GIO_ANIMATE__'] = (el: HTMLElement, now: number) => {
+        started.push([el.id, now]);
+      };
+      act(() => runtimeApi().commit(serverContent(html)));
+      expect(started).toEqual([['later', 0], ['now', 1]]);
+    } finally {
+      vi.unstubAllGlobals();
+      delete registry['__GIO_ANIMATE__'];
+    }
+  });
+
   it('later route registrations never re-mount the page', async () => {
     const runtime = await loadFirstPage({ path: '/a', pattern: '/a', props: { label: 'A' } }, Page);
     act(() => document.getElementById('count')?.click());

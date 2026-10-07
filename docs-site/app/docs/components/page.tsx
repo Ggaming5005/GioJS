@@ -106,7 +106,7 @@ export default function Page(): React.JSX.Element {
       <h2 id="localelink">LocaleLink</h2>
       <p>
         A <code>GioLink</code> that prefixes <code>href</code> with the request locale when it is
-        not <code>defaultLocale</code> (default <code>&quot;en&quot;</code>). The locale comes from{' '}
+        not the default one (<code>[i18n] default_locale</code>). The locale comes from{' '}
         <code>useLocale()</code>, so the prefixed href is already in the server HTML.
       </p>
       <CodeBlock lang="tsx" code={`<LocaleLink href="/pricing">Pricing</LocaleLink>   // /fr/pricing on a French page`} />

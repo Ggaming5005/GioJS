@@ -82,6 +82,8 @@ import {
 } from './action.ts';
 import { parseCookies } from './cookies.ts';
 import { installedImageConfig, type ImageRenderConfig } from './image-config.ts';
+import { installedI18nConfig, type I18nRenderConfig } from './i18n-config.ts';
+import { withRenderScope, type GioRenderScope } from './render-scope.ts';
 import { searchFromQuery, withNavigation, type GioNavigationState } from './navigation-context.ts';
 import {
   dedupeHeadTitles,
@@ -552,9 +554,6 @@ async function streamToString(stream: ReadableStream<Uint8Array>): Promise<strin
   return Buffer.concat(chunks).toString('utf8');
 }
 
-// Inline observer handles the no-root-layout case where useEffect never runs.
-const OBSERVER_SCRIPT_BODY = `(function(){var o=new IntersectionObserver(function(e){e.forEach(function(e){if(e.isIntersecting){e.target.dataset.gioAnimateState='entered';o.unobserve(e.target);}});},{threshold:0.1});document.querySelectorAll('[data-gio-animate]').forEach(function(el){o.observe(el);});})();`;
-
 /**
  * Default 404 document, served when no `app/not-found.*` exists. Also written
  * to `out/404.html` on static export, so every deployed site returns a real
@@ -573,9 +572,12 @@ function documentPrefix(metadataTags: readonly MetadataTag[]): string {
   return headTags === '' ? DOCUMENT_PREFIX : DOCUMENT_PREFIX.replace('</head>', `${headTags}</head>`);
 }
 
-/** Closing document shell; its inline script carries the CSP nonce. */
+/**
+ * Closing document shell. (`<Animate>` outside a hydrating tree brings its
+ * own inline script - see render-scope.ts - so none is needed here.)
+ */
 function documentSuffix(): string {
-  return `<script${nonceAttr()}>${OBSERVER_SCRIPT_BODY}</script></body></html>`;
+  return '</body></html>';
 }
 
 function wrapWithDocument(inner: string, metadataTags: readonly MetadataTag[] = []): string {
@@ -590,6 +592,11 @@ function wrapWithDocument(inner: string, metadataTags: readonly MetadataTag[] = 
 function nonceOption(): { nonce?: string } {
   const nonce = cspNonce();
   return nonce !== undefined ? { nonce } : {};
+}
+
+/** The render scope of HTML that never hydrates, with the CSP nonce. */
+function serverOnlyScope(): GioRenderScope {
+  return { hydrating: false, ...nonceOption() };
 }
 
 /** The built-in 404 document, its inline style nonced like our scripts. */
@@ -624,6 +631,8 @@ export function serializeEnvelope(envelope: {
   entry: string;
   /** The `<GioImage>` config the server rendered with, for identical srcsets. */
   images?: ImageRenderConfig;
+  /** The `<LocaleLink>` config (an app with `[i18n] locales` only). */
+  i18n?: I18nRenderConfig;
   /** Route info: the client runtime provides the same navigation context. */
   params?: Record<string, string>;
   search?: string;
@@ -1018,6 +1027,8 @@ async function answerRoute(
     const navigation = navigationStateFor(req, pattern, match.params);
     // Installed before rendering: <GioImage> reads it during the render.
     const images = installedImageConfig();
+    // The default locale <LocaleLink> leaves unprefixed, for the browser too.
+    const i18n = installedI18nConfig();
     // Static export passes the manifest of its own build (export.ts).
     const entryScript = clientScripts?.get(pattern);
     const envelopeJson =
@@ -1028,6 +1039,7 @@ async function answerRoute(
             pattern,
             entry: entryScript,
             images,
+            ...(i18n !== null ? { i18n } : {}),
             params: navigation.params,
             search: navigation.search,
             locale: navigation.locale,
@@ -1156,23 +1168,27 @@ async function answerRoute(
     // ipc.ts) - inside the shell it would be cached with this request's props.
     const deferEnvelope = shouldStream && (pprShell || skipShell);
 
+    // <div id="__gio">, stamped with its useId tree position: the client
+    // root starts from the same one, so useId values hydrate unchanged
+    // wherever the root layout puts it (id-tree.ts).
+    const boundary = hydrationBoundary(
+      // The client renders this same nesting: the runtime's withMetadata()
+      // around the route entry's withStylesheets() (client-build.ts).
+      withMetadata(
+        withStylesheets(inner, extras?.stylesheets?.routes.get(pattern) ?? []),
+        metadataTags,
+        { render: rootLayoutEntry !== undefined },
+      ),
+    );
     // Without a root layout no <head> exists in the tree to hoist into: the
     // tags go into the document prefix, and stay in the tree unrendered.
     let element: React.ReactNode = React.createElement(
       React.Fragment,
       null,
-      // <div id="__gio">, stamped with its useId tree position: the client
-      // root starts from the same one, so useId values hydrate unchanged
-      // wherever the root layout puts it (id-tree.ts).
-      hydrationBoundary(
-        // The client renders this same nesting: the runtime's withMetadata()
-        // around the route entry's withStylesheets() (client-build.ts).
-        withMetadata(
-          withStylesheets(inner, extras?.stylesheets?.routes.get(pattern) ?? []),
-          metadataTags,
-          { render: rootLayoutEntry !== undefined },
-        ),
-      ),
+      // Only a page with an envelope hydrates; the rest of the document, and
+      // a page without one, is server-only HTML (render-scope.ts). A provider
+      // adds no tree id fork, so the boundary's position is unchanged.
+      envelopeJson !== null ? withRenderScope({ hydrating: true }, boundary) : boundary,
       envelopeJson !== null && !deferEnvelope
         ? React.createElement('script', {
             id: '__gio_props',
@@ -1196,7 +1212,7 @@ async function answerRoute(
     }
     // Around the whole document: the hooks work in the server-only root
     // layout too, and the hydrated tree gets the same values from the envelope.
-    element = withNavigation(navigation, element);
+    element = withRenderScope(serverOnlyScope(), withNavigation(navigation, element));
 
     // Resolves once React's shell is ready; Suspense content streams later.
     const stream = await renderToReadableStream(element, {
@@ -2263,7 +2279,7 @@ async function renderSpecialPage(
     // Not a route match, so no pattern. The params are those of the route
     // that failed or was not found ({} for an unmatched URL) - the same ones
     // its layouts' generateMetadata read above.
-    element = withNavigation(navigationStateFor(req, '', params), element);
+    element = withRenderScope(serverOnlyScope(), withNavigation(navigationStateFor(req, '', params), element));
 
     const stream = await renderToReadableStream(element, {
       bootstrapModules: [],

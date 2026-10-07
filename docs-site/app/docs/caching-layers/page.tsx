@@ -54,8 +54,8 @@ disk_max_bytes = 536870912          # L2 cap; 0 = unbounded`} />
         after changing it, purge with <a href="/docs/functions/revalidate-path"><code>revalidatePath()</code></a> or{' '}
         <code>POST /_gio/revalidate</code>. It also covers the
         gio.toml settings pages are rendered with (<a href="/docs/configuration/images"><code>[images]</code></a> decides every{' '}
-        <a href="/docs/components/gio-image"><code>GioImage</code></a> srcset, plus the served <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a> and the i18n
-        default locale), so changing those settings drops persisted pages too. A pinned{' '}
+        <a href="/docs/components/gio-image"><code>GioImage</code></a> srcset, plus the served <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a> and{' '}
+        <a href="/docs/configuration/i18n"><code>[i18n]</code></a> (<code>locales</code> and <code>default_locale</code>)), so changing those settings drops persisted pages too. A pinned{' '}
         <code>GIO_DEPLOYMENT_ID</code> is used as given: change it with every deploy.
       </p>
       <h2 id="observing-the-cache-x-gio-cache">Observing the cache: X-Gio-Cache</h2>

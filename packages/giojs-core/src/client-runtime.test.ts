@@ -154,6 +154,23 @@ describe('registerRoute first load', () => {
     expect(hydrateRoot).toHaveBeenCalledTimes(1);
   });
 
+  it('installs the envelope i18n config before the hydration render', async () => {
+    const dom = installDom('complete');
+    const i18n = { locales: ['de', 'en'], defaultLocale: 'de' };
+    dom.elements.set('__gio_props', {
+      textContent: JSON.stringify({ ...JSON.parse(ENVELOPE), i18n }),
+    });
+    vi.stubGlobal('__GIO_I18N__', undefined);
+    const { registerRoute } = await import('./client-runtime.ts');
+    let seen: unknown;
+    registerRoute('/ppr', () => {
+      seen = (globalThis as Record<string, unknown>)['__GIO_I18N__'];
+      return null;
+    });
+    expect(seen).toEqual(i18n);
+    expect(hydrateRoot).toHaveBeenCalledTimes(1);
+  });
+
   it('a partially parsed envelope also waits instead of hydrating with nothing', async () => {
     const dom = installDom('loading');
     dom.elements.set('__gio_props', { textContent: ENVELOPE.slice(0, 20) });

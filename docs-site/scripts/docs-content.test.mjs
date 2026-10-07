@@ -169,7 +169,10 @@ test('the component and hook reference states the defaults @gio.js/react ships',
   check(animate, 'delay = 0', 'components/animate', "default: '0'");
   check(animate, "when = 'visible'", 'components/animate', `default: "'visible'"`);
   check(react('animate-observer.ts'), 'threshold: 0.1', 'components/animate', 'threshold <code>0.1</code>');
-  check(react('LocaleLink.tsx'), "defaultLocale = 'en'", 'components/locale-link', `default: "'en'"`);
+  const localeLink = react('LocaleLink.tsx');
+  check(localeLink, 'defaultLocale ?? settings.defaultLocale', 'components/locale-link', "default: '[i18n] default_locale'");
+  check(localeLink, "typeof defaultLocale === 'string' ? defaultLocale : 'en'", 'components/locale-link', 'the default is <code>en</code>');
+  check(localeLink, 'stringsIn(fromServer.__GIO_LOCALES__)', 'components/locale-link', '<code>window.__GIO_LOCALES__</code>');
   check(react('Image.tsx'), 'DEFAULT_QUALITY = 75', 'components/gio-image', '[images] quality (75)');
   const ws = react('hooks/useWebSocket.ts');
   check(ws, 'DEFAULT_MAX_QUEUED = 100', 'hooks/use-web-socket', 'keeps up to 100');
@@ -727,6 +730,17 @@ test('the i18n guide states the default detection order and the cookie name', ()
   const page = docsPage('i18n');
   assert.ok(page.includes(`detect_from = ${JSON.stringify(order).replace(/,/g, ', ')}   # the default order`));
   assert.match(read('crates/giojs-i18n/src/lib.rs'), /strip_prefix\("gio_locale="\)/, 'the cookie is gio_locale');
+});
+
+test('the i18n pages state how Accept-Language is read', () => {
+  const lib = read('crates/giojs-i18n/src/lib.rs');
+  // Highest q first, stable for ties; q=0 never chosen; the configured spelling.
+  assert.match(lib, /ranges\.sort_by_key\(\|&\(_, q\)\| std::cmp::Reverse\(q\)\)/, 'q-value ordering changed - update the docs');
+  assert.match(lib, /\(q > 0\)\.then_some/, 'q=0 handling changed - update the docs');
+  assert.doesNotMatch(lib, /to_ascii_lowercase/, 'a detected locale is the configured string');
+  assert.ok(docsPage('i18n').includes('<code>de;q=0.1, en</code> picks{\' \'}'));
+  assert.ok(docsPage('configuration/i18n').includes('tried by quality value, highest first'));
+  assert.ok(docsPage('hooks/use-locale').includes('tried from the highest <code>q</code> weight down'));
 });
 
 test('the streaming guide states the shutdown drain, render deadline and event buffer', () => {

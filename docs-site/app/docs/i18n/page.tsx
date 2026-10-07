@@ -61,10 +61,14 @@ detect_from = ["path", "accept-language", "cookie"]   # the default order`} />
         </li>
         <li>
           <strong><code>&quot;accept-language&quot;</code></strong> - the browser&apos;s
-          language list. Entries are read in the order the header lists them, and the first one
-          that matches a locale wins: exactly (ignoring case), or by its language part, so{' '}
-          <code>de-AT</code> matches <code>de</code>. Quality values (<code>;q=</code>) are not
-          compared - browsers already send the preferred language first.
+          language list. Entries are tried from the highest quality value (<code>;q=</code>,
+          default <code>1</code>) down, in the header&apos;s order where they tie, and the first
+          one that matches a locale wins: exactly (ignoring case), or by its language part, so{' '}
+          <code>de-AT</code> matches <code>de</code>. <code>de;q=0.1, en</code> picks{' '}
+          <code>en</code>. An entry with <code>q=0</code> (&quot;not this language&quot;) or a
+          malformed <code>q</code> is never picked. The locale is always spelled as in{' '}
+          <code>locales</code>: <code>pt-br</code> in the header gives a configured{' '}
+          <code>pt-BR</code>.
         </li>
         <li>
           <strong><code>&quot;cookie&quot;</code></strong> - a <code>gio_locale</code> cookie whose
@@ -129,9 +133,9 @@ export default function Greeting({ hello }: { hello: string }): React.JSX.Elemen
 }`} />
       <p>
         <a href="/docs/components/locale-link"><code>&lt;LocaleLink&gt;</code></a> prefixes its{' '}
-        <code>href</code> with the current locale unless it is the default, already in the
-        server HTML. It compares against its <code>defaultLocale</code> prop, which defaults to{' '}
-        <code>&quot;en&quot;</code>: pass <code>defaultLocale</code> when yours is different.
+        <code>href</code> with the current locale unless it is <code>default_locale</code>,
+        already in the server HTML. Links to other sites and paths that already carry a locale
+        prefix are left as they are.
       </p>
 
       <h2 id="a-language-switcher">A language switcher</h2>
@@ -169,10 +173,10 @@ set-cookie: gio_locale=de; Max-Age=31536000; Path=/; HttpOnly; Secure; SameSite=
 
       <h2 id="html-lang">The html lang attribute</h2>
       <p>
-        For a locale other than the default, the server adds <code>lang=&quot;de&quot;</code> as
-        the first attribute of the page&apos;s <code>&lt;html&gt;</code> tag, which browsers and
-        screen readers use. Keep <code>lang</code> set to your default locale in the root
-        layout; pages in the default locale keep it as written.
+        For a locale other than the default, the server sets <code>lang=&quot;de&quot;</code> on
+        the page&apos;s <code>&lt;html&gt;</code> tag, which browsers and screen readers use,
+        replacing the <code>lang</code> the root layout wrote. Keep <code>lang</code> set to your
+        default locale in the root layout; pages in the default locale keep it as written.
       </p>
 
       <h2 id="caching-and-seo">Caching and SEO</h2>
@@ -205,7 +209,7 @@ set-cookie: gio_locale=de; Max-Age=31536000; Path=/; HttpOnly; Secure; SameSite=
 };`} />
         </li>
         <li>
-          <code>default_locale</code> is part of the deployment ID: changing it drops the
+          The <code>[i18n]</code> section is part of the deployment ID: changing it drops the
           persisted page cache.
         </li>
       </ul>

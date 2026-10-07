@@ -25,6 +25,7 @@ import {
 } from './request-body.ts';
 import { redirect } from './action.ts';
 import { installImageConfig, installedImageConfig } from './image-config.ts';
+import { installI18nConfig } from './i18n-config.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import { pumpRenderStream } from './ipc.ts';
 import type { IPCRequest } from './context.ts';
@@ -600,6 +601,27 @@ describe('hydration envelope', () => {
       expect(renderSaw).toEqual(images);
     } finally {
       installImageConfig(installed);
+    }
+  });
+
+  it('carries the [i18n] config of an app with locales, so LocaleLink hrefs hydrate unchanged', async () => {
+    const routes = makeRoute('/');
+    const render = async (): Promise<string> => {
+      const result = await renderRoute(
+        makeRequest('/'), routes, noLayouts, undefined, undefined, new Map([['/', '/e.js']]),
+      );
+      return 'body' in result ? result.body : '';
+    };
+    try {
+      installI18nConfig({ locales: ['de', 'pt-BR'], defaultLocale: 'de' });
+      expect(await render()).toContain('"i18n":{"locales":["de","pt-BR"],"defaultLocale":"de"}');
+      // i18n off: nothing to carry.
+      installI18nConfig({ locales: [], defaultLocale: 'en' });
+      expect(await render()).not.toContain('"i18n"');
+      installI18nConfig(null);
+      expect(await render()).not.toContain('"i18n"');
+    } finally {
+      installI18nConfig(null);
     }
   });
 
@@ -2374,7 +2396,8 @@ describe('CSP nonce placeholder', () => {
     const html = bodyOf(result);
     const tags = executableScriptTags(html);
     expect(tags.some(tag => tag.includes('route-index-ABC.js'))).toBe(true);
-    expect(tags.length).toBeGreaterThanOrEqual(2); // bootstrap module + observer
+    // The bootstrap module (<Animate>'s inline scripts: tested further down).
+    expect(tags.length).toBeGreaterThanOrEqual(1);
     for (const tag of tags) expect(tag).toContain(`nonce="${PLACEHOLDER}"`);
   });
 
@@ -2386,8 +2409,8 @@ describe('CSP nonce placeholder', () => {
     const html = streamed.prefix + (await readStreamToString(streamed.stream)) + streamed.suffix;
     expect(html).toContain('LATE_CONTENT');
     const tags = executableScriptTags(html);
-    // bootstrap module, React's reveal script(s), and the document observer
-    expect(tags.length).toBeGreaterThanOrEqual(3);
+    // bootstrap module and React's reveal script(s)
+    expect(tags.length).toBeGreaterThanOrEqual(2);
     for (const tag of tags) expect(tag).toContain(`nonce="${PLACEHOLDER}"`);
   });
 
@@ -2419,5 +2442,94 @@ describe('CSP nonce placeholder', () => {
     expect(bodyOf(result)).not.toContain('nonce=');
     const missing = await renderRoute(makeRequest('/nope'), new Map(), noLayouts);
     expect(bodyOf(missing)).not.toContain('nonce=');
+  });
+});
+
+describe('<Animate> outside a hydrating tree', () => {
+  // The real component, from @gio.js/react's source (outside this package's
+  // tsc rootDir, hence the computed specifier).
+  const animateModule = '../../giojs-react/src/Animate.tsx';
+  let Animate: React.ComponentType<{ enter: string; when?: string; children?: React.ReactNode }>;
+  beforeEach(async () => {
+    ({ Animate } = await import(/* @vite-ignore */ animateModule));
+  });
+
+  const ANIMATE_SCRIPT =
+    /<script(?: nonce="([^"]*)")?>\(function\(s,n\)\{var a=self\.__GIO_ANIMATE__[^<]*,([01])\)<\/script>/g;
+
+  /** The inline Animate scripts in `html`: [nonce, immediate flag]. */
+  function animateScripts(html: string): Array<[string | undefined, string]> {
+    return [...html.matchAll(ANIMATE_SCRIPT)].map(m => [m[1], m[2]!]);
+  }
+
+  function rootLayoutWithAnimate(): Map<string, LayoutEntry> {
+    return new Map<string, LayoutEntry>([
+      ['', {
+        filePath: '/fake/layout.tsx',
+        dir: '',
+        load: async (): Promise<LayoutModule> => ({
+          default: function RootLayout({ children }: { children: React.ReactNode }) {
+            return React.createElement('html', null,
+              React.createElement('head', null),
+              React.createElement('body', null,
+                React.createElement(Animate, { enter: 'fade-in' }, 'LAYOUT_HEADER'),
+                children,
+                React.createElement(Animate, { enter: 'fade-up', when: 'immediate' }, 'LAYOUT_FOOTER')));
+          },
+        }),
+      }],
+    ]);
+  }
+
+  const animatedPage = makeRoute('/', {
+    default: function Page() {
+      return React.createElement(Animate, { enter: 'zoom-in' }, 'PAGE_CONTENT');
+    },
+  });
+
+  async function render(
+    layouts: Map<string, LayoutEntry>,
+    clientScripts?: Map<string, string>,
+  ): Promise<string> {
+    const result = await renderRoute(makeRequest('/'), animatedPage, layouts, undefined, undefined, clientScripts);
+    return 'body' in result ? result.body : '';
+  }
+
+  it('the root layout starts its own: an inline script after each element', async () => {
+    const body = await render(rootLayoutWithAnimate(), new Map([['/', '/e.js']]));
+    // The hydrating page's Animate runs its effect instead: no script there.
+    expect(animateScripts(body)).toEqual([[undefined, '0'], [undefined, '1']]);
+    expect(body).toMatch(/LAYOUT_HEADER<\/div><script>\(function\(s,n\)/);
+    expect(body).toMatch(/PAGE_CONTENT<\/div><\/div>/);
+  });
+
+  it('a page that never hydrates starts its own too, with or without a root layout', async () => {
+    expect(animateScripts(await render(rootLayoutWithAnimate()))).toHaveLength(3);
+    const bare = await render(noLayouts);
+    expect(animateScripts(bare)).toEqual([[undefined, '0']]);
+    // The document shell itself carries no observer script any more.
+    expect(bare.match(/<script/g)).toHaveLength(1);
+    expect(animateScripts(await render(noLayouts, new Map([['/', '/e.js']])))).toEqual([]);
+  });
+
+  it('so does a not-found page, and every script carries the CSP nonce', async () => {
+    const nonce = '0123456789abcdef0123456789abcdef';
+    process.env.GIO_CSP_NONCE_PLACEHOLDER = nonce;
+    try {
+      const specialPages = {
+        notFound: async () => ({
+          default: function NotFound() {
+            return React.createElement(Animate, { enter: 'fade-in' }, 'GONE');
+          },
+        }),
+      };
+      const result = await renderRoute(
+        makeRequest('/nope'), new Map(), rootLayoutWithAnimate(), undefined, undefined, undefined, { specialPages },
+      );
+      const body = 'body' in result ? result.body : '';
+      expect(animateScripts(body)).toEqual([[nonce, '0'], [nonce, '0'], [nonce, '1']]);
+    } finally {
+      delete process.env.GIO_CSP_NONCE_PLACEHOLDER;
+    }
   });
 });
