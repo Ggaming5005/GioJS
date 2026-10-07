@@ -237,7 +237,7 @@ async function main() {
   const { buildRouteStylesheets } = await import(coreSrc('css-build.ts'));
   const { cssImportsAsClassMapsPlugin } = await import(coreSrc('css-modules.ts'));
   const { styleManifestToJson } = await import(coreSrc('style-manifest.ts'));
-  const { generateStandaloneEntry } = await import(coreSrc('standalone-gen.ts'));
+  const { generateStandaloneEntry, withStickyModuleErrors } = await import(coreSrc('standalone-gen.ts'));
   const { loadEnvFiles } = await import(coreSrc('env-files.ts'));
 
   // GIO_PUBLIC_* values are frozen in at build time (client chunks and the
@@ -366,6 +366,18 @@ async function main() {
       sourcemap: false,
       logLevel: 'warning',
     });
+    // App modules evaluate on first import (standalone-gen.ts); one that
+    // throws must keep failing its importers, as under Node's ESM loader.
+    const workerFile = join(options.out, 'worker.js');
+    const patched = withStickyModuleErrors(await readFile(workerFile, 'utf8'));
+    if (patched === null) {
+      console.warn(
+        'warning: unrecognized esbuild module-init helper in worker.js - a module that throws while it ' +
+          'is imported fails only its first importer',
+      );
+    } else {
+      await writeFile(workerFile, patched, 'utf8');
+    }
   } finally {
     await rm(entryDir, { recursive: true, force: true });
   }

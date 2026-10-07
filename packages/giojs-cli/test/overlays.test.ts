@@ -203,7 +203,10 @@ test('tailwind: CLI build into an imported stylesheet, the watcher in dev, a bui
     assert.match(await read(project.dir, '.gitignore'), /^app\/tailwind\.out\.css$/m);
     assert.match(await read(project.dir, '.gitignore'), /^node_modules\/$/m);
     assert.match(await read(project.dir, 'scripts/dev.mjs'), /css:watch[\s\S]*dev:server/);
-    assert.match(await read(project.dir, 'AGENTS.md'), /## Starter features\n\n- Tailwind CSS v4/);
+    const agents = await read(project.dir, 'AGENTS.md');
+    assert.match(agents, /## Starter features\n\n- Tailwind CSS v4/);
+    // `gio dev` alone never builds the git-ignored output: agents must start `npm run dev`.
+    assert.match(agents, /Start development with\s+`npm run dev`[\s\S]*not `gio dev`/);
   });
 });
 

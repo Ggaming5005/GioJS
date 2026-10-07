@@ -56,7 +56,11 @@ export default function Page(): React.JSX.Element {
         <li>
           <strong>Set <code>GIO_SESSION_SECRET</code></strong> (32+ bytes) if you use{' '}
           <a href="/docs/authentication">sessions</a> or <code>require_session</code>{' '}
-          guards. Without it, production sessions throw and guards deny every request.
+          guards. Without it, <code>createSessionStorage()</code> throws, so every page and{' '}
+          <code>route.ts</code> importing your session module answers 500 (the log names the
+          file and the missing secret under the response&apos;s digest), and guards deny every
+          request. The server still starts - check <code>npx gio routes</code> with the
+          production environment for routes marked <code>(failed to load)</code>.
         </li>
         <li>
           <strong>Set <code>GIO_REVALIDATE_TOKEN</code></strong> (32+ bytes) only if a CMS or

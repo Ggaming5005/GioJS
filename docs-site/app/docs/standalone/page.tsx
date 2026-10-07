@@ -46,8 +46,13 @@ export default function Page(): React.JSX.Element {
       <p>
         <code>worker.js</code> is generated from your discovered app modules - every page,
         layout, <code>route.ts</code> handler, <code>gio.config</code>, and{' '}
-        <code>middleware</code> file is statically imported and bundled, so boot performs no
-        filesystem discovery and no TypeScript transform. The hydration chunks in{' '}
+        <code>middleware</code> file is bundled, so boot performs no filesystem discovery and
+        no TypeScript transform. Modules are evaluated when <code>gio</code> evaluates them
+        from source: <code>gio.config</code>, <code>middleware</code> and{' '}
+        <code>route.ts</code> files at startup, pages and layouts on first use. A module that
+        throws while it is imported (a missing <code>GIO_SESSION_SECRET</code>, a required
+        variable check) makes the URLs that import it answer 500, with the file and the error
+        in the log - the server still starts. The hydration chunks in{' '}
         <code>static/</code> are built ahead of time too, and so are the route stylesheets:{' '}
         <a href="/docs/css">CSS imports and CSS Modules</a> work exactly as with{' '}
         <code>gio</code>, with each CSS Module&apos;s class names compiled into{' '}
@@ -79,11 +84,21 @@ export default function Page(): React.JSX.Element {
         you place inside the deploy folder (the server loads them at startup with the usual{' '}
         <a href="/docs/configuration">precedence</a>; real environment variables win).
       </p>
-      <p>As a systemd service, the whole unit is one line of ExecStart:</p>
+      <p>
+        As a systemd service, the unit needs <code>ExecStart</code> plus a stop policy:
+        systemd&apos;s default sends <code>SIGTERM</code> to every process at once, which
+        stops the workers in the middle of requests the server is still draining.{' '}
+        <code>KillMode=mixed</code> signals only the launcher (the server then drains and
+        stops its workers itself); the full unit is in{' '}
+        <a href="/docs/guides/deploying#vps">Deploying</a>.
+      </p>
       <CodeBlock lang="ini" code={`[Service]
 ExecStart=node /srv/app/run.mjs
 Restart=always
-Environment=NODE_ENV=production`} />
+Environment=NODE_ENV=production
+# SIGTERM to the launcher only: the server drains requests, then stops its workers.
+KillMode=mixed
+TimeoutStopSec=30`} />
 
       <h2>Cross-building for another platform</h2>
       <p>

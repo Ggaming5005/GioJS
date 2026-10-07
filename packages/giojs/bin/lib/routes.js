@@ -102,7 +102,8 @@ function formatRoutes(table) {
   lines.push(`${routes.length} route${routes.length === 1 ? '' : 's'}, ${dynamic} dynamic` +
     '   (:param one segment, *param catch-all, *param? optional catch-all)');
   for (const route of routes.filter((r) => r.loadError)) {
-    lines.push(`! ${route.file} failed to load - the server skips its handlers: ${route.loadError}`);
+    lines.push(`! ${route.file} failed to load - the server answers 500 for its URL (and closes ` +
+      `WebSocket connections with 1011) until it is fixed: ${route.loadError}`);
   }
   return lines.join('\n');
 }

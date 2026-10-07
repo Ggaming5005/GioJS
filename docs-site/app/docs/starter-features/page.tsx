@@ -77,8 +77,9 @@ npx create-giojs add --ci --features db  # create's flag spellings work too`} />
             <td>
               Tailwind CSS v4 through its CLI: <code>app/tailwind.css</code> builds into{' '}
               <code>app/tailwind.out.css</code>, which the root layout imports.{' '}
-              <code>npm run dev</code> runs the watcher next to the server; build and start build
-              the stylesheet first. See <a href="/docs/guides/tailwind">the Tailwind guide</a>.
+              <code>npm run dev</code> runs the watcher next to the server (<code>gio dev</code>{' '}
+              starts only the server, so the git-ignored output is missing in a fresh clone);
+              build and start build the stylesheet first. See <a href="/docs/guides/tailwind">the Tailwind guide</a>.
             </td>
           </tr>
           <tr>

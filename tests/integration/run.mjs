@@ -4246,6 +4246,28 @@ async function standalonePhase() {
         '    buildOnly: process.env.GIO_STANDALONE_BUILD_ONLY ?? null,\n' +
         '    publicDestructured: GIO_PUBLIC_STANDALONE_GREETING ?? null };\n}\n',
     );
+    // A module that throws while it is imported (a missing secret, an
+    // env.server.ts check), shared by a route.ts and a page: the bundle
+    // evaluates them lazily, so the worker still starts and each URL
+    // answers 500 with the module's own error in the log.
+    await mkdir(join(workDir, 'lib'), { recursive: true });
+    await mkdir(join(workDir, 'app', 'api', 'needs-env'), { recursive: true });
+    await mkdir(join(workDir, 'app', 'needs-env'), { recursive: true });
+    await writeFile(
+      join(workDir, 'lib', 'required-env.server.ts'),
+      "if (!process.env.STANDALONE_REQUIRED_VAR) throw new Error('STANDALONE_REQUIRED_VAR is not set');\n" +
+        'export const required = process.env.STANDALONE_REQUIRED_VAR;\n',
+    );
+    await writeFile(
+      join(workDir, 'app', 'api', 'needs-env', 'route.ts'),
+      "import { required } from '../../../lib/required-env.server.ts';\n\nexport function POST() {\n  return { required };\n}\n",
+    );
+    await writeFile(
+      join(workDir, 'app', 'needs-env', 'page.tsx'),
+      "import React from 'react';\nimport { required } from '../../lib/required-env.server.ts';\n\n" +
+        'export async function getServerSideProps() {\n  return { props: { required: required.toUpperCase() } };\n}\n\n' +
+        'export default function NeedsEnv({ required }) {\n  return <p>{required}</p>;\n}\n',
+    );
     // Build-time env: the public value is frozen into the bundles; the
     // server-only one must not travel into the deploy dir.
     await writeFile(
@@ -4458,6 +4480,7 @@ async function standalonePhase() {
     // The output must be self-contained: delete the app sources and the
     // node_modules the build used before booting it.
     await rm(join(workDir, 'app'), { recursive: true, force: true });
+    await rm(join(workDir, 'lib'), { recursive: true, force: true });
     await rm(join(workDir, 'node_modules'), { recursive: true, force: true });
 
     const startLauncher = async () => {
@@ -4510,6 +4533,57 @@ async function standalonePhase() {
         // they do in the client chunks.
         publicDestructured: 'STANDALONE_PUBLIC_VALUE',
       });
+    });
+
+    await test('standalone: a module that throws while imported fails its URLs with 500, not the worker', async () => {
+      const route = await fetch(`${STANDALONE_BASE}/api/needs-env`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      assert.equal(route.status, 500);
+      const body = await route.json();
+      assert.equal(body.error, 'Internal Server Error');
+      assert.match(body.digest, /^[0-9a-f]{12}$/);
+      // The log line under that digest names the route file and the error.
+      const logLine = (needle) => log.split('\n').find((line) => line.includes(needle));
+      await waitFor('route failure logged', async () => logLine(`"digest":"${body.digest}"`) !== undefined, 5_000);
+      const routeLine = logLine(`"digest":"${body.digest}"`);
+      assert.match(routeLine, /"msg":"route file failed to load"/);
+      assert.match(routeLine, /needs-env[\\/]+route\.ts/);
+      assert.match(routeLine, /"error":"STANDALONE_REQUIRED_VAR is not set"/);
+      // OPTIONS too: a 405 would list methods the module may never export.
+      const options = await fetch(`${STANDALONE_BASE}/api/needs-env`, { method: 'OPTIONS' });
+      assert.equal(options.status, 500);
+      assert.equal(options.headers.get('allow'), null);
+      await options.text();
+      // A WebSocket to it is closed with 1011 under a logged digest, not
+      // the 4404 of a path without a wsHandler.
+      const ws = new WebSocket(`${STANDALONE_BASE.replace(/^http/, 'ws')}/api/needs-env`);
+      const closed = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('WebSocket to a failed route.ts never closed')), 5_000);
+        ws.addEventListener('close', (event) => {
+          clearTimeout(timer);
+          resolve({ code: event.code, reason: event.reason });
+        });
+      });
+      assert.equal(closed.code, 1011);
+      const wsDigest = /^internal error \(digest ([0-9a-f]{12})\)$/.exec(closed.reason)?.[1];
+      assert.ok(wsDigest, `close reason: ${closed.reason}`);
+      await waitFor('ws failure logged', async () => logLine(`"digest":"${wsDigest}"`) !== undefined, 5_000);
+      const wsLine = logLine(`"digest":"${wsDigest}"`);
+      assert.match(wsLine, /"msg":"route file failed to load"/);
+      assert.match(wsLine, /needs-env[\\/]+route\.ts/);
+      // The page sharing the module reports the same error - not a TypeError
+      // on the export the failed evaluation left undefined.
+      const page = await fetch(`${STANDALONE_BASE}/needs-env`);
+      assert.equal(page.status, 500);
+      await page.text();
+      await waitFor('page failure logged', async () => logLine('"path":"/needs-env"') !== undefined, 5_000);
+      const pageLine = logLine('"path":"/needs-env"');
+      assert.match(pageLine, /"msg":"ssr render failed"/);
+      assert.match(pageLine, /"error":"STANDALONE_REQUIRED_VAR is not set"/);
+      assert.equal((await fetch(`${STANDALONE_BASE}/api/hello`)).status, 200);
     });
 
     await test('standalone: group layouts apply to dynamic pages from the prebuilt registry', async () => {

@@ -1,11 +1,18 @@
 /**
  * giojs-core/src/standalone-gen.ts
  *
- * Generates the standalone worker entry module: static imports for every
- * discovered app module plus a registry literal handed to
- * runStandaloneServer(). The emitted source is the esbuild entry for
- * `gio build standalone`, so imports use absolute forward-slashed paths that
- * resolve identically on Windows and POSIX.
+ * Generates the standalone worker entry module: a registry literal handed to
+ * runStandaloneServer() with a loader for every discovered app module. The
+ * emitted source is the esbuild entry for `gio build standalone`, so imports
+ * use absolute forward-slashed paths that resolve identically on Windows and
+ * POSIX.
+ *
+ * Pages, layouts, route files and the other per-route modules are dynamic
+ * `import()`s: esbuild still bundles them into worker.js, but evaluates each
+ * one when it is first loaded - as the source path does - so a module that
+ * throws while it is imported fails its own URL (500), not the whole worker
+ * at startup. gio.config and middleware.ts stay static imports: they are
+ * loaded at boot on both paths.
  */
 import { resolve, sep } from 'node:path';
 import type { SegmentFileKind } from './router.ts';
@@ -37,57 +44,55 @@ function moduleSpecifier(filePath: string): string {
   return JSON.stringify(resolve(filePath).split(sep).join('/'));
 }
 
+/** A loader for `filePath`: bundled, evaluated on first call. */
+function lazyImport(filePath: string): string {
+  return `() => import(${moduleSpecifier(filePath)})`;
+}
+
 /** Emit the generated entry module source for `spec`. */
 export function generateStandaloneEntry(spec: StandaloneEntrySpec): string {
   const imports: string[] = [
     `import { runStandaloneServer } from ${moduleSpecifier(spec.entryModulePath)};`,
   ];
   const routeEntries: string[] = [];
-  spec.routes.forEach((route, index) => {
-    imports.push(`import * as gioPage${index} from ${moduleSpecifier(route.filePath)};`);
+  spec.routes.forEach(route => {
     routeEntries.push(
-      `    { pattern: ${JSON.stringify(route.pattern)}, dir: ${JSON.stringify(route.dir)}, filePath: ${JSON.stringify(route.filePath)}, module: gioPage${index} },`,
+      `    { pattern: ${JSON.stringify(route.pattern)}, dir: ${JSON.stringify(route.dir)}, filePath: ${JSON.stringify(route.filePath)}, load: ${lazyImport(route.filePath)} },`,
     );
   });
   const layoutEntries: string[] = [];
-  spec.layouts.forEach((layout, index) => {
-    imports.push(`import * as gioLayout${index} from ${moduleSpecifier(layout.filePath)};`);
+  spec.layouts.forEach(layout => {
     layoutEntries.push(
-      `    { dir: ${JSON.stringify(layout.dir)}, filePath: ${JSON.stringify(layout.filePath)}, module: gioLayout${index} },`,
+      `    { dir: ${JSON.stringify(layout.dir)}, filePath: ${JSON.stringify(layout.filePath)}, load: ${lazyImport(layout.filePath)} },`,
     );
   });
   const routeFileEntries: string[] = [];
-  spec.routeFiles.forEach((routeFile, index) => {
-    imports.push(`import * as gioRoute${index} from ${moduleSpecifier(routeFile.filePath)};`);
+  spec.routeFiles.forEach(routeFile => {
     routeFileEntries.push(
-      `    { pattern: ${JSON.stringify(routeFile.pattern)}, filePath: ${JSON.stringify(routeFile.filePath)}, module: gioRoute${index} },`,
+      `    { pattern: ${JSON.stringify(routeFile.pattern)}, filePath: ${JSON.stringify(routeFile.filePath)}, load: ${lazyImport(routeFile.filePath)} },`,
     );
   });
 
   const segmentFileEntries: string[] = [];
-  (spec.segmentFiles ?? []).forEach((file, index) => {
-    imports.push(`import * as gioSegment${index} from ${moduleSpecifier(file.filePath)};`);
+  (spec.segmentFiles ?? []).forEach(file => {
     segmentFileEntries.push(
-      `    { kind: ${JSON.stringify(file.kind)}, dir: ${JSON.stringify(file.dir)}, filePath: ${JSON.stringify(file.filePath)}, module: gioSegment${index} },`,
+      `    { kind: ${JSON.stringify(file.kind)}, dir: ${JSON.stringify(file.dir)}, filePath: ${JSON.stringify(file.filePath)}, load: ${lazyImport(file.filePath)} },`,
     );
   });
 
   const metadataRouteEntries: string[] = [];
-  (spec.metadataRoutes ?? []).forEach((file, index) => {
-    imports.push(`import * as gioMetadataRoute${index} from ${moduleSpecifier(file.filePath)};`);
+  (spec.metadataRoutes ?? []).forEach(file => {
     metadataRouteEntries.push(
-      `    { kind: ${JSON.stringify(file.kind)}, filePath: ${JSON.stringify(file.filePath)}, module: gioMetadataRoute${index} },`,
+      `    { kind: ${JSON.stringify(file.kind)}, filePath: ${JSON.stringify(file.filePath)}, load: ${lazyImport(file.filePath)} },`,
     );
   });
 
   const specialPageFields: string[] = [];
   if (spec.notFoundPath !== undefined) {
-    imports.push(`import * as gioNotFound from ${moduleSpecifier(spec.notFoundPath)};`);
-    specialPageFields.push('notFound: gioNotFound');
+    specialPageFields.push(`notFound: ${lazyImport(spec.notFoundPath)}`);
   }
   if (spec.errorPath !== undefined) {
-    imports.push(`import * as gioError from ${moduleSpecifier(spec.errorPath)};`);
-    specialPageFields.push('error: gioError');
+    specialPageFields.push(`error: ${lazyImport(spec.errorPath)}`);
   }
 
   const registryFields: string[] = [
@@ -124,4 +129,40 @@ await runStandaloneServer({
 ${registryFields.join('\n')}
 });
 `;
+}
+
+/**
+ * esbuild's helper for modules evaluated on first import() - as it emits it.
+ * It clears the module's initializer before running it, so a module that
+ * throws while it is evaluated throws once: the next importer gets its
+ * half-initialized bindings (undefined) instead of the error.
+ */
+const LAZY_INIT_HELPER =
+  'var __esm = (fn, res) => function __init() {\n' +
+  '  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;\n' +
+  '};';
+
+/** The same helper, keeping the first throw for every later importer - like Node's ESM loader. */
+const STICKY_LAZY_INIT_HELPER =
+  'var __esm = (fn, res, failure) => function __init() {\n' +
+  '  if (failure) throw failure.error;\n' +
+  '  try {\n' +
+  '    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;\n' +
+  '  } catch (error) {\n' +
+  '    failure = { error };\n' +
+  '    throw error;\n' +
+  '  }\n' +
+  '};';
+
+/**
+ * Patch worker.js so a module that throws while it is evaluated fails every
+ * importer with that error, as on the source path: two routes sharing a
+ * broken lib/session.server.ts both report the session error, not a
+ * TypeError on an undefined export. `null` when the bundle declares the
+ * helper in a shape this does not know (an esbuild that emits it
+ * differently); a bundle without lazy modules is returned unchanged.
+ */
+export function withStickyModuleErrors(bundle: string): string | null {
+  if (bundle.includes(LAZY_INIT_HELPER)) return bundle.replace(LAZY_INIT_HELPER, STICKY_LAZY_INIT_HELPER);
+  return /^var __esm = /m.test(bundle) ? null : bundle;
 }

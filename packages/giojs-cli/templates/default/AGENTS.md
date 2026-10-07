@@ -172,6 +172,12 @@ renders React. Full docs: https://giojs.com/llms.txt
   `callRoute(path, { method, body })` a fetch-like response - both run
   in-process with the .env files loaded, without gio.toml/middleware.ts
   rules or [i18n] detection (pass the unprefixed path plus `locale`).
+  Tests run in production mode (vitest sets NODE_ENV=test); without a
+  `GIO_SESSION_SECRET` the kit sets a random one before importing the app,
+  but a test file that imports a session module at its top level needs its
+  own: `test: { env: { GIO_SESSION_SECRET: '<32+ bytes>' } }` in
+  vitest.config. A route.ts that throws while imported answers 500 (see
+  the `route file failed to load` log line), never 404.
   `createTestServer()` starts the real server on a free port (`url`,
   `close()` in afterAll).
   Under vitest, mirror tsconfig `paths` as `resolve.alias`, and add

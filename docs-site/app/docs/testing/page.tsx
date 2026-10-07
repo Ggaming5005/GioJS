@@ -210,6 +210,26 @@ it('rejects a form post to a JSON endpoint', async () => {
   });
   expect(res.status).toBe(415);
 });`} />
+      <p id="sessions">
+        <strong>Sessions:</strong> tests run in production mode, where{' '}
+        <code>createSessionStorage()</code> needs <code>GIO_SESSION_SECRET</code>. When neither
+        the environment nor a <code>.env</code> file sets it, the kit sets a random secret for
+        the test process before it imports any app module, so session modules load and the
+        example above works as is. It is not passed to a <code>createTestServer</code> server,
+        which runs with what your project configures. A test file that imports a session
+        module itself at the top - before any <code>renderPage</code>/<code>callRoute</code>{' '}
+        call - runs <code>createSessionStorage()</code> first, so give the test run a secret
+        of its own (under node:test, in the test script&apos;s environment):
+      </p>
+      <CodeBlock lang="ts" code={`// vitest.config.ts
+export default defineConfig({
+  test: { env: { GIO_SESSION_SECRET: 'test-only-secret-at-least-32-bytes-long' } },
+});`} />
+      <p>
+        A <code>route.ts</code> that throws while it is imported answers 500 for every method
+        (with a <code>digest</code>; the error is on the <code>route file failed to load</code>{' '}
+        log line), like on the server - never a 404.
+      </p>
       <p>
         <code>body</code> takes a string (sent as <code>text/plain</code>),{' '}
         <code>URLSearchParams</code> (a form), a <code>Uint8Array</code> (raw bytes), or any

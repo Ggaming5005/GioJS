@@ -55,6 +55,13 @@ npm install`} />
         component and the watcher rewrites the output; the dev server picks that up and reloads
         the browser.
       </p>
+      <p>
+        Start development with <code>npm run dev</code>, not <code>gio dev</code> (or{' '}
+        <code>npx gio dev</code>): those start only the GioJS server, so in a fresh clone{' '}
+        <code>app/tailwind.out.css</code> - git-ignored - does not exist yet, and nothing
+        rebuilds it as you edit. Run <code>npm run css:build</code> once if you start the
+        server another way.
+      </p>
       <CodeBlock lang="tsx" code={`export default function Hero(): React.JSX.Element {
   return <h1 className="text-4xl font-semibold tracking-tight text-orange-500">Hello</h1>;
 }`} />

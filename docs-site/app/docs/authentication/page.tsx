@@ -52,12 +52,21 @@ export default function Page(): React.JSX.Element {
         <li>
           <strong>Production</strong> without a secret: <code>createSessionStorage()</code>{' '}
           throws with the command above, and every <code>require_session</code> guard denies
-          all requests (fail closed) with an error in the server log.
+          all requests (fail closed) with an error in the server log. Called at module scope
+          (as in <code>lib/session.server.ts</code>), the throw happens when a module imports
+          it: each page and <code>route.ts</code> that does answers 500 with an error digest,
+          and the log line under that digest names the file and the missing secret.
         </li>
         <li>
           <strong>Development</strong> without a secret: the server generates an ephemeral one
           and shares it with the worker, so logins work out of the box and survive worker
           restarts, but reset when the server restarts. A warning says so.
+        </li>
+        <li>
+          <strong>Tests</strong> (<code>@gio.js/core/testing</code>, which runs in production
+          mode under vitest&apos;s <code>NODE_ENV=test</code>): the kit sets a random secret
+          for the test process when none is set - see{' '}
+          <a href="/docs/testing#sessions">Testing</a>.
         </li>
       </ul>
 

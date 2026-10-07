@@ -170,7 +170,7 @@ socket.on('message', (msg) => broadcast(room, msg, { except: socket.id }));`} />
           <tr><td><code>1000</code></td><td>Normal close (<code>socket.close()</code>).</td></tr>
           <tr><td><code>1001</code></td><td>The server is shutting down, or the worker restarted (its sockets&apos; state is gone): reconnect.</td></tr>
           <tr><td><code>1008</code></td><td>Too many messages (256, or 1 MiB) before the handler listened or accepted the connection.</td></tr>
-          <tr><td><code>1011</code></td><td>The <code>wsHandler</code> threw.</td></tr>
+          <tr><td><code>1011</code></td><td>The <code>wsHandler</code> threw, or the <code>route.ts</code> for this path threw while it was imported: the reason is <code>internal error (digest ...)</code> and the server log has the file and the error under that digest.</td></tr>
           <tr><td><code>1013</code></td><td><code>[websocket] max_connections</code> reached: try again later.</td></tr>
           <tr><td><code>4401</code></td><td>The handler rejected the connection (returned <code>false</code>).</td></tr>
           <tr><td><code>4404</code></td><td>No <code>route.ts</code> exports a <code>wsHandler</code> for this path.</td></tr>

@@ -321,6 +321,18 @@ first.
   strings or segment arrays. Invalid entries are skipped with a reason,
   nothing is written outside `out/`, and a root catch-all no longer replaces
   `404.html`.
+- **A `route.ts` that throws while it is imported answers `500`.** It used to
+  be skipped with a warning, so its URL answered `404` (or a same-folder page
+  took it over). Every method, `OPTIONS` included, now answers the JSON `500`
+  with a `digest`, and a WebSocket connection to it is closed with `1011`
+  (reason `internal error (digest ...)`) instead of the `4404` of a path with
+  no `wsHandler`; the log names the file and the error once at startup and per
+  request or connection under the digest, development shows the error in the
+  response, and `gio routes` still marks it `(failed to load)` and says the
+  server answers `500` for it (it used to say the server skips it). A
+  module-scope `createSessionStorage()` without `GIO_SESSION_SECRET` in
+  production, or a required-variable check in `lib/env.server.ts`, is such a
+  throw.
 
 ### Data, forms and mutations
 
@@ -778,6 +790,10 @@ first.
 - `callRoute(path, { method, body })` calls route handlers and returns a
   fetch-like response (JSON, form and binary bodies; SSE as a raw event
   stream).
+- Tests run in production mode (vitest sets `NODE_ENV=test`), where sessions
+  need a secret: when neither the environment nor a `.env` file sets
+  `GIO_SESSION_SECRET`, the kit sets a random one for the test process before
+  it imports the app. A `createTestServer()` server does not get it.
 - `createTestServer()` starts the real server on a free port with a private
   cache and waits for the worker; `close()` stops both, and a forgotten
   `close()` never keeps the run alive or leaves processes behind.
@@ -872,6 +888,18 @@ first.
   with metrics off (no `[metrics]` section, or `enabled = false`), where the
   endpoint answers `404`. The warning now appears only when metrics are
   enabled without a `token` or `ip_allowlist`.
+- A standalone build whose app had a module that throws while it is imported
+  (a missing `GIO_SESSION_SECRET`) never started: `worker.js` evaluated every
+  module at load, the worker died and the server gave up with
+  `IPC connect ... failed after 60 attempts`. It now evaluates them as `gio`
+  does from source - `route.ts` files at startup, pages and layouts on first
+  use - so the URLs that import the module answer `500` and the rest of the
+  app serves.
+- The Standalone docs' systemd unit had no `KillMode=mixed`, so stopping the
+  service killed the workers in the middle of requests; it now matches the
+  Deploying guide's (`KillMode=mixed`, `TimeoutStopSec=30`). The Tailwind
+  docs and the feature's `AGENTS.md` note say to start with `npm run dev`:
+  `gio dev` alone never builds the ignored `app/tailwind.out.css`.
 
 ### Known limitations
 

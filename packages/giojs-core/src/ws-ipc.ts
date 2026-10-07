@@ -13,6 +13,8 @@ import path from 'node:path';
 import { Buffer } from 'node:buffer';
 import { handshakeProof, writeFrame, makeDroppableFrameWriter } from './ipc.ts';
 import { logger } from './logger.ts';
+import { createErrorDigest, describeError } from './mode.ts';
+import { RouteLoadError } from './router.ts';
 import { parseCookies } from './cookies.ts';
 import { matchWsHandler, type WsHandlerFn } from './ws-router.ts';
 import { assertRoomName, MAX_ROOMS_PER_SOCKET, wsHub } from './ws-hub.ts';
@@ -407,6 +409,21 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
  */
 function runWsHandler(handler: WsHandlerFn, socket: GioSocketImpl): void {
   const fail = (cause: unknown): void => {
+    if (cause instanceof RouteLoadError) {
+      // The route.ts threw while it was imported (registerFailedRouteModule):
+      // log it like an HTTP request to the same URL - file, import error,
+      // and a digest the close reason carries for correlation.
+      const digest = createErrorDigest();
+      logger.error('route file failed to load', {
+        path: socket.path,
+        connId: socket.id,
+        digest,
+        filePath: cause.file,
+        ...describeError(cause.cause),
+      });
+      socket.close(1011, `internal error (digest ${digest})`);
+      return;
+    }
     logger.error('wsHandler threw on connect', {
       path: socket.path,
       connId: socket.id,
