@@ -39,7 +39,12 @@ export default function Page(): React.JSX.Element {
       <p>Optimized images via the Rust /_gio/image endpoint, with a srcset built from gio.toml&apos;s [images] allowed_widths. Requires width and height; takes sizes, fill, quality, priority (preloads the image) and unoptimized (plain src - also automatic in a static export). See <a href="/docs/image-optimization">Image Optimization</a>.</p>
       <CodeBlock lang="tsx" code={`<GioImage src="/photo.jpg" alt="" width={800} height={600} priority />`} />
       <h2>GioFont</h2>
-      <p>Self-hosts a font and injects preload + stylesheet links.</p>
+      <p>
+        A typed marker that renders nothing. Fonts are self-hosted from{' '}
+        <code>[[fonts]]</code> in <code>gio.toml</code>: the server downloads them and injects
+        the preload and stylesheet links itself - see{' '}
+        <a href="/docs/font-optimization">Font Optimization</a>.
+      </p>
       <h2>Props of your app components</h2>
       <p>
         The props GioJS passes to the components in <code>app/</code> are typed by{' '}

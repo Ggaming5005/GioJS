@@ -39,6 +39,12 @@ export default function Page(): React.JSX.Element {
           <code>@gio.js/core</code> and <code>@gio.js/react</code> on the same version - they
           are released in lockstep.
         </li>
+        <li>
+          <strong>Fonts download on first start.</strong> <code>[[fonts]]</code> files are
+          fetched into <code>.gio/fonts/</code> before the server listens, and a failed
+          download stops startup - allow outbound HTTPS to the font URLs, or persist that
+          folder. See <a href="/docs/font-optimization">Font Optimization</a>.
+        </li>
       </ul>
 
       <h2>Secrets and environment</h2>
