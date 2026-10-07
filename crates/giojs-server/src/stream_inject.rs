@@ -2,7 +2,7 @@
 //!
 //! Incremental HTML injector for streamed SSR bodies. Buffers bytes only
 //! until the first `</head>` (bounded by HEAD_SCAN_CAP), splices the head
-//! snippets (and an optional `lang` attribute after `<html`), then scans a
+//! snippets (and sets the `<html>` tag's `lang` when asked to), then scans a
 //! small carry-over tail for `</body>` to place an optional body-end snippet.
 //! Markers may span chunk boundaries. Everything operates on bytes: both
 //! markers are pure ASCII, and UTF-8 continuation bytes always have the high
