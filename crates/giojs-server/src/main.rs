@@ -1011,8 +1011,8 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         } else if dev_guard::binds_all_interfaces(&cfg.server.host) {
             warn!(
                 "dev server is bound to {} - /_gio/devtools endpoints (error overlay codeframes, \
-                 open-in-editor, live reload) only answer to localhost hosts; add other hostnames \
-                 or IPs you browse from to [dev] allowed_hosts in gio.toml",
+                 open-in-editor, live reload) only answer this machine on localhost hosts; add \
+                 other hostnames or IPs you browse from to [dev] allowed_hosts in gio.toml",
                 cfg.server.host
             );
         }
@@ -4318,8 +4318,17 @@ fn request_host(req: &Request) -> Option<String> {
         .or_else(|| req.uri().authority().map(|a| a.as_str().to_string()))
 }
 
+/// The connection's remote address (not a forwarded client address): the dev
+/// guard trusts localhost-style hosts only on a loopback connection.
+fn connection_peer_ip(req: &Request) -> Option<std::net::IpAddr> {
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip())
+}
+
 /// Host / Origin / Sec-Fetch-Site vetting for every /_gio/devtools* route
-/// (see dev_guard.rs): defeats DNS rebinding and cross-site requests.
+/// (see dev_guard.rs): defeats DNS rebinding and cross-site requests, and
+/// forged localhost Host headers from other machines.
 async fn dev_endpoint_guard(
     State(policy): State<Arc<dev_guard::DevHostPolicy>>,
     req: Request,
@@ -4328,11 +4337,12 @@ async fn dev_endpoint_guard(
     let headers = req.headers();
     let header_str = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
     let host = request_host(&req);
-    let verdict = policy.check(
+    let verdict = policy.check_from(
         dev_guard::DevEndpointKind::for_path(req.uri().path()),
         host.as_deref(),
         header_str(header::ORIGIN.as_str()),
         header_str("sec-fetch-site"),
+        connection_peer_ip(&req),
     );
     match verdict {
         Ok(()) => next.run(req).await,
@@ -4362,16 +4372,18 @@ struct WorkerErrorPage;
 /// Dev mode: a render error page embeds the error message and stack (file
 /// paths, source excerpts from build errors). Pages carry no Host check, so
 /// a DNS-rebinding site could read them same-origin; a request whose Host is
-/// not trusted gets a page without the details instead.
+/// not trusted (or a localhost Host from another machine) gets a page
+/// without the details instead.
 async fn dev_error_detail_guard(
     State(policy): State<Arc<dev_guard::DevHostPolicy>>,
     req: Request,
     next: Next,
 ) -> Response {
     let host = request_host(&req);
+    let peer = connection_peer_ip(&req);
     let resp = next.run(req).await;
     if resp.extensions().get::<WorkerErrorPage>().is_none()
-        || host.is_some_and(|h| policy.is_trusted_host(&h))
+        || host.is_some_and(|h| policy.is_trusted_host_from(&h, peer))
     {
         return resp;
     }
@@ -7098,6 +7110,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dev_guard_refuses_a_forged_localhost_host_from_another_machine() {
+        let request = |peer: &str| {
+            let mut req = Request::builder()
+                .uri("/_gio/devtools/codeframe")
+                .header("host", "localhost:4518")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo::<SocketAddr>(peer.parse().unwrap()));
+            req
+        };
+        let lan = guarded_dev_router()
+            .call(request("192.0.2.2:50000"))
+            .await
+            .unwrap();
+        assert_eq!(lan.status(), StatusCode::FORBIDDEN);
+        let local = guarded_dev_router()
+            .call(request("127.0.0.1:50000"))
+            .await
+            .unwrap();
+        assert_eq!(local.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn dev_guard_uses_http2_authority_when_host_is_absent() {
         assert_eq!(
             dev_request("GET", "http://localhost:3000/_gio/devtools/codeframe", &[]).await,
@@ -7150,6 +7186,25 @@ mod tests {
             .await
             .unwrap();
         (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn dev_error_details_are_hidden_from_other_machines() {
+        for (peer, shown) in [("192.0.2.2:50000", false), ("127.0.0.1:50000", true)] {
+            let mut req = Request::builder()
+                .uri("/broken")
+                .header("host", "localhost:3000")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo::<SocketAddr>(peer.parse().unwrap()));
+            let resp = error_detail_router().call(req).await.unwrap();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert_eq!(body.contains("SECRET_MESSAGE"), shown, "{peer}: {body}");
+        }
     }
 
     #[tokio::test]

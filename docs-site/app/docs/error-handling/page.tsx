@@ -185,7 +185,8 @@ GIO_EDITOR="subl -w" npm run dev`} />
         dev mode - none of it is compiled into production responses.
       </div>
       <p>
-        Both endpoints only answer to localhost hosts. The codeframe endpoint
+        Both endpoints only answer to localhost hosts, on connections from
+        this machine. The codeframe endpoint
         refuses cross-site requests; open-in-editor takes same-origin{' '}
         <code>POST</code> only. The SSR error page follows the same rule: for
         any other host it leaves out the error message and stack (the
