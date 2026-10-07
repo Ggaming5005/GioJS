@@ -1007,6 +1007,15 @@ first.
   blindly (`/fr/fr/x`, `/frhttps://...`): absolute and protocol-relative
   URLs, relative paths, `?query` and `#hash` hrefs and paths that already
   start with a configured locale are now left as they are.
+- `<Animate>` in the root layout stayed at `opacity: 0` for good: the root
+  layout never hydrates, so its effect never ran, and the inline observer
+  fallback was only written into pages without a root layout. Outside the
+  hydrated page - the root layout, pages without a client bundle,
+  `not-found` and `error` pages - the server now renders a small nonced
+  inline script after each `<Animate>` that observes it (or shows it at
+  once for `when="immediate"`), and the client router starts the ones in a
+  server-only page it swaps in. The document-wide observer script is gone:
+  it also touched hydrated elements before React did.
 - A standalone build whose app had a module that throws while it is imported
   (a missing `GIO_SESSION_SECRET`) never started: `worker.js` evaluated every
   module at load, the worker died and the server gave up with

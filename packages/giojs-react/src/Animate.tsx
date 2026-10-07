@@ -5,9 +5,17 @@
  * hidden (opacity: 0) during SSR; the observer sets data-gio-animate-state="entered"
  * when the element scrolls into view, triggering the CSS animation.
  * CSS is auto-hoisted via React 19 <style precedence> - no manual import needed.
+ *
+ * HTML that never hydrates - the server-only root layout, a page without a
+ * client bundle, a not-found or error page - runs no effects. There the
+ * server render (render-scope.ts) adds an inline script right after the
+ * element that does the effect's job: observe it, or mark it entered for
+ * when="immediate". The browser never renders that script, and never
+ * hydrates where the server rendered it.
  */
 import React from 'react';
 import { observeElement } from './animate-observer.js';
+import { renderScopeContext } from './render-scope.js';
 
 export type AnimatePreset =
   | 'fade-up'
@@ -48,6 +56,18 @@ const ANIMATE_CSS = `
 }
 `;
 
+/**
+ * The inline stand-in for the effect: `__GIO_ANIMATE__(element, immediate)`,
+ * defined by the first such script on the page with one shared observer
+ * (the client runtime also calls it for server-only HTML it swaps in).
+ * Without IntersectionObserver the element is shown at once.
+ */
+export const SERVER_ONLY_ANIMATE_SCRIPT =
+  '(function(s,n){var a=self.__GIO_ANIMATE__||(self.__GIO_ANIMATE__=function(){var o;return function(e,now){if(!e)return;' +
+  "if(now||typeof IntersectionObserver!=='function'){e.dataset.gioAnimateState='entered';return}" +
+  "o=o||new IntersectionObserver(function(es){es.forEach(function(x){if(x.isIntersecting){x.target.dataset.gioAnimateState='entered';o.unobserve(x.target)}})},{threshold:0.1});" +
+  'o.observe(e)}}());a(s&&s.previousElementSibling,n)})(document.currentScript,';
+
 export function Animate({
   enter,
   duration = 400,
@@ -57,6 +77,8 @@ export function Animate({
   className,
 }: AnimateProps): React.JSX.Element {
   const ref = React.useRef<HTMLDivElement>(null);
+  const scope = React.useContext(renderScopeContext());
+  const serverOnly = scope !== null && !scope.hydrating;
 
   React.useEffect(() => {
     const el = ref.current;
@@ -79,6 +101,12 @@ export function Animate({
       <div ref={ref} data-gio-animate={enter} className={className} style={style}>
         {children}
       </div>
+      {serverOnly ? (
+        <script
+          nonce={scope.nonce}
+          dangerouslySetInnerHTML={{ __html: `${SERVER_ONLY_ANIMATE_SCRIPT}${when === 'immediate' ? 1 : 0})` }}
+        />
+      ) : null}
     </>
   );
 }

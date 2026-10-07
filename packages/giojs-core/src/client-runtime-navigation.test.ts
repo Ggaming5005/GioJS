@@ -451,6 +451,30 @@ describe('persistent root', () => {
     expect(text('count')).toBe('count=0');
   });
 
+  it('starts the <Animate> elements of a swapped-in server-only page', async () => {
+    await loadFirstPage({ path: '/a', pattern: '/a', props: { label: 'A' } }, Page);
+    // The inline scripts after each element never run in swapped-in HTML.
+    const html =
+      '<div data-gio-animate="fade-in" id="later"></div><script>(...)(document.currentScript,0)</script>' +
+      '<div data-gio-animate="fade-in" id="now"></div><script>(...)(document.currentScript,1)</script>';
+    swapEnvelope(null);
+    act(() => runtimeApi().commit(serverContent(html)));
+    // No observer on the page yet: shown at once rather than never.
+    expect(document.getElementById('later')?.dataset['gioAnimateState']).toBe('entered');
+
+    // One defined by an earlier server-only element: it gets them.
+    const started: Array<[string, number]> = [];
+    (window as unknown as Record<string, unknown>)['__GIO_ANIMATE__'] = (el: HTMLElement, now: number) => {
+      started.push([el.id, now]);
+    };
+    try {
+      act(() => runtimeApi().commit(serverContent(html)));
+      expect(started).toEqual([['later', 0], ['now', 1]]);
+    } finally {
+      delete (window as unknown as Record<string, unknown>)['__GIO_ANIMATE__'];
+    }
+  });
+
   it('later route registrations never re-mount the page', async () => {
     const runtime = await loadFirstPage({ path: '/a', pattern: '/a', props: { label: 'A' } }, Page);
     act(() => document.getElementById('count')?.click());

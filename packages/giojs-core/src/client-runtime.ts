@@ -235,7 +235,10 @@ function commit(content: Element | null): void {
     activeTreeId = null;
   }
   const current = document.getElementById('__gio');
-  if (content !== null && current !== null && content !== current) current.replaceWith(content);
+  if (content !== null && current !== null && content !== current) {
+    current.replaceWith(content);
+    if (envelope === null) startServerOnlyAnimations(content);
+  }
   if (envelope === null || build === undefined) return;
   const container = document.getElementById('__gio');
   if (container === null) return;
@@ -247,6 +250,24 @@ function commit(content: Element | null): void {
   activeTreeId = treeIdOfBoundary(container);
   const element = routeElement(envelope, build, activeTreeId);
   updateRoot(rendersTitle(envelope), () => flushSync(() => fresh.render(element)));
+}
+
+/**
+ * A server-only page's `<Animate>` elements start through the inline script
+ * the server put after each one (@gio.js/react's Animate.tsx), but scripts
+ * in swapped-in HTML never run - and a nonce from another response would
+ * not pass the page's CSP anyway. So do their job: hand each element to the
+ * `__GIO_ANIMATE__` observer an earlier one defined (`immediate` is the
+ * script's last argument), or show it at once when there is none.
+ */
+function startServerOnlyAnimations(content: Element): void {
+  const start = (window as unknown as { __GIO_ANIMATE__?: unknown }).__GIO_ANIMATE__;
+  for (const el of Array.from(content.querySelectorAll<HTMLElement>('[data-gio-animate]'))) {
+    const script = el.nextElementSibling;
+    const immediate = script?.tagName === 'SCRIPT' && (script.textContent ?? '').endsWith(',1)');
+    if (typeof start === 'function') start(el, immediate ? 1 : 0);
+    else el.dataset['gioAnimateState'] = 'entered';
+  }
 }
 
 /** Called by each generated route entry when its module loads. */
