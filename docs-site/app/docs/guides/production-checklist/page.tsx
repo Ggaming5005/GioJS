@@ -247,7 +247,8 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
           <strong>Health checks</strong> on <code>/_gio/health</code>. It always answers 200
           while the server runs; read <code>nodeReady</code> for &quot;can render
           right now&quot;. <code>[health] details = false</code> keeps the deployment id and
-          worker counts out of it. See <a href="/docs/deployment#health-check">Health check</a>.
+          worker counts out of it; <code>[health] enabled = false</code> turns it into a{' '}
+          <code>404</code>, so point every probe at a page of your own first. See <a href="/docs/deployment#health-check">Health check</a>.
         </li>
         <li>
           <strong>Graceful stops</strong>: stop with <code>SIGTERM</code> and allow at least

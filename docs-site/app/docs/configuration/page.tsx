@@ -571,7 +571,12 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
       <div className="callout">
         Loopback means the client after <code>trusted_proxies</code> resolution: behind a
         proxy on the same machine, list it in <code>trusted_proxies</code> so its
-        forwarded clients are not mistaken for local ones. To serve metrics to every
+        forwarded clients are not mistaken for local ones. Until you do, a request it
+        forwards with <code>X-Forwarded-For</code>, <code>Forwarded</code> or{' '}
+        <code>X-Real-IP</code> gets <code>403</code>, but one forwarded without any of
+        those headers comes from <code>127.0.0.1</code> and is answered - whoever sent
+        it. The startup line about loopback-only metrics says so whenever{' '}
+        <code>trusted_proxies</code> is empty. To serve metrics to every
         client with no token, say so explicitly with{' '}
         <code>ip_allowlist = [&quot;0.0.0.0/0&quot;, &quot;::/0&quot;]</code> - the server
         then logs a warning at startup. With metrics off (no <code>[metrics]</code>{' '}

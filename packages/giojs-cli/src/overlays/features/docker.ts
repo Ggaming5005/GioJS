@@ -81,6 +81,8 @@ USER node
 EXPOSE 3000
 # /_gio/health answers 200 whenever the Rust server is up; nodeReady says
 # whether a Node worker is too (false while every worker is restarting).
+# Needs [health] enabled = true (the default); with it off, fetch a page of
+# your own here instead.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \\
   CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/_gio/health').then((r) => r.json()).then((health) => process.exit(health.nodeReady === true ? 0 : 1), () => process.exit(1))"]
 CMD ["node", "run.mjs"]

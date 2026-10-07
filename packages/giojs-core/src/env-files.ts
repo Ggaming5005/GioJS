@@ -247,35 +247,270 @@ export function parseEnvFile(source: string, lookup: Lookup = () => undefined): 
 /** `0` / `false` skips the .env files, `1` / `true` loads them, whatever gio.toml says. */
 export const ENV_FILES_SWITCH = 'GIO_ENV_FILES';
 
+/** gio.toml is not valid TOML: the scan gives up, as the server's parse would. */
+class TomlSyntaxError extends Error {}
+
+/** A scanned `{ ... }`, kept apart from an array. */
+class InlineTable {
+  readonly entries: Array<[string[], TomlValue]> = [];
+}
+
+/** Booleans and strings as values; every other scalar as its raw text. */
+type TomlValue = boolean | string | TomlValue[] | InlineTable;
+
+const BARE_KEY = /[A-Za-z0-9_-]+/y;
+const BARE_SCALAR = /[^ \t\r\n,\]}#]+/y;
+const SIMPLE_ESCAPES: Record<string, string> = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', '"': '"', '\\': '\\' };
+
+/**
+ * Just enough TOML to find one key where the server's parser (toml_edit)
+ * would: comments, the four string forms (so a `#` or an `[env]` line inside
+ * a string is not syntax), quoted and dotted keys, arrays, inline tables and
+ * table headers. Throws TomlSyntaxError at anything it cannot read; nothing
+ * else is validated.
+ */
+class TomlScanner {
+  private pos = 0;
+
+  constructor(private readonly src: string) {}
+
+  scan(
+    onHeader: (path: string[], arrayOfTables: boolean) => void,
+    onAssign: (path: string[], value: TomlValue) => void,
+  ): void {
+    for (;;) {
+      this.skipSpaces();
+      this.skipComment();
+      if (this.pos >= this.src.length) return;
+      if (this.atNewline()) {
+        this.endOfLine();
+        continue;
+      }
+      if (this.peek() === '[') {
+        const arrayOfTables = this.peek(1) === '[';
+        const close = arrayOfTables ? ']]' : ']';
+        this.pos += close.length;
+        const path = this.key();
+        this.expect(close);
+        onHeader(path, arrayOfTables);
+      } else {
+        const path = this.key();
+        this.expect('=');
+        onAssign(path, this.value());
+      }
+      this.endOfLine();
+    }
+  }
+
+  private peek(offset = 0): string {
+    return this.src[this.pos + offset] ?? '';
+  }
+
+  private fail(): never {
+    throw new TomlSyntaxError();
+  }
+
+  private expect(text: string): void {
+    if (!this.src.startsWith(text, this.pos)) this.fail();
+    this.pos += text.length;
+  }
+
+  private atNewline(): boolean {
+    return this.peek() === '\n' || this.src.startsWith('\r\n', this.pos);
+  }
+
+  private skipNewline(): void {
+    this.pos += this.peek() === '\n' ? 1 : 2;
+  }
+
+  private skipSpaces(): void {
+    while (this.peek() === ' ' || this.peek() === '\t') this.pos++;
+  }
+
+  private skipComment(): void {
+    if (this.peek() !== '#') return;
+    while (this.pos < this.src.length && !this.atNewline()) this.pos++;
+  }
+
+  /** Spaces, comments and newlines: the gaps inside an array. */
+  private skipBlank(): void {
+    for (;;) {
+      this.skipSpaces();
+      this.skipComment();
+      if (!this.atNewline()) return;
+      this.skipNewline();
+    }
+  }
+
+  /** Only a comment may follow a header or a key/value on its line. */
+  private endOfLine(): void {
+    this.skipSpaces();
+    this.skipComment();
+    if (this.pos >= this.src.length) return;
+    if (!this.atNewline()) this.fail();
+    this.skipNewline();
+  }
+
+  /** `a.b`, `"a".'b'`, ` a . b `: one entry per part. */
+  private key(): string[] {
+    const path: string[] = [];
+    for (;;) {
+      this.skipSpaces();
+      const c = this.peek();
+      if (c === '"' || c === "'") {
+        if (this.src.startsWith(c.repeat(3), this.pos)) this.fail();
+        path.push(this.string());
+      } else {
+        BARE_KEY.lastIndex = this.pos;
+        const bare = BARE_KEY.exec(this.src);
+        if (bare === null) this.fail();
+        path.push(bare[0]);
+        this.pos = BARE_KEY.lastIndex;
+      }
+      this.skipSpaces();
+      if (this.peek() !== '.') return path;
+      this.pos++;
+    }
+  }
+
+  private value(): TomlValue {
+    this.skipSpaces();
+    const c = this.peek();
+    if (c === '"' || c === "'") return this.string();
+    if (c === '[') {
+      this.pos++;
+      const items: TomlValue[] = [];
+      for (;;) {
+        this.skipBlank();
+        if (this.peek() === ']') break;
+        items.push(this.value());
+        this.skipBlank();
+        if (this.peek() !== ',') break;
+        this.pos++;
+      }
+      this.expect(']');
+      return items;
+    }
+    if (c === '{') {
+      this.pos++;
+      const table = new InlineTable();
+      this.skipSpaces();
+      if (this.peek() !== '}') {
+        for (;;) {
+          const path = this.key();
+          this.expect('=');
+          table.entries.push([path, this.value()]);
+          this.skipSpaces();
+          if (this.peek() !== ',') break;
+          this.pos++;
+        }
+      }
+      this.expect('}');
+      return table;
+    }
+    BARE_SCALAR.lastIndex = this.pos;
+    const bare = BARE_SCALAR.exec(this.src);
+    if (bare === null) this.fail();
+    this.pos = BARE_SCALAR.lastIndex;
+    let text = bare[0];
+    // A date-time may separate the date and the time with a space.
+    if (/^\d{4}-\d\d-\d\d$/.test(text) && this.peek() === ' ' && /\d/.test(this.peek(1))) {
+      BARE_SCALAR.lastIndex = this.pos + 1;
+      text += ` ${BARE_SCALAR.exec(this.src)?.[0] ?? ''}`;
+      this.pos = BARE_SCALAR.lastIndex;
+    }
+    return text === 'true' ? true : text === 'false' ? false : text;
+  }
+
+  /** Any of the four string forms, from its opening quote. */
+  private string(): string {
+    const quote = this.peek();
+    const multiLine = this.src.startsWith(quote.repeat(3), this.pos);
+    const close = multiLine ? quote.repeat(3) : quote;
+    this.pos += close.length;
+    // A newline right after the opening delimiter is not part of the string.
+    if (multiLine && this.atNewline()) this.skipNewline();
+    let out = '';
+    for (;;) {
+      if (this.pos >= this.src.length || (!multiLine && this.atNewline())) this.fail();
+      if (this.src.startsWith(close, this.pos)) {
+        this.pos += close.length;
+        // Up to two more quotes still belong to the string: `"""a""""` is `a"`.
+        for (let extra = 0; multiLine && extra < 2 && this.peek() === quote; extra++) {
+          out += quote;
+          this.pos++;
+        }
+        return out;
+      }
+      const c = this.peek();
+      this.pos++;
+      out += c === '\\' && quote === '"' ? this.escape(multiLine) : c;
+    }
+  }
+
+  /** The escape after a backslash in a basic string. */
+  private escape(multiLine: boolean): string {
+    const c = this.peek();
+    // A line-ending backslash drops the line break and the whitespace after it.
+    if (multiLine && /[ \t\r\n]/.test(c)) {
+      this.skipSpaces();
+      if (!this.atNewline()) this.fail();
+      while (/[ \t\r\n]/.test(this.peek())) this.pos++;
+      return '';
+    }
+    this.pos++;
+    const simple = SIMPLE_ESCAPES[c];
+    if (simple !== undefined) return simple;
+    const digits = c === 'u' ? 4 : c === 'U' ? 8 : 0;
+    const hex = this.src.slice(this.pos, this.pos + digits);
+    if (digits === 0 || !/^[0-9A-Fa-f]+$/.test(hex) || hex.length !== digits) this.fail();
+    const code = parseInt(hex, 16);
+    if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) this.fail();
+    this.pos += digits;
+    return String.fromCodePoint(code);
+  }
+}
+
 /**
  * `[env] files` in gio.toml's contents, or undefined when it is not set to
- * a plain bool (the server's strict parse reports anything else). A line
- * scan rather than a TOML parser, covering the spellings TOML allows for a
- * top-level table's key: `[env]` then `files = ...`, `env.files = ...`, and
- * `env = { files = ... }`.
+ * a plain bool or gio.toml is not valid TOML (the server's strict parse
+ * reports either, with the files left on). Every spelling TOML allows
+ * counts - `[env]` then `files = ...`, `env.files = ...`,
+ * `env = { files = ... }`, quoted keys - and a comment or a string never
+ * does, however it is laid out.
  */
 export function gioTomlEnvFiles(source: string): boolean | undefined {
-  let table = '';
-  let found: boolean | undefined;
-  for (const rawLine of source.split(/\r?\n/)) {
-    const line = rawLine.replace(/\s+#.*$|^#.*$/, '').trim();
-    if (line === '') continue;
-    if (line.startsWith('[[')) {
-      table = '[[]]';
-      continue;
+  let table: string[] | null = [];
+  let envHeaders = 0;
+  let envAtRoot = false;
+  const found: TomlValue[] = [];
+  const visit = (path: string[], value: TomlValue): void => {
+    if (value instanceof InlineTable) {
+      for (const [key, inner] of value.entries) visit([...path, ...key], inner);
+    } else if (path.length === 2 && path[0] === 'env' && path[1] === 'files') {
+      found.push(value);
     }
-    const header = /^\[\s*([^\]]*?)\s*\]$/.exec(line);
-    if (header) {
-      table = header[1] as string;
-      continue;
-    }
-    const value =
-      (table === 'env' ? /^files\s*=\s*(true|false)$/.exec(line) : null) ??
-      (table === '' ? /^env\s*\.\s*files\s*=\s*(true|false)$/.exec(line) : null) ??
-      (table === '' ? /^env\s*=\s*\{.*\bfiles\s*=\s*(true|false)\b.*\}$/.exec(line) : null);
-    if (value) found = value[1] === 'true';
+  };
+  try {
+    new TomlScanner(source.replace(/^﻿/, '')).scan(
+      (path, arrayOfTables) => {
+        // Keys under `[[...]]` belong to an array element, never to a table.
+        table = arrayOfTables ? null : path;
+        if (!arrayOfTables && path.length === 1 && path[0] === 'env') envHeaders++;
+      },
+      (path, value) => {
+        if (table !== null && table.length === 0 && path[0] === 'env') envAtRoot = true;
+        if (table !== null) visit([...table, ...path], value);
+      },
+    );
+  } catch (error) {
+    if (error instanceof TomlSyntaxError) return undefined;
+    throw error;
   }
-  return found;
+  // A key or a table defined twice (`[env]` after `env.x = ...` too) is
+  // invalid TOML as well.
+  if (found.length !== 1 || envHeaders + (envAtRoot ? 1 : 0) > 1) return undefined;
+  return typeof found[0] === 'boolean' ? found[0] : undefined;
 }
 
 /**

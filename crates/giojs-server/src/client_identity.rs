@@ -260,6 +260,8 @@ pub struct ClientInfo {
     /// the proxy standing in for a client nobody could name. Access checks
     /// (the metrics allowlist) treat such a client as unknown and refuse it.
     pub unresolved: bool,
+    /// The peer is in `trusted_proxies`, so its forwarding headers were read.
+    pub via_trusted_proxy: bool,
     /// The TCP peer that sent the request (the proxy, behind one).
     pub peer: SocketAddr,
     /// `"https"` or `"http"`, as the client used it.
@@ -348,6 +350,7 @@ pub fn resolve(
     ClientInfo {
         ip,
         unresolved,
+        via_trusted_proxy: via_trusted,
         peer,
         scheme,
         host,
@@ -651,6 +654,25 @@ pub fn access_ip<B>(req: &axum::http::Request<B>, peer: SocketAddr) -> Option<Ip
         Some(client) => Some(client.ip),
         None => Some(peer.ip().to_canonical()),
     }
+}
+
+/// Headers a reverse proxy adds to say whose request it relays.
+const FORWARDING_HEADERS: [&str; 3] = ["x-forwarded-for", "forwarded", "x-real-ip"];
+
+/// The request carries a forwarding header from a peer outside
+/// `trusted_proxies`: a proxy nobody listed relayed it (or a client wrote
+/// one itself), so the peer address may not be the client's. A same-host
+/// proxy makes every client's peer address 127.0.0.1; the loopback-only
+/// metrics default refuses such requests rather than trust that address.
+pub fn forwarded_by_untrusted_peer<B>(req: &axum::http::Request<B>) -> bool {
+    let trusted = req
+        .extensions()
+        .get::<ClientInfo>()
+        .is_some_and(|client| client.via_trusted_proxy);
+    !trusted
+        && FORWARDING_HEADERS
+            .iter()
+            .any(|name| req.headers().contains_key(*name))
 }
 
 #[cfg(test)]
@@ -1052,6 +1074,49 @@ mod tests {
         assert_eq!(access_ip(&bare, p), Some(ip("127.0.0.1")));
     }
 
+    #[test]
+    fn forwarding_headers_from_an_untrusted_peer_are_flagged() {
+        let request = |trusted: &[&str], name: Option<&str>| {
+            let mut req = axum::http::Request::builder();
+            if let Some(name) = name {
+                req = req.header(name, "198.51.100.4");
+            }
+            let mut req = req.body(()).unwrap();
+            let info = resolve(
+                peer("127.0.0.1:1"),
+                req.headers(),
+                None,
+                &proxy_trust(trusted),
+            );
+            req.extensions_mut().insert(info);
+            req
+        };
+        for name in ["x-forwarded-for", "forwarded", "x-real-ip"] {
+            assert!(
+                forwarded_by_untrusted_peer(&request(&[], Some(name))),
+                "{name}"
+            );
+            assert!(
+                !forwarded_by_untrusted_peer(&request(&["127.0.0.1"], Some(name))),
+                "{name}"
+            );
+        }
+        assert!(!forwarded_by_untrusted_peer(&request(&[], None)));
+        assert!(
+            request(&["127.0.0.1"], None)
+                .extensions()
+                .get::<ClientInfo>()
+                .unwrap()
+                .via_trusted_proxy
+        );
+        // Without the identity layer nothing is trusted.
+        let bare = axum::http::Request::builder()
+            .header("x-forwarded-for", "198.51.100.4")
+            .body(())
+            .unwrap();
+        assert!(forwarded_by_untrusted_peer(&bare));
+    }
+
     // ── scheme / host ─────────────────────────────────────────────────────────
 
     #[test]
@@ -1169,6 +1234,7 @@ mod tests {
         req.extensions_mut().insert(ClientInfo {
             ip: ip("198.51.100.4"),
             unresolved: false,
+            via_trusted_proxy: false,
             peer: peer("127.0.0.1:1"),
             scheme: "https",
             host: Some("app.example".into()),

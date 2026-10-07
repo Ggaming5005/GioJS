@@ -332,7 +332,7 @@
       "additionalProperties": false
     },
     "EnvConfig": {
-      "description": "`[env]`: `.env` file loading. Read before the rest of gio.toml (the files\nload first), by `env_files::files_switch`; `GIO_ENV_FILES` wins over it.",
+      "description": "`[env]`: `.env` file loading. Read on its own before the rest of gio.toml,\nsince the files load first; the `GIO_ENV_FILES` env var wins over it.",
       "type": "object",
       "properties": {
         "files": {

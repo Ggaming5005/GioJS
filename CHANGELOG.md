@@ -170,6 +170,11 @@ first.
   client after `trusted_proxies` resolution) and `403` to everyone else. Set a
   `token` or an `ip_allowlist` for your scraper, or
   `ip_allowlist = ["0.0.0.0/0", "::/0"]` to keep it open (startup warns).
+  Behind a reverse proxy on the same machine, list it in
+  `[server] trusted_proxies`: otherwise every client it forwards connects from
+  `127.0.0.1`. Such requests get a `403` when they carry `X-Forwarded-For`,
+  `Forwarded` or `X-Real-IP`, but a proxy that sends none of those makes every
+  client look local, and the endpoint answers them.
 - **`[server] max_body_bytes = 0` means no limit of its own.** It used to
   answer `413` to every request with a body. Bodies are now bounded only by
   the worker's 64 MiB message cap (about 48 MiB of binary body), and startup

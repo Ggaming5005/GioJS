@@ -2812,6 +2812,7 @@ mod tests {
         let client = crate::client_identity::ClientInfo {
             ip: "198.51.100.4".parse().unwrap(),
             unresolved: false,
+            via_trusted_proxy: false,
             peer: "127.0.0.1:9000".parse().unwrap(),
             scheme: "https",
             host: Some("app.example".into()),

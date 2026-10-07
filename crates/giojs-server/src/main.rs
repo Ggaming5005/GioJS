@@ -919,9 +919,18 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     spawn_worker_revalidations(state.clone());
 
     if metrics_loopback_only(&state.metrics_config) {
+        // With no trusted proxy, a reverse proxy on this machine connects
+        // from 127.0.0.1 for every client it forwards.
+        let behind_local_proxy = if cfg.server.trusted_proxies.is_empty() {
+            " - behind a reverse proxy on this machine, list it in [server] trusted_proxies: \
+             requests it forwards with X-Forwarded-For, Forwarded or X-Real-IP get a 403, and \
+             without those headers every client it forwards looks local and is answered"
+        } else {
+            ""
+        };
         info!(
             "/_gio/metrics answers loopback clients only - set [metrics] token or ip_allowlist \
-             in gio.toml to scrape it from elsewhere"
+             in gio.toml to scrape it from elsewhere{behind_local_proxy}"
         );
     }
 
@@ -1376,7 +1385,10 @@ fn metrics_refusal(
             return Some(StatusCode::FORBIDDEN);
         }
     } else if metrics_loopback_only(config)
-        && !client.is_some_and(|ip| ip.to_canonical().is_loopback())
+        && (!client.is_some_and(|ip| ip.to_canonical().is_loopback())
+            // Relayed by a proxy on this machine that trusted_proxies does
+            // not list: the loopback peer stands for a client nobody named.
+            || client_identity::forwarded_by_untrusted_peer(req))
     {
         return Some(StatusCode::FORBIDDEN);
     }
@@ -5609,12 +5621,20 @@ mod tests {
                 req.extensions_mut().insert(client_identity::ClientInfo {
                     ip: client.parse().unwrap(),
                     unresolved: false,
+                    via_trusted_proxy: true,
                     peer: "127.0.0.1:9".parse().unwrap(),
                     scheme: "http",
                     host: None,
                     request_id: String::new(),
                 });
             }
+            req
+        };
+        // What a reverse proxy adds; `client` as for `request`.
+        let forwarded = |name: &'static str, client: Option<&str>| {
+            let mut req = request(client, None);
+            req.headers_mut()
+                .insert(name, header::HeaderValue::from_static("198.51.100.4"));
             req
         };
         let local: SocketAddr = "127.0.0.1:5000".parse().unwrap();
@@ -5636,6 +5656,24 @@ mod tests {
         assert_eq!(
             refusal(open, &request(Some("198.51.100.4"), None), local),
             Some(StatusCode::FORBIDDEN)
+        );
+        // A proxy on this machine that trusted_proxies does not list connects
+        // from loopback for every client: what it forwards is refused.
+        for name in ["x-forwarded-for", "forwarded", "x-real-ip"] {
+            assert_eq!(
+                refusal(open, &forwarded(name, None), local),
+                Some(StatusCode::FORBIDDEN),
+                "{name}"
+            );
+        }
+        // Through a trusted proxy the forwarded client is judged instead.
+        assert_eq!(
+            refusal(
+                open,
+                &forwarded("x-forwarded-for", Some("127.0.0.1")),
+                local
+            ),
+            None
         );
         // The explicit loosening.
         let everyone = "[metrics]\nip_allowlist = [\"0.0.0.0/0\", \"::/0\"]\n";

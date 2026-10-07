@@ -116,8 +116,8 @@ impl Default for HealthConfig {
     }
 }
 
-/// `[env]`: `.env` file loading. Read before the rest of gio.toml (the files
-/// load first), by `env_files::files_switch`; `GIO_ENV_FILES` wins over it.
+/// `[env]`: `.env` file loading. Read on its own before the rest of gio.toml,
+/// since the files load first; the `GIO_ENV_FILES` env var wins over it.
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]

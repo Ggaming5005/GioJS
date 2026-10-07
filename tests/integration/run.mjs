@@ -5592,6 +5592,8 @@ async function switchesOffPhase() {
       // Behind the trusted local proxy, the forwarded client is judged.
       assert.equal((await rawGet('/_gio/metrics', { 'x-forwarded-for': '203.0.113.9' })).status, 403);
       assert.match(run.log(), /\/_gio\/metrics answers loopback clients only/);
+      // The same-host proxy caveat is for servers that trust no proxy.
+      assert.doesNotMatch(run.log(), /behind a reverse proxy on this machine/);
     });
 
     await test('[health] enabled = false: /_gio/health is not routed', async () => {
@@ -5637,6 +5639,27 @@ async function switchesOffPhase() {
       assert.equal(body.dotenv, null);
       assert.equal(run.report.envFilesDisabledBy, 'GIO_ENV_FILES');
       assert.match(run.log(), /not loading \.env files: GIO_ENV_FILES turns them off/);
+    });
+    await run.stop();
+    run = null;
+
+    label = 'no trusted proxy';
+    run = await startSwitchesServer(
+      appRoot,
+      SWITCHES_SERVER_TOML.replace(/^trusted_proxies = .*\n/m, '') + '\n[metrics]\n',
+    );
+
+    await test('[metrics] loopback-only refuses what an untrusted local proxy forwards', async () => {
+      assert.equal((await rawGet('/_gio/metrics')).status, 200);
+      // A reverse proxy on this machine connects from 127.0.0.1 for every
+      // client; its forwarding headers give it away.
+      for (const name of ['x-forwarded-for', 'forwarded', 'x-real-ip']) {
+        assert.equal((await rawGet('/_gio/metrics', { [name]: '203.0.113.9' })).status, 403, name);
+      }
+      assert.match(
+        run.log(),
+        /\/_gio\/metrics answers loopback clients only .* behind a reverse proxy on this machine, list it in \[server\] trusted_proxies/,
+      );
     });
   } catch (err) {
     console.error(`\nintegration (switches off, ${label}): FAILED`);

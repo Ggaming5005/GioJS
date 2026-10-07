@@ -523,6 +523,54 @@ mod tests {
         }
     }
 
+    // The same cases are in env-files.test.ts: `gio export` and
+    // `gio build standalone` must read the key exactly as startup does.
+    const GIO_TOML_FILES_OFF: &[&str] = &[
+        "[env]\nfiles = false#off\n",
+        "[env]#c\nfiles = false\n",
+        "[env]\n\"files\" = false\n",
+        "[env]\n'files' = false\n",
+        "[\"env\"]\nfiles = false\n",
+        "\"env\".\"files\" = false\n",
+        "env . files = false\n",
+        "env = { other = [1, 2], files = false }\n",
+        "[env]\r\nfiles = false\r\n",
+        "[env]\nfiles = false\n[server]\nnote = '''\n[env] files = true\n'''\n",
+        "x = \"\"\"\n[env]\nfiles = true\n\"\"\"\n[env]\nfiles = false\n",
+        "x = \"\"\"a \\\n  [env]\nfiles = true\"\"\"\"\n[env]\nfiles = false\n",
+        "hosts = [\n  \"a#\", # files = true\n  'b]',\n]\n[env]\nfiles = false\n",
+        "when = 1979-05-27 07:32:00Z\n[env]\nfiles = false # \"x\"\n",
+    ];
+    const GIO_TOML_FILES_ON: &[&str] = &[
+        "x = '''\n[env]\nfiles = false\n'''\n",
+        "x = \"[env] files = false\"\n",
+        "[env]\nfiles = false\nfiles = true\n",
+        "[env]\nfiles = false\n[env]\n",
+        "env.files = false\n[env]\n",
+        "[env]\nfiles = false true\n",
+        "[env]\nfiles = \"false\"\n",
+        "[env]\n\"files \" = false\n",
+        "x = \"\"\"\n[env]\nfiles = false\n",
+    ];
+
+    #[test]
+    fn env_files_switch_reads_gio_toml_as_toml() {
+        for spelling in GIO_TOML_FILES_OFF {
+            assert_eq!(
+                files_disabled_by(None, Some(spelling)).unwrap(),
+                Some("[env] files"),
+                "{spelling}"
+            );
+        }
+        for spelling in GIO_TOML_FILES_ON {
+            assert_eq!(
+                files_disabled_by(None, Some(spelling)).unwrap(),
+                None,
+                "{spelling}"
+            );
+        }
+    }
+
     #[test]
     fn candidates_that_are_not_files_are_skipped() {
         // `python -m venv .env` leaves a directory where the file would be.

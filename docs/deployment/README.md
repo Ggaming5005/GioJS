@@ -119,7 +119,7 @@ Two security settings depend on the proxy too (see the *Security* docs page):
 
 ## Health check
 
-`/_gio/health` returns JSON and is always available - use it for readiness probes and uptime monitors:
+`/_gio/health` returns JSON and is on unless `[health] enabled = false` turns it into a `404` (point probes at a page of your own then) - use it for readiness probes and uptime monitors:
 
 ```json
 {

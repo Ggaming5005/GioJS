@@ -53,7 +53,11 @@ export default function Page(): React.JSX.Element {
         <li>
           <strong>Health:</strong> <code>GET /_gio/health</code> answers 200 with JSON. The
           port only opens once the first Node worker is up, so a platform&apos;s HTTP check
-          passing means the app can render.
+          passing means the app can render. Every health check on this page needs the
+          endpoint: with <code>[health] enabled = false</code> it is a <code>404</code> and
+          the platform marks the app unhealthy, so point the check at a page of your own
+          instead (<code>[health] details = false</code> is fine - it keeps{' '}
+          <code>nodeReady</code>).
         </li>
         <li>
           <strong>Behind a proxy</strong> (every platform here has one), set{' '}
@@ -140,7 +144,8 @@ docker run -p 3000:3000 --stop-timeout 20 \\
           only worker is stuck respawning reports unhealthy even though{' '}
           <code>/_gio/health</code> itself still answers 200. It assumes the port comes from{' '}
           <code>GIO_PORT</code>, <code>PORT</code> or the default - adjust it if{' '}
-          <code>gio.toml</code> sets another.
+          <code>gio.toml</code> sets another. It needs <code>[health] enabled = true</code>{' '}
+          (the default); with the endpoint off, probe a page of your own instead.
         </li>
       </ul>
       <p>

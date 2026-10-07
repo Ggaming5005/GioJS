@@ -166,6 +166,46 @@ describe('turning .env loading off', () => {
     expect(gioTomlEnvFiles('[env]\nfiles = "no"\n')).toBeUndefined();
     expect(gioTomlEnvFiles('[[env]]\nfiles = false\n')).toBeUndefined();
   });
+
+  it('reads gio.toml as TOML, like the server', () => {
+    // Same cases as env_files_switch_reads_gio_toml_as_toml in env_files.rs.
+    const off = [
+      '[env]\nfiles = false#off\n',
+      '[env]#c\nfiles = false\n',
+      '[env]\n"files" = false\n',
+      "[env]\n'files' = false\n",
+      '["env"]\nfiles = false\n',
+      '"env"."files" = false\n',
+      'env . files = false\n',
+      'env = { other = [1, 2], files = false }\n',
+      '[env]\r\nfiles = false\r\n',
+      "[env]\nfiles = false\n[server]\nnote = '''\n[env] files = true\n'''\n",
+      'x = """\n[env]\nfiles = true\n"""\n[env]\nfiles = false\n',
+      'x = """a \\\n  [env]\nfiles = true""""\n[env]\nfiles = false\n',
+      "hosts = [\n  \"a#\", # files = true\n  'b]',\n]\n[env]\nfiles = false\n",
+      'when = 1979-05-27 07:32:00Z\n[env]\nfiles = false # "x"\n',
+    ];
+    const on = [
+      "x = '''\n[env]\nfiles = false\n'''\n",
+      'x = "[env] files = false"\n',
+      '[env]\nfiles = false\nfiles = true\n',
+      '[env]\nfiles = false\n[env]\n',
+      'env.files = false\n[env]\n',
+      '[env]\nfiles = false true\n',
+      '[env]\nfiles = "false"\n',
+      '[env]\n"files " = false\n',
+      'x = """\n[env]\nfiles = false\n',
+    ];
+    for (const spelling of off) expect(gioTomlEnvFiles(spelling), spelling).toBe(false);
+    for (const spelling of on) expect(gioTomlEnvFiles(spelling), spelling).not.toBe(false);
+  });
+
+  it('keeps export and standalone from loading .env files the server would skip', async () => {
+    const root = await projectWith({ '.env': 'GIO_PUBLIC_X=1\n', 'gio.toml': '[env]\nfiles = false#off\n' });
+    const env: NodeJS.ProcessEnv = {};
+    expect(loadEnvFiles(root, { mode: 'production', env }).disabledBy).toBe('[env] files');
+    expect(env).toEqual({});
+  });
 });
 
 describe('parseEnvFile (dotenvy syntax)', () => {

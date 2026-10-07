@@ -50,6 +50,8 @@ USER node
 EXPOSE 3000
 # /_gio/health answers 200 whenever the Rust server is up; nodeReady says
 # whether a Node worker is too (false while every worker is restarting).
+# Needs [health] enabled = true (the default); with it off, fetch a page of
+# your own here instead.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \\
   CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/_gio/health').then((r) => r.json()).then((health) => process.exit(health.nodeReady === true ? 0 : 1), () => process.exit(1))"]
 CMD ["node", "run.mjs"]`} />
@@ -71,7 +73,11 @@ CMD ["node", "run.mjs"]`} />
           The health check calls <code>/_gio/health</code>, which the Rust server answers with{' '}
           <code>200</code> as long as it runs. The check passes only when its{' '}
           <code>nodeReady</code> field is <code>true</code> - a Node worker is up - so a
-          container whose worker keeps crashing is reported unhealthy, not healthy.
+          container whose worker keeps crashing is reported unhealthy, not healthy. It
+          needs the endpoint on: with <code>[health] enabled = false</code> it gets a{' '}
+          <code>404</code> and the container stays unhealthy, so change the check to fetch
+          a page of your own (<code>[health] details = false</code> keeps{' '}
+          <code>nodeReady</code> and works as is).
         </li>
         <li>
           The server binary comes from the <code>@gio.js/server-&lt;platform&gt;</code> package

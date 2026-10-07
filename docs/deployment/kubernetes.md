@@ -72,6 +72,7 @@ spec:
           # /_gio/health always returns 200 (cached and static content still
           # serves while the Node worker respawns); the JSON body's nodeReady
           # field reports SSR worker state if you need a stricter probe.
+          # Both probes need [health] enabled = true (the default).
           readinessProbe:
             httpGet:
               path: /_gio/health
