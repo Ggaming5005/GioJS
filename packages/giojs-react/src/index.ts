@@ -7,7 +7,7 @@ export type { AnimatePreset } from './Animate.js';
 export { initAnimateObserver, observeElement } from './animate-observer.js';
 export { initDeploymentId, getDeploymentId, isHardReloadResponse, handleHardReload } from './navigation.js';
 export { useWebSocket } from './hooks/useWebSocket.js';
-export type { UseWebSocketResult } from './hooks/useWebSocket.js';
+export type { UseWebSocketResult, UseWebSocketOptions, ReconnectOptions, WebSocketData } from './hooks/useWebSocket.js';
 export { useLocale } from './hooks/useLocale.js';
 export { LocaleLink } from './LocaleLink.js';
 export { href } from './typed-href.js';
