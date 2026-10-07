@@ -30,6 +30,13 @@ export default function Page(): React.JSX.Element {
         </li>
       </ul>
 
+      <p>
+        For a working starting point, <code>npx create-giojs add auth</code> (or{' '}
+        <code>--auth</code> when creating the app) adds a login page, logout, and a guarded{' '}
+        <code>/dashboard</code> built from these pieces - see the{' '}
+        <a href="/docs/guides/authentication-example">authentication example</a>.
+      </p>
+
       <h2>1. Set a session secret</h2>
       <p>
         Sessions are encrypted and signed with keys derived from{' '}

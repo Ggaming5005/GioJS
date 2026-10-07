@@ -92,6 +92,8 @@ lists.
 - \`npm run build\` — export to \`out/\`
 - Dev dashboard: \`/_gio/devtools\` (dev only; answers localhost hosts only,
   add LAN IPs/hostnames to \`[dev] allowed_hosts\`)
+- \`npx create-giojs add <feature>\` — add tailwind or ci (the other starter
+  features need the server; never overwrites a changed file; safe to rerun)
 `;
 }
 

@@ -155,6 +155,12 @@ declare module '*.css' {}`} />
 
       <h2>Tailwind CSS</h2>
       <p>
+        <code>npm create giojs@latest -- --tailwind</code> (or{' '}
+        <code>npx create-giojs add tailwind</code> in an existing app) sets up everything below,
+        including a dev script that runs the watcher next to the server - see the{' '}
+        <a href="/docs/guides/tailwind">Tailwind guide</a>.
+      </p>
+      <p>
         GioJS doesn&apos;t process Tailwind directives itself. Run Tailwind v4&apos;s CLI next to
         the server and import the CSS it generates. You can use{' '}
         <code>npx @tailwindcss/cli</code> or the dependency-free standalone{' '}

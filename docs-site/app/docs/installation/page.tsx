@@ -12,7 +12,10 @@ export default function Page(): React.JSX.Element {
 
       <h2>System requirements</h2>
       <ul>
-        <li>Node.js 20 or newer</li>
+        <li>
+          Node.js 20 or newer (22.16 or newer for the{' '}
+          <a href="/docs/guides/database">database starter feature</a>)
+        </li>
         <li>
           Linux x64 (glibc or musl/Alpine), macOS (Intel or Apple Silicon), or Windows x64.
           Linux arm64 has no prebuilt server binary yet - see{' '}
@@ -32,6 +35,13 @@ export default function Page(): React.JSX.Element {
           <strong>Server app or Static site</strong> - a server app has everything (SSR,
           caching, route handlers, actions, WebSockets); a static site builds to plain HTML
           with <code>gio export</code> (see <a href="/docs/static-export">Static Export</a>)
+        </li>
+        <li>
+          <strong>Add features</strong> - optional{' '}
+          <a href="/docs/starter-features">starter features</a>: Tailwind CSS, an API route,
+          authentication, a SQLite database, Docker and GitHub Actions CI (a static site is
+          offered the two that work without a server: Tailwind and CI). Add more later with{' '}
+          <code>gio add &lt;feature&gt;</code>
         </li>
         <li>
           <strong>Install dependencies</strong> - with the package manager you ran it with,
@@ -58,6 +68,7 @@ npm run dev        # http://localhost:3000`} />
       <CodeBlock lang="bash" code={`npm create giojs@latest my-app -- --ts --server
 npm create giojs@latest my-app -- --js --static --no-git
 npm create giojs@latest . -- --yes          # current (empty) folder, all defaults
+npm create giojs@latest my-app -- --tailwind --features auth,db,docker
 
 npm create giojs@latest -- --help           # every option`} />
       <table>
@@ -73,6 +84,8 @@ npm create giojs@latest -- --help           # every option`} />
           <tr><td><code>--git</code> / <code>--no-git</code></td><td><code>git init</code> and a first commit (default: on)</td></tr>
           <tr><td><code>-f</code>, <code>--force</code></td><td>Scaffold into a directory that is not empty (refused by default)</td></tr>
           <tr><td><code>-y</code>, <code>--yes</code></td><td>Accept the defaults for every question not answered by a flag</td></tr>
+          <tr><td><code>--tailwind</code> <code>--api</code> <code>--auth</code> <code>--db</code> <code>--docker</code> <code>--ci</code></td><td>Add these <a href="/docs/starter-features">starter features</a> instead of asking (a static site takes only <code>--tailwind</code> and <code>--ci</code>)</td></tr>
+          <tr><td><code>--features a,b,c</code></td><td>The same, as a list</td></tr>
           <tr><td><code>-h</code>, <code>--help</code> / <code>-v</code>, <code>--version</code></td><td>Usage / the scaffolder&apos;s version</td></tr>
         </tbody>
       </table>
@@ -99,8 +112,8 @@ npm create giojs@latest -- --help           # every option`} />
         </li>
         <li>
           <strong>Scripts and CI.</strong> Without a terminal (piped stdin, CI) nothing is asked:
-          every option you did not pass takes its default, so a scripted run never hangs.
-          Unknown flags are an error with a did-you-mean hint.
+          every option you did not pass takes its default (no starter features), so a scripted
+          run never hangs. Unknown flags are an error with a did-you-mean hint.
         </li>
         <li>
           <strong>Ctrl+C</strong> at any question exits without writing anything.
