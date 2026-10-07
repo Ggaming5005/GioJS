@@ -7,7 +7,8 @@
     "giojs-server": "bin/gio.js"
   },
   "files": [
-    "bin"
+    "bin",
+    "gio.schema.json"
   ],
   "dependencies": {
     "@gio.js/core": "0.1.0-beta.7"
