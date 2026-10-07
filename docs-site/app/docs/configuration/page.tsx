@@ -95,7 +95,7 @@ pathname = "/photos/*"  # optional; exact match, or prefix with trailing *
 
 [css]
 enabled = true          # serve app/*.css by path (imported CSS is always bundled)
-minify = true           # production CSS, path-served and bundled alike
+minify = true           # production CSS, path-served and bundled (standalone: at build time)
 critical_extraction = true
 
 [websocket]

@@ -555,6 +555,8 @@ pub struct CssConfig {
     pub enabled: bool,
     /// Minify production CSS: path-served stylesheets (Lightning CSS) and
     /// the bundled route stylesheets (esbuild). Development never minifies.
+    /// `gio build standalone` bakes the route stylesheets at build time, so
+    /// for those the gio.toml the build reads is the one that counts.
     #[serde(default = "default_true")]
     pub minify: bool,
     /// Inline the CSS a page's first paint needs.

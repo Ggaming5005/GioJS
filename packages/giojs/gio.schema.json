@@ -300,7 +300,7 @@
           "default": true
         },
         "minify": {
-          "description": "Minify production CSS: path-served stylesheets (Lightning CSS) and\nthe bundled route stylesheets (esbuild). Development never minifies.",
+          "description": "Minify production CSS: path-served stylesheets (Lightning CSS) and\nthe bundled route stylesheets (esbuild). Development never minifies.\n`gio build standalone` bakes the route stylesheets at build time, so\nfor those the gio.toml the build reads is the one that counts.",
           "type": "boolean",
           "default": true
         }

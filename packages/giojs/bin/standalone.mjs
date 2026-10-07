@@ -21,7 +21,7 @@
  */
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -167,6 +167,24 @@ function findServerBinary(requireFromHere, target) {
   return binary.path;
 }
 
+/**
+ * `[css] minify` from the project's gio.toml. The route stylesheets are
+ * baked into static/css here and the standalone worker never rebuilds them,
+ * so the GIO_CSS_CONFIG the deployed server hands it cannot change them: the
+ * build-time value is the one that counts. Lenient read (the deployed server
+ * validates the file); anything but `false` minifies.
+ */
+function cssMinify(requireFromHere, projectRoot) {
+  let text;
+  try {
+    text = readFileSync(join(projectRoot, 'gio.toml'), 'utf8');
+  } catch {
+    return true;
+  }
+  const { parseTomlLite } = requireFromHere('./lib/config.js');
+  return parseTomlLite(text).css?.minify !== false;
+}
+
 /** Pick app/<base>.<ext> by the same precedence discovery uses, or null. */
 function pickExisting(dir, base, exts) {
   for (const ext of exts) {
@@ -281,12 +299,15 @@ async function main() {
 
   console.log(`  routes: ${[...routes.keys()].join(', ') || '(none)'}`);
 
+  const minifyCss = cssMinify(requireFromHere, projectRoot);
+  if (!minifyCss) console.log('  css:    unminified ([css] minify = false)');
   const styleManifest = await buildRouteStylesheets({
     routes,
     layouts,
     segmentFiles,
     projectRoot,
     dev: false,
+    minify: minifyCss,
   });
   const clientManifest = await buildClientBundles({
     routes,

@@ -165,7 +165,10 @@ function SaveButton({ id }: { id: string }) {
         Prefetching is budgeted by the Rust prefetch manager, so a page full of links will not
         flood your server: each client may have 5 prefetches in flight and start 20 per second,
         set by <code>[prefetch] max_concurrent</code> and <code>max_per_second</code> in{' '}
-        <code>gio.toml</code>.
+        <code>gio.toml</code>, where <code>0</code> lifts that budget.{' '}
+        <code>[prefetch] enabled = false</code> turns prefetching off site-wide: every
+        prefetch gets <code>429</code>, and a click still navigates (see{' '}
+        <a href="/docs/configuration">Configuration</a>).
       </div>
 
       <h2>Focus and announcements</h2>

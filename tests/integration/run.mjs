@@ -4380,6 +4380,34 @@ async function standalonePhase() {
       assert.notEqual(next.worker, first.worker, 'a server-only edit changes the manifest');
     });
 
+    // The standalone worker serves the stylesheets the build baked and never
+    // rebuilds them, so the build itself must follow `[css] minify`.
+    await test('standalone: [css] minify = false bakes unminified route stylesheets', async () => {
+      const cssOf = async (out) => {
+        const dir = join(out, 'static', 'css');
+        const files = (await readdir(dir)).filter((name) => name.endsWith('.css'));
+        return (await Promise.all(files.map((name) => readFile(join(dir, name), 'utf8')))).join('\n');
+      };
+      assert.match(await cssOf(outDir), /\.standalone-blog-css\{color:red\}/, 'minified by default');
+      const toml = join(workDir, 'gio.toml');
+      const original = await readFile(toml, 'utf8');
+      await writeFile(toml, `${original}\n[css]\nminify = false\n`);
+      const unminified = join(workDir, 'dist-standalone-unminified');
+      let build;
+      try {
+        build = spawnSync(
+          process.execPath,
+          [join(repoRoot, 'packages', 'giojs', 'bin', 'standalone.mjs'), '--out', unminified],
+          { cwd: workDir, env: { ...process.env, GIO_STANDALONE_SERVER_BIN: binary }, encoding: 'utf8', timeout: 180_000 },
+        );
+      } finally {
+        await writeFile(toml, original);
+      }
+      assert.equal(build.status, 0, `standalone build failed:\n${build.stdout ?? ''}\n${build.stderr ?? ''}`);
+      assert.match(build.stdout, /css: {4}unminified \(\[css\] minify = false\)/);
+      assert.match(await cssOf(unminified), /\.standalone-blog-css \{\n {2}color: red;\n\}/);
+    });
+
     await test('static export: pages hydrate from chunks shipped in out/', async () => {
       const exportOut = join(workDir, 'out');
       const result = spawnSync(

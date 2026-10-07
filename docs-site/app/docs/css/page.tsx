@@ -51,8 +51,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           Files are served from <code>/_next/static/css/</code> with content-hashed names and{' '}
           <code>Cache-Control: public, max-age=31536000, immutable</code>, and minified in
           production (<code>[css] minify = false</code> in <code>gio.toml</code> keeps them as
-          written). Imported CSS is part of the module graph: no <code>[css]</code> key turns
-          its bundling off.
+          written; a <a href="/docs/standalone">standalone build</a> bakes them, so there the
+          build reads the key). Imported CSS is part of the module graph: no{' '}
+          <code>[css]</code> key turns its bundling off.
         </li>
         <li>
           The links are React stylesheet resources (<code>precedence=&quot;default&quot;</code>),

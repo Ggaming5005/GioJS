@@ -685,6 +685,8 @@ first.
 - **`[css] minify` reaches the worker.** Rust hands `[css]` to the worker in
   `GIO_CSS_CONFIG`, so `minify = false` also leaves the bundled route
   stylesheets unminified (it only covered path-served `app/*.css` before).
+  `gio build standalone` reads the key from the project's gio.toml when it
+  bakes the route stylesheets, so there a change needs a rebuild.
   `[css] enabled` covers path-served stylesheets only: imported CSS is part
   of the module graph and always bundled.
 - **Loosened limits are never silent.** Lifting the image, rate-limiter,
