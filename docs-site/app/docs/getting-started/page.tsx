@@ -34,11 +34,26 @@ export default function IntroductionPage(): React.JSX.Element {
         Everything else is served entirely from Rust.
       </p>
 
+      <h2>What you get</h2>
+      <ul>
+        <li><strong>Routing</strong> - file-based <code>app/</code> routes with layouts, dynamic and catch-all segments, route groups, per-folder loading/error/not-found UI, and typed <code>href()</code>s.</li>
+        <li><strong>Data</strong> - <code>getServerSideProps</code>, page actions with progressively enhanced <code>&lt;GioForm&gt;</code>, <code>route.ts</code> API handlers, SSE and WebSockets with rooms.</li>
+        <li><strong>Caching</strong> - an ISR page cache in Rust with stale-while-revalidate, partial prerendering, and on-demand purges by tag or path.</li>
+        <li><strong>Security by default</strong> - security headers, CSRF and WebSocket origin checks, CSP nonces in one line, encrypted cookie sessions with guards verified in Rust, rate limits.</li>
+        <li><strong>Assets</strong> - CSS imports and CSS Modules, image optimization, self-hosted fonts, metadata, sitemaps and robots.txt.</li>
+        <li><strong>Operations</strong> - a supervised worker pool, health checks, Prometheus metrics, JSON logs with request ids, standalone builds and static export.</li>
+      </ul>
+
       <h2>Start in seconds</h2>
       <CodeBlock lang="bash" code={`npm create giojs@latest`} />
       <p>
-        Pick TypeScript or JavaScript at the prompt, then <code>npm run dev</code>. Next,
-        head to <a href="/docs/installation">Installation</a> and <a href="/docs/project-structure">Project Structure</a>.
+        Answer the prompts - name, TypeScript or JavaScript, server app or static site, and
+        any starter features - then <code>npm run dev</code>. Next, head to{' '}
+        <a href="/docs/installation">Installation</a> for every option and{' '}
+        <a href="/docs/project-structure">Project Structure</a> for a tour of the files.
+        When you are ready to ship, <a href="/docs/guides/deploying">Deploying</a> and the{' '}
+        <a href="/docs/guides/production-checklist">production checklist</a> take it from
+        there.
       </p>
 
       <div className="callout">
