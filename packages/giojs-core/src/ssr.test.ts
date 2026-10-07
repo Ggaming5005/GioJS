@@ -92,6 +92,52 @@ describe('revalidate caching semantics', () => {
     expect('cacheable' in result && result.cacheable).toBe(false);
     expect('cacheMaxAge' in result && result.cacheMaxAge).toBe(0);
   });
+
+  it('revalidate=0 is a valid lifetime', async () => {
+    const result = await renderRoute(makeRequest('/'), makeRoute('/', { revalidate: 0 }), noLayouts);
+    expect('cacheMaxAge' in result && result.cacheMaxAge).toBe(0);
+  });
+
+  // These reached Rust as cacheMaxAge, which failed to parse the frame: a
+  // bare 500 with no hint on every request.
+  const invalid: Array<[unknown, string]> = [
+    [-5, '-5'],
+    [1.5, '1.5'],
+    ['60', '"60"'],
+    [Number.NaN, 'NaN'],
+    [Number.POSITIVE_INFINITY, 'Infinity'],
+    [true, 'boolean'],
+  ];
+  for (const [value, shown] of invalid) {
+    it(`revalidate=${shown} is a render error naming the file`, async () => {
+      vi.stubEnv('NODE_ENV', 'development');
+      try {
+        const routes = makeRoute('/', { revalidate: value as number });
+        const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+        expect(result).toMatchObject({
+          error: true,
+          code: 'RENDER_ERROR',
+          message:
+            '/fake/page.tsx: export const revalidate must be a whole number of seconds (0 or more) ' +
+            `or false - got ${shown}`,
+        });
+        expect('cacheMaxAge' in result).toBe(false);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  }
+
+  it('an invalid revalidate answers production with only a digest', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    try {
+      const result = await renderRoute(makeRequest('/'), makeRoute('/', { revalidate: -1 }), noLayouts);
+      expect(result).toMatchObject({ error: true, code: 'RENDER_ERROR', message: 'Internal Server Error' });
+      expect('digest' in result && typeof result.digest).toBe('string');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 describe('cache tags', () => {

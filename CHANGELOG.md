@@ -1040,6 +1040,12 @@ first.
   file change and starts the worker again, and a dev worker that crashes
   after startup is respawned on the next save instead of after the respawn
   backoff. `createTestServer` leads its error with the same message.
+- A page exporting an invalid `revalidate` (`-5`, `1.5`, `'60'`, `NaN`)
+  answered every request with a bare `500`: the value reached the server as
+  the cache lifetime and the response failed to parse. It is now a render
+  error naming the file and the allowed values (a whole number of seconds,
+  or `false`) - the error overlay in dev, a logged error and a `500` with a
+  digest in production.
 
 ### Known limitations
 
