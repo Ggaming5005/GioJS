@@ -75,7 +75,7 @@ Moves `pages/` to `app/`, rewrites `next/*` imports (`next/link`, `next/image`, 
 
 ## What you get
 
-A small app built on the framework's own features: file-based routing (`app/page.tsx`, `layout.tsx`, a dynamic `posts/[id]` route with `getServerSideProps` and `getStaticPaths`), the metadata API for titles and descriptions, global CSS imported from `app/layout.tsx`, fonts self-hosted from `public/fonts/` via `[[fonts]]` in `gio.toml`, typed props from `@gio.js/core`, the `@gio.js/react` components, plus `.gitignore`, `.env.example` and an `AGENTS.md` for coding agents.
+A small app built on the framework's own features: file-based routing (pages in an `app/(site)/` route group whose hydrated `layout.tsx` renders the navigation, a dynamic `posts/[id]` route with `getServerSideProps` and `getStaticPaths`), the metadata API for titles and descriptions, global CSS imported from `app/layout.tsx`, fonts self-hosted from `public/fonts/` via `[[fonts]]` in `gio.toml`, typed props from `@gio.js/core`, the `@gio.js/react` components, plus `.gitignore`, `.env.example` and an `AGENTS.md` for coding agents.
 
 ## Links
 

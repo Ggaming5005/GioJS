@@ -1,8 +1,8 @@
 import React from 'react';
 import { redirect } from '@gio.js/core';
 import { GioForm, useGioFormState } from '@gio.js/react';
-import { addEntry, listEntries, validateEntry } from '../../lib/guestbook.server';
-import '../../components/forms.css';
+import { addEntry, listEntries, validateEntry } from '../../../lib/guestbook.server';
+import '../../../components/forms.css';
 
 /** @type {import('@gio.js/core').Metadata} */
 export const metadata = { title: 'Guestbook' };
@@ -45,7 +45,7 @@ function SubmitButton() {
 
 /**
  * @param {import('@gio.js/core').WithActionData<typeof action, {
- *   entries: import('../../lib/guestbook.server').Entry[]
+ *   entries: import('../../../lib/guestbook.server').Entry[]
  * }>} props
  */
 export default function GuestbookPage({ entries, actionData }) {

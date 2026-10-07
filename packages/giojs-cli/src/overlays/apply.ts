@@ -134,6 +134,31 @@ async function templateFiles(overlay: Overlay, ctx: OverlayContext): Promise<Gen
   return files;
 }
 
+/**
+ * The URL a page or route file under app/ serves, as its folder path without
+ * (group) folders - `app/(site)/login/page.tsx` and `app/login/page.tsx` both
+ * give `login`. Null for any other file, and for files in _private folders.
+ */
+export function routeFileKey(path: string): string | null {
+  const segments = path.split('/');
+  if (segments[0] !== 'app' || segments.length < 2) return null;
+  if (!/^(page|route)\.(tsx|ts|jsx|js|mdx|md)$/.test(segments.at(-1) ?? '')) return null;
+  const folders = segments.slice(1, -1);
+  if (folders.some(folder => folder.startsWith('_'))) return null;
+  return folders.filter(folder => !/^\(.+\)$/.test(folder)).join('/');
+}
+
+/** The project's page and route files, by the URL they serve (routeFileKey). */
+async function routeFiles(dir: string): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  for (const file of await listFiles(join(dir, 'app'))) {
+    const path = relative(dir, file).split(sep).join('/');
+    const key = routeFileKey(path);
+    if (key !== null && !files.has(key)) files.set(key, path);
+  }
+  return files;
+}
+
 /** The project as disk plus planned writes. */
 class VirtualProject {
   readonly writes = new Map<string, string>();
@@ -258,6 +283,8 @@ export async function planOverlays(
 
   // Paths some overlay wrote whole: whatever was on disk is gone from them.
   const wholeFiles = new Set<string>();
+  // The pages the project already serves, wherever its (group) folders put them.
+  const existingRoutes = await routeFiles(dir);
   for (const name of ordered) {
     const overlay = OVERLAYS[name];
     const issuesBefore = plan.conflicts.length + plan.manual.length;
@@ -282,6 +309,17 @@ export async function planOverlays(
     const files = [...(await templateFiles(overlay, ctx)), ...(overlay.generate?.(ctx) ?? [])];
     const setUp = files.length > 0 && files.every(file => fs.exists(file.path));
     for (const file of files) {
+      const key = setUp ? null : routeFileKey(file.path);
+      const sameUrl = key === null ? undefined : existingRoutes.get(key);
+      if (sameUrl !== undefined && sameUrl !== file.path) {
+        // Two files for one URL is a broken app, --force or not.
+        plan.conflicts.push({
+          path: file.path,
+          reason: `${sameUrl} already serves this URL - move or delete it first`,
+          diff: [],
+        });
+        continue;
+      }
       const existing = await fs.read(file.path);
       if (existing === undefined || existing === file.content) {
         await write(file.path, file.content);

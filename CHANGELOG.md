@@ -316,7 +316,10 @@ first.
   (`{ pending, lastResult }`), `onSuccess`, `onError`, `resetOnSuccess`,
   `reloadDocument`, a double-submit guard and `aria-busy`, never sends a
   submission twice once the action may have run, and follows redirects to
-  other sites.
+  other sites. It submits natively again only answers the server marks as
+  refused before the action ran (`x-gio-refused: unread` on its rate-limit
+  `429` and `max_body_bytes` `413`), never a `413` or `429` the action or a
+  `route.ts` returned itself.
 - `redirect()` also works in `getServerSideProps`, returned or thrown. Headers
   an action returns with its data are sent even when `getServerSideProps` then
   redirects or calls `notFound()`. Typed contract: `ActionArgs<Params>`,
@@ -472,6 +475,17 @@ first.
   by `router.refresh()` and by any same-origin non-GET `fetch()`. A failed
   prefetch (including the `429` of a spent prefetch budget) no longer turns
   the next click into a full page load.
+- **Deployment skew is detected.** Navigations, prefetches, refreshes and
+  `<GioForm>` posts send the deployment id the server injected into the page
+  (nothing has to call `initDeploymentId()` any more), so after a deploy a
+  tab still running the old build loads the new one in full instead of
+  rendering its pages with old code. A prefetch that finds a new deployment
+  never reloads the page: the click on the link does.
+- A page without a client bundle whose `loading.tsx` or `<Suspense>` boundary
+  was still pending when it streamed is loaded in full instead of being
+  swapped in showing its fallback for good, and a route chunk named in a
+  page's envelope is imported only after the URL parser confirms it is on
+  this origin (`/\host/x.js` is another host).
 
 ### Realtime and streaming
 
@@ -495,7 +509,9 @@ first.
   `{ maxAttempts, initialDelayMs, maxDelayMs, minUptimeMs }`), but not after
   `1000` or `4000`-`4499` closes, `close()` or unmount. New: an optional send
   queue while disconnected, `reconnectAttempts`, `isReconnecting`,
-  `reconnect()` and `onMessage` / `onOpen` / `onClose` callbacks.
+  `reconnect()` and `onMessage` / `onOpen` / `onClose` callbacks. A message
+  queued for one `url` is never sent to the next: switching rooms drops what
+  was still queued for the old one.
 - **Streamed route-handler bodies.** A `ReadableStream` body (LLM tokens,
   large downloads, a hand-written `text/event-stream`, streamed HTML) reaches
   the client chunk by chunk, with backpressure and no idle cutoff. When the
@@ -658,7 +674,11 @@ first.
 - **A starter that uses the framework.** It imports `app/globals.css` from the
   root layout, self-hosts its fonts from `public/fonts/` through `[[fonts]]`
   (no Google Fonts CDN), declares its title template and description as
-  `export const metadata`, and ships `.gitignore` and `.env.example`. A
+  `export const metadata`, and ships `.gitignore` and `.env.example`. Its
+  pages live in an `app/(site)/` route group whose layout renders the
+  navigation and footer inside the hydrated tree, so the main navigation
+  prefetches and soft-navigates (in the server-only root layout a `GioLink`
+  is a plain link); the 404 and error pages render the same shell. A
   static-site scaffold's `npm run build` typechecks and then runs
   `gio export`, with fonts declared by `@font-face`.
 - **Starter features.** `npm create giojs@latest` asks which features to add,
@@ -675,7 +695,9 @@ first.
   keeps your edits, so running it again is safe. A file of yours in a new
   feature's way stops the run before anything is written and shows a diff
   (`--force` overwrites, `--dry-run` previews), and `gio.toml` additions merge
-  into existing tables.
+  into existing tables. Feature pages go into `app/(site)/`, and a page of
+  yours serving the same URL from another folder is a conflict `--force` does
+  not override.
 
 ### Testing
 

@@ -44,6 +44,14 @@ npx create-giojs add --ci --features db  # create's flag spellings work too`} />
           it would change. Merge it by hand, or rerun with <code>--force</code> to overwrite.
         </li>
         <li>
+          <strong>Pages join the site.</strong> A feature&apos;s pages go into the starter&apos;s{' '}
+          <code>app/(site)/</code> group, so its layout wraps them with the site&apos;s
+          navigation; the folder adds nothing to the URL. A page your app already serves at the
+          same URL from another folder (<code>app/login/page.tsx</code> next to the new{' '}
+          <code>app/(site)/login/page.tsx</code>) is a conflict <code>--force</code> does not
+          override: move or delete one of them.
+        </li>
+        <li>
           <strong>Safe to run again.</strong> A feature whose files all exist is already set
           up: your edits to them (the login page, say) are kept and listed, and nothing else
           changes - so <code>add auth db</code> after customizing auth just adds the database.
@@ -77,7 +85,7 @@ npx create-giojs add --ci --features db  # create's flag spellings work too`} />
             <td><code>api</code></td>
             <td>
               <code>app/api/guestbook/route.ts</code> (GET/POST JSON with <code>req.json()</code>{' '}
-              validation: 201, 400, 415, 422) and <code>app/guestbook/page.tsx</code>, a page
+              validation: 201, 400, 415, 422) and <code>app/(site)/guestbook/page.tsx</code>, a page
               action rendered with <code>&lt;GioForm&gt;</code>: it works without JavaScript,
               answers invalid input with 422 and <code>actionData</code>, and redirects after
               success. See <a href="/docs/forms">Forms</a> and{' '}

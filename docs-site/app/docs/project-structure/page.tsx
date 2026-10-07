@@ -14,12 +14,14 @@ export default function Page(): React.JSX.Element {
   app/
     layout.tsx           # root layout: imports ./globals.css, exports metadata
     globals.css          # global styles (the CSS pipeline bundles and minifies them)
-    page.tsx             # the / route
-    about/page.tsx       # the /about route
-    posts/[id]/page.tsx  # dynamic route -> /posts/:id
+    (site)/              # route group: no URL segment
+      layout.tsx         # the site's navigation and footer - hydrated, so its links soft-navigate
+      page.tsx           # the / route
+      about/page.tsx     # the /about route
+      posts/[id]/page.tsx  # dynamic route -> /posts/:id
     not-found.tsx        # 404 page
     error.tsx            # error page
-  components/            # your shared components (layout/Navbar, layout/Footer)
+  components/            # your shared components (layout/SiteShell, layout/Navbar, layout/Footer)
   public/                # static files, served at the site root and under /public/
     fonts/               # the self-hosted .woff2 files gio.toml's [[fonts]] name
   gio.toml               # server configuration (fonts, images, security, ...)
@@ -62,7 +64,11 @@ export default function RootLayout({ children }: LayoutProps) {
 }`} />
       <p>
         The root layout is server-rendered HTML that never hydrates: put interactive
-        components and context providers in a nested layout or the pages. CSS can be
+        components and context providers in a nested layout or the pages. That is why the
+        starter&apos;s navigation lives in <code>app/(site)/layout.tsx</code>: a{' '}
+        <code>GioLink</code> there prefetches and soft-navigates, while in the root layout it
+        would be a plain link. The 404 and error pages sit outside the group and render the
+        same <code>SiteShell</code> themselves. CSS can be
         imported from any page, layout or component, including CSS Modules - see{' '}
         <a href="/docs/css">CSS &amp; Styling</a>.
       </p>

@@ -14,7 +14,7 @@ export const api: Overlay = {
   templateDirs: ['_forms', 'api'],
   agents:
     '- API + form example: `lib/guestbook.server.*` (in-memory data and validation),\n' +
-    '  `app/api/guestbook/route.*` (GET/POST JSON) and `app/guestbook/page.*` (action + `<GioForm>`).',
+    '  `app/api/guestbook/route.*` (GET/POST JSON) and `app/(site)/guestbook/page.*` (action + `<GioForm>`).',
   postSteps: () => [
     'Open /guestbook for the form; the same entries are JSON at /api/guestbook.',
   ],

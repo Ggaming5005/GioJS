@@ -65,7 +65,7 @@ export async function createNote(title: string): Promise<void> {
       </p>
 
       <h2>The page</h2>
-      <CodeBlock lang="tsx" code={`// app/notes/page.tsx
+      <CodeBlock lang="tsx" code={`// app/(site)/notes/page.tsx
 export const getServerSideProps: GetServerSideProps<Props> = async () => ({
   props: { notes: await listNotes() },
 });

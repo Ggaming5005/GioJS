@@ -117,7 +117,7 @@ test('`pnpm create giojs my-app -- --js` scaffolds the JS app', async () => {
   try {
     const result = runCli(['my-app', '--', '--js', '--no-install', '--no-git'], { cwd });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    const app = await readdir(join(cwd, 'my-app', 'app'));
+    const app = await readdir(join(cwd, 'my-app', 'app', '(site)'));
     assert.ok(app.includes('page.jsx'), app.join(', '));
   } finally {
     await rm(cwd, { recursive: true, force: true });
