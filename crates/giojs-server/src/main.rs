@@ -5488,7 +5488,19 @@ fn stdin_is_pipe() -> bool {
 
 // ── TLS helpers ──────────────────────────────────────────────────────────────
 
-fn load_tls_acceptor(tls: &config::TlsConfig) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+fn load_tls_acceptor(
+    tls: &config::TlsConfig,
+    http2: bool,
+) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(
+        tls_server_config(tls, http2)?,
+    )))
+}
+
+fn tls_server_config(
+    tls: &config::TlsConfig,
+    http2: bool,
+) -> anyhow::Result<rustls::ServerConfig> {
     let cert_path = tls
         .cert_path
         .as_deref()
@@ -5506,10 +5518,21 @@ fn load_tls_acceptor(tls: &config::TlsConfig) -> anyhow::Result<tokio_rustls::Tl
         .with_single_cert(certs, key)
         .map_err(|e| anyhow::anyhow!("Invalid TLS certificate/key: {e}"))?;
 
-    // ALPN: prefer HTTP/2, fall back to HTTP/1.1
-    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    server_config.alpn_protocols = alpn_protocols(http2);
+    Ok(server_config)
+}
 
-    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
+/// The protocols TLS offers in ALPN: h2 first, then HTTP/1.1. Only
+/// HTTP/1.1 when `[server] http2 = false` - the connection is then served by
+/// the HTTP/1-only builder, and a client that negotiated h2 would send a
+/// preface it cannot parse.
+fn alpn_protocols(http2: bool) -> Vec<Vec<u8>> {
+    let mut protocols = Vec::with_capacity(2);
+    if http2 {
+        protocols.push(b"h2".to_vec());
+    }
+    protocols.push(b"http/1.1".to_vec());
+    protocols
 }
 
 /// rustls server config builder with an explicit crypto provider. Both
@@ -8608,4 +8631,48 @@ mod tests {
             .to_string()
             .contains("TLS enabled but key not found"));
     }
+
+    // A throwaway self-signed P-256 certificate for localhost, generated for
+    // these tests only (it secures nothing).
+    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBmzCCAUGgAwIBAgIUNyJeQb7k8UbVuc86JtU6jP4T6+YwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTAwNzE5MjYyOVoYDzIxMjYwOTEz
+MTkyNjI5WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAS7IWT5SzdlHHiV33c2IEtceeqriEg8Z1uis5x6LpdQ/f48fePWB4bJ
+azo1nu0iiDgI5KKq1gGbWFFjVjMISa/mo28wbTAdBgNVHQ4EFgQUdcsaLFfigEPz
+BcLt+i0B/EUV2BEwHwYDVR0jBBgwFoAUdcsaLFfigEPzBcLt+i0B/EUV2BEwDwYD
+VR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwCgYIKoZI
+zj0EAwIDSAAwRQIhAMhP9eBhd9BVSude5PIF9g8jB+LY6jOLUs1/DLXTQyevAiBy
+6cVdI/JK1+eV4e0cP/encbpZ6MW4vqw8QneqnH45mQ==
+-----END CERTIFICATE-----
+";
+    const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg4ueBBM1qbFXwB/NG
+unfYWiFnNHUmYsdTGk+ik2k1x+ShRANCAAS7IWT5SzdlHHiV33c2IEtceeqriEg8
+Z1uis5x6LpdQ/f48fePWB4bJazo1nu0iiDgI5KKq1gGbWFFjVjMISa/m
+-----END PRIVATE KEY-----
+";
+
+    #[test]
+    fn tls_offers_h2_in_alpn_only_when_http2_is_on() {
+        let dir = std::env::temp_dir().join(format!("giojs-tls-alpn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        std::fs::write(&cert, TEST_CERT_PEM).unwrap();
+        std::fs::write(&key, TEST_KEY_PEM).unwrap();
+        let tls = config::TlsConfig {
+            enabled: true,
+            cert_path: Some(cert.to_string_lossy().into_owned()),
+            key_path: Some(key.to_string_lossy().into_owned()),
+        };
+        let offered = |http2: bool| tls_server_config(&tls, http2).unwrap().alpn_protocols;
+        assert_eq!(offered(true), vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        // `[server] http2 = false` serves HTTP/1.1 only: a client that
+        // negotiated h2 would fail on its connection preface.
+        assert_eq!(offered(false), vec![b"http/1.1".to_vec()]);
+        assert!(load_tls_acceptor(&tls, false).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
 }

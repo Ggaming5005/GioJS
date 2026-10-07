@@ -1012,6 +1012,9 @@ first.
   id differ by a `0` digit.
 - Every startup warning for a protection `gio.toml` turns off or loosens was
   logged twice.
+- With `[server.tls]` on, `[server] http2 = false` still offered `h2` in the
+  TLS handshake (ALPN), and clients that picked it (browsers, curl) could not
+  connect. It now offers only `http/1.1`.
 
 ### Known limitations
 
