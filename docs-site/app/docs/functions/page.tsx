@@ -4,7 +4,8 @@ import { CodeBlock } from '../../../components/CodeBlock.tsx';
 
 export const metadata: Metadata = {
   title: 'Functions',
-  description: 'Server-side functions, page exports and router hooks.',
+  description:
+    'Every function GioJS exports: server functions from @gio.js/core, client functions from @gio.js/react, and the testing kit.',
 };
 
 export const revalidate = false;
@@ -13,139 +14,154 @@ export default function Page(): React.JSX.Element {
   return (
     <>
       <h1>Functions</h1>
-      <p className="page-subtitle">Server-side functions, page exports and router hooks.</p>
-
-      <h2 id="getserversidepropsctx">getServerSideProps(ctx)</h2>
-      <p>
-        Async data loader, run per request. The context carries the full request:{' '}
-        <code>method</code>, <code>path</code>, <code>params</code>, <code>query</code>,
-        lowercased <code>headers</code>, parsed <code>cookies</code>, and{' '}
-        <code>locale</code>. Return <code>props</code>, a <code>redirect</code>,{' '}
-        <code>{'{ notFound: true }'}</code>, or props plus response <code>headers</code>{' '}
-        (typed: <code>{"GetServerSideProps<Props, '/route/:param'>"}</code>, see{' '}
-        <a href="#types">Types</a>):
+      <p className="page-subtitle">
+        Every function GioJS exports: server functions from <code>@gio.js/core</code>, client
+        functions from <code>@gio.js/react</code>, and the testing kit.
       </p>
-      <CodeBlock lang="ts" code={`import { sessions } from '../lib/session.server.ts';   // see Authentication
-
-export async function getServerSideProps(ctx) {
-  const user = await findUser(sessions.getSession(ctx).get('userId'));
-  if (!user) {
-    return { redirect: { destination: '/login', permanent: false } };
-  }
-  return {
-    props: { name: user.name },
-    headers: {                                              // optional
-      'set-cookie': ['seen=1; Path=/; HttpOnly', 'theme=dark; Path=/'],
-    },
-  };
-}`} />
       <p>
-        Header values are strings or string arrays: each <code>set-cookie</code> entry is
-        sent as its own header, other arrays are joined with <code>, </code>. A{' '}
-        <code>redirect</code> may carry <code>headers</code> too (e.g. clearing cookies on
-        logout). A page that returns response headers is automatically made uncacheable -
-        caching a per-request <code>set-cookie</code> would replay one visitor&apos;s
-        cookie to everyone.
+        Components and hooks have their own references (
+        <a href="/docs/components">Components</a>, <a href="/docs/hooks">Hooks</a>), and so do
+        the exports a page or route file declares (
+        <a href="/docs/page-exports">Page Exports</a>).
       </p>
 
+      <h2 id="server-functions">Server functions</h2>
       <p>
-        On a cached page, <code>getServerSideProps</code> may also return{' '}
-        <code>tags</code> next to <code>props</code> - <code>{"{ props, tags: ['post:42'] }"}</code>{' '}
-        - added to the page&apos;s <code>export const tags</code> for this render.
-      </p>
-
-      <h2 id="export-const-revalidate">export const revalidate</h2>
-      <p>
-        A number (seconds), or <code>false</code> to cache indefinitely. Controls the
-        ISR cache TTL for the page. Pages without it render on every request.
-      </p>
-
-      <h2 id="export-const-tags">export const tags</h2>
-      <p>
-        Cache tags for every render of a cached page, e.g.{' '}
-        <code>{"export const tags = ['posts']"}</code>. <code>revalidateTag()</code> and{' '}
-        <code>POST /_gio/revalidate</code> purge the pages carrying a tag - see{' '}
-        <a href="/docs/caching">Caching</a>.
-      </p>
-
-      <h2 id="revalidatetagtag-revalidatepathpath-options">revalidateTag(tag) / revalidatePath(path, options?)</h2>
-      <p>
-        Purge cached pages from server code, so the next request renders them fresh.{' '}
-        <code>revalidatePath</code> takes <code>{"{ type: 'page' }"}</code> (default: that
-        page, every query string and locale) or <code>{"{ type: 'prefix' }"}</code> (the path
-        and everything below it); the path may be decoded (<code>/blog/café</code>) or
-        percent-encoded (<code>/blog/caf%C3%A9</code>). Both resolve with{' '}
-        <code>{'{ ok, purged, error? }'}</code>{' '}
-        once the server confirmed the purge, and resolve <code>ok: false</code> instead of
-        throwing when it could not be confirmed in time.
-      </p>
-      <CodeBlock lang="ts" code={`import { revalidatePath, revalidateTag } from '@gio.js/core';
-
-await revalidateTag('posts');
-await revalidatePath('/blog', { type: 'prefix' });`} />
-
-      <h2 id="getstaticpaths">getStaticPaths()</h2>
-      <p>
-        On static export, tells <code>gio export</code> which concrete paths to
-        pre-render for a dynamic route: return{' '}
-        <code>{'{ paths: [{ params: { id: "1" } }] }'}</code>. Typed as{' '}
-        <code>{"GetStaticPaths<'/posts/:id'>"}</code>, every entry must carry the
-        route&apos;s params. A catch-all takes the path below it as one string{' '}
-        (<code>{"'guides/setup'"}</code>) or as its segments (<code>{"['guides', 'setup']"}</code>).
-      </p>
-
-      <h2 id="route-handler-exports">Route handler exports</h2>
-      <p>
-        <code>route.ts</code> files export <code>GET</code> / <code>POST</code> /{' '}
-        <code>PUT</code> / <code>PATCH</code> / <code>DELETE</code> (API endpoints,
-        SSE) and <code>wsHandler</code> (WebSockets) - see Route Handlers.
-      </p>
-
-      <h2 id="router-hooks">Router hooks</h2>
-      <p>
-        From <code>@gio.js/react</code>. They read the page the router matched, on the server
-        (root layout included) and in the browser with identical values, and follow soft
-        navigations. See <a href="/docs/linking-and-navigating">Linking &amp; Navigating</a>.
+        From <code>@gio.js/core</code>. They run in the Node worker: in{' '}
+        <code>getServerSideProps</code>, page actions, route handlers and plugins.
       </p>
       <table>
-        <thead><tr><th>Hook</th><th>Returns</th></tr></thead>
+        <thead><tr><th>Function</th><th>What it does</th></tr></thead>
         <tbody>
-          <tr><td><code>usePathname()</code></td><td>The routed path, without query, hash or locale prefix.</td></tr>
-          <tr><td><code>{'useParams<T>()'}</code></td><td>The dynamic segment values; <code>T</code> is a registered pattern (<code>{"'/posts/:id'"}</code>) or a params shape.</td></tr>
-          <tr><td><code>useSearchParams()</code></td><td>The query as a read-only <code>URLSearchParams</code>.</td></tr>
-          <tr><td><code>useLocale()</code></td><td>The request locale (<code>&apos;&apos;</code> without i18n).</td></tr>
-          <tr><td><code>useRouter()</code></td><td><code>{'{ push, replace, back, forward, refresh, prefetch }'}</code> - one stable object; no-ops on the server.</td></tr>
+          <tr><td><a href="/docs/functions/redirect"><code>redirect()</code></a>, <code>isActionRedirect()</code></td><td>Answer an action or <code>getServerSideProps</code> with a redirect (303 by default), returned or thrown.</td></tr>
+          <tr><td><a href="/docs/functions/not-found"><code>notFound()</code></a></td><td>Answer 404 with the nearest <code>not-found.tsx</code>, or a JSON 404 in a route handler.</td></tr>
+          <tr><td><a href="/docs/functions/revalidate-path"><code>revalidatePath()</code></a></td><td>Purge the cached page at a path, or everything below it.</td></tr>
+          <tr><td><a href="/docs/functions/revalidate-tag"><code>revalidateTag()</code></a></td><td>Purge every cached page carrying a tag.</td></tr>
+          <tr><td><a href="/docs/functions/create-session-storage"><code>createSessionStorage()</code></a></td><td>Encrypted cookie sessions that Rust guards can verify.</td></tr>
+          <tr><td><a href="/docs/functions/cookies"><code>parseCookies()</code>, <code>serializeCookie()</code>, <code>signValue()</code>, <code>unsignValue()</code></a></td><td>Read and write cookies with secure defaults; sign values against tampering.</td></tr>
+          <tr><td><a href="/docs/functions/csp-nonce"><code>cspNonce()</code></a></td><td>The CSP nonce for your own inline scripts.</td></tr>
+          <tr><td><a href="/docs/functions/gio-event-stream"><code>GioEventStream</code>, <code>isGioEventStream()</code></a></td><td>Answer a route handler with Server-Sent Events.</td></tr>
+          <tr><td><a href="/docs/functions/broadcast"><code>broadcast()</code></a></td><td>Send a message to every WebSocket in a room.</td></tr>
+          <tr><td><a href="/docs/functions/request-errors"><code>UnsupportedMediaTypeError</code>, <code>MalformedBodyError</code></a> and their <code>is...()</code> guards</td><td>What <code>req.json()</code> and <code>req.formData()</code> throw (415 and 400).</td></tr>
+          <tr><td><a href="/docs/functions/define-middleware"><code>defineMiddleware()</code></a></td><td>Type <code>middleware.ts</code>: redirects, rewrites, headers and guards run in Rust.</td></tr>
+          <tr><td><a href="/docs/functions/define-config"><code>defineConfig()</code></a></td><td>Type <code>gio.config.ts</code>: Node plugins.</td></tr>
+          <tr><td><a href="/docs/functions/server-only"><code>@gio.js/core/server-only</code></a></td><td>Mark a module so a client bundle that imports it is refused.</td></tr>
         </tbody>
       </table>
-      <CodeBlock lang="tsx" code={`import { usePathname, useRouter, navigate } from '@gio.js/react';
 
-const router = useRouter();
-await router.push('/posts/2', { scroll: false });
-router.refresh();                       // fresh props, same URL and state
-
-await navigate('/login', { replace: true });   // outside components`} />
-
-      <h2 id="broadcast">broadcast()</h2>
+      <h2 id="client-functions">Client functions</h2>
       <p>
-        <code>broadcast(room, data, {'{'} except? {'}'})</code> from <code>@gio.js/core</code>{' '}
-        sends a text (string) or binary (<code>Uint8Array</code>) message to every WebSocket
-        that joined <code>room</code> with <code>socket.join(room)</code>, from any route
-        handler or <code>wsHandler</code>. It returns <code>false</code> when no WebSocket
-        server is connected - see <a href="/docs/websockets">WebSockets</a>.
+        From <code>@gio.js/react</code>. Safe to import during server rendering:{' '}
+        <code>navigate()</code> and the observer helpers do nothing there, and{' '}
+        <code>getDeploymentId()</code> returns <code>undefined</code>. Only{' '}
+        <code>handleHardReload()</code> must not be called outside the browser.
+      </p>
+      <table>
+        <thead><tr><th>Function</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><a href="/docs/functions/navigate"><code>navigate()</code></a></td><td>Soft-navigate from any client code.</td></tr>
+          <tr><td><a href="/docs/functions/href"><code>href()</code></a></td><td>Build a path from a route pattern, type-checked against your routes.</td></tr>
+          <tr><td><a href="/docs/functions/deployment-helpers"><code>getDeploymentId()</code>, <code>isHardReloadResponse()</code>, <code>handleHardReload()</code>, <code>initDeploymentId()</code></a></td><td>Detect that a tab runs an older build, and reload it.</td></tr>
+          <tr><td><code>initAnimateObserver()</code>, <code>observeElement()</code></td><td>The shared IntersectionObserver behind <a href="/docs/components/animate"><code>{'<Animate>'}</code></a> (below).</td></tr>
+        </tbody>
+      </table>
+      <h3 id="initanimateobserver-and-observeelement"><code>initAnimateObserver</code> and <code>observeElement</code></h3>
+      <p>
+        <code>{'<Animate>'}</code> uses one <code>IntersectionObserver</code> for every
+        animated element on the page. <code>observeElement(el)</code> adds an element to it
+        (creating the observer on first use); once at least 10% of the element is visible,
+        its <code>data-gio-animate-state</code> attribute becomes <code>entered</code> and it
+        is no longer observed. <code>initAnimateObserver()</code> only creates the observer.
+        Both do nothing on the server. You need them only to give an element of your own the
+        same entrance trigger.
       </p>
 
-      <h2 id="cspnonce">cspNonce()</h2>
+      <h2 id="testing-functions">Testing functions</h2>
       <p>
-        The Content-Security-Policy nonce for an inline <code>&lt;script&gt;</code> you
-        render, when <code>[security] csp</code> uses <code>{'{nonce}'}</code>;{' '}
-        <code>undefined</code> otherwise. During server rendering it returns a placeholder the
-        server replaces with each response&apos;s fresh nonce, so it is meant for{' '}
-        <code>nonce</code> attributes only: pass it straight to the attribute (best in the root
-        layout) and never derive anything from it - see <a href="/docs/security">Security</a>.
+        From <code>@gio.js/core/testing</code> and <code>@gio.js/core/vitest</code>, for
+        vitest and node:test. See the <a href="/docs/testing">Testing guide</a>.
       </p>
-      <CodeBlock lang="tsx" code={`import { cspNonce } from '@gio.js/core';
+      <table>
+        <thead><tr><th>Function</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><a href="/docs/functions/render-page"><code>renderPage()</code></a></td><td>Render a page in-process: status, HTML, props, cookies, redirect, cacheability.</td></tr>
+          <tr><td><a href="/docs/functions/call-route"><code>callRoute()</code></a></td><td>Call a route handler or page action in-process, with any method and body.</td></tr>
+          <tr><td><a href="/docs/functions/create-test-server"><code>createTestServer()</code></a></td><td>Start the real server on a free port for end-to-end tests.</td></tr>
+          <tr><td><a href="/docs/functions/reset-test-app"><code>resetTestApp()</code></a></td><td>Re-discover routes after a test added or removed files.</td></tr>
+          <tr><td><a href="/docs/functions/gio-vitest"><code>gioVitest()</code></a></td><td>The vitest plugin for CSS Module class names.</td></tr>
+        </tbody>
+      </table>
 
-<script nonce={cspNonce()} dangerouslySetInnerHTML={{ __html: 'window.dataLayer = []' }} />`} />
+      <h2 id="page-exports-and-hooks">Page exports and hooks</h2>
+      <p>
+        These used to be described on this page. Each now has its own reference; the short
+        versions below keep their old links working.
+      </p>
+
+      <h3 id="getserversidepropsctx">getServerSideProps(ctx)</h3>
+      <p>
+        A page&apos;s per-request data loader. <code>ctx</code> carries <code>method</code>,{' '}
+        <code>path</code>, <code>params</code>, <code>query</code>, lowercased{' '}
+        <code>headers</code>, parsed <code>cookies</code> and <code>locale</code>. Return{' '}
+        <code>{'{ props }'}</code> (optionally with response <code>headers</code> and cache{' '}
+        <code>tags</code>), a redirect, or <code>{'{ notFound: true }'}</code>. See{' '}
+        <a href="/docs/page-exports/get-server-side-props">getServerSideProps</a>.
+      </p>
+
+      <h3 id="export-const-revalidate">export const revalidate</h3>
+      <p>
+        Seconds a page is cached, or <code>false</code> to cache it until it is purged. Pages
+        without it render on every request. See{' '}
+        <a href="/docs/page-exports/revalidate">revalidate</a>.
+      </p>
+
+      <h3 id="export-const-tags">export const tags</h3>
+      <p>
+        Cache tags for every render of a cached page, purged with{' '}
+        <a href="/docs/functions/revalidate-tag"><code>revalidateTag()</code></a>. See{' '}
+        <a href="/docs/page-exports/tags">tags</a>.
+      </p>
+
+      <h3 id="revalidatetagtag-revalidatepathpath-options">revalidateTag(tag) / revalidatePath(path, options?)</h3>
+      <p>
+        Purge cached pages from server code. See{' '}
+        <a href="/docs/functions/revalidate-tag">revalidateTag</a> and{' '}
+        <a href="/docs/functions/revalidate-path">revalidatePath</a>.
+      </p>
+
+      <h3 id="getstaticpaths">getStaticPaths()</h3>
+      <p>
+        Lists the concrete paths <code>gio export</code> pre-renders for a dynamic route. See{' '}
+        <a href="/docs/page-exports/get-static-paths">getStaticPaths</a>.
+      </p>
+
+      <h3 id="route-handler-exports">Route handler exports</h3>
+      <p>
+        A <code>route.ts</code> exports method handlers - <code>GET</code>,{' '}
+        <code>POST</code>, <code>PUT</code>, <code>PATCH</code>, <code>DELETE</code> - and{' '}
+        <code>wsHandler</code> for WebSockets. See{' '}
+        <a href="/docs/page-exports/http-methods">HTTP methods</a> and{' '}
+        <a href="/docs/page-exports/ws-handler">wsHandler</a>.
+      </p>
+
+      <h3 id="router-hooks">Router hooks</h3>
+      <p>
+        <code>usePathname()</code>, <code>useParams()</code>, <code>useSearchParams()</code>,{' '}
+        <code>useLocale()</code> and <code>useRouter()</code> from <code>@gio.js/react</code>{' '}
+        read the page the router matched, on the server and in the browser alike. See{' '}
+        <a href="/docs/hooks">Hooks</a>; outside components, use{' '}
+        <a href="/docs/functions/navigate"><code>navigate()</code></a>.
+      </p>
+
+      <h3 id="broadcast">broadcast()</h3>
+      <p>
+        See <a href="/docs/functions/broadcast">broadcast</a>.
+      </p>
+
+      <h3 id="cspnonce">cspNonce()</h3>
+      <p>
+        See <a href="/docs/functions/csp-nonce">cspNonce</a>.
+      </p>
 
       <h2 id="types">Types</h2>
       <p>
@@ -154,7 +170,8 @@ await navigate('/login', { replace: true });   // outside components`} />
         browser). Every runtime export&apos;s parameter and result types are exported too
         (<code>CookieOptions</code>, <code>SessionStorage</code>, <code>RevalidateResult</code>,{' '}
         <code>MiddlewareRules</code>, <code>RedirectInit</code>, <code>IPCRequest</code> /{' '}
-        <code>IPCResponse</code> for plugins, ...).
+        <code>IPCResponse</code> for plugins, ...). The <a href="/docs/typescript">TypeScript</a>{' '}
+        reference lists them all.
       </p>
       <table>
         <thead><tr><th>Type</th><th>For</th></tr></thead>
@@ -180,9 +197,10 @@ await navigate('/login', { replace: true });   // outside components`} />
         <code>.gio/routes.d.ts</code> is in your tsconfig <code>include</code> (it is in the
         starters), a pattern must be one of your app&apos;s routes, so a typo fails{' '}
         <code>tsc</code> and editors autocomplete it - the same registry{' '}
-        <code>href()</code> and <code>useParams()</code> use. Before the server first runs,
-        any pattern is accepted and its params are read from the pattern itself. Leaving{' '}
-        <code>Route</code> out types params as <code>{'Record<string, string>'}</code>.
+        <a href="/docs/functions/href"><code>href()</code></a> and <code>useParams()</code>{' '}
+        use. Before the server first runs, any pattern is accepted and its params are read
+        from the pattern itself. Leaving <code>Route</code> out types params as{' '}
+        <code>{'Record<string, string>'}</code>.
       </p>
       <CodeBlock lang="tsx" code={`import type { GetStaticPaths, PageProps, RouteHandler } from '@gio.js/core';
 
