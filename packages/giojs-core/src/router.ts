@@ -27,6 +27,7 @@ import {
   type MetadataRouteModule,
   type MetadataRoutes,
 } from './metadata-routes.ts';
+import type { ActionRedirect, PageAction } from './action.ts';
 
 // JSX-bearing files (page, layout) may be .tsx/.jsx/.js; pure handlers
 // (route) may be .ts/.js. Order is precedence when several coexist.
@@ -114,6 +115,11 @@ export interface GsspContext {
   readonly host?: string | undefined;
   /** This request's id (X-Request-Id). Reading it does not make a render personal. */
   requestId?: string;
+  /**
+   * The page action's result, on the render that answers a POST to this
+   * page (see action.ts); absent on every GET.
+   */
+  actionData?: unknown;
 }
 
 /** `{ notFound: true }` form of a getServerSideProps result (same as calling notFound()). */
@@ -123,9 +129,10 @@ export interface NotFoundResult {
 
 export interface PageModule {
   default: React.ComponentType<Record<string, unknown>>;
+  /** May also return (or throw) redirect() from action.ts. */
   getServerSideProps?: (
     ctx: GsspContext,
-  ) => Promise<PropsResult | RedirectResult | NotFoundResult | Record<string, unknown>>;
+  ) => Promise<PropsResult | RedirectResult | NotFoundResult | ActionRedirect | Record<string, unknown>>;
   revalidate?: number | false;
   /**
    * Cache tags for every render of this page (e.g. `['posts']`), used by
@@ -145,6 +152,8 @@ export interface PageModule {
   metadata?: Metadata;
   /** Per-request head metadata; receives the gSSP context and `{ props }`. */
   generateMetadata?: (ctx: GsspContext, extras: MetadataExtras) => Metadata | Promise<Metadata>;
+  /** Handles POSTs to the page's URL (action.ts). */
+  action?: PageAction;
 }
 
 export interface RouteFile {

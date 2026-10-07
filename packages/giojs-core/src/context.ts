@@ -137,6 +137,15 @@ export interface GioRequest {
    * on absent, base64, or malformed bodies. `body` stays available raw.
    */
   json<T = unknown>(): T;
+  /**
+   * Parse the body as a form: `application/x-www-form-urlencoded` fields as
+   * strings, `multipart/form-data` file parts as `File` objects (web-standard
+   * FormData). Any other content type throws `UnsupportedMediaTypeError`
+   * (415 unless caught); a body that does not parse throws
+   * `MalformedBodyError` (400). Bodies above `[server] max_body_bytes` never
+   * get here - the server answers 413.
+   */
+  formData(): Promise<FormData>;
   locale?: string;
   /**
    * The client's IP address. Behind a reverse proxy this is the visitor

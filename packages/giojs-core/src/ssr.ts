@@ -6,6 +6,12 @@
  * the cache fields Rust reads (revalidate=false → one-year TTL, not 0).
  * Also handles GET() exports that return GioEventStream (SSE routes).
  *
+ * POSTs to a page run its `action` export (action.ts): the action's answer
+ * is sent as is (Response, redirect), or the page re-renders with its data
+ * as the `actionData` prop - never cached. Other mutations get a 405. A
+ * redirect answering a GioForm submission travels in a header instead of a
+ * 3xx (asFormRedirect), so the client router - not fetch - follows it.
+ *
  * Failures pick the nearest per-folder file: notFound() (or a
  * `{ notFound: true }` result) answers 404 with the nearest not-found.*, a
  * throw answers 500 with the nearest error.* - each inside the layouts of
@@ -58,9 +64,18 @@ import { segmentStylesheetKey, type StyleManifest } from './style-manifest.ts';
 import { cspNonce, nonceAttr } from './csp.ts';
 import {
   isJsonContentType,
+  isMalformedBodyError,
   isUnsupportedMediaTypeError,
+  parseFormData,
   UnsupportedMediaTypeError,
 } from './request-body.ts';
+import {
+  actionOutcome,
+  isActionRedirect,
+  type ActionOutcome,
+  type ActionRedirect,
+  type PageAction,
+} from './action.ts';
 import { parseCookies } from './cookies.ts';
 import { installedImageConfig, type ImageRenderConfig } from './image-config.ts';
 import { searchFromQuery, withNavigation, type GioNavigationState } from './navigation-context.ts';
@@ -309,6 +324,9 @@ function makeGioRequest(req: IPCRequest, params: Record<string, string>): GioReq
       if (req.body === null) throw new Error('request has no body');
       if (req.bodyBase64) throw new Error('request body is binary (base64) - decode it manually');
       return JSON.parse(req.body) as T;
+    },
+    formData(): Promise<FormData> {
+      return parseFormData(req.body, req.bodyBase64, req.headers['content-type']);
     },
     locale: req.locale,
     ...clientFields(req),
@@ -680,6 +698,20 @@ export async function renderRoute(
   clientScripts?: Map<string, string>,
   extras?: RenderExtras,
 ): Promise<IPCOutbound | SseRouteResult | StreamRenderResult | RouteStreamResult> {
+  const result = await answerRoute(req, routes, layouts, registry, signal, clientScripts, extras);
+  return isFormSubmission(req) ? asFormRedirect(result) : result;
+}
+
+/** renderRoute's answer before a GioForm submission's redirect is reshaped. */
+async function answerRoute(
+  req: IPCRequest,
+  routes: Map<string, RouteModule>,
+  layouts: Map<string, LayoutEntry>,
+  registry: NodePluginRegistry | undefined,
+  signal: AbortSignal | undefined,
+  clientScripts: Map<string, string> | undefined,
+  extras: RenderExtras | undefined,
+): Promise<IPCOutbound | SseRouteResult | StreamRenderResult | RouteStreamResult> {
   const credentialHeaders = new Set([
     ...CREDENTIAL_HEADERS,
     ...CLIENT_ADDRESS_HEADERS,
@@ -727,6 +759,9 @@ export async function renderRoute(
     handlerMatch === null || match === null
       ? -1
       : compareSpecificity(handlerMatch.pattern, match.module.urlPattern);
+  // Set when a same-folder route.ts passes a method it does not export on to
+  // the page: a 405 from the page names both files' methods.
+  let siblingAllow: string[] = [];
   if (handlerMatch !== null && handlerVsPage <= 0) {
     // HEAD is served by the GET handler (body discarded by the client).
     const method = req.method === 'HEAD' ? 'GET' : req.method;
@@ -745,11 +780,13 @@ export async function renderRoute(
       return result;
     }
     // The route.ts owns this URL; only a sibling page (same pattern) may still
-    // render a GET it does not export. Anything else is a 405.
-    const siblingPage = handlerVsPage === 0;
-    if (!((req.method === 'GET' || req.method === 'HEAD') && siblingPage)) {
+    // render a GET, or run its action for a POST, the route.ts does not
+    // export - and answer anything else with a 405 that lists what the page
+    // serves too. Without one, it is the route.ts's 405.
+    if (handlerVsPage !== 0) {
       return methodNotAllowed(req, [...handlerMatch.entry.methods.keys()]);
     }
+    siblingAllow = [...handlerMatch.entry.methods.keys()];
   }
 
   if (!match) {
@@ -757,13 +794,33 @@ export async function renderRoute(
     return renderNotFound(req, {}, '', layouts, extras, signal);
   }
 
-  // Pages only answer GET/HEAD; mutations belong to route.ts handlers.
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    return methodNotAllowed(req, ['GET', 'HEAD']);
-  }
-
+  // The headers of an action that ran and asked for a re-render (a session
+  // cookie it committed): whatever answers in the end carries them - the
+  // page, or the redirect, not-found or error page that replaces it.
+  let actionHeaders: IpcHeaders | null = null;
   try {
     const pageModule = await match.module.load();
+
+    // Pages answer GET/HEAD, and POST when they export an action, which runs
+    // first - only a data result re-renders the page. Other mutations belong
+    // to route.ts handlers.
+    let action: RenderOutcome | null = null;
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const pageAction = pageModule.action;
+      if (req.method !== 'POST' || typeof pageAction !== 'function') {
+        const allow = typeof pageAction === 'function' ? ['GET', 'HEAD', 'POST'] : ['GET', 'HEAD'];
+        return methodNotAllowed(req, [...allow, ...siblingAllow]);
+      }
+      const outcome = await runPageAction(req, pageAction, match.params);
+      if (outcome.kind !== 'render') {
+        if (registry !== undefined && !registry.isEmpty) {
+          return registry.interceptResponse(req, outcome.response);
+        }
+        return outcome.response;
+      }
+      action = outcome;
+      if (outcome.headers !== undefined) actionHeaders = flattenResponseHeaders(outcome.headers);
+    }
 
     // Legacy SSE shape - a component-less page module exporting GET(req) →
     // GioEventStream. route.ts handlers are the supported home for SSE; this
@@ -786,23 +843,35 @@ export async function renderRoute(
     if (pageModule.getServerSideProps) {
       const gssp = makeGsspContext(req, match.params, credentialHeaders);
       credentialsRead = gssp.credentialsRead;
+      if (action !== null) gssp.ctx.actionData = action.data;
       const result = await pageModule.getServerSideProps(gssp.ctx);
+      // redirect() from @gio.js/core, as in an action (a thrown one is
+      // answered by the catch below).
+      if (isActionRedirect(result)) {
+        return withActionHeaders(redirectResponse(req, result), actionHeaders);
+      }
       if (isRedirect(result)) {
         const extra = isHeaderRecord(result.headers)
           ? flattenResponseHeaders(result.headers)
           : { headers: {}, setCookies: [] };
-        return {
-          id: req.id,
-          status: result.redirect.permanent ? 301 : 302,
-          headers: { ...extra.headers, location: result.redirect.destination },
-          body: '',
-          cacheable: false,
-          cacheMaxAge: 0,
-          ...setCookiesField(extra.setCookies),
-        };
+        return withActionHeaders(
+          {
+            id: req.id,
+            status: result.redirect.permanent ? 301 : 302,
+            headers: { ...extra.headers, location: result.redirect.destination },
+            body: '',
+            cacheable: false,
+            cacheMaxAge: 0,
+            ...setCookiesField(extra.setCookies),
+          },
+          actionHeaders,
+        );
       }
       if (isNotFoundResult(result)) {
-        return renderNotFound(req, match.params, match.module.dir, layouts, extras, signal);
+        return withActionHeaders(
+          await renderNotFound(req, match.params, match.module.dir, layouts, extras, signal),
+          actionHeaders,
+        );
       }
       if (!isRecord(result)) {
         throw new Error(
@@ -834,6 +903,16 @@ export async function renderRoute(
       }
     } else {
       props = { params: match.params, searchParams: req.query };
+    }
+    if (action !== null) {
+      // getServerSideProps may have shaped the prop itself from ctx.actionData.
+      if (!('actionData' in props)) props = { ...props, actionData: action.data };
+      if (actionHeaders !== null) {
+        gsspHeaders = {
+          headers: { ...actionHeaders.headers, ...(gsspHeaders?.headers ?? {}) },
+          setCookies: [...actionHeaders.setCookies, ...(gsspHeaders?.setCookies ?? [])],
+        };
+      }
     }
 
     // Head metadata (root layout → nested layouts → page), resolved before
@@ -905,7 +984,9 @@ export async function renderRoute(
     const clientBuildError =
       entryScript === undefined && devOverlayHandOff() ? clientBuildErrorFor(pattern) : undefined;
 
-    let cacheable = pageModule.revalidate !== undefined;
+    // An action's re-render answers one POST: never cached, and never stored
+    // as the page's entry (Rust stores no non-GET response either).
+    let cacheable = action === null && pageModule.revalidate !== undefined;
     if (gsspHeaders !== null && cacheable) {
       // Response headers from gSSP are per-request (set-cookie above all);
       // caching them would replay one user's headers to everyone.
@@ -983,7 +1064,7 @@ export async function renderRoute(
         { path: req.path },
       );
     }
-    if (pageModule.shell === 'cache' && !shareable && !skipShell) {
+    if (pageModule.shell === 'cache' && !shareable && !skipShell && action === null) {
       logger.warn(
         "shell='cache' requires a shareable render (revalidate set, no per-request headers) - falling back",
         { path: req.path },
@@ -1168,7 +1249,7 @@ export async function renderRoute(
 
     const ssrResponse: IPCOutbound = {
       id: req.id,
-      status: 200,
+      status: action?.status ?? 200,
       headers: responseHeaders,
       body,
       cacheable,
@@ -1185,8 +1266,16 @@ export async function renderRoute(
     // A failure React caught (and onError logged) keeps its digest.
     const reportedFailure = thrown instanceof ReportedFailure ? thrown : null;
     const err: unknown = reportedFailure !== null ? reportedFailure.error : thrown;
+    // A redirect() thrown from getServerSideProps (or a helper it calls,
+    // the way an action may throw one) is an answer, not a failure.
+    if (isActionRedirect(err)) {
+      return withActionHeaders(redirectResponse(req, err), actionHeaders);
+    }
     if (isNotFoundError(err)) {
-      return renderNotFound(req, match.params, match.module.dir, layouts, extras, signal);
+      return withActionHeaders(
+        await renderNotFound(req, match.params, match.module.dir, layouts, extras, signal),
+        actionHeaders,
+      );
     }
     // Production responses carry only a generic message and the digest; the
     // details live in this log line under the same digest.
@@ -1207,7 +1296,7 @@ export async function renderRoute(
       500,
       signal,
     );
-    if (errorPage !== null) return errorPage;
+    if (errorPage !== null) return withActionHeaders(errorPage, actionHeaders);
     return {
       id: req.id,
       error: true,
@@ -1557,14 +1646,8 @@ async function runRouteHandler(
       };
     }
     // A client error, not a handler failure: nothing to log or hide.
-    if (isUnsupportedMediaTypeError(err)) {
-      return {
-        ...base,
-        status: 415,
-        headers: { 'content-type': 'application/json; charset=utf-8' },
-        body: JSON.stringify({ error: 'Unsupported Media Type', message: err.message }),
-      };
-    }
+    const clientError = requestBodyErrorResponse(err);
+    if (clientError !== null) return { ...base, ...clientError };
     const digest = createErrorDigest();
     logger.error('route handler failed', {
       path: req.path,
@@ -1579,6 +1662,166 @@ async function runRouteHandler(
       body: JSON.stringify({ error: GENERIC_ERROR_MESSAGE, digest }),
     };
   }
+}
+
+/**
+ * A web Response as a never-cached IPC response (route.ts handlers, and a
+ * page action answering with its own Response). Flagged `routeHandler`: the
+ * app owns its Cache-Control.
+ */
+async function webResponseToIpc(req: IPCRequest, result: Response): Promise<IPCResponse> {
+  const base = { id: req.id, cacheable: false, cacheMaxAge: 0, routeHandler: true };
+  const { headers, setCookies } = webHeadersToIpc(result.headers);
+  headers['content-type'] ??= 'text/plain; charset=utf-8';
+  const cookies = setCookiesField(setCookies);
+  // text() would lossily transcode binary payloads (images, pdfs) to
+  // U+FFFD; non-UTF-8 bodies cross base64-encoded like request bodies do.
+  const raw = Buffer.from(await result.arrayBuffer());
+  if (isUtf8(raw)) {
+    return { ...base, status: result.status, headers, body: raw.toString('utf8'), ...cookies };
+  }
+  return {
+    ...base,
+    status: result.status,
+    headers,
+    body: raw.toString('base64'),
+    bodyBase64: true,
+    ...cookies,
+  };
+}
+
+/**
+ * The answer to a body the request declared wrongly (json() on a form,
+ * formData() on JSON: 415) or that does not parse (400) - a client error,
+ * so nothing is logged or hidden. Null for any other error.
+ */
+function requestBodyErrorResponse(
+  err: unknown,
+): Pick<IPCResponse, 'status' | 'headers' | 'body'> | null {
+  const headers = { 'content-type': 'application/json; charset=utf-8' };
+  if (isUnsupportedMediaTypeError(err)) {
+    return {
+      status: 415,
+      headers,
+      body: JSON.stringify({ error: 'Unsupported Media Type', message: err.message }),
+    };
+  }
+  if (isMalformedBodyError(err)) {
+    return { status: 400, headers, body: JSON.stringify({ error: 'Bad Request', message: err.message }) };
+  }
+  return null;
+}
+
+// ── page actions ──────────────────────────────────────────────────────────────
+
+type RenderOutcome = Extract<ActionOutcome, { kind: 'render' }>;
+
+/**
+ * Run a page's action for a POST: either the page re-renders with its data,
+ * or `response` is the whole answer (the action's Response or redirect, or
+ * the 415/400 of a body error). A thrown redirect() answers like a returned
+ * one. A thrown notFound() and every other error propagate to renderRoute's
+ * catch, so the nearest not-found.* / error.* page answers, as for a failed
+ * render. Nothing here is ever cached.
+ */
+async function runPageAction(
+  req: IPCRequest,
+  action: PageAction,
+  params: Record<string, string>,
+): Promise<RenderOutcome | { kind: 'answer'; response: IPCResponse }> {
+  const base = { id: req.id, cacheable: false, cacheMaxAge: 0 };
+  let result: unknown;
+  try {
+    result = await action(makeGioRequest(req, params));
+  } catch (err) {
+    const clientError = requestBodyErrorResponse(err);
+    if (clientError !== null) return { kind: 'answer', response: { ...base, ...clientError } };
+    if (!isActionRedirect(err)) throw err;
+    result = err;
+  }
+  const outcome = actionOutcome(result);
+  if (outcome.kind === 'response') {
+    return { kind: 'answer', response: await webResponseToIpc(req, outcome.response) };
+  }
+  const headers = outcome.kind === 'render' ? outcome.headers : outcome.redirect.headers;
+  if (headers !== undefined && !isHeaderRecord(headers)) {
+    throw new TypeError('action headers must map header names to strings or string arrays');
+  }
+  if (outcome.kind === 'render') return outcome;
+  return { kind: 'answer', response: redirectResponse(req, outcome.redirect) };
+}
+
+/**
+ * The answer to a redirect() - from an action, or from getServerSideProps -
+ * with the headers it was given. Never cached.
+ */
+function redirectResponse(req: IPCRequest, redirect: ActionRedirect): IPCResponse {
+  const extra = isHeaderRecord(redirect.headers)
+    ? flattenResponseHeaders(redirect.headers)
+    : { headers: {}, setCookies: [] };
+  return {
+    id: req.id,
+    status: redirect.status,
+    headers: { ...extra.headers, location: redirect.location },
+    body: '',
+    cacheable: false,
+    cacheMaxAge: 0,
+    ...setCookiesField(extra.setCookies),
+  };
+}
+
+/**
+ * `response` with the headers of the action that ran before it merged in:
+ * the response's own win a clash, cookies add up. Unchanged without any.
+ */
+function withActionHeaders(response: IPCResponse, action: IpcHeaders | null): IPCResponse {
+  if (action === null) return response;
+  return {
+    ...response,
+    headers: { ...action.headers, ...response.headers },
+    ...setCookiesField([...action.setCookies, ...(response.setCookies ?? [])]),
+  };
+}
+
+// ── GioForm redirects ─────────────────────────────────────────────────────────
+
+/** The request header GioForm marks its submissions with (giojs-react navigation.ts). */
+const FORM_SUBMISSION_HEADER = 'x-gio-form';
+/** Where the redirect answering a GioForm submission names its target. */
+const FORM_REDIRECT_HEADER = 'x-gio-redirect';
+/** Redirects a browser follows with a GET; a 307/308 repeats the POST, which fetch does itself. */
+const SEE_OTHER_STATUSES: ReadonlySet<number> = new Set([301, 302, 303]);
+
+function isFormSubmission(req: IPCRequest): boolean {
+  return req.method === 'POST' && req.headers[FORM_SUBMISSION_HEADER] === '1';
+}
+
+/**
+ * A redirect answering a GioForm submission - from an action, its page's
+ * getServerSideProps, a route.ts handler or a plugin - becomes a 204 naming
+ * the target in x-gio-redirect, its cookies and other headers kept. fetch
+ * would follow a 3xx itself, and one leading off-site (a payment page, a
+ * sign-in) fails the CORS check after the action has already run. Told
+ * where to go, the client router fetches a same-origin target and hands any
+ * other to the browser. A POST answer is never stored, here or in a cache.
+ */
+function asFormRedirect(
+  result: IPCOutbound | SseRouteResult | StreamRenderResult | RouteStreamResult,
+): IPCOutbound | SseRouteResult | StreamRenderResult | RouteStreamResult {
+  if (!('status' in result) || !SEE_OTHER_STATUSES.has(result.status)) return result;
+  const headers: Record<string, string> = {};
+  let location: string | undefined;
+  for (const [name, value] of Object.entries(result.headers)) {
+    const lower = name.toLowerCase();
+    if (lower === 'location') location = value;
+    // The redirect's body (if any) is not sent.
+    else if (lower !== 'content-type' && lower !== 'content-length') headers[name] = value;
+  }
+  if (location === undefined) return result;
+  headers[FORM_REDIRECT_HEADER] = location;
+  const answer: IPCResponse = { ...result, status: 204, headers, body: '' };
+  delete answer.bodyBase64;
+  return answer;
 }
 
 // ── segment boundaries (loading.*, error.*, not-found.*) ──────────────────────

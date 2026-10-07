@@ -2681,6 +2681,12 @@ async fn render_uncoalesced(
             )
         }
         Err(e) => {
+            // A body within max_body_bytes whose frame the worker cannot take
+            // (base64 / JSON escaping grew it): the client's to shrink.
+            if let Some(too_large) = e.downcast_ref::<ipc::RequestTooLarge>() {
+                warn!(path = %path, frame_bytes = too_large.frame_bytes, "request body too large to forward to the worker - answered 413");
+                return respond_request_too_large(state, method, path, encoding, locale, start);
+            }
             state.metrics.record_ipc_latency(
                 metrics::ROUTE_UNMATCHED,
                 ipc_start.elapsed().as_nanos() as u64,
@@ -3417,6 +3423,41 @@ impl Stream for PprHitBodyStream {
             Poll::Pending => Poll::Pending,
         }
     }
+}
+
+/// The 413 for a request whose IPC frame the worker could not take, recorded
+/// like any other answer to a request that went for the worker (metrics, the
+/// devtools log and its in-flight count).
+fn respond_request_too_large(
+    state: &AppState,
+    method: &str,
+    path: &str,
+    encoding: &str,
+    locale: &str,
+    start: std::time::Instant,
+) -> Response {
+    let status = StatusCode::PAYLOAD_TOO_LARGE;
+    state.metrics.record_request(
+        method,
+        status.as_u16(),
+        "bypass",
+        metrics::ROUTE_UNMATCHED,
+        start.elapsed().as_nanos() as u64,
+    );
+    record_devtools(
+        state,
+        method,
+        path,
+        status.as_u16(),
+        "bypass",
+        encoding,
+        locale,
+        start.elapsed().as_millis() as u64,
+        true,
+    );
+    let mut resp = (status, "413 Payload Too Large").into_response();
+    insert_cache_status_header(&mut resp, "bypass");
+    resp
 }
 
 /// Build the error response for a failed IPC render and record it.

@@ -26,8 +26,33 @@ use crate::rules::{MiddlewareRules, RuleSet};
 type BoxReader = Box<dyn AsyncRead + Unpin + Send>;
 type BoxWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
-// packages/giojs-core/src/ipc.ts defines no frame cap, so bound allocation here.
+// Bounds allocation here; mirrors MAX_IPC_MESSAGE_SIZE in
+// packages/giojs-core/src/ipc.ts, which destroys the connection when a frame
+// declares more.
 const MAX_IPC_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
+/// A request whose frame would exceed MAX_IPC_MESSAGE_SIZE. The worker drops
+/// the whole connection on such a frame - every in-flight request with it -
+/// so it is refused before it is written. Only a large forwarded body gets
+/// here: binary bodies cross base64-encoded (4/3 their size) and JSON
+/// escaping can grow text, so `[server] max_body_bytes` above ~48 MiB lets
+/// a body through that the frame cannot carry.
+#[derive(Debug)]
+pub struct RequestTooLarge {
+    pub frame_bytes: usize,
+}
+
+impl std::fmt::Display for RequestTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "IPC request frame too large: {} bytes (max {MAX_IPC_MESSAGE_SIZE})",
+            self.frame_bytes
+        )
+    }
+}
+
+impl std::error::Error for RequestTooLarge {}
 
 /// Wire-format version. Bumped on breaking protocol changes; the worker
 /// echoes it in READY and a mismatch refuses the handshake (a beta-N binary
@@ -721,6 +746,12 @@ impl IpcClient {
     pub async fn send_request(&self, req: IpcRequest) -> anyhow::Result<IpcSendResult> {
         let id = req.id.clone();
         let payload = Bytes::from(serde_json::to_vec(&req)?);
+        if payload.len() > MAX_IPC_MESSAGE_SIZE {
+            return Err(RequestTooLarge {
+                frame_bytes: payload.len(),
+            }
+            .into());
+        }
         let (tx, rx) = oneshot::channel();
         self.inner.pending.insert(id.clone(), tx);
 
@@ -1998,6 +2029,36 @@ mod tests {
             client.inner.pending.is_empty(),
             "failed send must not leak its pending waiter"
         );
+    }
+
+    #[tokio::test]
+    async fn send_request_refuses_a_frame_the_worker_would_drop_the_connection_for() {
+        let (client, mut write_rx) = test_client_with_mode(false);
+        // A body within a raised max_body_bytes whose base64 form is past the cap.
+        let body = "A".repeat(MAX_IPC_MESSAGE_SIZE + 1);
+        let req = IpcRequest {
+            id: "req-big".into(),
+            method: "POST".into(),
+            path: "/upload".into(),
+            params: HashMap::new(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Some(body),
+            body_base64: true,
+            deployment_id: "dep-test".into(),
+            locale: String::new(),
+            skip_shell: false,
+            client: IpcClientFields::default(),
+        };
+        let Err(err) = client.send_request(req).await else {
+            panic!("an oversized frame must be refused");
+        };
+        let too_large = err
+            .downcast_ref::<RequestTooLarge>()
+            .expect("a typed error the HTTP layer answers 413 for");
+        assert!(too_large.frame_bytes > MAX_IPC_MESSAGE_SIZE);
+        assert!(client.inner.pending.is_empty(), "no waiter for a request never sent");
+        assert!(write_rx.try_recv().is_err(), "nothing may reach the worker");
     }
 
     #[test]
