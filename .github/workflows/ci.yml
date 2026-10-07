@@ -115,6 +115,15 @@ jobs:
         run: |
           npx tsc --noEmit
           npx vitest run
+      # create-giojs runs its tests as TypeScript (node --test *.ts), which
+      # needs Node 22's type stripping. They include the scaffold typecheck:
+      # both templates against the packages' built declarations.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: create-giojs tests
+        working-directory: packages/giojs-cli
+        run: npm test
 
   # Same reasoning as cargo-deny advisories: a fresh advisory in a transitive
   # npm dependency must not turn every unrelated PR red, so this reports as a

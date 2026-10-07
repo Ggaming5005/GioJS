@@ -4,11 +4,13 @@ import Footer from '../components/layout/Footer';
 
 // The title and description of every page: a page's own `metadata` (or
 // generateMetadata) title fills the template, e.g. 'About | {{PROJECT_NAME}}'.
+/** @type {import('@gio.js/core').Metadata} */
 export const metadata = {
   title: { default: "{{PROJECT_NAME}}", template: "%s | {{PROJECT_NAME}}" },
   description: 'A GioJS application.',
 };
 
+/** @param {import('@gio.js/core').LayoutProps} props */
 export default function RootLayout({ children }) {
   return (
     <html lang="en">

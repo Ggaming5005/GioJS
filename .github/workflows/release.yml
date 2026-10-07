@@ -63,6 +63,13 @@ jobs:
         run: |
           npx tsc --noEmit
           npx vitest run
+      # Node 22: the create-giojs tests are TypeScript run by node --test.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: create-giojs tests
+        working-directory: packages/giojs-cli
+        run: npm test
 
   integration:
     name: Integration (${{ matrix.os }})

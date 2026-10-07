@@ -58,9 +58,11 @@ async function patchPackageJson(destDir: string, mode: Mode): Promise<void> {
 
   const root = monorepoRoot();
   if (root !== null) {
-    // Local workspace: @gio.js/* aren't published, so file-ref the React package
-    // and run the server straight from cargo instead of the @gio.js/server bin.
+    // Local workspace: @gio.js/* aren't published, so file-ref the core and
+    // React packages and run the server straight from cargo instead of the
+    // @gio.js/server bin.
     delete deps['@gio.js/server'];
+    deps['@gio.js/core'] = 'file:../../packages/giojs-core';
     deps['@gio.js/react'] = 'file:../../packages/giojs-react';
     scripts['dev'] = 'cross-env NODE_ENV=development cargo run --manifest-path ../../Cargo.toml -p giojs-server';
     scripts['start'] = 'cross-env NODE_ENV=production cargo run --release --manifest-path ../../Cargo.toml -p giojs-server';

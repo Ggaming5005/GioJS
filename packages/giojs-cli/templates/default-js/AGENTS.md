@@ -27,6 +27,14 @@ renders React. Full docs: https://giojs.com/llms.txt
   or `{ notFound: true }`). There are NO
   React Server Components, no `use client`/`use server`, no server actions -
   forms post to a page `action` export instead (below).
+- Editor types come from `@gio.js/core` through JSDoc, e.g.
+  `/** @type {import('@gio.js/core').GetServerSideProps<{ post: Post }, '/posts/:id'>} */`
+  above `export const getServerSideProps = async (ctx) => ...` (types
+  `ctx.params` and the result variants). Also `PageProps<'/posts/:id'>` (a
+  page WITHOUT gSSP gets `{ params, searchParams }`; a page with gSSP gets
+  exactly its props), `LayoutProps`, `ErrorPageProps`, `NotFoundPageProps`,
+  `Metadata`, `GetStaticPaths<'/posts/:id'>`, `ActionArgs<'/posts/:id'>` and
+  `RouteHandler<'/api/items/:id'>` / `GioRequest<...>` for route.js.
 - Forms/mutations: a page may `export async function action(req)`; POSTs to
   the page's own URL run it (`await req.formData()`, plus params/cookies/
   `getSession(req)` like route handlers). Return `redirect('/next')` (303,
