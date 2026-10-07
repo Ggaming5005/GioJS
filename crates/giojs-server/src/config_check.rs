@@ -10,7 +10,8 @@
 //!
 //! Startup and the check share `validate`: every refusal startup makes after
 //! gio.toml parses ([cache] placement, [security], the revalidation token,
-//! TLS) lives there once, so the check cannot say yes to a configuration the
+//! local [[fonts]] files, TLS) lives there once, so the check cannot say yes
+//! to a configuration the
 //! server refuses.
 //!
 //! The report never carries a value that may be a secret (session secrets,
@@ -84,8 +85,9 @@ pub struct Validated {
 /// Every check startup makes on a parsed gio.toml before it creates a
 /// directory, spawns the worker or binds: the page cache directory's
 /// placement, [security] (headers, CSP, CSRF origins and exemptions), the
-/// revalidation token (GIO_REVALIDATE_TOKEN or [revalidate] token) and the
-/// TLS certificate and key. Errors are the messages startup prints after
+/// revalidation token (GIO_REVALIDATE_TOKEN or [revalidate] token), the
+/// local `[[fonts]]` files and the TLS certificate and key. Errors are the
+/// messages startup prints after
 /// "configuration error:", all of them rather than the first.
 pub fn validate(config: &GioConfig, env: &StartupEnv) -> Result<Validated, Vec<String>> {
     let mut errors = Vec::new();
@@ -115,6 +117,8 @@ pub fn validate(config: &GioConfig, env: &StartupEnv) -> Result<Validated, Vec<S
     .map_err(|error| errors.push(error.to_string()))
     .ok();
 
+    errors.extend(local_font_errors(config, &env.public_dir));
+
     let tls_acceptor = if config.server.tls.enabled {
         crate::load_tls_acceptor(&config.server.tls)
             .map(Some)
@@ -135,6 +139,40 @@ pub fn validate(config: &GioConfig, env: &StartupEnv) -> Result<Validated, Vec<S
         }
         _ => Err(errors),
     }
+}
+
+/// The `[[fonts]]` entries naming a file under public/ that startup could not
+/// copy: an invalid path, or a file that is missing or unreadable. Checked
+/// before the worker spawns, so a deploy that lost its font files fails here
+/// (and in `--check-config`) instead of after the build. Remote fonts are
+/// downloaded at startup and not checked.
+fn local_font_errors(config: &GioConfig, public_dir: &Path) -> Vec<String> {
+    let mut errors = Vec::new();
+    for font in config.fonts.iter().filter(|font| !font.url.contains("://")) {
+        let path = match giojs_font::local_font_path(&font.url, public_dir) {
+            Ok(path) => path,
+            Err(error) => {
+                errors.push(format!("[[fonts]] {}: {error}", font.family));
+                continue;
+            }
+        };
+        let problem = match std::fs::metadata(&path) {
+            Err(_) => Some("not found".to_string()),
+            Ok(meta) if !meta.is_file() => Some("is not a file".to_string()),
+            Ok(_) => std::fs::File::open(&path)
+                .err()
+                .map(|error| format!("cannot be read ({error})")),
+        };
+        if let Some(problem) = problem {
+            errors.push(format!(
+                "[[fonts]] {}: {} {problem} (url = \"{}\")",
+                font.family,
+                path.display(),
+                font.url
+            ));
+        }
+    }
+    errors
 }
 
 /// The process inputs the report depends on, gathered once so the report
@@ -436,6 +474,71 @@ mod tests {
         assert!(errors[0].starts_with("GIO_CACHE_DIR: "));
         assert!(errors[1].starts_with("[security.csrf] "));
         assert!(errors[2].starts_with("the revalidation token "));
+    }
+
+    #[test]
+    fn a_missing_local_font_fails_the_check() {
+        let root = std::env::temp_dir().join(format!(
+            "gio_config_check_fonts_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(root.join("public/fonts")).unwrap();
+        std::fs::write(root.join("public/fonts/present.woff2"), b"wOF2").unwrap();
+        let env = env_in(&root);
+
+        let present = report(
+            &loaded(&[]),
+            parse(
+                "[[fonts]]\nfamily = \"Present\"\nurl = \"/public/fonts/present.woff2\"\n\n\
+                 [[fonts]]\nfamily = \"Remote\"\nurl = \"https://fonts.example/r.woff2\"\n",
+            ),
+            &env,
+        );
+        assert_eq!(present["ok"], true, "{present}");
+
+        let missing = report(
+            &loaded(&[]),
+            parse(
+                "[[fonts]]\nfamily = \"Present\"\nurl = \"/fonts/present.woff2\"\n\n\
+                 [[fonts]]\nfamily = \"Missing\"\nurl = \"/public/fonts/missing.woff2\"\n\n\
+                 [[fonts]]\nfamily = \"Escape\"\nurl = \"/../secret.woff2\"\n\n\
+                 [[fonts]]\nfamily = \"Dir\"\nurl = \"/fonts\"\n",
+            ),
+            &env,
+        );
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(missing["ok"], false, "{missing}");
+        let errors: Vec<&str> = missing["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|error| error.as_str().unwrap())
+            .collect();
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        let missing_path = root.join("public/fonts/missing.woff2");
+        assert!(
+            errors[0].starts_with(&format!(
+                "[[fonts]] Missing: {} not found",
+                missing_path.display()
+            )),
+            "{errors:?}"
+        );
+        assert!(errors[1].starts_with("[[fonts]] Escape: font url"), "{errors:?}");
+        assert!(errors[2].starts_with("[[fonts]] Dir: "), "{errors:?}");
+        assert!(errors[2].contains("is not a file"), "{errors:?}");
+    }
+
+    #[test]
+    fn a_malformed_metrics_allowlist_entry_fails_the_check() {
+        let root = test_root();
+        let report = report(
+            &loaded(&[]),
+            parse("[metrics]\nip_allowlist = [\"10.0.0.0/33\"]\n"),
+            &env_in(&root),
+        );
+        assert_eq!(report["ok"], false, "{report}");
+        let error = report["errors"][0].as_str().unwrap();
+        assert!(error.contains("invalid ip_allowlist entry \"10.0.0.0/33\""), "{error}");
     }
 
     #[test]

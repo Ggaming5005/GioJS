@@ -15,6 +15,7 @@
  * by Rust per process): a file a previous run left behind never passes for
  * this run's build. Kept free of esbuild: reusing workers never load it.
  */
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ClientManifest } from './client-build.ts';
@@ -50,6 +51,33 @@ interface BuildManifestJson {
 
 export function buildManifestPath(projectRoot: string): string {
   return join(projectRoot, '.gio', 'build', 'manifest.json');
+}
+
+/** `map`'s entries sorted by key: discovery order must not change a hash. */
+function sortedEntries<V>(map: ReadonlyMap<string, V>): [string, V][] {
+  return [...map.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * Content hash of a client build: what the build manifest records, minus
+ * the per-process buildId. Every hydration entry and stylesheet URL carries
+ * a hash of its content (an entry's also covers the chunks it imports), so
+ * this changes whenever the app's client code, CSS or inlined `GIO_PUBLIC_*`
+ * values do, and stays the same across restarts of the same code. Sent in
+ * READY as `buildHash`: the Rust server derives the deployment ID from it,
+ * so pages cached by an earlier build - which link chunks and stylesheets
+ * the new build no longer has - stop matching, and clients still running
+ * the old build get the version-skew reload.
+ */
+export function clientBuildHash(build: ClientBuild): string {
+  const canonical = JSON.stringify({
+    clientScripts: sortedEntries(build.clientScripts),
+    stylesheets: {
+      routes: sortedEntries(build.stylesheets.routes),
+      segmentPages: sortedEntries(build.stylesheets.segmentPages),
+    },
+  });
+  return createHash('sha256').update(canonical).digest('hex');
 }
 
 /** True when this worker was told to load the builder's build. */

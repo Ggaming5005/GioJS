@@ -564,86 +564,9 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     } = startup_env;
     tokio::fs::create_dir_all(&cache_dir).await?;
 
-    // Before the worker spawns: it renders with the nonce placeholder.
-    let nonce_placeholder = security.uses_nonces().then(|| {
-        // A subdirectory: the cache's eviction and dev clearing only touch
-        // the entry files at the top level. Keyed by the deployment id the
-        // worker is about to get (same inputs, same id), so every deployment
-        // renders with its own placeholder.
-        security::load_or_create_nonce_placeholder(
-            &cache_dir.join("meta"),
-            &ipc::generate_deployment_id(&worker_env),
-        )
-    });
-    let security = match &nonce_placeholder {
-        Some(placeholder) => {
-            security::install_nonce_placeholder(placeholder);
-            security.with_nonce_placeholder(placeholder)
-        }
-        None => security,
-    };
-    info!(
-        default_headers = ?security.default_header_names(),
-        csp = security.has_csp(),
-        csp_report_only = security.has_csp_report_only(),
-        csp_nonces = nonce_placeholder.is_some(),
-        csrf = security.csrf().enabled(),
-        csrf_trusted_origins = security.csrf().trusted_origin_count(),
-        csrf_exempt = security.csrf().exempt_count(),
-        websocket_origin_check = security.websocket_origin_check(),
-        "security policy"
-    );
-    if !security.websocket_origin_check() {
-        warn!(
-            "[security.websocket] check_origin = false: any website can open WebSockets to this \
-             server with your visitors' cookies - prefer listing origins in [security.csrf] \
-             trusted_origins, or public endpoints in [security.csrf] exempt"
-        );
-    }
-    let security = Arc::new(security);
-
-    let workers = render_worker_count(
-        cfg.server.workers,
-        std::thread::available_parallelism().ok().map(usize::from),
-        dev_mode,
-    );
-    info!(workers, "Starting Node SSR worker: {node_script}");
-    let ipc = IpcClient::start(&node_script, &ipc_paths, dev_mode, worker_env, workers).await?;
-    let cache_epoch: Arc<str> =
-        security::cache_epoch(ipc.deployment_id(), nonce_placeholder.as_deref()).into();
-
-    let cache = Arc::new(PageCache::new(CacheConfig {
-        memory_max_entries: cfg.cache.memory_max_entries,
-        disk_dir: cache_dir.clone(),
-        swr_multiplier: CACHE_SWR_MULTIPLIER,
-        disk_max_bytes: cfg.cache.disk_max_bytes,
-    }));
-
-    // Index what a previous run left on disk so tag and path purges reach
-    // it. In the background: lookups stay correct while it runs.
-    let cache_for_index = cache.clone();
-    let epoch_for_index = cache_epoch.clone();
-    tokio::spawn(async move {
-        cache_for_index.index_disk(&epoch_for_index).await;
-    });
-
-    let cache_for_eviction = cache.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            cache_for_eviction.evict_disk().await;
-        }
-    });
-
-    let prefetch = Arc::new(PrefetchBudgets::new(cfg.prefetch.budgets()));
-    let prefetch_for_eviction = prefetch.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            prefetch_for_eviction.evict_idle(60);
-        }
-    });
-
+    // Fonts before the worker spawns: a font that cannot be fetched or
+    // copied fails startup before the build starts (validate already refused
+    // missing local files), and the served names feed the deployment ID.
     let fonts_dir = std::env::var("GIO_FONTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/fonts"));
@@ -681,6 +604,114 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             Some(r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string())
         })
         .collect();
+
+    // Everything the deployment ID covers besides the build the worker is
+    // about to produce: the worker's render settings, and what the server
+    // composes into cached pages itself - the font links above and the
+    // deployment script's default locale (see `deployment_script`).
+    let default_locale = if cfg.i18n.locales.is_empty() {
+        "en".to_string()
+    } else {
+        cfg.i18n.default_locale.clone()
+    };
+    let deployment = ipc::DeploymentInputs::from_process(
+        &project_root,
+        &worker_env,
+        vec![
+            ("fonts".to_string(), font_snippets.join("\n")),
+            ("i18n.default_locale".to_string(), default_locale),
+        ],
+    );
+
+    // Before the worker spawns: it renders with the nonce placeholder.
+    let nonce_placeholder = security.uses_nonces().then(|| {
+        // A subdirectory: the cache's eviction and dev clearing only touch
+        // the entry files at the top level. The worker needs it at spawn,
+        // before its build completes the deployment ID, so it is keyed by
+        // everything else the ID covers (GIO_DEPLOYMENT_ID when pinned, a
+        // standalone build's manifest, the render settings). The cache epoch
+        // below still includes the build, so a code change drops every page.
+        security::load_or_create_nonce_placeholder(
+            &cache_dir.join("meta"),
+            &deployment.before_build(),
+        )
+    });
+    let security = match &nonce_placeholder {
+        Some(placeholder) => {
+            security::install_nonce_placeholder(placeholder);
+            security.with_nonce_placeholder(placeholder)
+        }
+        None => security,
+    };
+    info!(
+        default_headers = ?security.default_header_names(),
+        csp = security.has_csp(),
+        csp_report_only = security.has_csp_report_only(),
+        csp_nonces = nonce_placeholder.is_some(),
+        csrf = security.csrf().enabled(),
+        csrf_trusted_origins = security.csrf().trusted_origin_count(),
+        csrf_exempt = security.csrf().exempt_count(),
+        websocket_origin_check = security.websocket_origin_check(),
+        "security policy"
+    );
+    if !security.websocket_origin_check() {
+        warn!(
+            "[security.websocket] check_origin = false: any website can open WebSockets to this \
+             server with your visitors' cookies - prefer listing origins in [security.csrf] \
+             trusted_origins, or public endpoints in [security.csrf] exempt"
+        );
+    }
+    let security = Arc::new(security);
+
+    let workers = render_worker_count(
+        cfg.server.workers,
+        std::thread::available_parallelism().ok().map(usize::from),
+        dev_mode,
+    );
+    info!(workers, "Starting Node SSR worker: {node_script}");
+    let ipc = IpcClient::start(
+        &node_script,
+        &ipc_paths,
+        dev_mode,
+        worker_env,
+        workers,
+        &deployment,
+    )
+    .await?;
+    let cache_epoch: Arc<str> =
+        security::cache_epoch(ipc.deployment_id(), nonce_placeholder.as_deref()).into();
+
+    let cache = Arc::new(PageCache::new(CacheConfig {
+        memory_max_entries: cfg.cache.memory_max_entries,
+        disk_dir: cache_dir.clone(),
+        swr_multiplier: CACHE_SWR_MULTIPLIER,
+        disk_max_bytes: cfg.cache.disk_max_bytes,
+    }));
+
+    // Index what a previous run left on disk so tag and path purges reach
+    // it. In the background: lookups stay correct while it runs.
+    let cache_for_index = cache.clone();
+    let epoch_for_index = cache_epoch.clone();
+    tokio::spawn(async move {
+        cache_for_index.index_disk(&epoch_for_index).await;
+    });
+
+    let cache_for_eviction = cache.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            cache_for_eviction.evict_disk().await;
+        }
+    });
+
+    let prefetch = Arc::new(PrefetchBudgets::new(cfg.prefetch.budgets()));
+    let prefetch_for_eviction = prefetch.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            prefetch_for_eviction.evict_idle(60);
+        }
+    });
 
     let image_cache_dir = std::env::var("GIO_IMAGE_CACHE_DIR")
         .map(PathBuf::from)
@@ -875,10 +906,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
 
     spawn_worker_revalidations(state.clone());
 
-    if !dev_mode
-        && state.metrics_config.token.is_empty()
-        && state.metrics_config.ip_allowlist.is_empty()
-    {
+    if metrics_unauthenticated(&state.metrics_config, dev_mode) {
         warn!("/_gio/metrics is unauthenticated - set [metrics] token or ip_allowlist in gio.toml");
     }
 
@@ -1236,6 +1264,13 @@ async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
+/// Whether startup warns that `/_gio/metrics` is open to anyone: only in
+/// production, and only when the endpoint exists (with `[metrics]` absent or
+/// `enabled = false` it answers 404, so there is nothing to protect).
+fn metrics_unauthenticated(config: &config::MetricsConfig, dev_mode: bool) -> bool {
+    !dev_mode && config.enabled && config.token.is_empty() && config.ip_allowlist.is_empty()
+}
+
 async fn metrics_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -1248,13 +1283,8 @@ async fn metrics_handler(
         // The client behind trusted proxies: allowlisting 127.0.0.1 must not
         // admit everything a local reverse proxy forwards. A client the
         // proxy's forwarding header could not name is refused outright.
-        let allowed = client_identity::access_ip(&req, addr).is_some_and(|ip| {
-            state.metrics_config.ip_allowlist.iter().any(|entry| {
-                entry
-                    .parse::<client_identity::IpNet>()
-                    .is_ok_and(|net| net.contains(ip))
-            })
-        });
+        let allowed = client_identity::access_ip(&req, addr)
+            .is_some_and(|ip| state.metrics_config.ip_allowlist.contains(ip));
         if !allowed {
             return StatusCode::FORBIDDEN.into_response();
         }
@@ -5290,6 +5320,32 @@ mod tests {
             render_worker_count(config::WorkersSetting::default(), None, false),
             1
         );
+    }
+
+    #[test]
+    fn unauthenticated_metrics_warning_only_when_the_endpoint_exists() {
+        let metrics = |toml: &str| {
+            config::GioConfig::parse(toml, "gio.toml")
+                .expect("valid gio.toml")
+                .metrics
+        };
+        // No [metrics] section, or enabled = false: /_gio/metrics is a 404.
+        assert!(!metrics_unauthenticated(&metrics(""), false));
+        assert!(!metrics_unauthenticated(
+            &metrics("[metrics]\nenabled = false\n"),
+            false
+        ));
+        // Enabled without a token or an allowlist: open to anyone.
+        assert!(metrics_unauthenticated(&metrics("[metrics]\n"), false));
+        assert!(!metrics_unauthenticated(&metrics("[metrics]\n"), true));
+        assert!(!metrics_unauthenticated(
+            &metrics("[metrics]\ntoken = \"t\"\n"),
+            false
+        ));
+        assert!(!metrics_unauthenticated(
+            &metrics("[metrics]\nip_allowlist = [\"10.0.0.0/8\"]\n"),
+            false
+        ));
     }
 
     // ── inject_into_html ──────────────────────────────────────────────────────

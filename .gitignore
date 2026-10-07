@@ -55,6 +55,7 @@ platform/*/bin/*
 /OPEN_QUESTIONS.md
 tests/integration/.dev-fixture/
 tests/integration/.image-cache-fixture/
+tests/integration/.build-cache-fixture/
 tests/integration/.config-fixture/
 tests/integration/.dev-cache-fixture/
 

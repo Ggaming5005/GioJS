@@ -3310,6 +3310,127 @@ async function imageConfigCachePhase() {
 }
 
 /**
+ * Phase 1c' (persisted page cache vs app code): every start rebuilds
+ * `.gio/build` with new content-hashed chunks and stylesheets, and a cached
+ * page links the ones it was rendered with. A restart after a code change
+ * must get a new deployment ID - so pages persisted by the old build stop
+ * matching and clients on it get the skew reload - while a restart of the
+ * same code keeps the ID and the warm disk cache.
+ */
+async function buildChangeCachePhase() {
+  const binary = findServerBinary();
+  const appRoot = await copyFixtureForDev('.build-cache-fixture');
+  const cssPath = join(appRoot, 'app', 'root.css');
+  const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-buildcache-'));
+  const stylesheets = (html) => [...html.matchAll(/\/_next\/static\/css\/[^"]+\.css/g)].map((m) => m[0]);
+  const runs = [];
+
+  try {
+    for (const run of [1, 2, 3]) {
+      if (run === 2) {
+        await writeFile(cssPath, `${await readFile(cssPath, 'utf8')}\n.build-change-marker { color: teal; }\n`);
+      }
+      let log = '';
+      const server = spawn(binary, [], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          GIO_APP_DIR: join(appRoot, 'app'),
+          // Shared by every run: entries persist across the restarts.
+          GIO_CACHE_DIR: cacheDir,
+          GIO_DEPLOYMENT_ID: '',
+          RUST_LOG: 'info',
+          NODE_ENV: 'production',
+        },
+      });
+      server.stdout.on('data', (d) => { log += d.toString(); });
+      server.stderr.on('data', (d) => { log += d.toString(); });
+      let serverGone = false;
+      const serverExited = new Promise((r) =>
+        server.on('exit', () => { serverGone = true; r(); }),
+      );
+      try {
+        await waitFor(`server health (build run ${run})`, async () => {
+          const res = await fetch(`${BASE}/_gio/health`);
+          return res.ok && (await res.json()).nodeReady === true;
+        }, 30_000);
+        const deploymentId = (await (await fetch(`${BASE}/_gio/health`)).json()).deploymentId;
+        const res = await fetch(`${BASE}/cached`);
+        const html = await res.text();
+        runs.push({ deploymentId, cache: res.headers.get('x-gio-cache') ?? '', css: stylesheets(html) });
+        const current = runs[run - 1];
+        assert.equal(res.status, 200);
+        assert.ok(current.css.length > 0, `/cached links a stylesheet: ${html.slice(0, 400)}`);
+
+        if (run === 1) {
+          assert.match(current.cache, /^miss; stored$/);
+          await waitFor('page persisted to the disk cache', async () => {
+            const files = await readdir(cacheDir, { recursive: true });
+            return files.some((f) => f.endsWith('.json'));
+          }, 10_000);
+          continue;
+        }
+
+        if (run === 2) {
+          const before = runs[0];
+          await test('a code change gives the restarted server a new deployment ID', () => {
+            assert.notEqual(current.deploymentId, before.deploymentId);
+          });
+          await test('pages persisted by the old build are not served after a code change', async () => {
+            assert.match(
+              current.cache,
+              /^miss; stored$/,
+              `a page linking the old build's stylesheets was served: ${before.css} -> ${current.css}`,
+            );
+            assert.notDeepEqual(current.css, before.css, 'the CSS edit renamed the stylesheet');
+            for (const href of current.css) {
+              const css = await fetch(`${BASE}${href}`);
+              assert.equal(css.status, 200, `${href} must be servable`);
+              await css.arrayBuffer();
+            }
+          });
+          await test('a client still on the old build gets the version-skew reload', async () => {
+            const skewed = await fetch(`${BASE}/cached`, { headers: { 'x-deployment-id': before.deploymentId } });
+            assert.equal(skewed.status, 409);
+            assert.equal(skewed.headers.get('x-gio-action'), 'hard-reload');
+            await skewed.arrayBuffer();
+          });
+          // The entry file is rewritten in place, stamped with the new ID.
+          await waitFor('page re-persisted by the new build', async () => {
+            const files = await readdir(cacheDir, { recursive: true });
+            for (const file of files.filter((f) => f.endsWith('.json'))) {
+              const body = await readFile(join(cacheDir, file), 'utf8').catch(() => '');
+              if (body.includes(`"deployment_id":"${current.deploymentId}`)) return true;
+            }
+            return false;
+          }, 10_000);
+          continue;
+        }
+
+        await test('a restart of the same code keeps the deployment ID and the disk cache', () => {
+          assert.equal(current.deploymentId, runs[1].deploymentId);
+          assert.match(current.cache, /^hit\b/, 'the page persisted by this build must be served');
+          assert.deepEqual(current.css, runs[1].css);
+        });
+      } catch (err) {
+        console.error(`\nintegration (build change, run ${run}): FAILED`);
+        console.error(err);
+        console.error('\n── server log tail ──');
+        console.error(significantLogTail(log));
+        process.exitCode = 1;
+      } finally {
+        if (!serverGone) server.kill();
+        await serverExited;
+      }
+      if (process.exitCode === 1) return;
+    }
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+    await rm(appRoot, { recursive: true, force: true });
+  }
+}
+
+/**
  * Phase 1d (testing kit): testing-kit.test.ts runs the `@gio.js/core/testing`
  * helpers under node:test + tsx - the setup the docs describe - including
  * createTestServer against this binary, on free ports. Then
@@ -4324,7 +4445,7 @@ const CSP_ECHO_TYPES = [
  * must leave the WebSocket origin check on. Runs: production (every serve
  * path: buffered miss, cache hit, PPR shell + holes, streaming, 404, route
  * handlers in any content type), a restart on the same disk cache, the
- * plain fixture (CSP off) on that cache, a new deployment on that cache
+ * same app with CSP off on that cache, a new deployment on that cache
  * (placeholder rotated), then dev (overlay and error page scripts).
  */
 async function cspPhase() {
@@ -4332,10 +4453,9 @@ async function cspPhase() {
   const cspDir = await copyFixtureForDev('.csp-fixture');
   const toml = await readFile(join(cspDir, 'gio.toml'), 'utf8');
   assert.ok(toml.includes('[security.csrf]\n'));
-  await writeFile(
-    join(cspDir, 'gio.toml'),
-    toml.replace('[security.csrf]\n', '[security.csrf]\nenabled = false\n') + CSP_TOML,
-  );
+  const cspOffToml = toml.replace('[security.csrf]\n', '[security.csrf]\nenabled = false\n');
+  const cspToml = cspOffToml + CSP_TOML;
+  await writeFile(join(cspDir, 'gio.toml'), cspToml);
   await mkdir(join(cspDir, 'app', 'csp-boom'), { recursive: true });
   await writeFile(
     join(cspDir, 'app', 'csp-boom', 'page.tsx'),
@@ -4510,7 +4630,9 @@ export function GET(): Response {
     },
     {
       label: 'CSP off',
-      appDir: fixtureDir,
+      appDir: cspDir,
+      // The same app (so the same build and deployment ID) without [security] csp.
+      gioToml: cspOffToml,
       cacheDir: sharedCache,
       mode: 'production',
       async check() {
@@ -4527,6 +4649,7 @@ export function GET(): Response {
     {
       label: 'new deployment',
       appDir: cspDir,
+      gioToml: cspToml,
       cacheDir: sharedCache,
       mode: 'production',
       env: { GIO_DEPLOYMENT_ID: 'csp-rotated-deployment' },
@@ -4568,6 +4691,7 @@ export function GET(): Response {
   ];
 
   for (const run of runs) {
+    if (run.gioToml !== undefined) await writeFile(join(run.appDir, 'gio.toml'), run.gioToml);
     let log = '';
     const server = spawn(binary, [], {
       cwd: repoRoot,
@@ -4737,6 +4861,20 @@ async function strictConfigPhase() {
         server + `[revalidate]\ntoken = "${secret}" extra\n`,
         {},
         /cannot parse \S*gio\.toml:6:52: expected newline/,
+      ],
+      // Refused before the worker is spawned (and bundling starts).
+      [
+        'a local [[fonts]] file that does not exist',
+        server + '[[fonts]]\nfamily = "Missing"\nurl = "/public/fonts/missing.woff2"\n',
+        {},
+        /\[\[fonts\]\] Missing: \S*public\/fonts\/missing\.woff2 not found/,
+      ],
+      // An entry that matched nobody used to lock every scraper out (403).
+      [
+        'a malformed [metrics] ip_allowlist entry',
+        server + '[metrics]\nip_allowlist = ["10.0.0.0/33"]\n',
+        {},
+        /invalid ip_allowlist entry "10\.0\.0\.0\/33"/,
       ],
     ];
     for (const [label, toml, extraEnv, expected] of refusals) {
@@ -5022,6 +5160,9 @@ if (process.exitCode !== 1) {
 }
 if (process.exitCode !== 1) {
   await imageConfigCachePhase();
+}
+if (process.exitCode !== 1) {
+  await buildChangeCachePhase();
 }
 if (process.exitCode !== 1) {
   await configSettingsPhase();

@@ -233,7 +233,8 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         </li>
         <li>
           <strong>Metrics</strong>: <code>[metrics] enabled = true</code> with an{' '}
-          <code>ip_allowlist</code> or <code>token</code> - never open to the internet. Alert
+          <code>ip_allowlist</code> or <code>token</code> - never open to the internet (the
+          server warns at startup when metrics are enabled without either). Alert
           on 5xx rates per <code>route</code>, p95 latency, and a climbing{' '}
           <code>gio_worker_restarts_total</code>.
         </li>

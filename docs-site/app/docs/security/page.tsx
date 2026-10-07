@@ -133,8 +133,11 @@ csp = """
       <p>
         The placeholder is kept in the page cache directory&apos;s <code>meta/</code> (
         <code>.gio/cache/pages/meta/</code> by default) so the disk cache stays
-        valid across restarts, and it changes with every deployment (each new build, or a new{' '}
-        <code>GIO_DEPLOYMENT_ID</code>). To rotate it sooner, delete{' '}
+        valid across restarts. The worker needs it before it builds, so it changes with
+        what the deployment ID covers apart from that build: a new{' '}
+        <code>GIO_DEPLOYMENT_ID</code>, a new standalone build, or a change to the gio.toml
+        settings pages render with. A code-only redeploy keeps it (its cached pages are
+        still dropped: the cache is keyed by the full deployment ID). To rotate it, delete{' '}
         <code>.gio/cache/pages/meta/csp-nonce-placeholder-*</code> and restart; cached pages
         are then rendered again. Turning CSP on or off invalidates cached pages automatically.
       </p>

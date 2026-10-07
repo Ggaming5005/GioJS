@@ -904,16 +904,17 @@ impl WorkerInner {
 impl IpcClient {
     /// Start a pool of `workers` Node workers. Returns once the first (the
     /// builder) is READY; the others boot after it, in the background, and
-    /// join dispatch as each becomes READY.
+    /// join dispatch as each becomes READY. The deployment ID is derived
+    /// from `deployment` and the build the builder reports in its READY.
     pub async fn start(
         node_script: &str,
         paths: &IpcPaths,
         dev_mode: bool,
         extra_env: Vec<(String, String)>,
         workers: usize,
+        deployment: &DeploymentInputs,
     ) -> anyhow::Result<Self> {
         let workers = workers.max(1);
-        let deployment_id = generate_deployment_id(&extra_env);
         let mut extra_env = extra_env;
         extra_env.push((
             BUILD_ID_ENV.to_string(),
@@ -925,11 +926,13 @@ impl IpcClient {
 
         struct Slot {
             node: NodeWorker,
-            inner: Arc<WorkerInner>,
             write_rx: mpsc::Receiver<Bytes>,
             restart_rx: mpsc::Receiver<()>,
         }
         let mut slots = Vec::with_capacity(workers);
+        // Each worker's (write, restart) senders, for its state once the
+        // deployment ID is known.
+        let mut senders = Vec::with_capacity(workers);
         let mut ws_endpoints = Vec::with_capacity(workers);
         for index in 0..workers {
             let worker_paths = paths.for_worker(index);
@@ -949,30 +952,24 @@ impl IpcClient {
                     pool_size: workers,
                     extra_env: extra_env.clone(),
                 },
-                inner: Arc::new(WorkerInner::new(
-                    index,
-                    write_tx,
-                    restart_tx,
-                    deployment_id.clone(),
-                    generation.clone(),
-                    revalidate_tx.clone(),
-                    dev_mode,
-                )),
                 write_rx,
                 restart_rx,
             });
+            senders.push((write_tx, restart_tx));
         }
 
         // The builder boots alone and the server waits for it: its failure
         // to come up (a protocol mismatch, a broken app) fails startup, and
-        // the others must not start before its build is on disk.
-        let builder = &slots[0];
-        let mut process = builder.node.spawn()?;
+        // the others must not start before its build is on disk. Its READY
+        // reports that build, which completes the deployment ID - acked
+        // back to it, and handed to every worker connection after it.
+        let builder = &slots[0].node;
+        let mut process = builder.spawn()?;
         info!(worker = 0, "Node process spawned (pid {:?})", process.pid);
         let connection = match connect_and_handshake(
-            &builder.node.ipc_path,
-            &deployment_id,
-            &builder.node.token,
+            &builder.ipc_path,
+            |build_hash| deployment.with_build(build_hash),
+            &builder.token,
             STARTUP_CONNECT_ATTEMPTS,
         )
         .await
@@ -983,13 +980,28 @@ impl IpcClient {
                 return Err(e);
             }
         };
-        let streams = install_connection(&builder.inner, connection);
+        let deployment_id = connection.deployment_id.clone();
+        info!(deployment_id = %deployment_id, "deployment ID");
 
-        let workers_inner: Vec<Arc<WorkerInner>> =
-            slots.iter().map(|slot| slot.inner.clone()).collect();
+        let workers_inner: Vec<Arc<WorkerInner>> = senders
+            .into_iter()
+            .enumerate()
+            .map(|(index, (write_tx, restart_tx))| {
+                Arc::new(WorkerInner::new(
+                    index,
+                    write_tx,
+                    restart_tx,
+                    deployment_id.clone(),
+                    generation.clone(),
+                    revalidate_tx.clone(),
+                    dev_mode,
+                ))
+            })
+            .collect();
+        let streams = install_connection(&workers_inner[0], connection);
         let mut supervisors = Vec::with_capacity(workers);
         let mut initial = Some((process, streams));
-        for slot in slots {
+        for (slot, inner) in slots.into_iter().zip(&workers_inner) {
             // Worker 0 hands over its live process and connection; the rest
             // start in recovery, which spawns and connects them.
             let (process, streams) = match initial.take() {
@@ -1003,7 +1015,7 @@ impl IpcClient {
                 slot.write_rx,
                 slot.restart_rx,
                 shutdown.subscribe(),
-                slot.inner,
+                inner.clone(),
             )));
         }
 
@@ -1410,42 +1422,116 @@ async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> anyhow::Result<B
 
 // ── Deployment ID ────────────────────────────────────────────────────────────
 
-pub fn generate_deployment_id(worker_env: &[(String, String)]) -> String {
-    // Content-derived, never time-derived: a restart of the same build must
-    // keep the same ID or the entire persisted disk cache becomes dead weight
-    // (and every pod in a multi-instance deployment would disagree).
-    // GIO_DEPLOYMENT_ID lets deploy pipelines pin one ID across pods.
-    if let Ok(id) = std::env::var("GIO_DEPLOYMENT_ID") {
-        let trimmed = id.trim();
-        if !trimmed.is_empty() {
-            return trimmed.chars().take(64).collect();
-        }
-    }
-    let manifest = std::fs::read(".gio/manifest.json").unwrap_or_default();
-    derive_deployment_id(&manifest, worker_env)
+/// Pins the deployment ID across pods (used as given, up to 64 characters).
+pub const DEPLOYMENT_ID_ENV: &str = "GIO_DEPLOYMENT_ID";
+
+/// What the deployment ID is derived from, besides the client build the
+/// builder reports in its READY frame (`buildHash`, see
+/// giojs-core/src/build-manifest.ts `clientBuildHash`).
+///
+/// Content-derived, never time-derived: a restart of the same code and
+/// config must keep the same ID or the entire persisted disk cache becomes
+/// dead weight (and every pod in a multi-instance deployment would
+/// disagree); a code change must change it, or persisted pages keep linking
+/// chunks and stylesheets the new build deleted, and version-skew detection
+/// never fires. The ID feeds the cache epoch, `window.__GIO_DEPLOYMENT_ID__`
+/// and the version-skew 409s.
+#[derive(Debug, Clone)]
+pub struct DeploymentInputs {
+    /// GIO_DEPLOYMENT_ID, when set: wins over everything else.
+    pinned: Option<String>,
+    /// `<project root>/.gio/manifest.json`, which only a standalone build
+    /// writes; empty otherwise.
+    standalone_manifest: Vec<u8>,
+    /// The settings rendered and composed pages depend on, as (name, value).
+    render_settings: Vec<(String, String)>,
 }
 
-/// The build manifest alone does not describe the rendered HTML: the worker
-/// also renders with server settings handed to it in its environment (e.g.
-/// `[images]` decides every `<GioImage>` srcset). Those are hashed in too, so
-/// a gio.toml change invalidates persisted pages that were rendered with the
-/// old settings instead of serving them - and their now-rejected image URLs -
-/// until they expire. Only the variables listed in
-/// `config::WORKER_RENDER_SETTINGS_ENV` count: anything else the worker gets
-/// (a secret, a per-boot value) stays out of this public, restart-stable ID.
-fn derive_deployment_id(manifest: &[u8], worker_env: &[(String, String)]) -> String {
+impl DeploymentInputs {
+    /// The inputs of this process: GIO_DEPLOYMENT_ID, the standalone
+    /// manifest under `project_root`, the worker env vars listed in
+    /// `config::WORKER_RENDER_SETTINGS_ENV`, and `page_settings` - what the
+    /// server bakes into composed pages itself (font links, the default
+    /// locale of the deployment script).
+    pub fn from_process(
+        project_root: &std::path::Path,
+        worker_env: &[(String, String)],
+        page_settings: Vec<(String, String)>,
+    ) -> Self {
+        let pinned = std::env::var(DEPLOYMENT_ID_ENV).ok();
+        let standalone_manifest =
+            std::fs::read(project_root.join(".gio").join("manifest.json")).unwrap_or_default();
+        Self::new(pinned, standalone_manifest, worker_env, page_settings)
+    }
+
+    fn new(
+        pinned: Option<String>,
+        standalone_manifest: Vec<u8>,
+        worker_env: &[(String, String)],
+        page_settings: Vec<(String, String)>,
+    ) -> Self {
+        let pinned = pinned
+            .map(|id| id.trim().chars().take(64).collect::<String>())
+            .filter(|id| !id.is_empty());
+        // Only the listed worker variables count: anything else the worker
+        // gets (a secret, a per-boot value) stays out of this public,
+        // restart-stable ID.
+        let render_settings = worker_env
+            .iter()
+            .filter(|(key, _)| crate::config::WORKER_RENDER_SETTINGS_ENV.contains(&key.as_str()))
+            .cloned()
+            .chain(page_settings)
+            .collect();
+        DeploymentInputs {
+            pinned,
+            standalone_manifest,
+            render_settings,
+        }
+    }
+
+    /// The ID before the worker has built: everything but the build. It
+    /// keys what the worker needs at spawn (the CSP nonce placeholder).
+    pub fn before_build(&self) -> String {
+        self.with_build(None)
+    }
+
+    /// The deployment ID once the builder reported `build_hash` (None from
+    /// a worker that does not report one).
+    pub fn with_build(&self, build_hash: Option<&str>) -> String {
+        if let Some(pinned) = &self.pinned {
+            return pinned.clone();
+        }
+        derive_deployment_id(
+            &self.standalone_manifest,
+            build_hash,
+            &self.render_settings,
+        )
+    }
+}
+
+/// The build alone does not describe the rendered HTML: the worker also
+/// renders with server settings handed to it in its environment (e.g.
+/// `[images]` decides every `<GioImage>` srcset), and the server composes
+/// pages with font links and the deployment script. Those are hashed in too,
+/// so a gio.toml change invalidates persisted pages that were rendered with
+/// the old settings instead of serving them until they expire.
+fn derive_deployment_id(
+    standalone_manifest: &[u8],
+    build_hash: Option<&str>,
+    render_settings: &[(String, String)],
+) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(manifest);
-    let render_settings = worker_env
-        .iter()
-        .filter(|(key, _)| crate::config::WORKER_RENDER_SETTINGS_ENV.contains(&key.as_str()));
+    // Length-prefixed so no two different input lists hash alike.
+    let mut part = |bytes: &[u8]| {
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(bytes);
+    };
+    part(standalone_manifest);
+    part(build_hash.unwrap_or_default().as_bytes());
     for (key, value) in render_settings {
-        // Length-prefixed so no two different settings lists hash alike.
-        for part in [key, value] {
-            h.update((part.len() as u64).to_le_bytes());
-            h.update(part.as_bytes());
-        }
+        part(key.as_bytes());
+        part(value.as_bytes());
     }
     // 16 hex chars (64 bits) - human-readable, collision-resistant for deployment tracking
     h.finalize()
@@ -1676,6 +1762,18 @@ struct WorkerConnection {
     writer: BoxWriter,
     route_manifest: Vec<RouteInfo>,
     worker_rules: RuleSet,
+    /// The deployment ID acked to the worker.
+    deployment_id: String,
+}
+
+/// The optional `buildHash` field of a READY frame: the content hash of the
+/// client build the worker serves (giojs-core `clientBuildHash`). Additive
+/// within protocol v3; a worker that omits it contributes no build.
+fn ready_build_hash(ready: &serde_json::Value) -> Option<&str> {
+    ready
+        .get("buildHash")
+        .and_then(serde_json::Value::as_str)
+        .filter(|hash| !hash.is_empty())
 }
 
 /// Compile the optional `middleware` field of a READY frame. Absent or
@@ -1699,14 +1797,16 @@ fn parse_ready_middleware(ready: &serde_json::Value) -> RuleSet {
 /// Connect to the worker's socket and run the authenticated READY/ACK
 /// handshake, retrying up to `attempts` times (Node may still be booting).
 /// Returns the connection plus the route manifest and middleware rules from
-/// the READY frame.
+/// the READY frame. The ACK carries `deployment_id` of the READY's build
+/// hash (the builder's startup handshake completes the ID with it; every
+/// later one acks the pool's fixed ID).
 ///
 /// A READY carrying a wrong token proof fails immediately without retrying:
 /// something else owns that endpoint, and handing it requests would let a
 /// local attacker serve responses to our users.
 async fn connect_and_handshake(
     path: &str,
-    deployment_id: &str,
+    deployment_id: impl Fn(Option<&str>) -> String,
     token: &str,
     attempts: usize,
 ) -> anyhow::Result<WorkerConnection> {
@@ -1757,6 +1857,7 @@ async fn connect_and_handshake(
             .and_then(|r| serde_json::from_value::<Vec<RouteInfo>>(r.clone()).ok())
             .unwrap_or_default();
         let worker_rules = parse_ready_middleware(&ready);
+        let deployment_id = deployment_id(ready_build_hash(&ready));
         let ack = serde_json::to_vec(&serde_json::json!({
             "type": "ack",
             "deploymentId": deployment_id,
@@ -1774,6 +1875,7 @@ async fn connect_and_handshake(
                     writer,
                     route_manifest,
                     worker_rules,
+                    deployment_id,
                 });
             }
             Err(e) => {
@@ -2297,7 +2399,7 @@ async fn recover_worker(
         }
         match connect_and_handshake(
             &worker.ipc_path,
-            &inner.deployment_id,
+            |_| inner.deployment_id.clone(),
             &worker.token,
             connect_attempts,
         )
@@ -2699,30 +2801,146 @@ mod tests {
             )]
         };
         let manifest = br#"{"routes":[]}"#;
-        let before = derive_deployment_id(manifest, &render_env(vec![640]));
+        let id = |manifest: &[u8], env: &[(String, String)]| {
+            DeploymentInputs::new(None, manifest.to_vec(), env, Vec::new()).with_build(Some("b1"))
+        };
+        let before = id(manifest, &render_env(vec![640]));
         assert_eq!(before.len(), 16);
         assert_eq!(
             before,
-            derive_deployment_id(manifest, &render_env(vec![640])),
+            id(manifest, &render_env(vec![640])),
             "same build + same settings must keep the ID (and the warm disk cache)"
         );
         assert_ne!(
             before,
-            derive_deployment_id(manifest, &render_env(vec![828])),
+            id(manifest, &render_env(vec![828])),
             "changing [images] allowed_widths must invalidate cached pages"
         );
-        assert_ne!(before, derive_deployment_id(b"", &render_env(vec![640])));
+        assert_ne!(before, id(b"", &render_env(vec![640])));
         // Only listed render settings count: a secret or per-boot value handed
         // to the worker must neither leak into the public ID nor change it on
         // every restart.
         let mut with_secret = render_env(vec![640]);
         with_secret.push(("GIO_SESSION_SECRET".into(), "s3cret".into()));
-        assert_eq!(before, derive_deployment_id(manifest, &with_secret));
-        // No render settings at all: the manifest hash alone, as before.
+        assert_eq!(before, id(manifest, &with_secret));
         assert_eq!(
-            derive_deployment_id(manifest, &[]),
-            derive_deployment_id(manifest, &[("OTHER".into(), "x".into())])
+            id(manifest, &[]),
+            id(manifest, &[("OTHER".into(), "x".into())])
         );
+    }
+
+    #[test]
+    fn deployment_id_changes_with_the_client_build() {
+        // A code change gives the builder a new client build (new chunk and
+        // stylesheet names): persisted pages linking the old ones must stop
+        // matching, and clients on the old build must get the skew reload.
+        let inputs = DeploymentInputs::new(None, Vec::new(), &[], Vec::new());
+        let first = inputs.with_build(Some("build-a"));
+        assert_eq!(first, inputs.with_build(Some("build-a")), "restart-stable");
+        assert_ne!(first, inputs.with_build(Some("build-b")));
+        assert_ne!(first, inputs.before_build());
+        assert_eq!(inputs.before_build(), inputs.with_build(None));
+        // The standalone manifest still counts, on top of the build.
+        let standalone = DeploymentInputs::new(None, b"{\"v\":1}".to_vec(), &[], Vec::new());
+        assert_ne!(first, standalone.with_build(Some("build-a")));
+    }
+
+    #[test]
+    fn deployment_id_changes_with_what_the_server_composes_into_pages() {
+        // Font links (local fonts carry a content hash, and stale copies are
+        // deleted) and the deployment script's default locale are baked into
+        // cached pages by the server itself.
+        let id = |fonts: &str, locale: &str| {
+            DeploymentInputs::new(
+                None,
+                Vec::new(),
+                &[],
+                vec![
+                    ("fonts".into(), fonts.into()),
+                    ("i18n.default_locale".into(), locale.into()),
+                ],
+            )
+            .with_build(Some("b"))
+        };
+        let before = id("inter-400-normal-0011aabb.woff2", "en");
+        assert_eq!(before, id("inter-400-normal-0011aabb.woff2", "en"));
+        assert_ne!(before, id("inter-400-normal-ccddeeff.woff2", "en"));
+        assert_ne!(before, id("inter-400-normal-0011aabb.woff2", "de"));
+    }
+
+    #[test]
+    fn a_pinned_deployment_id_wins_over_the_build() {
+        let inputs = DeploymentInputs::new(
+            Some("  release-2026-10-07  ".into()),
+            b"manifest".to_vec(),
+            &[],
+            Vec::new(),
+        );
+        assert_eq!(inputs.with_build(Some("build-a")), "release-2026-10-07");
+        assert_eq!(inputs.with_build(Some("build-b")), "release-2026-10-07");
+        assert_eq!(inputs.before_build(), "release-2026-10-07");
+        // Blank means unset; overlong is cut at 64 characters.
+        let blank = DeploymentInputs::new(Some("  ".into()), Vec::new(), &[], Vec::new());
+        assert_ne!(blank.with_build(Some("a")), blank.with_build(Some("b")));
+        let long = DeploymentInputs::new(Some("x".repeat(100)), Vec::new(), &[], Vec::new());
+        assert_eq!(long.before_build().len(), 64);
+    }
+
+    #[test]
+    fn the_standalone_manifest_is_read_from_the_project_root() {
+        let root = std::env::temp_dir().join(format!(
+            "gio_deployment_inputs_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(root.join(".gio")).unwrap();
+        std::fs::write(root.join(".gio/manifest.json"), b"{\"standalone\":true}").unwrap();
+        let inputs = DeploymentInputs::from_process(&root, &[], Vec::new());
+        std::fs::remove_dir_all(&root).ok();
+        if std::env::var(DEPLOYMENT_ID_ENV).is_err() {
+            assert_eq!(inputs.standalone_manifest, b"{\"standalone\":true}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_builder_handshake_acks_the_id_of_its_build() {
+        let dir = std::env::temp_dir().join(format!(
+            "gio_handshake_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("ipc.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let token = generate_token();
+        let token_server = token.clone();
+        let worker = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut reader, mut writer) = tokio::io::split(stream);
+            let ready = serde_json::to_vec(&serde_json::json!({
+                "type": "ready",
+                "version": "test",
+                "protocol": IPC_PROTOCOL_VERSION,
+                "token": handshake_proof(&token_server, "ready"),
+                "routes": [],
+                "buildHash": "content-hash-1",
+            }))
+            .unwrap();
+            write_frame(&mut writer, &ready).await.unwrap();
+            let ack: serde_json::Value =
+                serde_json::from_slice(&read_frame(&mut reader).await.unwrap()).unwrap();
+            ack["deploymentId"].as_str().unwrap().to_string()
+        });
+        let connection = connect_and_handshake(
+            socket.to_str().unwrap(),
+            |build_hash| format!("id-of-{}", build_hash.unwrap_or("none")),
+            &token,
+            3,
+        )
+        .await
+        .expect("handshake");
+        assert_eq!(connection.deployment_id, "id-of-content-hash-1");
+        assert_eq!(worker.await.unwrap(), "id-of-content-hash-1");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -3368,7 +3586,7 @@ mod tests {
             assert_eq!(ack["deploymentId"], "dep-1");
         });
 
-        let connection = connect_and_handshake(&pipe, "dep-1", &token, 3)
+        let connection = connect_and_handshake(&pipe, |_| "dep-1".to_string(), &token, 3)
             .await
             .expect("handshake must succeed with matching token");
         assert_eq!(connection.route_manifest.len(), 1);
@@ -3467,7 +3685,7 @@ mod tests {
             write_frame(&mut writer, &ready).await.unwrap();
         });
 
-        let err = match connect_and_handshake(&pipe, "dep-1", "real-token", 3).await {
+        let err = match connect_and_handshake(&pipe, |_| "dep-1".to_string(), "real-token", 3).await {
             Ok(_) => panic!("wrong proof must be rejected"),
             Err(e) => e.to_string(),
         };
@@ -3502,7 +3720,7 @@ mod tests {
             write_frame(&mut writer, &ready).await.unwrap();
         });
 
-        let err = match connect_and_handshake(&pipe, "dep-1", &token, 3).await {
+        let err = match connect_and_handshake(&pipe, |_| "dep-1".to_string(), &token, 3).await {
             Ok(_) => panic!("mismatched protocol must be refused"),
             Err(e) => e.to_string(),
         };
@@ -3921,6 +4139,7 @@ mod tests {
                     has_ws_handler: false,
                 }],
                 worker_rules: rules_with_redirect("/installed"),
+                deployment_id: "dep".into(),
             },
         );
         assert!(worker.status().ready);

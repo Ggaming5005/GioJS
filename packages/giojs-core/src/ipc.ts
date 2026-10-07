@@ -26,6 +26,8 @@ import type { WsHandlerFn } from './ws-router.ts';
 import type { NodePluginRegistry } from './plugin.ts';
 import type { WireMiddlewareRules } from './middleware.ts';
 import { logger, withRequestLogContext } from './logger.ts';
+import { clientBuildHash } from './build-manifest.ts';
+import { emptyStyleManifest } from './style-manifest.ts';
 import { createErrorDigest, describeError, isDevMode } from './mode.ts';
 import {
   attachRevalidationChannel,
@@ -103,6 +105,10 @@ export function createIPCServer(
   const renderExtras: RenderExtras = { ...extras, streaming: true };
   // revalidateTag()/revalidatePath() now reach a server (once Rust connects).
   enableRevalidation();
+  const buildHash = clientBuildHash({
+    clientScripts: clientScripts ?? new Map(),
+    stylesheets: extras?.stylesheets ?? emptyStyleManifest(),
+  });
 
   const server = net.createServer(socket => {
     logger.info('rust connected', { pipe: PIPE_PATH });
@@ -117,6 +123,9 @@ export function createIPCServer(
       // Older servers ignore unknown READY fields, so shipping middleware
       // rules here needs no protocol bump.
       middleware: middleware ?? {},
+      // The client build this worker serves (build-manifest.ts): the server
+      // derives the deployment ID from it. Additive within v3 too.
+      buildHash,
     });
 
     let ackReceived = false;

@@ -83,9 +83,10 @@ pub struct MetricsConfig {
     #[serde(default)]
     pub token: String,
     /// Only these client IPs or CIDR blocks may scrape (after
-    /// `trusted_proxies` resolution).
+    /// `trusted_proxies` resolution). A malformed entry fails startup.
     #[serde(default)]
-    pub ip_allowlist: Vec<String>,
+    #[cfg_attr(test, schemars(with = "Vec<String>"))]
+    pub ip_allowlist: crate::client_identity::IpAllowlist,
 }
 
 /// `[revalidate]`: the on-demand revalidation endpoint (see revalidate.rs).
@@ -1878,6 +1879,20 @@ redirect_to    = "/"
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn malformed_metrics_ip_allowlist_fails_to_load() {
+        // An entry that matched nobody would lock every scraper out (403).
+        let error = GioConfig::parse(
+            "[metrics]\nip_allowlist = [\"198.51.100.0/24\", \"10.0.0.0/33\"]\n",
+            "gio.toml",
+        )
+        .expect_err("a malformed ip_allowlist entry must not load");
+        assert!(matches!(error, ConfigError::InvalidValue { .. }), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("metrics.ip_allowlist"), "{message}");
+        assert!(message.contains("\"10.0.0.0/33\""), "{message}");
     }
 
     #[test]

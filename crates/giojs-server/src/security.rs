@@ -17,7 +17,8 @@
 //!   dynamic response - buffered, cached, streamed, PPR shell + holes alike,
 //!   whatever the content type - before compression. The placeholder is
 //!   random, persisted beside the page cache (so the disk cache survives
-//!   restarts), rotated with each deployment and never sent to a client:
+//!   restarts), rotated with the deployment's pre-build inputs (see
+//!   `ipc::DeploymentInputs::before_build`) and never sent to a client:
 //!   markup an attacker manages to store cannot name it, so it can never be
 //!   promoted to a valid nonce.
 //! - Cross-site request protection: unsafe methods and WebSocket upgrades
@@ -142,10 +143,12 @@ pub fn with_nonce_attr(markup: &str, tag: &str, attr: &str) -> String {
 
 /// The placeholder of `deployment_id` persisted under `dir`, created on
 /// first use. Persisting keeps disk-cached pages (which contain it) servable
-/// across restarts. A new deployment gets a new placeholder and the files of
-/// earlier ones are deleted: its cache entries never match theirs anyway
-/// (see `cache_epoch`), and a placeholder that ever leaked dies with the
-/// deployment that leaked it. Deleting the files rotates it by hand.
+/// across restarts. A new ID gets a new placeholder and the files of earlier
+/// ones are deleted: a placeholder that ever leaked dies with the settings
+/// that leaked it. The worker needs it at spawn, before its build completes
+/// the deployment ID, so the caller passes the ID without the build
+/// (`ipc::DeploymentInputs::before_build`); `cache_epoch` still uses the
+/// full one. Deleting the files rotates it by hand.
 /// Falls back to a per-process placeholder when the directory is not
 /// writable - correct, only the disk cache is then lost at the next start.
 pub fn load_or_create_nonce_placeholder(dir: &Path, deployment_id: &str) -> String {

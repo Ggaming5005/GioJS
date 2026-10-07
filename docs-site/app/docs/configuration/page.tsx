@@ -547,11 +547,18 @@ ip_allowlist = ["10.0.0.5", "10.0.0.6"]   # only allow these client IPs (or CIDR
       <CodeBlock lang="bash" code={`# Scrape with a token:
 curl -H "Authorization: Bearer a-long-random-secret" \\
   http://localhost:3000/_gio/metrics`} />
+      <p>
+        A malformed <code>ip_allowlist</code> entry (<code>&quot;10.0.0.0/33&quot;</code>)
+        stops startup, like a malformed <code>trusted_proxies</code> one, instead of
+        quietly matching nobody.
+      </p>
       <div className="callout">
         In production (<code>NODE_ENV</code> not <code>development</code>), GioJS
-        logs a warning at startup when neither <code>token</code> nor
-        <code>ip_allowlist</code> is set - unauthenticated metrics are fine on
-        localhost but should never face the public internet.
+        logs a warning at startup when metrics are enabled with neither{' '}
+        <code>token</code> nor <code>ip_allowlist</code> set - unauthenticated metrics are
+        fine on localhost but should never face the public internet. With metrics off
+        (no <code>[metrics]</code> section, or <code>enabled = false</code>) the endpoint
+        answers <code>404</code> and there is no warning.
       </div>
 
       <h2>Dev endpoints &amp; allowed hosts</h2>
@@ -698,7 +705,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
           <tr><td><code>GIO_HOST</code> / <code>GIO_PORT</code></td><td>Override <code>[server] host</code> / <code>port</code> without editing <code>gio.toml</code> (a second instance, a test server). The host must be an IP address; a malformed value stops startup (see <a href="#listen-address">Listen address</a>)</td><td><code>[server]</code> values</td></tr>
           <tr><td><code>PORT</code></td><td>The port hosting platforms assign (Heroku, Render, Railway, Fly.io, Cloud Run): overrides <code>[server] port</code>; <code>GIO_PORT</code> wins over it</td><td>unset</td></tr>
           <tr><td><code>GIO_CACHE_DIR</code></td><td>Page cache directory, overriding <code>[cache] disk_path</code>; may be absolute</td><td><code>.gio/cache/pages</code></td></tr>
-          <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the build content and the gio.toml <code>[images]</code> settings). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
+          <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the client build the server produced at startup, the gio.toml <code>[images]</code> settings, the served <code>[[fonts]]</code> files and the i18n default locale). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
           <tr><td><code>GIO_SOCKET_PATH</code></td><td>Rust-to-Node IPC path; the server passes the resolved value to the Node worker (in a <a href="#render-workers">worker pool</a>, the other workers get it with a <code>-w&lt;N&gt;</code> suffix)</td><td>per-instance <code>.gio/ipc-&lt;pid&gt;-&lt;rand&gt;.sock</code> (Unix), unique named pipe (Windows)</td></tr>
           <tr><td><code>GIO_PUBLIC_DIR</code></td><td>Directory served at the site root and under <code>/public/*</code></td><td><code>public/</code> next to <code>app/</code></td></tr>
           <tr><td><code>GIO_REVALIDATE_TOKEN</code></td><td>Bearer token that enables <code>POST /_gio/revalidate</code> (<a href="/docs/caching">on-demand revalidation</a>); at least 32 bytes, or the server refuses to start. Overrides <code>[revalidate] token</code></td><td>unset (endpoint disabled)</td></tr>
