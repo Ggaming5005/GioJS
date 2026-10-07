@@ -12,13 +12,20 @@ export default function Page(): React.JSX.Element {
       <p>A new project is intentionally small. Everything is driven by file conventions under app/.</p>
       <CodeBlock lang="text" code={`my-app/
   app/
-    layout.tsx        # root layout (wraps every page)
+    layout.tsx        # root layout (wraps every page): metadata, imports globals.css
+    globals.css       # global styles, bundled and linked by GioJS
     page.tsx          # the / route
     about/page.tsx    # the /about route
     posts/[id]/page.tsx  # dynamic route -> /posts/:id
+    error.tsx         # error page / boundary
+    not-found.tsx     # 404 page
   components/          # your shared components
   public/              # static assets served as-is
-  gio.toml             # server configuration`} />
+    fonts/             # the self-hosted .woff2 files gio.toml's [[fonts]] name
+  gio.toml             # server configuration
+  .env.example         # the env variables the app reads (copy to .env.local)
+  .gitignore
+  AGENTS.md            # notes for coding agents`} />
       <h2>The app directory</h2>
       <p>Routes are folders. A page.tsx (or .jsx) makes a folder a route; a layout.tsx wraps the pages beneath it. Dynamic segments use [brackets] ([...slug] and [[...slug]] for catch-alls), (group) folders organize routes without adding a URL segment, and _private folders are never routable.</p>
       <h2>public/</h2>

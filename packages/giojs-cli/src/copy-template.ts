@@ -4,6 +4,8 @@
  * Recursively copies a scaffold template to the destination directory.
  * Text files go through {{PROJECT_NAME}} substitution; anything else
  * (favicons, images, fonts) is byte-copied so binary content survives.
+ * Files npm would drop from a published package ship under a placeholder
+ * name and are renamed on copy (see PUBLISH_RENAMES).
  */
 import { readFile, writeFile, readdir, mkdir, copyFile } from 'fs/promises';
 import { join, extname } from 'path';
@@ -25,10 +27,27 @@ const TEXT_EXTENSIONS = new Set([
   '.txt',
 ]);
 
+/**
+ * npm never packs a file named .gitignore (it reads it as the package's
+ * ignore list instead), so the templates ship _gitignore.
+ */
+const PUBLISH_RENAMES: Record<string, string> = {
+  _gitignore: '.gitignore',
+};
+
+/** The name a template file is written under in the new project. */
+export function scaffoldFileName(templateFileName: string): string {
+  return PUBLISH_RENAMES[templateFileName] ?? templateFileName;
+}
+
 /** True for files safe to read as UTF-8 and run through placeholder substitution. */
 export function isTextTemplateFile(fileName: string): boolean {
   if (fileName.startsWith('.')) return true;
   return TEXT_EXTENSIONS.has(extname(fileName).toLowerCase());
+}
+
+export function templateDir(templateName: string): string {
+  return join(TEMPLATES_DIR, templateName);
 }
 
 export async function copyTemplate(
@@ -36,8 +55,7 @@ export async function copyTemplate(
   destDir: string,
   projectName: string,
 ): Promise<void> {
-  const srcDir = join(TEMPLATES_DIR, templateName);
-  await copyDir(srcDir, destDir, projectName);
+  await copyDir(templateDir(templateName), destDir, projectName);
 }
 
 export async function copyDir(src: string, dest: string, projectName: string): Promise<void> {
@@ -45,7 +63,7 @@ export async function copyDir(src: string, dest: string, projectName: string): P
   const entries = await readdir(src, { withFileTypes: true });
   for (const entry of entries) {
     const srcPath = join(src, entry.name);
-    const destPath = join(dest, entry.name);
+    const destPath = join(dest, scaffoldFileName(entry.name));
     if (entry.isDirectory()) {
       await copyDir(srcPath, destPath, projectName);
     } else if (isTextTemplateFile(entry.name)) {
