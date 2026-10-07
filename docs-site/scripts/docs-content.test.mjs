@@ -150,3 +150,52 @@ test("the releases page highlights the release tagged 'latest', which is release
     assert.match(source, new RegExp(`\\$\\{isLatest\\(rel\\) \\? ' ${cls}' : ''\\}`), cls);
   }
 });
+
+/** `[export] const NAME = <number expression>` in a TypeScript source file, evaluated. */
+function tsNumber(file, name) {
+  const m = new RegExp(`const ${name}(?::[^=]*)? = ([0-9_ *]+);`).exec(read(file));
+  assert.ok(m, `${name} not found in ${file} - update this test if it moved`);
+  return m[1].replaceAll('_', '').split('*').reduce((product, factor) => product * Number(factor), 1);
+}
+
+test('the function reference states the limits and defaults the code uses', () => {
+  const core = (name) => `packages/giojs-core/src/${name}`;
+  const page = (slug) => docsPage(`functions/${slug}`);
+
+  // redirect(): 303 unless told otherwise, and only these statuses.
+  const action = read(core('action.ts'));
+  assert.match(action, /const \{ status = 303, headers \}/, 'redirect() default status moved');
+  const statuses = /REDIRECT_STATUSES[^=]*= new Set\(\[([^\]]*)\]\)/.exec(action)?.[1].replace(/\s/g, '');
+  assert.equal(statuses, '301,302,303,307,308');
+  assert.match(page('redirect'), /default: '303'/);
+  assert.match(page('redirect'), /must be 301, 302, 303, 307 or 308/);
+
+  // revalidateTag / revalidatePath: confirmation timeout, calls in flight, tag and path limits.
+  const revalidate = core('revalidate.ts');
+  const timeoutSeconds = tsNumber(revalidate, 'REVALIDATE_TIMEOUT_MS') / 1000;
+  const inFlight = tsNumber(revalidate, 'MAX_REVALIDATIONS_IN_FLIGHT');
+  for (const slug of ['revalidate-path', 'revalidate-tag']) {
+    assert.match(page(slug), new RegExp(`${timeoutSeconds}\\s+seconds`), slug);
+    assert.match(page(slug), new RegExp(`at\\s+most\\s+${inFlight}\\b|most\\s+${inFlight}\\s+calls`), slug);
+  }
+  assert.match(page('revalidate-tag'), new RegExp(`at most ${tsNumber(revalidate, 'MAX_CACHE_TAG_BYTES')} bytes`));
+  assert.match(page('revalidate-tag'), new RegExp(`at most ${tsNumber(revalidate, 'MAX_CACHE_TAGS')} tags`));
+  assert.match(page('revalidate-path'), new RegExp(`longer than ${tsNumber(revalidate, 'MAX_PATH_BYTES')} bytes`));
+
+  // createSessionStorage: default lifetime and cookie name, secret length.
+  assert.match(page('create-session-storage'), new RegExp(`default: '${tsNumber(core('session.ts'), 'DEFAULT_MAX_AGE')}'`));
+  assert.match(read(core('session.ts')), /const DEFAULT_COOKIE_NAME = 'gio_session';/);
+  assert.match(page('create-session-storage'), /default: "'gio_session'"/);
+  const minSecret = tsNumber(core('cookies.ts'), 'MIN_SECRET_BYTES');
+  assert.match(page('create-session-storage'), new RegExp(`at\\s+least\\s+${minSecret}\\s+bytes`));
+  assert.match(page('cookies'), new RegExp(`at\\s+least\\s+${minSecret}\\s+bytes`));
+
+  // broadcast: room name and rooms-per-socket limits.
+  assert.match(page('broadcast'), new RegExp(`at\\s+most\\s+${tsNumber(core('ws-hub.ts'), 'MAX_ROOM_NAME_BYTES')}\\s+bytes`));
+  assert.match(page('broadcast'), new RegExp(`up to ${tsNumber(core('ws-hub.ts'), 'MAX_ROOMS_PER_SOCKET')} rooms`));
+
+  // createTestServer: readiness timeout.
+  const readyMs = /options\.timeoutMs \?\? ([0-9_]+)/.exec(read(core('testing.ts')))?.[1].replaceAll('_', '');
+  assert.ok(readyMs, 'createTestServer timeout default moved');
+  assert.match(page('create-test-server'), new RegExp(`default: '${readyMs}'`));
+});

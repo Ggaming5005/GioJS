@@ -1,0 +1,146 @@
+import React from 'react';
+import type { Metadata } from '@gio.js/core';
+import { CodeBlock } from '../../../../components/CodeBlock.tsx';
+import { PropsTable, VersionHistory } from '../../../../components/ReferenceTable.tsx';
+
+export const metadata: Metadata = {
+  title: 'href',
+  description:
+    'Build a URL path from one of your route patterns, with the pattern and its params checked by TypeScript.',
+};
+
+export const revalidate = false;
+
+export default function Page(): React.JSX.Element {
+  return (
+    <>
+      <h1>href</h1>
+      <p className="page-subtitle">
+        Build a URL path from one of your route patterns, with the pattern and its params
+        checked by TypeScript.
+      </p>
+      <CodeBlock lang="tsx" code={`import { GioLink, href } from '@gio.js/react';
+
+<GioLink href={href('/posts/:id', { id: post.id })}>{post.title}</GioLink>`} />
+
+      <h2 id="reference">Reference</h2>
+      <PropsTable kind="Parameter" rows={[
+        {
+          name: 'pattern',
+          type: 'keyof GioRegisteredRoutes',
+          required: true,
+          description: (
+            <>
+              A route pattern of your app, as the router writes it: <code>/about</code>,{' '}
+              <code>/posts/:id</code>, <code>/docs/*slug</code> (catch-all),{' '}
+              <code>/shop/*path?</code> (optional catch-all). Route groups never appear in
+              patterns.
+            </>
+          ),
+        },
+        {
+          name: 'params',
+          type: 'RouteParamsOf<pattern>',
+          description: (
+            <>
+              The values of the pattern&apos;s params. Not accepted for a static route,
+              optional when every param is optional, required otherwise.
+            </>
+          ),
+        },
+      ]} />
+      <h3 id="returns">Returns</h3>
+      <p>
+        The path as a <code>string</code>. Each param value is URL-encoded with{' '}
+        <code>encodeURIComponent</code>; a catch-all value is encoded segment by segment, so
+        its <code>/</code> separators stay. An empty or missing optional catch-all drops its
+        segment entirely (<code>/shop</code>, not <code>/shop/</code>), and an empty result
+        is <code>/</code>.
+      </p>
+      <h3 id="types">Types</h3>
+      <p>
+        At every server start (and with <code>gio typegen</code>), GioJS writes{' '}
+        <code>.gio/routes.d.ts</code>, which fills the global{' '}
+        <code>GioJS.RegisteredRoutes</code> interface with every page and{' '}
+        <code>route.ts</code> pattern and its params. With that file in your tsconfig{' '}
+        <code>include</code> (the starters have it), a pattern that is not one of your routes,
+        or a missing or misspelled param, fails <code>tsc</code>, and editors autocomplete
+        both. Without it, any string is accepted and params are{' '}
+        <code>{'Record<string, string>'}</code>.
+      </p>
+      <CodeBlock lang="ts" title=".gio/routes.d.ts" code={`// Generated on every server start - do not edit.
+/// <reference path="./css-modules.d.ts" />
+declare global {
+  namespace GioJS {
+    interface RegisteredRoutes {
+      '/': Record<string, never>;
+      '/posts/:id': { id: string };
+      '/docs/*slug': { slug: string };
+      '/shop/*path?': { path?: string };
+    }
+  }
+}
+export {};`} />
+
+      <h2 id="examples">Examples</h2>
+      <h3 id="every-kind-of-pattern">Every kind of pattern</h3>
+      <CodeBlock lang="ts" code={`href('/about');                          // '/about'
+href('/posts/:id', { id: '42' });         // '/posts/42'
+href('/posts/:id', { id: 'a b/c' });      // '/posts/a%20b%2Fc'
+href('/docs/*slug', { slug: 'guides/setup' });   // '/docs/guides/setup'
+href('/shop/*path?');                     // '/shop'
+href('/shop/*path?', { path: 'shoes/red' });     // '/shop/shoes/red'`} />
+      <h3 id="with-a-query-string">With a query string</h3>
+      <p><code>href</code> builds the path only. Append a query yourself:</p>
+      <CodeBlock lang="ts" code={`const url = \`\${href('/posts/:id', { id })}?\${new URLSearchParams({ tab: 'comments' })}\`;
+router.push(url);`} />
+
+      <h2 id="good-to-know">Good to know</h2>
+      <ul>
+        <li>
+          <strong>It runs anywhere</strong> - server, browser, tests - and has no side
+          effects. It does not check at runtime that the route exists or that params are
+          complete - a missing <code>id</code> gives <code>/posts/</code> - the type check
+          does.
+        </li>
+        <li>
+          <strong>Before the first server start</strong> (no <code>.gio/routes.d.ts</code> yet),
+          every pattern is accepted. Run <code>gio typegen</code> in CI before{' '}
+          <code>tsc</code>.
+        </li>
+        <li>
+          <strong>The same registry</strong> types <code>useParams()</code> and the{' '}
+          <code>@gio.js/core</code> types such as <code>{"PageProps<'/posts/:id'>"}</code> and{' '}
+          <code>{"GioRequest<'/api/posts/:id'>"}</code>.
+        </li>
+        <li>
+          Routes added by hand to <code>@gio.js/react</code>&apos;s{' '}
+          <code>GioRegisteredRoutes</code> still type <code>href()</code>; declare them on{' '}
+          <code>GioJS.RegisteredRoutes</code> instead so the core types see them too.
+        </li>
+      </ul>
+
+      <h2 id="related">Related</h2>
+      <ul>
+        <li><a href="/docs/linking-and-navigating#typed-routes">Linking &amp; Navigating: Typed routes</a></li>
+        <li><a href="/docs/typescript">TypeScript</a></li>
+        <li><a href="/docs/cli/typegen">gio typegen</a></li>
+        <li><a href="/docs/functions/navigate">navigate</a> and <a href="/docs/hooks/use-params">useParams</a></li>
+      </ul>
+
+      <h2 id="version-history">Version history</h2>
+      <VersionHistory entries={[
+        {
+          version: 'v0.1.0-beta.8',
+          changes: (
+            <>
+              Reads the global <code>GioJS.RegisteredRoutes</code> registry; optional
+              catch-alls (<code>*slug?</code>) drop their segment when empty.
+            </>
+          ),
+        },
+        { version: 'v0.1.0-beta.6', changes: 'Introduced.' },
+      ]} />
+    </>
+  );
+}
