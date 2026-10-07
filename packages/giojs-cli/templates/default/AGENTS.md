@@ -178,3 +178,5 @@ renders React. Full docs: https://giojs.com/llms.txt
   bundles are built at startup)
 - Health: `GET /_gio/health` · Dev dashboard: `/_gio/devtools` (dev only;
   answers localhost hosts only, add LAN IPs/hostnames to `[dev] allowed_hosts`)
+- `npx create-giojs add <feature>` — add tailwind, api, auth, db, docker or ci
+  (never overwrites a changed file; safe to rerun)

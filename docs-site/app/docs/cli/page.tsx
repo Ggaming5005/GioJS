@@ -13,7 +13,23 @@ export default function Page(): React.JSX.Element {
       <p>Scaffold a new project. Runs an interactive prompt, or accepts flags for non-interactive use.</p>
       <CodeBlock lang="bash" code={`npm create giojs@latest my-app -- --ts   # or --js
 #   --no-install   skip dependency install
-#   -y / --yes     accept all defaults`} />
+#   -y / --yes     accept all defaults
+#   --tailwind --api --auth --db --docker --ci   starter features
+#   --features tailwind,auth,db                  the same, as a list`} />
+      <p>
+        Without feature flags the prompt asks which <a href="/docs/starter-features">starter
+        features</a> to add.
+      </p>
+      <h2>create-giojs add</h2>
+      <p>
+        Adds starter features to an existing project. A file you changed is never overwritten:
+        any conflict stops the run before anything is written and shows a diff. Running it
+        again is safe.
+      </p>
+      <CodeBlock lang="bash" code={`npx create-giojs add tailwind auth
+#   --dry-run      show what would change, write nothing
+#   --force        overwrite conflicting files and scripts
+#   --cwd <dir>    the project directory (default: the current one)`} />
       <h2>giojs-server / gio</h2>
       <p>The gio binary runs the server. npm run dev and npm run start call it for you.</p>
       <CodeBlock lang="bash" code={`NODE_ENV=development giojs-server   # dev
