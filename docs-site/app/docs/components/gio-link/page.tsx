@@ -136,9 +136,11 @@ export default function SiteLayout({ children }: LayoutProps) {
         <code>Sec-Purpose: prefetch</code>. It is skipped for a <code>#hash</code> link, for the
         page already on screen, and for a page already in the prefetch cache. The cache keeps a
         page for 30 seconds (<code>PREFETCH_TTL_MS</code>), holds at most 50, and is emptied by{' '}
-        <code>router.refresh()</code> and by any non-<code>GET</code> <code>fetch()</code> to
-        your own origin. The server budgets prefetches per client (<code>429</code> once the
-        budget is spent); a prefetch that failed never decides the click - the navigation
+        <code>router.refresh()</code>, by every <code>&lt;GioForm&gt;</code> submission and by
+        any <code>fetch()</code> to your own origin other than <code>GET</code>,{' '}
+        <code>HEAD</code> or <code>OPTIONS</code>. The server budgets prefetches per client
+        (<code>429</code> once the budget is spent, or for every prefetch with{' '}
+        <code>[prefetch] enabled = false</code>); a prefetch that failed never decides the click - the navigation
         fetches the page itself. See <a href="/docs/configuration/prefetch"><code>[prefetch]</code></a>.
       </p>
 
@@ -147,7 +149,8 @@ export default function SiteLayout({ children }: LayoutProps) {
         With a preset, the DOM swap runs inside <code>document.startViewTransition()</code>, and{' '}
         <code>data-gio-transition=&quot;&lt;preset&gt;&quot;</code> is set on{' '}
         <code>&lt;html&gt;</code> until the transition finishes. The keyframes come in a{' '}
-        <code>&lt;style&gt;</code> element that React hoists into the head once per page.
+        <code>&lt;style&gt;</code> element that React hoists into the head once per page. The
+        preset type is exported as <code>TransitionPreset</code>.
       </p>
       <table>
         <thead><tr><th>Preset</th><th>Old page</th><th>New page</th><th>Duration</th></tr></thead>

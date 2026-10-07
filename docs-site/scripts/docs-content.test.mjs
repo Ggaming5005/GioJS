@@ -176,4 +176,19 @@ test('the component and hook reference states the defaults @gio.js/react ships',
   check(ws, 'DEFAULT_INITIAL_DELAY_MS = 500', 'hooks/use-web-socket', "name: 'initialDelayMs', type: 'number', default: '500'");
   check(ws, 'DEFAULT_MAX_DELAY_MS = 30_000', 'hooks/use-web-socket', "name: 'maxDelayMs', type: 'number', default: '30000'");
   check(ws, 'DEFAULT_MIN_UPTIME_MS = 5_000', 'hooks/use-web-socket', "name: 'minUptimeMs', type: 'number', default: '5000'");
+  check(ws, 'if (code >= 4000 && code < 4500) return false;', 'hooks/use-web-socket', '<code>4000</code>-<code>4499</code>');
+  check(react('Form.tsx'), 'new Set([413, 429])', 'components/gio-form', 'The server&apos;s own <code>413</code> or <code>429</code>');
+  check(
+    read('packages', 'giojs-core', 'src', 'ssr.ts'),
+    'SEE_OTHER_STATUSES: ReadonlySet<number> = new Set([301, 302, 303])',
+    'components/gio-form',
+    '301, 302 or 303 redirect',
+  );
+  check(
+    read('crates', 'giojs-server', 'src', 'config.rs'),
+    'fn default_max_body_bytes() -> usize {\n    2 * 1024 * 1024',
+    'components/gio-form',
+    '(2 MiB by default)',
+  );
+  check(read('crates', 'giojs-font', 'src', 'lib.rs'), 'font-display:swap', 'components/gio-font', 'font-display: swap');
 });

@@ -24,12 +24,12 @@ import { useWebSocket } from '@gio.js/react';
 
 export function Chat({ room }: { room: string }) {
   const [messages, setMessages] = useState<string[]>([]);
-  const { send, readyState } = useWebSocket(\`/chat/\${room}\`, {
+  const { send, readyState } = useWebSocket(\`/api/chat/\${room}\`, {
     onMessage: (data) => setMessages((list) => [...list, String(data)]),
   });
   return (
     <>
-      <p>{readyState === WebSocket.OPEN ? 'Live' : 'Connecting...'}</p>
+      <p>{readyState === 1 ? 'Live' : 'Connecting...'}</p>
       <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
       <button onClick={() => send('hello')}>Say hello</button>
     </>
@@ -37,7 +37,8 @@ export function Chat({ room }: { room: string }) {
 }`} />
       <p>
         The server side is a <code>wsHandler</code> export in the <code>route.ts</code> for that
-        path - see <a href="/docs/page-exports/ws-handler"><code>wsHandler</code></a> and{' '}
+        path, here <code>app/api/chat/[room]/route.ts</code>. The socket needs its own URL: a
+        folder cannot hold both a <code>page.tsx</code> and a <code>route.ts</code>. See <a href="/docs/page-exports/ws-handler"><code>wsHandler</code></a> and{' '}
         <a href="/docs/websockets">WebSockets</a>.
       </p>
 
@@ -115,7 +116,7 @@ export function Chat({ room }: { room: string }) {
       <PropsTable kind="Field" rows={[
         { name: 'send', type: '(data: string | ArrayBufferLike | ArrayBufferView | Blob) => boolean', description: <>Send now, or queue it (with <code>queueWhileDisconnected</code>). <code>false</code> when the message was dropped: not open and not queued, the queue full, or the hook stopped.</> },
         { name: 'lastMessage', type: 'string | ArrayBuffer | null', description: <>The latest message, <code>null</code> before the first. React may batch two quick messages into one render: use <code>onMessage</code> when every one matters.</> },
-        { name: 'readyState', type: 'number', description: <><code>0</code> connecting, <code>1</code> open, <code>3</code> closed, as on <code>WebSocket</code>; <code>-1</code> before a socket exists (server rendering).</> },
+        { name: 'readyState', type: 'number', description: <><code>0</code> connecting, <code>1</code> open, <code>3</code> closed, as on <code>WebSocket</code>; <code>-1</code> before a socket exists (server rendering). Compare with the numbers rather than <code>WebSocket.OPEN</code> in render code: Node 20 has no <code>WebSocket</code> global, so the server render would throw.</> },
         { name: 'reconnectAttempts', type: 'number', description: <>Retries since a connection last stayed open <code>minUptimeMs</code>; <code>0</code> while connected.</> },
         { name: 'isReconnecting', type: 'boolean', description: 'Waiting to retry after a drop.' },
         { name: 'close', type: '(code?: number, reason?: string) => void', description: <>Close for good (default code <code>1000</code>): no reconnects until <code>reconnect()</code> or a new <code>url</code>.</> },
@@ -179,7 +180,7 @@ export function CursorSync({ onRemote }: { onRemote: (cursor: Cursor) => void })
 });
 
 if (isReconnecting) return <p>Reconnecting (attempt {reconnectAttempts})...</p>;
-if (readyState === WebSocket.CLOSED) return <button onClick={reconnect}>Reconnect</button>;`} />
+if (readyState === 3) return <button onClick={reconnect}>Reconnect</button>; // closed`} />
 
       <h3 id="queueing-while-offline">Queueing while offline</h3>
       <CodeBlock lang="tsx" code={`const { send } = useWebSocket('/notes/42', { queueWhileDisconnected: { maxMessages: 500 } });

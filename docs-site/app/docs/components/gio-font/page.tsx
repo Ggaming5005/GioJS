@@ -48,9 +48,9 @@ export default function Page(): React.JSX.Element {
       ]} />
       <h3 id="returns">Returns</h3>
       <p>
-        <code>null</code>. Neither the server render, the client bundle nor the server reads
-        the props: a family or weight missing from <code>gio.toml</code> is not an error, and the
-        text falls back to the next font in your CSS stack.
+        <code>null</code>. Nothing reads the props - not the React render, not the client
+        bundle, not the Rust server: a family or weight missing from <code>gio.toml</code> is not
+        an error, and the text falls back to the next font in your CSS stack.
       </p>
 
       <h3 id="the-fonts-entries">The [[fonts]] entries</h3>

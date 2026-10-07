@@ -32,8 +32,10 @@ export function Price({ amount }: { amount: number }) {
       <p>A <code>string</code>:</p>
       <ul>
         <li>
-          with <code>[i18n] locales</code> set in <code>gio.toml</code>, always one of them: the
-          locale the server detected, or <code>default_locale</code> when nothing matched;
+          with <code>[i18n] locales</code> set in <code>gio.toml</code>, one of them: the
+          locale the server detected, or <code>default_locale</code> when nothing matched (a
+          region locale with capitals can come back in lower case, see{' '}
+          <a href="#good-to-know">Good to know</a>);
         </li>
         <li>without <code>[i18n]</code>, <code>&apos;&apos;</code>.</li>
       </ul>
@@ -46,7 +48,7 @@ export function Price({ amount }: { amount: number }) {
       </p>
       <ul>
         <li><code>path</code> - a first path segment that is a locale (<code>/fr/about</code>). The prefix is always removed before routing, so the page is <code>app/about/page.tsx</code> and <code>usePathname()</code> is <code>/about</code>.</li>
-        <li><code>accept-language</code> - the first language in the header that is a locale, by full tag (<code>fr-CA</code>) or language (<code>fr</code>).</li>
+        <li><code>accept-language</code> - the first language in the header that is a locale, by full tag (<code>fr-CA</code>) or language (<code>fr</code>). The languages are tried in the order the header lists them; <code>q</code> weights are not compared.</li>
         <li><code>cookie</code> - the <code>gio_locale</code> cookie.</li>
       </ul>
       <p>
@@ -98,8 +100,10 @@ const published = new Intl.DateTimeFormat(locale, { dateStyle: 'long' }).format(
         </li>
         <li>
           The page cache keeps one copy per locale. A URL without a locale prefix depends on
-          the visitor&apos;s headers, so its response is never marked <code>public</code> for CDNs
-          and carries no <code>ETag</code>; link to prefixed URLs where shared caching matters.
+          the visitor&apos;s headers (unless <code>detect_from</code> is only{' '}
+          <code>[&quot;path&quot;]</code>), so its response is never marked <code>public</code>{' '}
+          for CDNs and carries no <code>ETag</code>; link to prefixed URLs where shared caching
+          matters.
         </li>
         <li>
           GioJS never sets the <code>gio_locale</code> cookie; set it yourself to remember a
@@ -110,7 +114,9 @@ const published = new Intl.DateTimeFormat(locale, { dateStyle: 'long' }).format(
         </li>
         <li>
           Locales are matched exactly as written in <code>locales</code> for the path and the
-          cookie; the <code>Accept-Language</code> match ignores case.
+          cookie; the <code>Accept-Language</code> match ignores case. A full-tag match is
+          returned in lower case (<code>pt-br</code> for a configured <code>pt-BR</code>), which
+          then no longer matches the path prefix: write region locales in lower case.
         </li>
       </ul>
 

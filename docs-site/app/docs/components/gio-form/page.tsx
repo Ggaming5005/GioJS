@@ -138,9 +138,12 @@ export default function Newsletter() {
         <code>name</code>/<code>value</code>, URL-encoded - or <code>FormData</code> when{' '}
         <code>encType</code> (or the button&apos;s <code>formEncType</code>) is{' '}
         <code>multipart/form-data</code>. The request carries <code>x-gio-form: 1</code> and the
-        page&apos;s <code>x-deployment-id</code>. The server answers its 301/302/303 redirects with
-        a <code>204</code> that names the target in <code>x-gio-redirect</code>, so{' '}
-        <code>fetch</code> does not follow them itself.
+        page&apos;s <code>x-deployment-id</code>. When the action, the page&apos;s{' '}
+        <code>getServerSideProps</code> or a <code>route.ts</code> answers such a request with a
+        301, 302 or 303 redirect, the worker turns it into a <code>204</code> that names the
+        target in <code>x-gio-redirect</code> (cookies and other headers kept), so{' '}
+        <code>fetch</code> does not follow it itself. A 307 or 308 repeats the <code>POST</code>,
+        and <code>fetch</code> follows those.
       </p>
 
       <h3 id="how-answers-are-handled">How answers are handled</h3>
@@ -154,7 +157,7 @@ export default function Newsletter() {
           </tr>
           <tr>
             <td>A redirect to a page of this app</td>
-            <td>The target is fetched fresh and shown under its own URL, as a new history entry scrolled to the top.</td>
+            <td>The target is fetched fresh and shown under its own URL, as a new history entry scrolled to the top. A redirect back to the URL already shown (Post/Redirect/Get to the same page) replaces the entry and keeps the scroll position instead.</td>
             <td>By the target&apos;s status</td>
           </tr>
           <tr>
