@@ -79,7 +79,7 @@ use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{debug, error, info, warn, Instrument};
 use uuid::Uuid;
-use ws_ipc::WsIpcClient;
+use ws_ipc::WsIpcPool;
 use ws_registry::WsRegistry;
 
 /// Upper bound on the on-disk page cache. Oldest entries are evicted past this.
@@ -448,7 +448,7 @@ struct AppState {
     metrics: Arc<metrics::Metrics>,
     metrics_config: config::MetricsConfig,
     dev_mode: bool,
-    ws_ipc: Option<Arc<WsIpcClient>>,
+    ws_ipc: Option<Arc<WsIpcPool>>,
     ws_registry: Arc<WsRegistry>,
     ws_config: config::WebsocketConfig,
     rate_limiter: Option<Arc<RateLimiter>>,
@@ -521,7 +521,6 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let ws_config = cfg.websocket.clone();
 
     let ipc_paths = ipc::IpcPaths::resolve();
-    let ipc_token = ipc::generate_token();
 
     // The one runtime-mode decision: the worker is spawned with the matching
     // NODE_ENV, so Rust and Node can never disagree about dev vs production.
@@ -599,8 +598,13 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         }
     };
 
-    info!("Starting Node SSR worker: {node_script}");
-    let ipc = IpcClient::start(&node_script, &ipc_paths, &ipc_token, dev_mode, worker_env).await?;
+    let workers = render_worker_count(
+        cfg.server.workers,
+        std::thread::available_parallelism().ok().map(usize::from),
+        dev_mode,
+    );
+    info!(workers, "Starting Node SSR worker: {node_script}");
+    let ipc = IpcClient::start(&node_script, &ipc_paths, dev_mode, worker_env, workers).await?;
     let cache_epoch: Arc<str> =
         security::cache_epoch(ipc.deployment_id(), nonce_placeholder.as_deref()).into();
 
@@ -745,12 +749,10 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let ws_registry = Arc::new(WsRegistry::new());
     let ws_registry_for_shutdown = ws_registry.clone();
     let ws_ipc_client = if ws_config.enabled {
-        match WsIpcClient::connect(ws_registry.clone(), ipc_paths.ws.clone(), ipc_token.clone())
-            .await
-        {
-            Ok(client) => {
+        match WsIpcPool::connect(ws_registry.clone(), ipc.ws_endpoints()).await {
+            Ok(pool) => {
                 info!("WS IPC connected");
-                Some(Arc::new(client))
+                Some(Arc::new(pool))
             }
             Err(e) => {
                 warn!(error = %e, "WS IPC connect failed - WebSocket disabled");
@@ -837,8 +839,10 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         );
     }
 
+    let ipc = Arc::new(ipc);
+    let ipc_for_shutdown = ipc.clone();
     let state = AppState {
-        ipc: Arc::new(ipc),
+        ipc,
         cache,
         coalesce: Arc::new(SingleFlight::new()),
         revalidating: Arc::new(dashmap::DashSet::new()),
@@ -1114,6 +1118,9 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     )
     .await?;
     ws_registry_for_shutdown.close_all();
+    // Connections are drained: let every worker exit on its own (plugin
+    // shutdown hooks included) before the process does.
+    ipc_for_shutdown.shutdown().await;
     if let Err(e) = plugin_registry.shutdown_all() {
         error!(error = %e, "plugin shutdown error");
     }
@@ -1208,14 +1215,17 @@ async fn font_cache_control_middleware(req: Request, next: Next) -> Response {
 
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     let (cache_entries, _) = state.cache.stats();
+    let workers = state.ipc.worker_statuses();
+    let ready_workers = workers.iter().filter(|w| w.ready).count();
     axum::Json(serde_json::json!({
         "status": "ok",
         "http2": state.http2,
         "tls": state.tls_enabled,
         "deploymentId": state.ipc.deployment_id(),
-        // False during worker respawn windows; cached/static content still
-        // serves, so this stays a 200 - readiness probes read the field.
-        "nodeReady": state.ipc.worker_ready(),
+        // False only while every worker is respawning; cached/static content
+        // still serves, so this stays a 200 - readiness probes read the field.
+        "nodeReady": ready_workers > 0,
+        "workers": { "configured": workers.len(), "ready": ready_workers },
         "cacheEntries": cache_entries,
         "uptimeSecs": state.devtools.uptime_secs(),
     }))
@@ -1257,9 +1267,11 @@ async fn metrics_handler(
         }
     }
     let (cache_entries, cache_size_bytes) = state.cache.stats();
+    let worker_metrics = metrics::format_worker_metrics(&state.ipc.worker_statuses());
     let body = state
         .metrics
-        .format_prometheus(cache_entries, cache_size_bytes, read_proc_rss());
+        .format_prometheus(cache_entries, cache_size_bytes, read_proc_rss())
+        + &worker_metrics;
     axum::response::Response::builder()
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(axum::body::Body::from(body))
@@ -1396,7 +1408,7 @@ fn spawn_worker_revalidations(state: AppState) {
             };
             state
                 .ipc
-                .send_revalidate_ack(&revalidation.id, outcome)
+                .send_revalidate_ack(revalidation.worker, &revalidation.id, outcome)
                 .await;
         }
     });
@@ -1999,7 +2011,7 @@ async fn dynamic_handler(
             };
             return ws::handle_ws_upgrade(
                 ws,
-                ws_ipc.clone(),
+                ws_ipc.pick(),
                 state.ws_registry.clone(),
                 info,
                 client_addr,
@@ -4663,6 +4675,25 @@ async fn collect_ppr_shell(
     }
 }
 
+/// How many Node workers render: `[server] workers`, except that dev mode
+/// always runs one. Dev restarts rebuild the client bundles on every edit,
+/// and the builder is the only worker that may write them.
+fn render_worker_count(
+    setting: config::WorkersSetting,
+    available_cores: Option<usize>,
+    dev_mode: bool,
+) -> usize {
+    let configured = setting.resolve(available_cores);
+    if dev_mode && configured > 1 {
+        info!(
+            configured,
+            "dev mode runs a single Node worker ([server] workers applies in production)"
+        );
+        return 1;
+    }
+    configured
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(e) = tokio::signal::ctrl_c().await {
@@ -4979,6 +5010,20 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+
+    #[test]
+    fn dev_mode_always_runs_one_render_worker() {
+        let four = config::WorkersSetting::Count(4);
+        assert_eq!(render_worker_count(four, Some(16), false), 4);
+        assert_eq!(render_worker_count(four, Some(16), true), 1);
+        let auto = config::WorkersSetting::Auto;
+        assert_eq!(render_worker_count(auto, Some(6), false), 6);
+        assert_eq!(render_worker_count(auto, Some(6), true), 1);
+        assert_eq!(
+            render_worker_count(config::WorkersSetting::default(), None, false),
+            1
+        );
+    }
 
     // ── inject_into_html ──────────────────────────────────────────────────────
 

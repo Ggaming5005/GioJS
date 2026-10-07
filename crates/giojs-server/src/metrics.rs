@@ -433,6 +433,41 @@ impl Metrics {
     }
 }
 
+/// The Node worker pool in Prometheus text format, one series per worker
+/// labeled by its pool index. Appended to `format_prometheus`'s output.
+pub fn format_worker_metrics(workers: &[crate::ipc::WorkerStatus]) -> String {
+    let mut out = String::with_capacity(256 + workers.len() * 160);
+    out.push_str("# HELP gio_workers Node render workers configured\n");
+    out.push_str("# TYPE gio_workers gauge\n");
+    out.push_str(&format!("gio_workers {}\n", workers.len()));
+    let mut series =
+        |name: &str, kind: &str, help: &str, value: &dyn Fn(&crate::ipc::WorkerStatus) -> u64| {
+            out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
+            for (index, worker) in workers.iter().enumerate() {
+                out.push_str(&format!("{name}{{worker=\"{index}\"}} {}\n", value(worker)));
+            }
+        };
+    series(
+        "gio_worker_ready",
+        "gauge",
+        "1 while the worker's IPC connection is live",
+        &|w| u64::from(w.ready),
+    );
+    series(
+        "gio_worker_in_flight",
+        "gauge",
+        "Requests and streaming renders in flight on the worker",
+        &|w| w.in_flight as u64,
+    );
+    series(
+        "gio_worker_restarts_total",
+        "counter",
+        "Times the worker process was respawned",
+        &|w| w.restarts,
+    );
+    out
+}
+
 fn escape_label_value(s: &str) -> String {
     s.chars()
         .flat_map(|c| match c {
@@ -495,6 +530,38 @@ fn write_histogram(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_metrics_carry_one_series_per_worker() {
+        let out = format_worker_metrics(&[
+            crate::ipc::WorkerStatus {
+                ready: true,
+                in_flight: 3,
+                restarts: 0,
+            },
+            crate::ipc::WorkerStatus {
+                ready: false,
+                in_flight: 0,
+                restarts: 2,
+            },
+        ]);
+        for line in [
+            "gio_workers 2",
+            "# TYPE gio_worker_ready gauge",
+            "gio_worker_ready{worker=\"0\"} 1",
+            "gio_worker_ready{worker=\"1\"} 0",
+            "gio_worker_in_flight{worker=\"0\"} 3",
+            "gio_worker_in_flight{worker=\"1\"} 0",
+            "# TYPE gio_worker_restarts_total counter",
+            "gio_worker_restarts_total{worker=\"0\"} 0",
+            "gio_worker_restarts_total{worker=\"1\"} 2",
+        ] {
+            assert!(
+                out.lines().any(|l| l == line),
+                "missing {line:?} in:\n{out}"
+            );
+        }
+    }
 
     #[test]
     fn record_request_increments_labeled_counter() {
