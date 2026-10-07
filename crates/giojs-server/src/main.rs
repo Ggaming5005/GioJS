@@ -6291,7 +6291,7 @@ mod tests {
     #[test]
     fn rate_limit_buckets_cannot_be_dodged_by_path_spelling() {
         let limiter = RateLimiter::new(vec![RateLimitRule {
-            path_pattern: "/api/login".to_string(),
+            path_pattern: giojs_ratelimit::PathPattern::parse("/api/login").unwrap(),
             per_ip: 1,
             window_seconds: 3600,
             burst: 0,

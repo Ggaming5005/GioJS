@@ -1010,6 +1010,12 @@ first.
   root layout that puts `children` past React's 30-bit tree id, with slots
   in lists of 8 or more children around it or in the page, can still see an
   id differ by a `0` digit.
+- A `[[rate_limits]] path` written in rule syntax (`/api/*rest`, the
+  spelling every other path setting takes) was compared literally and matched
+  nothing, without a warning. `path` now takes the rule pattern syntax
+  (literal segments, `:param`, a trailing `*rest`); `/api/*`, `/api*` and
+  exact paths keep working. A path that cannot be parsed (no leading `/`, a
+  `*rest` that is not last) stops startup and `--check-config` reports it.
 
 ### Known limitations
 

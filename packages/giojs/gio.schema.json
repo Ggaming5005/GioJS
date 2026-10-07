@@ -797,7 +797,7 @@
           "minimum": 0
         },
         "path": {
-          "description": "Exact path, or a prefix with a trailing `*` (`/api/*` covers `/api`).",
+          "description": "The paths it covers, in rule syntax: literal segments, `:param`, and\na trailing `*rest` catch-all (`/api/*rest` covers `/api`; `/api/*`\nis the same). Without a catch-all the match is exact. A pattern that\ncannot be parsed stops startup.",
           "type": "string"
         },
         "per_ip": {

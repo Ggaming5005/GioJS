@@ -22,7 +22,7 @@ export default function Page(): React.JSX.Element {
         request gets <code>429</code> and never reaches Node.
       </p>
       <CodeBlock lang="toml" title="gio.toml" code={`[[rate_limits]]
-path = "/api/*"
+path = "/api/*rest"
 per_ip = 100
 window_seconds = 60
 burst = 20
@@ -36,7 +36,7 @@ burst = 0`} />
 
       <h2 id="reference">Reference</h2>
       <ConfigKeyTable rows={[
-        { key: 'path', type: 'string', required: true, description: <>An exact path (<code>/api/login</code>), or a prefix ending in <code>*</code> (<code>/api/*</code>, which also covers <code>/api</code> itself). This is not the rule pattern syntax: <code>:param</code> and <code>*rest</code> are not understood here.</> },
+        { key: 'path', type: 'string', required: true, description: <>The paths the rule covers, in the <a href="/docs/middleware#pattern-language">pattern syntax</a> the other path rules use: literal segments, <code>:param</code> for one segment, and a trailing <code>*rest</code> catch-all (<code>/api/*rest</code>, which also covers <code>/api</code> itself). Without a catch-all the match is exact (<code>/api/login</code>). The older spellings still work: <code>/api/*</code> is the same as <code>/api/*rest</code>, and <code>/api*</code> covers every path starting with <code>/api</code> (<code>/apiary</code> too). A path that cannot be parsed stops startup.</> },
         { key: 'per_ip', type: 'integer', default: '100', zero: <>No refill: only <code>burst</code> requests, ever</>, description: <>Requests per <code>window_seconds</code> per client: the bucket refills at this rate.</> },
         { key: 'window_seconds', type: 'integer', default: '60', zero: <>Treated as 1 second</>, description: <>The window <code>per_ip</code> is counted over.</> },
         { key: 'burst', type: 'integer', default: '20', description: <>Extra requests on top of <code>per_ip</code>: a new client&apos;s bucket holds <code>per_ip + burst</code> tokens.</> },
@@ -52,9 +52,11 @@ burst = 0`} />
       <h3 id="behavior">Behavior</h3>
       <ul>
         <li>
-          <strong>One rule per request.</strong> The rule whose literal text covers most of the path
-          wins; on a tie an exact rule beats a wildcard. Above, <code>/api/login</code> uses its own
-          rule and every other <code>/api</code> path the general one.
+          <strong>One rule per request.</strong> The rule whose segments cover most of the path
+          before its wildcard wins; on a tie an exact rule beats a wildcard, then more literal text
+          beats a <code>:param</code> (<code>/users/me</code> over <code>/users/:id</code>). Above,{' '}
+          <code>/api/login</code> uses its own rule and every other <code>/api</code> path the
+          general one.
         </li>
         <li>
           <strong>Canonical paths.</strong> Requests are matched with repeated and trailing slashes
@@ -93,6 +95,15 @@ x-gio-refused: unread
         <li>Each refusal is logged at <code>warn</code> with the client, path and rule, and counted in the metrics.</li>
       </ul>
 
+      <h3 id="startup-errors">Startup errors</h3>
+      <p>
+        A <code>path</code> that cannot be parsed stops startup, and{' '}
+        <a href="/docs/cli/giojs-server#check-config"><code>--check-config</code></a> reports it: one
+        that does not start with <code>/</code>, a <code>*rest</code> that is not the last segment, or
+        a <code>*</code> anywhere but the end.
+      </p>
+      <CodeBlock lang="text" code={`gio.toml:12: invalid \`rate_limits[1].path\`: path "api/*rest" must start with '/'`} />
+
       <h3 id="startup-warnings">Startup warnings</h3>
       <StartupWarnings rows={[
         { when: <><code>max_keys_per_client = 0</code> on a rule with <code>key_header</code></>, text: '[[rate_limits]] /api/*: max_keys_per_client = 0 - one client can mint a fresh budget for every key_header value it sends' },
@@ -109,7 +120,7 @@ burst = 0`} />
 
       <h3 id="per-api-key-budgets">Per API key budgets</h3>
       <CodeBlock lang="toml" title="gio.toml" code={`[[rate_limits]]
-path = "/api/*"
+path = "/api/*rest"
 per_ip = 600
 window_seconds = 60
 key_header = "x-api-key"
@@ -123,10 +134,6 @@ window_seconds = 60`} />
 
       <h2 id="good-to-know">Good to know</h2>
       <ul>
-        <li>
-          A <code>path</code> written in rule syntax, such as <code>/api/*rest</code>, is compared
-          literally and matches nothing - and nothing warns. Write <code>/api/*</code>.
-        </li>
         <li>
           <code>per_ip = 0</code> is not an off switch: with <code>burst = 0</code> it refuses every
           request to the path. Remove the rule to stop limiting.
@@ -150,7 +157,7 @@ window_seconds = 60`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Added <code>max_keys_per_client</code>. Paths match the canonical request path, and <code>/api/*</code> also covers <code>/api</code>. Clients are resolved through trusted proxies, and the bucket store is capped by <code>[server] rate_limit_max_buckets</code>.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Added <code>max_keys_per_client</code>. <code>path</code> takes the rule pattern syntax (<code>:param</code>, <code>*rest</code>; a <code>/api/*rest</code> rule used to match nothing), and a path that cannot be parsed stops startup. Paths match the canonical request path, and <code>/api/*</code> also covers <code>/api</code>. Clients are resolved through trusted proxies, and the bucket store is capped by <code>[server] rate_limit_max_buckets</code>.</> },
         { version: 'v0.1.0-beta.6', changes: <><code>/_gio/image</code> honors the rules.</> },
         { version: 'v0.1.0-beta.1', changes: <>Introduced with <code>path</code>, <code>per_ip</code>, <code>window_seconds</code>, <code>burst</code> and <code>key_header</code>.</> },
       ]} />

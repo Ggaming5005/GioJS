@@ -568,8 +568,13 @@ impl Default for I18nConfig {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct RateLimitEntry {
-    /// Exact path, or a prefix with a trailing `*` (`/api/*` covers `/api`).
-    pub path: String,
+    /// The paths it covers, in rule syntax: literal segments, `:param`, and
+    /// a trailing `*rest` catch-all (`/api/*rest` covers `/api`; `/api/*`
+    /// is the same). Without a catch-all the match is exact. A pattern that
+    /// cannot be parsed stops startup.
+    #[serde(deserialize_with = "deserialize_rate_limit_path")]
+    #[cfg_attr(test, schemars(with = "String"))]
+    pub path: giojs_ratelimit::PathPattern,
     #[serde(default = "default_per_ip")]
     pub per_ip: u64,
     #[serde(default = "default_window_seconds")]
@@ -583,6 +588,14 @@ pub struct RateLimitEntry {
     /// unlimited (many API keys behind one NAT address).
     #[serde(default = "default_max_keys_per_client")]
     pub max_keys_per_client: u64,
+}
+
+fn deserialize_rate_limit_path<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<giojs_ratelimit::PathPattern, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    giojs_ratelimit::PathPattern::parse(&raw)
+        .map_err(|error| serde::de::Error::custom(format!("path {raw:?} {error}")))
 }
 
 fn default_per_ip() -> u64 {
@@ -2126,6 +2139,17 @@ redirect_to    = "/"
     }
 
     #[test]
+    fn rate_limit_paths_take_rule_syntax() {
+        let config = parse(
+            "[[rate_limits]]\npath = \"/api/*rest\"\n\n[[rate_limits]]\npath = \"/api/*\"\n\n\
+             [[rate_limits]]\npath = \"/users/:id\"\n\n[[rate_limits]]\npath = \"/login/\"\n",
+        )
+        .unwrap();
+        let paths: Vec<String> = config.rate_limits.iter().map(|rule| rule.path.to_string()).collect();
+        assert_eq!(paths, ["/api/*rest", "/api/*", "/users/:id", "/login"]);
+    }
+
+    #[test]
     fn missing_rule_sections_default_to_empty() {
         let path = unique_temp_path("no_rules.toml");
         let config = GioConfig::load_from_path(&path).unwrap();
@@ -2670,6 +2694,14 @@ check_origin = true
             ("[cache]\nmemory_max_entries = 0\n", "gio.toml:2: invalid `cache.memory_max_entries`"),
             ("[dev]\nwatch_ignore = [\"../shared/**\"]\n", "gio.toml:2: invalid `dev.watch_ignore`: invalid watch_ignore pattern"),
             ("\n\n[[rate_limits]]\nper_ip = 1\n", "gio.toml:3: invalid `rate_limits[0]`: missing field `path`"),
+            (
+                "[[rate_limits]]\npath = \"/api/*\"\n\n[[rate_limits]]\npath = \"api/*rest\"\n",
+                "gio.toml:5: invalid `rate_limits[1].path`: path \"api/*rest\" must start with '/'",
+            ),
+            (
+                "[[rate_limits]]\npath = \"/api/*rest/x\"\n",
+                "gio.toml:2: invalid `rate_limits[0].path`: path \"/api/*rest/x\" a catch-all (*rest) must be the last segment",
+            ),
         ] {
             let text = error_text(body);
             assert!(text.starts_with(expected), "{body:?}\n got: {text}\nwant: {expected}");

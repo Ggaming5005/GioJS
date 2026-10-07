@@ -41,10 +41,10 @@ pub const DEFAULT_MAX_BUCKETS: usize = 100_000;
 
 #[derive(Debug, Clone)]
 pub struct RateLimitRule {
-    /// Glob-style path pattern, e.g. "/api/*" or "/api/auth/*". A trailing
-    /// "/*" also covers the bare prefix ("/api/*" matches "/api"); without
-    /// a "*" the match is exact. Matched against the canonical path.
-    pub path_pattern: String,
+    /// Which paths the rule covers, e.g. "/api/*rest" or "/api/auth/*". A
+    /// trailing catch-all also covers the bare prefix ("/api/*rest" matches
+    /// "/api"); without one the match is exact. See `PathPattern`.
+    pub path_pattern: PathPattern,
     /// Maximum requests allowed per `window_seconds` per client.
     pub per_ip: u64,
     /// Duration of the sliding window in seconds.
@@ -97,9 +97,6 @@ impl RateLimiter {
             if let Some(header_name) = rule.key_header.as_mut() {
                 *header_name = header_name.to_ascii_lowercase();
             }
-            // Requests are matched in canonical form, so "/api/login/" in
-            // gio.toml must mean "/api/login" or it could never match.
-            rule.path_pattern = canonical_pattern(&rule.path_pattern);
         }
         Self {
             store: Arc::new(RateLimitStore::new(max_buckets)),
@@ -183,7 +180,7 @@ impl RateLimiter {
             RateLimitResult::Rejected {
                 retry_after_secs,
                 limit: rule.per_ip,
-                rule_pattern: rule.path_pattern.clone(),
+                rule_pattern: rule.path_pattern.to_string(),
             }
         }
     }
@@ -203,7 +200,8 @@ impl RateLimiter {
             .iter()
             .enumerate()
             .filter_map(|(index, rule)| {
-                match_path_pattern(&rule.path_pattern, path)
+                rule.path_pattern
+                    .match_path(path)
                     .map(|specificity| (specificity, index, rule))
             })
             .max_by_key(|&(specificity, ..)| specificity)
@@ -274,79 +272,179 @@ fn client_key(ip: IpAddr) -> String {
 
 // ── Path pattern matching ─────────────────────────────────────────────────────
 
+/// Why a `[[rate_limits]] path` cannot be used. Startup refuses the config:
+/// a rule that silently matches nothing leaves the path it was meant to
+/// limit unlimited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternError {
+    /// Does not start with `/` (`api/*`, `*`).
+    NotAbsolute,
+    /// A `*rest` catch-all followed by more segments (`/api/*rest/x`).
+    CatchAllNotLast,
+    /// A `*` anywhere but the end of the last segment (`/a*b`, `/**`).
+    MisplacedWildcard,
+}
+
+impl std::fmt::Display for PatternError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PatternError::NotAbsolute => "must start with '/'",
+            PatternError::CatchAllNotLast => "a catch-all (*rest) must be the last segment",
+            PatternError::MisplacedWildcard => {
+                "'*' may only end the pattern (/api/*rest, /api/* or /api*)"
+            }
+        })
+    }
+}
+
+impl std::error::Error for PatternError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PatternSegment {
+    Literal(String),
+    /// `:name`: any one segment.
+    Param(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PatternTail {
+    /// The segments are the whole path.
+    Exact,
+    /// `/*rest` or `/*`: zero or more further segments, so `/api/*rest`
+    /// covers `/api` too - the router serves "/api/" (canonically "/api")
+    /// from the same handler as "/api".
+    CatchAll(String),
+    /// `/api*`: one more segment starting with the literal, then anything
+    /// (`/api`, `/apiary`, `/api/x`).
+    Prefix(String),
+}
+
+/// A parsed `[[rate_limits]] path`, in the syntax the other path rules use
+/// (giojs-server rules.rs): literal segments, `:param` for one segment, and
+/// a trailing `*rest` catch-all (`/*` is the same without a name). `/api*`,
+/// a literal prefix of the last segment, stays from the original glob
+/// syntax. Repeated and trailing slashes are dropped: requests are compared
+/// in canonical form, so "/api/login/" must mean "/api/login" or it could
+/// never match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathPattern {
+    segments: Vec<PatternSegment>,
+    tail: PatternTail,
+}
+
+impl PathPattern {
+    pub fn parse(raw: &str) -> Result<Self, PatternError> {
+        if !raw.starts_with('/') {
+            return Err(PatternError::NotAbsolute);
+        }
+        let raw_segments: Vec<&str> = raw.split('/').filter(|s| !s.is_empty()).collect();
+        let mut segments = Vec::with_capacity(raw_segments.len());
+        let mut tail = PatternTail::Exact;
+        for (index, raw_segment) in raw_segments.iter().enumerate() {
+            let last = index + 1 == raw_segments.len();
+            if let Some(name) = raw_segment.strip_prefix('*') {
+                if !last {
+                    return Err(PatternError::CatchAllNotLast);
+                }
+                if name.contains('*') {
+                    return Err(PatternError::MisplacedWildcard);
+                }
+                tail = PatternTail::CatchAll(name.to_string());
+            } else if let Some(prefix) = raw_segment.strip_suffix('*') {
+                if !last || prefix.contains('*') {
+                    return Err(PatternError::MisplacedWildcard);
+                }
+                tail = PatternTail::Prefix(prefix.to_string());
+            } else if raw_segment.contains('*') {
+                return Err(PatternError::MisplacedWildcard);
+            } else if let Some(name) = raw_segment.strip_prefix(':') {
+                segments.push(PatternSegment::Param(name.to_string()));
+            } else {
+                segments.push(PatternSegment::Literal((*raw_segment).to_string()));
+            }
+        }
+        Ok(PathPattern { segments, tail })
+    }
+
+    /// Match the canonical `path`: how specific the match is, or `None`.
+    fn match_path(&self, path: &str) -> Option<Specificity> {
+        let mut rest = path.split('/').filter(|s| !s.is_empty());
+        // Path bytes the segments covered, and the literal bytes among them
+        // (a `:param` contributes only its separator).
+        let mut covered = 0;
+        let mut literal = 0;
+        for segment in &self.segments {
+            let head = rest.next()?;
+            match segment {
+                PatternSegment::Literal(text) if text != head => return None,
+                PatternSegment::Literal(text) => literal += 1 + text.len(),
+                PatternSegment::Param(_) => literal += 1,
+            }
+            covered += 1 + head.len();
+        }
+        match &self.tail {
+            PatternTail::Exact => rest.next().is_none().then_some(Specificity {
+                matched: path.len(),
+                exact: true,
+                literal,
+            }),
+            // The bare prefix is covered by the segments only, so that match
+            // scores like an exact rule for it would, never higher.
+            PatternTail::CatchAll(_) => Some(Specificity {
+                matched: if rest.next().is_some() {
+                    covered + 1
+                } else {
+                    covered
+                },
+                exact: false,
+                literal: literal + 1,
+            }),
+            PatternTail::Prefix(prefix) => {
+                rest.next()?
+                    .starts_with(prefix.as_str())
+                    .then_some(Specificity {
+                        matched: covered + 1 + prefix.len(),
+                        exact: false,
+                        literal: literal + 1 + prefix.len(),
+                    })
+            }
+        }
+    }
+}
+
+/// The canonical spelling, which logs and metrics name the rule by.
+impl std::fmt::Display for PathPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for segment in &self.segments {
+            match segment {
+                PatternSegment::Literal(text) => write!(f, "/{text}")?,
+                PatternSegment::Param(name) => write!(f, "/:{name}")?,
+            }
+        }
+        match &self.tail {
+            PatternTail::Exact if self.segments.is_empty() => f.write_str("/"),
+            PatternTail::Exact => Ok(()),
+            PatternTail::CatchAll(name) => write!(f, "/*{name}"),
+            PatternTail::Prefix(prefix) => write!(f, "/{prefix}*"),
+        }
+    }
+}
+
 /// How specifically a pattern matched a path; the greatest wins. Fields
 /// compare in declaration order:
-///   1. `matched` - how much of the path the pattern's literal text covered
-///      (the documented "longest literal prefix wins"),
+///   1. `matched` - how much of the path the pattern covered before its
+///      wildcard (the documented "longest prefix wins"),
 ///   2. `exact` - on equal coverage an exact pattern beats a wildcard, so an
 ///      exact "/auth" rule keeps "/auth" even though "/auth/*" covers the
 ///      bare "/auth" too,
-///   3. `literal` - then the longer literal: on "/auth", "/auth/*" (only
-///      "/auth" and below) beats the broader "/auth*" (also "/authors").
+///   3. `literal` - then the more literal text: on "/auth", "/auth/*" (only
+///      "/auth" and below) beats the broader "/auth*" (also "/authors"),
+///      and "/users/me" beats "/users/:id".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Specificity {
     matched: usize,
     exact: bool,
     literal: usize,
-}
-
-/// Match `pattern` against the canonical `path`. Returns how specific the
-/// match is, or `None` if there is no match.
-///
-/// Rules:
-///   - Exact match: "/api/auth" matches only "/api/auth"
-///   - Wildcard: "/api/*" matches "/api" and anything below it - the router
-///     serves "/api/" (canonically "/api") from the same handler as "/api".
-///     The bare "/api" is covered by the "/api" part of the literal only, so
-///     that match scores like an exact "/api" rule would, never higher.
-///   - No wildcard means exact match required
-fn match_path_pattern(pattern: &str, path: &str) -> Option<Specificity> {
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        let wildcard = |matched: usize| Specificity {
-            matched,
-            exact: false,
-            literal: prefix.len(),
-        };
-        if path.starts_with(prefix) {
-            return Some(wildcard(prefix.len()));
-        }
-        match prefix.strip_suffix('/') {
-            Some(bare) if !bare.is_empty() && bare == path => Some(wildcard(bare.len())),
-            _ => None,
-        }
-    } else if pattern == path {
-        Some(Specificity {
-            matched: pattern.len(),
-            exact: true,
-            literal: pattern.len(),
-        })
-    } else {
-        None
-    }
-}
-
-/// Collapse repeated slashes and drop a trailing slash (root and a final
-/// "/*" excepted), matching the canonical form requests are compared in.
-fn canonical_pattern(pattern: &str) -> String {
-    if !pattern.starts_with('/') {
-        // Not a path pattern ("*" or a typo): leave it as configured.
-        return pattern.to_string();
-    }
-    let (literal, wildcard) = match pattern.strip_suffix('*') {
-        Some(literal) => (literal, "*"),
-        None => (pattern, ""),
-    };
-    let mut out = String::with_capacity(pattern.len());
-    for segment in literal.split('/').filter(|segment| !segment.is_empty()) {
-        out.push('/');
-        out.push_str(segment);
-    }
-    // Root stays "/", and "/api/*" keeps the separator before its wildcard.
-    if out.is_empty() || (!wildcard.is_empty() && literal.ends_with('/')) {
-        out.push('/');
-    }
-    out.push_str(wildcard);
-    out
 }
 
 /// Longest prefix of `value` that fits in `max_bytes` on a char boundary.
@@ -371,13 +469,21 @@ mod tests {
     const LOCAL: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
     const OTHER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
 
+    fn pattern(raw: &str) -> PathPattern {
+        PathPattern::parse(raw).unwrap()
+    }
+
+    fn specificity(raw: &str, path: &str) -> Option<Specificity> {
+        pattern(raw).match_path(path)
+    }
+
     fn make_limiter(rules: Vec<RateLimitRule>) -> RateLimiter {
         RateLimiter::new(rules)
     }
 
     fn api_rule(per_ip: u64) -> RateLimitRule {
         RateLimitRule {
-            path_pattern: "/api/*".to_string(),
+            path_pattern: pattern("/api/*"),
             per_ip,
             window_seconds: 60,
             burst: 0,
@@ -388,7 +494,7 @@ mod tests {
 
     fn api_auth_rule(per_ip: u64) -> RateLimitRule {
         RateLimitRule {
-            path_pattern: "/api/auth/*".to_string(),
+            path_pattern: pattern("/api/auth/*"),
             per_ip,
             window_seconds: 60,
             burst: 0,
@@ -444,7 +550,7 @@ mod tests {
 
     fn rule(path_pattern: &str, per_ip: u64) -> RateLimitRule {
         RateLimitRule {
-            path_pattern: path_pattern.to_string(),
+            path_pattern: pattern(path_pattern),
             per_ip,
             window_seconds: 3600,
             burst: 0,
@@ -513,7 +619,7 @@ mod tests {
 
     fn keyed_rule(per_ip: u64, window_seconds: u64) -> RateLimitRule {
         RateLimitRule {
-            path_pattern: "/api/*".to_string(),
+            path_pattern: pattern("/api/*"),
             per_ip,
             window_seconds,
             burst: 0,
@@ -685,7 +791,7 @@ mod tests {
     #[test]
     fn mixed_case_key_header_config_still_keys_by_header() {
         let rule = RateLimitRule {
-            path_pattern: "/api/*".to_string(),
+            path_pattern: pattern("/api/*"),
             per_ip: 1,
             window_seconds: 3600,
             burst: 0,
@@ -723,7 +829,7 @@ mod tests {
 
     fn hourly_rule(path: &str, per_ip: u64) -> RateLimitRule {
         RateLimitRule {
-            path_pattern: path.to_string(),
+            path_pattern: pattern(path),
             per_ip,
             window_seconds: 3600,
             burst: 0,
@@ -902,23 +1008,28 @@ mod tests {
             ));
         }
         assert_eq!(
-            match_path_pattern("/api/*", "/api").map(|s| s.matched),
-            match_path_pattern("/api", "/api").map(|s| s.matched)
+            specificity("/api/*", "/api").map(|s| s.matched),
+            specificity("/api", "/api").map(|s| s.matched)
         );
-        assert!(match_path_pattern("/api", "/api") > match_path_pattern("/api/*", "/api"));
-        assert!(match_path_pattern("/api/*", "/api/x") > match_path_pattern("/api*", "/api/x"));
+        assert!(specificity("/api", "/api") > specificity("/api/*", "/api"));
+        assert!(specificity("/api/*", "/api/x") > specificity("/api*", "/api/x"));
     }
 
     #[test]
     fn configured_patterns_are_canonicalized() {
-        assert_eq!(canonical_pattern("/api/login/"), "/api/login");
-        assert_eq!(canonical_pattern("//api//login"), "/api/login");
-        assert_eq!(canonical_pattern("/api/*"), "/api/*");
-        assert_eq!(canonical_pattern("/api//*"), "/api/*");
-        assert_eq!(canonical_pattern("/api*"), "/api*");
-        assert_eq!(canonical_pattern("/"), "/");
-        assert_eq!(canonical_pattern("/*"), "/*");
-        assert_eq!(canonical_pattern("*"), "*");
+        for (raw, canonical) in [
+            ("/api/login/", "/api/login"),
+            ("//api//login", "/api/login"),
+            ("/api/*", "/api/*"),
+            ("/api//*", "/api/*"),
+            ("/api/*rest/", "/api/*rest"),
+            ("/api*", "/api*"),
+            ("/users/:id", "/users/:id"),
+            ("/", "/"),
+            ("/*", "/*"),
+        ] {
+            assert_eq!(pattern(raw).to_string(), canonical, "{raw}");
+        }
 
         let rl = make_limiter(vec![hourly_rule("/api/login/", 1)]);
         assert!(matches!(
@@ -930,7 +1041,7 @@ mod tests {
     #[test]
     fn exact_path_match_works() {
         let rule = RateLimitRule {
-            path_pattern: "/api/status".to_string(),
+            path_pattern: pattern("/api/status"),
             per_ip: 1,
             window_seconds: 60,
             burst: 0,
@@ -955,5 +1066,68 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ── rule syntax ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn rule_syntax_catch_all_matches_like_the_bare_wildcard() {
+        // `/api/*rest` is how every other path setting spells it; it used to
+        // be compared literally and match nothing.
+        for raw in ["/api/*rest", "/api/*"] {
+            let rl = make_limiter(vec![hourly_rule(raw, 1)]);
+            for (path, ip) in [("/api", LOCAL), ("/api/users/1", OTHER)] {
+                assert!(matches!(
+                    rl.check(path, ip, &empty_headers()),
+                    RateLimitResult::Allowed { limit: 1, .. }
+                ));
+            }
+            assert!(matches!(
+                rl.check("/api/users", LOCAL, &empty_headers()),
+                RateLimitResult::Rejected { .. }
+            ));
+            assert!(matches!(
+                rl.check("/apiary", LOCAL, &empty_headers()),
+                RateLimitResult::Allowed { limit: 0, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn params_match_one_segment_and_literals_beat_them() {
+        let rl = make_limiter(vec![
+            hourly_rule("/users/:id/posts", 1),
+            hourly_rule("/users/me/posts", 50),
+            hourly_rule("/users/*rest", 100),
+        ]);
+        assert!(matches!(
+            rl.check("/users/7/posts", LOCAL, &empty_headers()),
+            RateLimitResult::Allowed { limit: 1, .. }
+        ));
+        assert!(matches!(
+            rl.check("/users/me/posts", LOCAL, &empty_headers()),
+            RateLimitResult::Allowed { limit: 50, .. }
+        ));
+        // A param covers one segment only: deeper paths fall to the catch-all.
+        assert!(matches!(
+            rl.check("/users/7/posts/2", LOCAL, &empty_headers()),
+            RateLimitResult::Allowed { limit: 100, .. }
+        ));
+        assert!(specificity("/users/:id/posts", "/users/7/posts") > specificity("/users/*", "/users/7/posts"));
+    }
+
+    #[test]
+    fn unparseable_patterns_are_refused() {
+        for (raw, error) in [
+            ("api/*", PatternError::NotAbsolute),
+            ("*", PatternError::NotAbsolute),
+            ("", PatternError::NotAbsolute),
+            ("/api/*rest/x", PatternError::CatchAllNotLast),
+            ("/a*b", PatternError::MisplacedWildcard),
+            ("/api/**", PatternError::MisplacedWildcard),
+            ("/a*/b", PatternError::MisplacedWildcard),
+        ] {
+            assert_eq!(PathPattern::parse(raw), Err(error), "{raw}");
+        }
     }
 }

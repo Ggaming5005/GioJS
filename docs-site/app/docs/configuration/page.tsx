@@ -212,7 +212,7 @@ max_connections = 1000  # 0 = unlimited
 ping_interval_secs = 30 # 0 = no server pings
 
 [[rate_limits]]         # repeat per path rule; /_gio/image honors these too
-path = "/api/*"         # exact, or prefix with trailing * ("/api/*" covers /api too)
+path = "/api/*rest"     # rule syntax: exact, :param, trailing *rest (covers /api too)
 per_ip = 100            # requests per window (default 100)
 window_seconds = 60     # default 60
 burst = 20              # default 20
@@ -936,8 +936,10 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
       <p>
         Each <code>[[rate_limits]]</code> rule is a token bucket per client:{' '}
         <code>per_ip</code> requests per <code>window_seconds</code>, plus{' '}
-        <code>burst</code> on top. When several rules match, the one with the
-        longest literal prefix wins. Limits run in Rust before routing, so a
+        <code>burst</code> on top. <code>path</code> uses the rule pattern
+        syntax (<code>/api/*rest</code>, <code>/users/:id</code>), and a path
+        that cannot be parsed stops startup. When several rules match, the one
+        covering most of the path wins. Limits run in Rust before routing, so a
         rejected request (<code>429</code> with <code>Retry-After</code>) never
         reaches Node. Every key is on the{' '}
         <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a> page.
@@ -955,7 +957,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         </li>
         <li>
           <strong>
-            <code>/api/*</code> also covers <code>/api</code> itself
+            <code>/api/*rest</code> also covers <code>/api</code> itself
           </strong>{' '}
           (<code>/api/</code> is the same path). An exact <code>/api</code>{' '}
           rule still takes precedence there, whichever order the two rules
