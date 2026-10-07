@@ -190,7 +190,7 @@ export GIO_REVALIDATE_TOKEN=<token>     # or [revalidate] token = "..." in gio.t
         cached for everyone gets:
       </p>
       <CodeBlock lang="bash" code={`Cache-Control: public, max-age=0, s-maxage=60, stale-while-revalidate=540
-ETag: "4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
+ETag: W/"4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
       <ul>
         <li><code>s-maxage</code> - what is left of the page&apos;s <code>revalidate</code> window, so a CDN in front of GioJS caches it no longer than GioJS does</li>
         <li><code>stale-while-revalidate</code> - the rest of the window in which GioJS itself serves the page stale while it refreshes (nine times <code>revalidate</code>)</li>
@@ -204,7 +204,9 @@ ETag: "4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
         <code>revalidate</code> short on pages you purge on demand.
       </p>
       <p>
-        The ETag is strong: a hash of the stored page, computed once when it is cached. A
+        The ETag is a hash of the stored page, computed once when it is cached. It is weak
+        (<code>W/</code>): the same page goes out gzip, brotli or uncompressed under it, and
+        a strong ETag would have to differ between those encodings. A
         request whose <code>If-None-Match</code> names it gets a 304 with the same headers
         (<code>X-Request-Id</code>, security headers, header rules and the{' '}
         <code>Vary: accept-encoding</code> of a compressed page included). The dev

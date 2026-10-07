@@ -213,9 +213,15 @@ export function GET() {
           runs, so stop timers and upstream requests there.
         </li>
         <li>
-          A streamed body has no time limit: it ends when you close the stream or the client
-          leaves. If your stream errors midway, the response ends early (the status is already
-          sent).
+          A streamed body has no time limit: it ends when you close the stream, the client
+          leaves, or the server shuts down (open streams and SSE connections are ended and
+          cancelled when shutdown starts, so they never hold up a deploy). If your stream errors
+          midway, the response ends early (the status is already sent).
+        </li>
+        <li>
+          A streamed <code>text/html</code> body is sent exactly as you write it - an htmx
+          fragment or a page without a <code>&lt;head&gt;</code> arrives chunk by chunk. GioJS
+          injects its head scripts into page streams only.
         </li>
         <li>
           <code>HEAD</code> requests cancel a streaming body instead of sending it. While a

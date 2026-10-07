@@ -128,8 +128,8 @@ docker run -p 3000:3000 --stop-timeout 20 \\
         </li>
         <li>
           <strong>Stopping.</strong> <code>run.mjs</code> is PID 1 and forwards{' '}
-          <code>SIGTERM</code>; the server drains requests for up to 8 seconds and then gives
-          the workers a few more to exit. Docker&apos;s default 10-second stop timeout can cut
+          <code>SIGTERM</code>; the server ends open SSE and streamed route-handler responses,
+          drains requests for up to 8 seconds and then gives the workers a few more to exit. Docker&apos;s default 10-second stop timeout can cut
           that short - use <code>--stop-timeout 20</code> (Compose:{' '}
           <code>stop_grace_period: 20s</code>).
         </li>
