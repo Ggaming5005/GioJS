@@ -1,14 +1,8 @@
 import React from 'react';
+import type { PageProps } from '@gio.js/core';
 
-interface Props {
-  params: { id: string };
-}
-
-export async function getServerSideProps({ params }: { params: Record<string, string> }) {
-  return { params };
-}
-
-export default function PostPage({ params }: Props) {
+// No getServerSideProps: the page renders with the route params and query.
+export default function PostPage({ params }: PageProps<'/posts/:id'>) {
   return (
     <main>
       <h1>Post #{params.id}</h1>

@@ -1,4 +1,5 @@
 import React from 'react';
+import type { GetServerSideProps } from '@gio.js/core';
 
 interface AboutProps {
   locale: string;
@@ -19,10 +20,6 @@ export default function AboutPage({ locale }: AboutProps): React.JSX.Element {
   );
 }
 
-export async function getServerSideProps(ctx: {
-  locale?: string;
-  params: Record<string, string>;
-  query: Record<string, string>;
-}): Promise<AboutProps> {
-  return { locale: ctx.locale ?? 'en' };
-}
+export const getServerSideProps: GetServerSideProps<AboutProps> = async (ctx) => {
+  return { props: { locale: ctx.locale ?? 'en' } };
+};

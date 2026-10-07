@@ -1,4 +1,5 @@
 import React from 'react';
+import type { GetServerSideProps } from '@gio.js/core';
 import { sessions } from '../../../lib/session.server.ts';
 
 interface Props {
@@ -8,10 +9,10 @@ interface Props {
 // Reached only with a valid session: the require_session guard in gio.toml
 // checks it in Rust first. Reading it through ctx.cookies marks this render
 // personal, so one user's dashboard is never cached for another.
-export async function getServerSideProps(ctx: { cookies: Record<string, string> }): Promise<{ props: Props }> {
+export const getServerSideProps: GetServerSideProps<Props> = async (ctx) => {
   const session = sessions.getSession(ctx);
   return { props: { name: session.get('name') ?? 'unknown' } };
-}
+};
 
 export default function AdminDashboard({ name }: Props): React.JSX.Element {
   return (
