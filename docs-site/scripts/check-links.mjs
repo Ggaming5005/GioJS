@@ -39,10 +39,7 @@ const scriptFile = fileURLToPath(import.meta.url);
 // nav entry (an error until it has one). The create-giojs starter guides
 // (/docs/guides/{tailwind,authentication-example,database,docker}) have
 // landed, so nothing is pending.
-export const PENDING = new Set([
-  // Wave B API reference and guide pages, written in parallel. Remove each
-  // entry when its page lands (check-links warns about stale ones).
-]);
+export const PENDING = new Set([]);
 
 // Written by build.mjs next to the exported pages, not by a page module.
 const GENERATED = new Set(['/llms.txt', '/llms-full.txt', '/sitemap.xml', '/robots.txt', '/search-index.json']);
