@@ -799,6 +799,11 @@ pub enum ImageFormat {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ImageConfig {
+    /// Run the optimizer. false leaves `/_gio/image` unrouted (404) and
+    /// `<GioImage>` renders its plain `src` without a srcset - for apps
+    /// that use an image CDN, or want no CPU-heavy endpoint.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// The only widths `/_gio/image` resizes to (anything else is a 400),
     /// and the `<GioImage>` srcset candidates.
     #[serde(default = "default_allowed_widths")]
@@ -812,9 +817,22 @@ pub struct ImageConfig {
     /// On-disk optimized-image cache cap.
     #[serde(default = "default_image_disk_max_bytes")]
     pub disk_max_bytes: u64,
-    /// Largest remote source the optimizer downloads.
+    /// Largest remote source the optimizer downloads, in bytes. 0 =
+    /// unlimited.
     #[serde(default = "default_image_max_remote_bytes")]
     pub max_remote_bytes: u64,
+    /// Deadline for downloading a whole remote source. 0 = none (the 5s
+    /// connect timeout still applies).
+    #[serde(default = "default_image_remote_timeout_secs")]
+    pub remote_timeout_secs: u64,
+    /// Largest source width or height the optimizer decodes, in pixels;
+    /// larger sources are a 500. 0 = unlimited.
+    #[serde(default = "default_image_max_source_dimension")]
+    pub max_source_dimension: u32,
+    /// Most memory decoding one source may allocate, in bytes. 0 =
+    /// unlimited.
+    #[serde(default = "default_image_max_decode_bytes")]
+    pub max_decode_bytes: u64,
     /// Modern formats to serve when the browser accepts them, in order of
     /// preference; everything else gets JPEG. Leave AVIF out to save CPU:
     /// it is several times slower to encode than WebP.
@@ -840,6 +858,18 @@ fn default_image_max_remote_bytes() -> u64 {
     20 * 1024 * 1024
 }
 
+fn default_image_remote_timeout_secs() -> u64 {
+    giojs_image::DEFAULT_REMOTE_TIMEOUT.as_secs()
+}
+
+fn default_image_max_source_dimension() -> u32 {
+    giojs_image::processor::DEFAULT_MAX_SOURCE_DIMENSION
+}
+
+fn default_image_max_decode_bytes() -> u64 {
+    giojs_image::processor::DEFAULT_MAX_DECODE_BYTES
+}
+
 fn default_image_formats() -> Vec<ImageFormat> {
     vec![ImageFormat::Avif, ImageFormat::Webp]
 }
@@ -847,11 +877,15 @@ fn default_image_formats() -> Vec<ImageFormat> {
 impl Default for ImageConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             allowed_widths: default_allowed_widths(),
             quality: default_image_quality(),
             remote_patterns: Vec::new(),
             disk_max_bytes: default_image_disk_max_bytes(),
             max_remote_bytes: default_image_max_remote_bytes(),
+            remote_timeout_secs: default_image_remote_timeout_secs(),
+            max_source_dimension: default_image_max_source_dimension(),
+            max_decode_bytes: default_image_max_decode_bytes(),
             formats: default_image_formats(),
         }
     }
@@ -872,7 +906,7 @@ impl ImageConfig {
     /// worker: srcset candidates must be widths `/_gio/image` accepts (any
     /// other width is a 400), and the default quality matches the
     /// optimizer's. Widths are sorted and deduplicated; 0 is never a usable
-    /// candidate.
+    /// candidate. `enabled: false` (no optimizer) renders plain `src`.
     pub fn worker_json(&self) -> String {
         let mut widths: Vec<u32> = self
             .allowed_widths
@@ -883,10 +917,24 @@ impl ImageConfig {
         widths.sort_unstable();
         widths.dedup();
         serde_json::json!({
+            "enabled": self.enabled,
             "widths": widths,
             "quality": self.quality.clamp(1, 100),
         })
         .to_string()
+    }
+
+    /// The optimizer's decoder bounds (`max_source_dimension`,
+    /// `max_decode_bytes`; 0 lifts one).
+    pub fn decode_limits(&self) -> giojs_image::processor::DecodeLimits {
+        giojs_image::processor::DecodeLimits {
+            max_dimension: self.max_source_dimension,
+            max_alloc_bytes: self.max_decode_bytes,
+        }
+    }
+
+    pub fn remote_timeout(&self) -> Option<std::time::Duration> {
+        secs(self.remote_timeout_secs)
     }
 
     /// `formats` as the optimizer's negotiation order, duplicates dropped.
@@ -1590,13 +1638,53 @@ mod tests {
             serde_json::from_str(&result.unwrap().images.worker_json()).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "widths": [640, 828, 1200], "quality": 80 })
+            serde_json::json!({ "enabled": true, "widths": [640, 828, 1200], "quality": 80 })
         );
 
         let defaults: serde_json::Value =
             serde_json::from_str(&ImageConfig::default().worker_json()).unwrap();
         assert_eq!(defaults["widths"].as_array().unwrap().len(), 16);
         assert_eq!(defaults["quality"], 75);
+        assert_eq!(defaults["enabled"], true);
+    }
+
+    #[test]
+    fn images_can_be_turned_off_and_their_limits_lifted() {
+        let off = parse("[images]\nenabled = false\n").unwrap().images;
+        assert!(!off.enabled);
+        let json: serde_json::Value = serde_json::from_str(&off.worker_json()).unwrap();
+        assert_eq!(json["enabled"], false, "the worker renders plain src");
+
+        let defaults = parse("").unwrap().images;
+        assert!(defaults.enabled);
+        assert_eq!(defaults.remote_timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(
+            defaults.decode_limits(),
+            giojs_image::processor::DecodeLimits::default()
+        );
+        assert_eq!(defaults.max_source_dimension, 10_000);
+        assert_eq!(defaults.max_decode_bytes, 268_435_456);
+
+        let lifted = parse(
+            "[images]\nmax_remote_bytes = 0\nremote_timeout_secs = 0\n\
+             max_source_dimension = 0\nmax_decode_bytes = 0\n",
+        )
+        .unwrap()
+        .images;
+        assert_eq!(lifted.max_remote_bytes, 0);
+        assert_eq!(lifted.remote_timeout(), None);
+        assert_eq!(
+            lifted.decode_limits(),
+            giojs_image::processor::DecodeLimits {
+                max_dimension: 0,
+                max_alloc_bytes: 0,
+            }
+        );
+        let raised = parse("[images]\nmax_source_dimension = 20000\nremote_timeout_secs = 5\n")
+            .unwrap()
+            .images;
+        assert_eq!(raised.decode_limits().max_dimension, 20_000);
+        assert_eq!(raised.remote_timeout(), Some(Duration::from_secs(5)));
     }
 
     #[test]

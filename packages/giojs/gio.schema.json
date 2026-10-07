@@ -519,6 +519,11 @@
           "default": 536870912,
           "minimum": 0
         },
+        "enabled": {
+          "description": "Run the optimizer. false leaves `/_gio/image` unrouted (404) and\n`<GioImage>` renders its plain `src` without a srcset - for apps\nthat use an image CDN, or want no CPU-heavy endpoint.",
+          "type": "boolean",
+          "default": true
+        },
         "formats": {
           "description": "Modern formats to serve when the browser accepts them, in order of\npreference; everything else gets JPEG. Leave AVIF out to save CPU:\nit is several times slower to encode than WebP.",
           "type": "array",
@@ -530,11 +535,25 @@
             "$ref": "#/definitions/ImageFormat"
           }
         },
+        "max_decode_bytes": {
+          "description": "Most memory decoding one source may allocate, in bytes. 0 =\nunlimited.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 268435456,
+          "minimum": 0
+        },
         "max_remote_bytes": {
-          "description": "Largest remote source the optimizer downloads.",
+          "description": "Largest remote source the optimizer downloads, in bytes. 0 =\nunlimited.",
           "type": "integer",
           "format": "uint64",
           "default": 20971520,
+          "minimum": 0
+        },
+        "max_source_dimension": {
+          "description": "Largest source width or height the optimizer decodes, in pixels;\nlarger sources are a 500. 0 = unlimited.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 10000,
           "minimum": 0
         },
         "quality": {
@@ -551,6 +570,13 @@
           "items": {
             "$ref": "#/definitions/RemotePattern"
           }
+        },
+        "remote_timeout_secs": {
+          "description": "Deadline for downloading a whole remote source. 0 = none (the 5s\nconnect timeout still applies).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
         }
       },
       "additionalProperties": false

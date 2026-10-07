@@ -737,7 +737,11 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let image_cache_dir = std::env::var("GIO_IMAGE_CACHE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/cache/images"));
-    tokio::fs::create_dir_all(&image_cache_dir).await?;
+    if cfg.images.enabled {
+        tokio::fs::create_dir_all(&image_cache_dir).await?;
+    } else {
+        info!("image optimizer disabled ([images] enabled = false): /_gio/image is not routed");
+    }
 
     let image_config = giojs_image::ImageConfig {
         allowed_widths: cfg.images.allowed_widths.clone(),
@@ -757,7 +761,9 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         giojs_image::ImageHandler::new(image_config, image_cache_dir, public_dir.clone())
             .with_disk_max_bytes(cfg.images.disk_max_bytes)
             .with_formats(cfg.images.negotiated_formats())
-            .with_max_remote_bytes(cfg.images.max_remote_bytes),
+            .with_max_remote_bytes(cfg.images.max_remote_bytes)
+            .with_remote_timeout(cfg.images.remote_timeout())
+            .with_decode_limits(cfg.images.decode_limits()),
     );
 
     let http2 = cfg.server.http2;
@@ -1021,8 +1027,12 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
 
     let mut app = Router::new()
         .route("/_gio/health", get(health_handler))
-        .route("/_gio/metrics", get(metrics_handler))
-        .route("/_gio/image", get(image_handler_route));
+        .route("/_gio/metrics", get(metrics_handler));
+    // Unrouted while off: /_gio/image then answers 404 like any unknown
+    // /_gio path.
+    if cfg.images.enabled {
+        app = app.route("/_gio/image", get(image_handler_route));
+    }
     // Without a token the route does not exist: /_gio/revalidate is then an
     // unrouted /_gio path and answers 404 like any other.
     if let Some(token) = revalidate_token {

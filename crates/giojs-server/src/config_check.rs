@@ -147,6 +147,35 @@ pub fn validate(config: &GioConfig, env: &StartupEnv) -> Result<Validated, Vec<S
 /// switched off on purpose is still never silent.
 pub fn protections_off_warnings(config: &GioConfig) -> Vec<String> {
     let mut warnings = Vec::new();
+    let images = &config.images;
+    if images.enabled {
+        for (key, zero, risk) in [
+            (
+                "max_remote_bytes",
+                images.max_remote_bytes == 0,
+                "remote sources of any size are downloaded into memory",
+            ),
+            (
+                "remote_timeout_secs",
+                images.remote_timeout_secs == 0,
+                "a slow remote source holds its request open indefinitely",
+            ),
+            (
+                "max_source_dimension",
+                images.max_source_dimension == 0,
+                "a small file declaring huge dimensions can exhaust memory and CPU",
+            ),
+            (
+                "max_decode_bytes",
+                images.max_decode_bytes == 0,
+                "decoding one source may allocate any amount of memory",
+            ),
+        ] {
+            if zero {
+                warnings.push(format!("[images] {key} = 0: {risk}"));
+            }
+        }
+    }
     if config.websocket.enabled && config.websocket.max_connections == 0 {
         warnings.push(
             "[websocket] max_connections = 0: WebSocket connections are unlimited - every \
@@ -634,6 +663,30 @@ mod tests {
         );
         assert_eq!(report["ok"], true);
         assert_eq!(report["warnings"], json!(warnings));
+    }
+
+    #[test]
+    fn image_limits_lifted_to_zero_are_warnings() {
+        let all = "[images]\nmax_remote_bytes = 0\nremote_timeout_secs = 0\n\
+                   max_source_dimension = 0\nmax_decode_bytes = 0\n";
+        let warnings = protection_warnings(all);
+        let keys: Vec<&str> = warnings
+            .iter()
+            .map(|warning| warning.split(" = 0:").next().unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "[images] max_remote_bytes",
+                "[images] remote_timeout_secs",
+                "[images] max_source_dimension",
+                "[images] max_decode_bytes",
+            ]
+        );
+        // Raised limits are no warning, and neither are any with the
+        // optimizer off.
+        assert!(protection_warnings("[images]\nmax_source_dimension = 30000\n").is_empty());
+        assert!(protection_warnings(&format!("{all}enabled = false\n")).is_empty());
     }
 
     #[test]
