@@ -47,7 +47,7 @@
       "$ref": "#/definitions/DevConfig"
     },
     "fonts": {
-      "description": "Self-hosted fonts, downloaded at startup and served from /_gio/fonts.",
+      "description": "Self-hosted fonts, fetched at startup and served from /_gio/fonts.",
       "type": "array",
       "items": {
         "$ref": "#/definitions/FontEntry"
@@ -311,7 +311,7 @@
           "default": "normal"
         },
         "url": {
-          "description": "woff2 URL (or a /public path) downloaded at startup.",
+          "description": "A file under public/ (\"/fonts/inter.woff2\"), copied at every start, or\nan https:// woff2 URL, downloaded on the first start.",
           "type": "string"
         },
         "weight": {

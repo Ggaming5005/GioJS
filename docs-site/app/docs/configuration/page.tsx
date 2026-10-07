@@ -64,7 +64,7 @@ max_per_second = 20
 
 [[fonts]]               # self-hosted fonts, repeat per font file
 family = "Inter"
-url    = "/fonts/inter.woff2"
+url    = "/fonts/inter.woff2"   # public/fonts/inter.woff2, or an https:// URL (downloaded once)
 weight = 400            # default 400
 style  = "normal"       # default "normal"
 

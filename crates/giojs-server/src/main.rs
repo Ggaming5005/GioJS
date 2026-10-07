@@ -673,7 +673,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         .collect();
 
     if !font_entries.is_empty() {
-        giojs_font::download_fonts(&font_entries, &fonts_dir).await?;
+        giojs_font::download_fonts(&font_entries, &fonts_dir, &public_dir).await?;
         let css = giojs_font::generate_css(&font_entries);
         tokio::fs::write(fonts_dir.join("fonts.css"), css).await?;
     }
