@@ -43,8 +43,14 @@ renders React. Full docs: https://giojs.com/llms.txt
 - `error.jsx` gets `{ error: { message, digest }, reset }`; in production the
   message is always generic - log lookups go by `digest`. It is also a client
   error boundary (shipped in the page bundles - no server-only imports), and
-  `reset` exists only for errors caught in the browser.
-- Components come from `@gio.js/react`: `<GioLink>` (client nav + prefetch),
+  `reset` exists only for errors caught in the browser; a caught error clears
+  on the next navigation (a query-only one too).
+- Components come from `@gio.js/react`: `<GioLink>` (client nav + prefetch;
+  `replace`, `scroll={false}`), router hooks `usePathname()`, `useParams()`,
+  `useSearchParams()` (read-only), `useLocale()` and `useRouter()` (`push`,
+  `replace`, `back`, `forward`, `refresh`, `prefetch`) - SSR-safe, also in the
+  root layout, which soft navigation never re-renders (URL-dependent UI goes
+  below it, e.g. in a `(group)/layout`),
   `<GioImage>` (srcset from the gio.toml `[images]` allowed_widths, served by
   the built-in `/_gio/image` optimizer; `sizes`, `priority` to preload,
   `unoptimized` for a plain `src` — never add `sharp` or `next/image`). Route-handler types come from `@gio.js/core`

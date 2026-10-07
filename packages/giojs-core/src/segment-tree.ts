@@ -12,10 +12,17 @@
  * therefore never catches its own folder's layout - the boundary above it
  * does - and a loading.* shows while anything below it suspends.
  *
- * Browser-safe: imports only React and not-found.ts.
+ * Soft navigation re-renders this tree in the same React root
+ * (client-runtime.ts): layouts the routes share keep their state, the page
+ * itself remounts when the path changes, a folder below a dynamic segment
+ * remounts when that segment's value changes, and a caught error clears on
+ * any navigation - to another path or only to another query.
+ *
+ * Browser-safe: imports only React, not-found.ts and navigation-context.ts.
  */
 import React from 'react';
 import { isNotFoundError } from './not-found.ts';
+import { navigationContext } from './navigation-context.ts';
 
 /** The failure an error.* component receives (the Next.js shape). */
 export interface GioErrorInfo {
@@ -59,6 +66,12 @@ export interface SegmentLevel {
   layout?: LayoutComponent | null;
   error?: React.ComponentType<GioErrorProps> | null;
   loading?: React.ComponentType | null;
+  /**
+   * The dynamic segment names from app/ down to this folder (router.ts
+   * SegmentChainLevel.params): the folder's layout and everything below it
+   * remount when one of their values changes (/teams/a to /teams/b).
+   */
+  params?: readonly string[] | undefined;
   /** Server only. */
   probe?: LoadingProbe;
 }
@@ -93,12 +106,15 @@ export function publicErrorInfo(error: unknown): GioErrorInfo {
 
 interface SegmentErrorBoundaryProps {
   fallback: React.ComponentType<GioErrorProps>;
+  /** The page URL (path + query): a caught error clears when it changes (navigation). */
+  resetKey?: string;
   children?: React.ReactNode;
 }
 
 interface SegmentErrorBoundaryState {
   // Wrapped: a thrown value may itself be null or undefined.
   caught: { error: unknown } | null;
+  resetKey?: string | undefined;
 }
 
 /**
@@ -110,10 +126,20 @@ export class SegmentErrorBoundary extends React.Component<
   SegmentErrorBoundaryProps,
   SegmentErrorBoundaryState
 > {
-  override state: SegmentErrorBoundaryState = { caught: null };
+  override state: SegmentErrorBoundaryState = { caught: null, resetKey: this.props.resetKey };
 
-  static getDerivedStateFromError(error: unknown): SegmentErrorBoundaryState {
+  static getDerivedStateFromError(error: unknown): Partial<SegmentErrorBoundaryState> {
     return { caught: { error } };
+  }
+
+  // A boundary in a layout the next route shares stays mounted across a soft
+  // navigation; the error it caught belongs to the page the user just left.
+  static getDerivedStateFromProps(
+    props: SegmentErrorBoundaryProps,
+    state: SegmentErrorBoundaryState,
+  ): Partial<SegmentErrorBoundaryState> | null {
+    if (props.resetKey === state.resetKey) return null;
+    return { caught: null, resetKey: props.resetKey };
   }
 
   // Clearing the error remounts the children: the segment renders afresh.
@@ -130,6 +156,44 @@ export class SegmentErrorBoundary extends React.Component<
     }
     return this.props.children;
   }
+}
+
+/**
+ * A folder's error boundary, reset by the URL on screen: the path, plus the
+ * query from the navigation context. A query-only navigation (/search?q=bad
+ * to /search?q=good) keeps the page mounted but must still clear the error
+ * the previous query caused.
+ */
+export function SegmentErrorScope({
+  fallback,
+  path,
+  children,
+}: {
+  fallback: React.ComponentType<GioErrorProps>;
+  path: string;
+  children?: React.ReactNode;
+}): React.ReactElement {
+  const navigation = React.useContext(navigationContext());
+  const resetKey = path + (navigation?.search ?? '');
+  return React.createElement(SegmentErrorBoundary, { fallback, resetKey }, children);
+}
+
+/**
+ * Keys a folder's subtree by the values of the dynamic segments it lives
+ * under, from the navigation context: the same layout component at the same
+ * position would otherwise keep the previous value's state (data loaded for
+ * team a shown under /teams/b).
+ */
+function SegmentParamsKey({
+  names,
+  children,
+}: {
+  names: readonly string[];
+  children?: React.ReactNode;
+}): React.ReactElement {
+  const params = React.useContext(navigationContext())?.params ?? {};
+  const key = JSON.stringify(names.map(name => params[name] ?? ''));
+  return React.createElement(React.Fragment, { key }, children);
 }
 
 /** Renders the boundary content between the probe's enter and exit marks. */
@@ -169,7 +233,9 @@ export function buildSegmentTree(
   path: string,
   levels: readonly SegmentLevel[],
 ): React.ReactNode {
-  let element = page;
+  // Keyed by path: navigating between two URLs of one route (/posts/1 to
+  // /posts/2) mounts a fresh page instead of carrying the old one's state.
+  let element: React.ReactNode = React.createElement(React.Fragment, { key: path }, page);
   for (let i = levels.length - 1; i >= 0; i--) {
     const level = levels[i];
     if (level === undefined) continue;
@@ -186,10 +252,13 @@ export function buildSegmentTree(
       );
     }
     if (level.error) {
-      element = React.createElement(SegmentErrorBoundary, { fallback: level.error }, element);
+      element = React.createElement(SegmentErrorScope, { fallback: level.error, path }, element);
     }
     if (level.layout) {
       element = React.createElement(level.layout, { children: element, path });
+    }
+    if (level.params !== undefined && level.params.length > 0) {
+      element = React.createElement(SegmentParamsKey, { names: level.params }, element);
     }
   }
   return element;

@@ -5,23 +5,14 @@
  * optional view transitions. Hover prefetch fires ~50ms before click, avoiding
  * the "60 links = 60 requests" problem; viewport prefetch fires once when the
  * link scrolls into view (server-side prefetch budgets bound the fan-out).
- * When `transition` is set, uses document.startViewTransition + DOMParser swap instead of
- * document.write so CSS and <html> attributes survive across the animation.
- * Modified clicks, non-left buttons, target/download links, and non-relative
- * hrefs are left to the browser's default navigation.
+ * Clicks soft-navigate through navigation.ts (`replace` and `scroll` map to
+ * its options); when `transition` is set the swap runs inside
+ * document.startViewTransition. Modified clicks, non-left buttons,
+ * target/download links, and hrefs that are not path- or hash-relative are
+ * left to the browser's default navigation.
  */
 import React from 'react';
-import {
-  getDeploymentId,
-  isHardReloadResponse,
-  isSwappableResponse,
-  handleHardReload,
-  navigateTo,
-  initPopstateHandler,
-  prefetchCache,
-  PREFETCH_NOT_SWAPPABLE,
-  type TransitionPreset,
-} from './navigation.js';
+import { navigate, prefetch as prefetchPage, type TransitionPreset } from './navigation.js';
 
 export type { TransitionPreset } from './navigation.js';
 
@@ -29,6 +20,10 @@ interface GioLinkProps {
   href: string;
   prefetch?: 'hover' | 'viewport' | false | undefined;
   transition?: TransitionPreset | false | undefined;
+  /** Replace the current history entry instead of pushing one. */
+  replace?: boolean | undefined;
+  /** Scroll to the top (or the #hash target) after navigating. Default true. */
+  scroll?: boolean | undefined;
   children: React.ReactNode;
   className?: string | undefined;
   target?: React.HTMLAttributeAnchorTarget | undefined;
@@ -64,44 +59,21 @@ function isModifiedClick(e: React.MouseEvent<HTMLAnchorElement>): boolean {
   return e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
 }
 
-/** Only same-origin path-relative hrefs are client-navigable. */
+/** Only same-origin path-relative (and same-page #hash) hrefs are client-navigable. */
 function isClientNavigableHref(href: string): boolean {
-  return href.startsWith('/') && !href.startsWith('//');
+  return (href.startsWith('/') && !href.startsWith('//')) || href.startsWith('#');
 }
 
-/**
- * Fetch a page into the prefetch cache; '' marks an in-flight request and
- * PREFETCH_NOT_SWAPPABLE a page the browser must load itself.
- */
 function prefetchHref(href: string): void {
-  if (prefetchCache.has(href) || !isClientNavigableHref(href)) return;
-  prefetchCache.set(href, '');
-  const fetchHeaders: Record<string, string> = { Purpose: 'prefetch', 'Sec-Purpose': 'prefetch' };
-  const id = getDeploymentId();
-  if (id) fetchHeaders['x-deployment-id'] = id;
-  fetch(href, { headers: fetchHeaders })
-    .then((r) => {
-      if (isHardReloadResponse(r)) {
-        prefetchCache.delete(href);
-        handleHardReload();
-        return undefined;
-      }
-      if (!isSwappableResponse(r)) {
-        // Remembered, not deleted: later hovers must not refetch it, and a
-        // click goes straight to a full load.
-        prefetchCache.set(href, PREFETCH_NOT_SWAPPABLE);
-        return undefined;
-      }
-      return r.text();
-    })
-    .then((html) => { if (html) prefetchCache.set(href, html); })
-    .catch(() => prefetchCache.delete(href));
+  if (isClientNavigableHref(href) && !href.startsWith('#')) prefetchPage(href);
 }
 
 export function GioLink({
   href,
   prefetch = 'hover',
   transition = false,
+  replace,
+  scroll,
   children,
   className,
   target,
@@ -142,8 +114,7 @@ export function GioLink({
     if (browserShouldHandle) return;
 
     e.preventDefault();
-    initPopstateHandler();
-    navigateTo(href, transition).catch(() => window.location.assign(href));
+    navigate(href, { transition, replace, scroll }).catch(() => window.location.assign(href));
   }
 
   return (

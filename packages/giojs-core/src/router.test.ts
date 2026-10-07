@@ -368,13 +368,28 @@ describe('segment files (not-found, error, loading)', () => {
         layout: level.layout !== undefined,
         error: level.error !== undefined,
         loading: level.loading !== undefined,
+        params: level.params,
       })),
     ).toEqual([
       // The root layout stays server-only HTML outside the boundary.
-      { dir: '', layout: false, error: true, loading: true },
-      { dir: '(shop)', layout: true, error: false, loading: false },
+      { dir: '', layout: false, error: true, loading: true, params: [] },
+      { dir: '(shop)', layout: true, error: false, loading: false, params: [] },
       // (shop)/products holds nothing and is left out.
-      { dir: '(shop)/products/[id]', layout: true, error: true, loading: true },
+      { dir: '(shop)/products/[id]', layout: true, error: true, loading: true, params: ['id'] },
     ]);
+  });
+
+  it('names every dynamic segment from app/ down to each level, catch-alls included', async () => {
+    await touch('teams/[team]/layout.tsx');
+    await touch('teams/[team]/docs/[[...path]]/error.tsx');
+    await touch('teams/[team]/docs/[[...path]]/page.tsx');
+    await touch('files/[...rest]/loading.tsx');
+    await touch('files/[...rest]/page.tsx');
+    const [layouts, files] = await Promise.all([discoverLayouts(appDir), discoverSegmentFiles(appDir)]);
+    expect(segmentChainForDir('teams/[team]/docs/[[...path]]', layouts, files).map(l => l.params)).toEqual([
+      ['team'],
+      ['team', 'path'],
+    ]);
+    expect(segmentChainForDir('files/[...rest]', layouts, files).map(l => l.params)).toEqual([['rest']]);
   });
 });

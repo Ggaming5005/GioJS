@@ -57,6 +57,7 @@ import {
 } from './request-body.ts';
 import { parseCookies } from './cookies.ts';
 import { installedImageConfig, type ImageRenderConfig } from './image-config.ts';
+import { searchFromQuery, withNavigation, type GioNavigationState } from './navigation-context.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -472,6 +473,10 @@ export function serializeEnvelope(envelope: {
   entry: string;
   /** The `<GioImage>` config the server rendered with, for identical srcsets. */
   images?: ImageRenderConfig;
+  /** Route info: the client runtime provides the same navigation context. */
+  params?: Record<string, string>;
+  search?: string;
+  locale?: string;
 }): string | null {
   try {
     return JSON.stringify(envelope)
@@ -726,6 +731,7 @@ export async function renderRoute(
     const inner = buildSegmentTree(React.createElement(Component, props), req.path, levels);
 
     const pattern = match.module.urlPattern;
+    const navigation = navigationStateFor(req, pattern, match.params);
     // Installed before rendering: <GioImage> reads it during the render.
     const images = installedImageConfig();
     // Static export passes the manifest of its own build (export.ts).
@@ -738,6 +744,9 @@ export async function renderRoute(
             pattern,
             entry: entryScript,
             images,
+            params: navigation.params,
+            search: navigation.search,
+            locale: navigation.locale,
           })
         : null;
     if (entryScript !== undefined && envelopeJson === null) {
@@ -846,6 +855,9 @@ export async function renderRoute(
         path: req.path,
       });
     }
+    // Around the whole document: the hooks work in the server-only root
+    // layout too, and the hydrated tree gets the same values from the envelope.
+    element = withNavigation(navigation, element);
 
     // Resolves once React's shell is ready; Suspense content streams later.
     const stream = await renderToReadableStream(element, {
@@ -1006,6 +1018,19 @@ export async function renderRoute(
       ...(dev && err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
     };
   }
+}
+
+/**
+ * What the navigation hooks see for this request. `pathname` is the routed
+ * path Rust sent - after locale-prefix stripping and rewrites - the same one
+ * the envelope carries.
+ */
+function navigationStateFor(
+  req: IPCRequest,
+  pattern: string,
+  params: Record<string, string>,
+): GioNavigationState {
+  return { pathname: req.path, params, search: searchFromQuery(req.query), locale: req.locale, pattern };
 }
 
 /** The `#__gio_props` element as raw HTML (the deferred PPR envelope). */
@@ -1174,6 +1199,7 @@ async function loadSegmentLevels(
       layout: layoutMod?.default ?? null,
       error: (errorMod?.default as React.ComponentType<GioErrorProps> | undefined) ?? null,
       loading: loadingMod?.default ?? null,
+      ...(level.params.length > 0 ? { params: level.params } : {}),
     };
     if (loadingMod !== undefined) {
       const state: ProbeState = {
@@ -1349,6 +1375,8 @@ async function renderSpecialPage(
         path: req.path,
       });
     }
+    // Not a route match: no pattern, no params.
+    element = withNavigation(navigationStateFor(req, '', {}), element);
 
     const stream = await renderToReadableStream(element, {
       bootstrapModules: [],

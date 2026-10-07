@@ -58,7 +58,7 @@ export default function MigrationPage(): React.JSX.Element {
           <tr>
             <td>Navigation hooks</td>
             <td><code>from 'next/navigation'</code></td>
-            <td>TODO comment added - no GioJS equivalent yet, import left intact</td>
+            <td>TODO comment added, import left intact - switch it to <code>@gio.js/react</code></td>
           </tr>
           <tr>
             <td>Font imports</td>
@@ -93,9 +93,12 @@ export default function MigrationPage(): React.JSX.Element {
           plugin (<code>GioNodePlugin</code> with an <code>onRequest</code> hook)
         </li>
         <li>
-          <strong>next/navigation hooks</strong> - flagged with a TODO comment. Use{' '}
-          <code>GioLink</code> for links and the browser location/history APIs for imperative
-          navigation
+          <strong>next/navigation hooks</strong> - flagged with a TODO comment.{' '}
+          <code>usePathname</code>, <code>useParams</code>, <code>useSearchParams</code> and{' '}
+          <code>useRouter</code> (<code>push</code>, <code>replace</code>, <code>back</code>,{' '}
+          <code>forward</code>, <code>refresh</code>, <code>prefetch</code>) have the same
+          names and shapes in <code>@gio.js/react</code> - change the import (see Linking &amp;
+          Navigating)
         </li>
         <li>
           <strong>Route Handlers</strong> (<code>route.ts</code>) - supported, no changes needed

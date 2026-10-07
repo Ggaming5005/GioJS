@@ -176,7 +176,8 @@ describe('generated entries', () => {
     const dom = installDom('complete');
     dom.elements.set('__gio_props', { textContent: ENVELOPE });
     const runtime = await import('./client-runtime.ts');
-    const { buildSegmentTree, SegmentErrorBoundary } = await import('./segment-tree.ts');
+    const { buildSegmentTree, SegmentErrorScope } = await import('./segment-tree.ts');
+    const { navigationContext } = await import('./navigation-context.ts');
     expect(runtime.buildSegmentTree).toBe(buildSegmentTree);
     const ErrorView = (): null => null;
     // What a generated entry registers for a page under an error.* folder.
@@ -184,8 +185,20 @@ describe('generated entries', () => {
       runtime.buildSegmentTree(React.createElement('p', props), path, [{ error: ErrorView }]),
     );
     const hydrated = hydrateRoot.mock.calls[0] as unknown[] | undefined;
-    const element = hydrated?.[1] as React.ReactElement<{ fallback: unknown }> | undefined;
-    expect(element?.type).toBe(SegmentErrorBoundary);
+    // Inside the navigation provider, built from the envelope's route info.
+    const provider = hydrated?.[1] as
+      | React.ReactElement<{ value: unknown; children: React.ReactElement<{ fallback: unknown }> }>
+      | undefined;
+    expect(provider?.type).toBe(navigationContext());
+    expect(provider?.props.value).toEqual({
+      pathname: '/ppr',
+      params: {},
+      search: '',
+      locale: '',
+      pattern: '/ppr',
+    });
+    const element = provider?.props.children;
+    expect(element?.type).toBe(SegmentErrorScope);
     expect(element?.props.fallback).toBe(ErrorView);
   });
 });

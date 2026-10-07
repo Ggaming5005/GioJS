@@ -102,6 +102,12 @@ export default function BlogError() { return React.createElement('p', null, API_
     expect(source).toContain('buildSegmentTree');
   });
 
+  it('names the dynamic segments each level lives under, as the server render does', () => {
+    const source = entrySources.get('/products/:id') ?? '';
+    // Only the [id] folder's level: its subtree remounts when the id changes.
+    expect(source.match(/params: \[[^\]]*\]/g)).toEqual(['params: ["id"]']);
+  });
+
   it("never includes a sibling group's files, not-found.* or the root layout", () => {
     const product = entrySources.get('/products/:id') ?? '';
     expect(product).not.toContain('(marketing)');
