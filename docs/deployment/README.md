@@ -25,7 +25,7 @@ See `benchmarks/memory-stability.md` for measured numbers comparing GioJS vs sel
 
 There is no build step for server apps - route discovery and client bundles happen at server startup. Static sites are pre-rendered with `gio export` instead and need no server at all.
 
-The HTTP port is not an environment variable - it comes from the `[server]` section of `gio.toml` (default `3000`).
+The listen address comes from the `[server]` section of `gio.toml` (default `0.0.0.0:3000`). `GIO_HOST` / `GIO_PORT` override it without editing the file - there is no plain `PORT` variable.
 
 ## Common environment variables
 

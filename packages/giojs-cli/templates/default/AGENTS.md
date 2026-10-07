@@ -90,6 +90,15 @@ renders React. Full docs: https://giojs.com/llms.txt
   hydrate (client JS ships under `out/_next/`), `GIO_PUBLIC_*` values are
   frozen at export time, and `<GioImage>` renders plain `src` (no optimizer
   on a static host).
+- Tests use `@gio.js/core/testing` (vitest or node:test; never import it
+  from app code): `renderPage(path, { cookies, query, headers })` returns
+  `{ status, html, props, setCookies, redirect, cacheable }` and
+  `callRoute(path, { method, body })` a fetch-like response - both run
+  in-process with the .env files loaded, without gio.toml/middleware.ts
+  rules or [i18n] detection (pass the unprefixed path plus `locale`).
+  `createTestServer()` starts the real server on a free port (`url`,
+  `close()` in afterAll).
+  Under vitest, mirror tsconfig `paths` as `resolve.alias`.
 
 ## Commands
 

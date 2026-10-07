@@ -149,8 +149,13 @@ function loaderForFile(path: string): Loader {
 const NODE_BUILTIN_FILTER =
   /^(node:|fs$|path$|crypto$|os$|child_process$|net$|tls$|http$|https$|stream$|zlib$|worker_threads$|dns$|dgram$|cluster$|readline$|v8$|vm$|perf_hooks$|async_hooks$|inspector$)/;
 
-/** Specifiers that mark a module as server-only (ours, and the npm package's). */
-const SERVER_ONLY_SPECIFIER = /^(?:@gio\.js\/core\/server-only|server-only)$/;
+/**
+ * Specifiers that mark a module as server-only (ours, and the npm
+ * package's). The testing kit counts as one: it would drag the whole server
+ * runtime into the bundle, so the build names it instead of failing on
+ * whatever Node builtin it trips over first.
+ */
+const SERVER_ONLY_SPECIFIER = /^(?:@gio\.js\/core\/(?:server-only|testing)|server-only)$/;
 const SERVER_ONLY_NAMESPACE = 'gio-server-only';
 /** `*.server.ts` / `.tsx` / `.js` / `.jsx` (+ module variants) never ship to the browser. */
 const SERVER_FILE_PATTERN = /\.server\.(?:[cm]?[jt]s|[jt]sx)$/;
@@ -159,7 +164,7 @@ const SERVER_FILE_PATTERN = /\.server\.(?:[cm]?[jt]s|[jt]sx)$/;
  * specifier, and one that may declare an enum. False positives (the text in
  * a comment or string) only cost a needless compile in loadServerModule().
  */
-const NAMES_SERVER_ONLY = /(['"])(?:@gio\.js\/core\/server-only|server-only)\1/;
+const NAMES_SERVER_ONLY = /(['"])(?:@gio\.js\/core\/(?:server-only|testing)|server-only)\1/;
 const MAY_DECLARE_ENUM = /\benum\s/;
 const TS_FILE_PATTERN = /\.(?:[cm]?ts|tsx)$/;
 

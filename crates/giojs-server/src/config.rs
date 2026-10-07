@@ -5,6 +5,7 @@
 //! read or parsed is a startup-time failure: print the error and exit(1).
 //! So is a `[[guards]]` entry that would not protect its path - other rules
 //! are skipped with a warning, but a skipped guard leaves its path open.
+//! `GIO_HOST` / `GIO_PORT` override `[server] host` / `port` after parsing.
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -26,6 +27,12 @@ pub enum ConfigError {
         path: String,
         guard: String,
         source: crate::rules::RuleError,
+    },
+    #[error("invalid {name}={value:?}: {reason}")]
+    InvalidEnv {
+        name: &'static str,
+        value: String,
+        reason: &'static str,
     },
 }
 
@@ -578,7 +585,14 @@ impl GioConfig {
             })
             .unwrap_or_else(|| std::path::PathBuf::from("gio.toml"));
 
-        match Self::load_from_path(&path) {
+        let loaded = Self::load_from_path(&path).and_then(|mut config| {
+            config.apply_listen_overrides(
+                std::env::var("GIO_HOST").ok().as_deref(),
+                std::env::var("GIO_PORT").ok().as_deref(),
+            )?;
+            Ok(config)
+        });
+        match loaded {
             Ok(config) => config,
             Err(error) => {
                 eprintln!("giojs-server: configuration error: {error}");
@@ -609,6 +623,37 @@ impl GioConfig {
                 })?;
         }
         Ok(config)
+    }
+
+    /// `GIO_HOST` / `GIO_PORT` win over `[server] host` / `port`, so one
+    /// gio.toml can serve instances on other addresses without being edited
+    /// (test servers on free ports, platform-assigned ports). Empty values
+    /// are ignored; a malformed one stops startup like a bad gio.toml rather
+    /// than silently binding somewhere else.
+    fn apply_listen_overrides(
+        &mut self,
+        host: Option<&str>,
+        port: Option<&str>,
+    ) -> Result<(), ConfigError> {
+        if let Some(host) = host.filter(|h| !h.is_empty()) {
+            // bind_addr() joins host and port and parses a SocketAddr.
+            if format!("{host}:0").parse::<std::net::SocketAddr>().is_err() {
+                return Err(ConfigError::InvalidEnv {
+                    name: "GIO_HOST",
+                    value: host.to_string(),
+                    reason: "expected an IPv4 address such as 127.0.0.1",
+                });
+            }
+            self.server.host = host.to_string();
+        }
+        if let Some(port) = port.filter(|p| !p.is_empty()) {
+            self.server.port = port.parse().map_err(|_| ConfigError::InvalidEnv {
+                name: "GIO_PORT",
+                value: port.to_string(),
+                reason: "expected a port number (0-65535)",
+            })?;
+        }
+        Ok(())
     }
 
     /// Path to the project root directory (parent of GIO_APP_DIR or CWD).
@@ -991,6 +1036,48 @@ check_origin = true
         let result = GioConfig::load_from_path(&path);
         let _ = std::fs::remove_file(&path);
         assert!(matches!(result, Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn listen_env_overrides_win_over_gio_toml() {
+        let path = unique_temp_path("listen_env.toml");
+        std::fs::write(&path, "[server]\nhost = \"0.0.0.0\"\nport = 4321\n").unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        let mut config = result.unwrap();
+
+        config.apply_listen_overrides(None, None).unwrap();
+        assert_eq!(config.bind_addr(), "0.0.0.0:4321");
+        // Empty values (`GIO_PORT=` in a shell) leave gio.toml in charge.
+        config.apply_listen_overrides(Some(""), Some("")).unwrap();
+        assert_eq!(config.bind_addr(), "0.0.0.0:4321");
+
+        config
+            .apply_listen_overrides(Some("127.0.0.1"), Some("39999"))
+            .unwrap();
+        assert_eq!(config.bind_addr(), "127.0.0.1:39999");
+        assert!(config.bind_addr().parse::<std::net::SocketAddr>().is_ok());
+    }
+
+    #[test]
+    fn malformed_listen_env_stops_startup_without_changing_the_address() {
+        let mut config = GioConfig::default();
+        let before = config.bind_addr();
+        for (host, port, name) in [
+            (Some("localhost"), None, "GIO_HOST"),
+            (Some("127.0.0.1:80"), None, "GIO_HOST"),
+            (None, Some("70000"), "GIO_PORT"),
+            (None, Some("http"), "GIO_PORT"),
+            (None, Some("-1"), "GIO_PORT"),
+        ] {
+            let err = config.apply_listen_overrides(host, port).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::InvalidEnv { name: n, .. } if n == name),
+                "{host:?} {port:?}: {err}"
+            );
+            assert!(err.to_string().contains(name));
+        }
+        assert_eq!(config.bind_addr(), before);
     }
 
     fn load_guard_toml(name: &str, guard_body: &str) -> Result<GioConfig, ConfigError> {
