@@ -2,9 +2,12 @@
  * giojs-core/src/typed-routes.ts
  *
  * Generates <projectRoot>/.gio/routes.d.ts from the discovered route
- * patterns. The file augments '@gio.js/react' via declaration merging so
- * href('/posts/:id', { id }) autocompletes and typechecks with zero
- * annotations in app code. Regenerated at every boot; the dev watcher
+ * patterns. The file fills the global `GioJS.RegisteredRoutes` registry
+ * (route-params.ts) via declaration merging, so href('/posts/:id', { id })
+ * from @gio.js/react and `PageProps<'/posts/:id'>` / `GsspContext<...>`
+ * from @gio.js/core autocomplete and typecheck with zero annotations in
+ * app code. A global, not a module augmentation: both packages read it and
+ * neither depends on the other. Regenerated at every boot; the dev watcher
  * restarts the worker on file changes, which keeps it fresh.
  *
  * It also references .gio/css-modules.d.ts, which types CSS imports
@@ -83,7 +86,7 @@ function paramsType(pattern: string): string {
 export function generateRouteTypes(patterns: string[]): string {
   const uniquePatterns = [...new Set(patterns)].sort();
   const entries = uniquePatterns.map(
-    pattern => `    '${escapeSingleQuoted(pattern)}': ${paramsType(pattern)};`,
+    pattern => `      '${escapeSingleQuoted(pattern)}': ${paramsType(pattern)};`,
   );
   return [
     '/**',
@@ -93,9 +96,11 @@ export function generateRouteTypes(patterns: string[]): string {
     ' * Do not edit - regenerated on every server start.',
     ' */',
     `/// <reference path="./${CSS_TYPES_FILE}" />`,
-    "declare module '@gio.js/react' {",
-    '  interface GioRegisteredRoutes {',
+    'declare global {',
+    '  namespace GioJS {',
+    '    interface RegisteredRoutes {',
     ...entries,
+    '    }',
     '  }',
     '}',
     'export {};',

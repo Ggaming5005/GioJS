@@ -22,6 +22,16 @@ declare module './typed-href.ts' {
   }
 }
 
+// What the generated .gio/routes.d.ts actually declares: the global
+// registry, shared with @gio.js/core's page types.
+declare global {
+  namespace GioJS {
+    interface RegisteredRoutes {
+      '/registered/:slug': { slug: string };
+    }
+  }
+}
+
 describe('href', () => {
   it('returns static patterns unchanged with no params argument', () => {
     expect(href('/')).toBe('/');
@@ -67,6 +77,14 @@ describe('href', () => {
     expect(href('/shop/*path?')).toBe('/shop');
     expect(href('/*all?')).toBe('/');
     expect(href('/*all?', { all: 'a/b' })).toBe('/a/b');
+  });
+
+  it('types patterns registered in the global GioJS.RegisteredRoutes (checked by tsc)', () => {
+    expect(href('/registered/:slug', { slug: 'a b' })).toBe('/registered/a%20b');
+    // @ts-expect-error - '/registered/:slug' needs { slug }
+    expect(href('/registered/:slug')).toBe('/registered/');
+    // @ts-expect-error - unregistered patterns are rejected
+    expect(href('/unregistered/:slug', { slug: 'x' })).toBe('/unregistered/x');
   });
 
   it('still requires the params argument when any param is required (checked by tsc)', () => {

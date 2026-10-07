@@ -4,6 +4,7 @@
  * Shared message and context types for the Rust ↔ Node IPC boundary:
  * HTTP render requests/responses, SSE frames, and WebSocket bridge messages.
  */
+import type { ParamsOf, RouteOrParams } from './route-params.ts';
 
 export interface IPCRequest {
   id: string;
@@ -118,11 +119,15 @@ export type IPCOutbound = IPCResponse | IPCError;
 
 // ── SSE + WebSocket types ─────────────────────────────────────────────────────
 
-/** Request object handed to route.ts method handlers (and SSE GET handlers). */
-export interface GioRequest {
+/**
+ * Request object handed to route.ts method handlers (and SSE GET handlers).
+ * `GioRequest<'/api/posts/:id'>` (or `GioRequest<{ id: string }>`) types
+ * `params`.
+ */
+export interface GioRequest<Route extends RouteOrParams = Record<string, string>> {
   method: string;
   path: string;
-  params: Record<string, string>;
+  params: ParamsOf<Route>;
   query: Record<string, string>;
   headers: Record<string, string>;
   /** Cookie header parsed into name → value. */

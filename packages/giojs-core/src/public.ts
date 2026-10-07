@@ -2,8 +2,11 @@
  * giojs-core/src/public.ts
  *
  * Public API surface of @gio.js/core — the package entrypoint for app code
- * (route handlers, plugins). The worker executable stays in index.ts and is
- * launched by file path, never through this module.
+ * (pages, route handlers, plugins). The worker executable stays in index.ts
+ * and is launched by file path, never through this module. Published, app
+ * code typechecks against the declarations the `build` script emits to
+ * dist/types (tsconfig.build.json), never against these sources: they need
+ * `allowImportingTsExtensions` and the package's own compiler settings.
  */
 export { GioEventStream, isGioEventStream } from './sse.ts';
 export type { SseStream, SseCleanupFn } from './sse.ts';
@@ -15,6 +18,35 @@ export { notFound } from './not-found.ts';
 export { revalidatePath, revalidateTag } from './revalidate.ts';
 export type { RevalidateResult, RevalidatePathOptions } from './revalidate.ts';
 export type { GioErrorProps, GioErrorInfo } from './segment-tree.ts';
+export type {
+  GetServerSideProps,
+  GetServerSidePropsContext,
+  GetServerSidePropsResult,
+  InferPageProps,
+  PageProps,
+  LayoutProps,
+  ErrorPageProps,
+  NotFoundPageProps,
+  GetStaticPaths,
+  StaticPathsResult,
+  RouteHandler,
+} from './app-types.ts';
+export type {
+  GsspContext,
+  GsspResponseHeaders,
+  PropsResult,
+  RedirectResult,
+  NotFoundResult,
+  RouteHandlerFn,
+} from './router.ts';
+export type { IPCRequest, IPCResponse } from './context.ts';
+export type {
+  RoutePattern,
+  RouteParamsOf,
+  ParamsFromPattern,
+  RouteOrParams,
+  ParamsOf,
+} from './route-params.ts';
 export type {
   Metadata,
   MetadataContext,

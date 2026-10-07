@@ -20,10 +20,14 @@ const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const fixtureRoot = join(packageDir, '.typed-routes-test-fixture');
 
 describe('generateRouteTypes', () => {
-  it('augments @gio.js/react as a module file', () => {
+  it('fills the global GioJS.RegisteredRoutes registry from a module file', () => {
     const output = generateRouteTypes(['/']);
-    expect(output).toContain("declare module '@gio.js/react' {");
-    expect(output).toContain('interface GioRegisteredRoutes {');
+    expect(output).toContain('declare global {');
+    expect(output).toContain('namespace GioJS {');
+    expect(output).toContain('interface RegisteredRoutes {');
+    // No module augmentation: the file must not depend on which @gio.js/*
+    // packages the project can resolve.
+    expect(output).not.toContain('declare module');
     expect(output).toContain('export {};');
   });
 
@@ -104,7 +108,7 @@ describe('writeRouteTypes', () => {
     const routes = await readFile(join(projectRoot, '.gio', 'routes.d.ts'), 'utf8');
     expect(routes).toContain('/// <reference path="./css-modules.d.ts" />');
     // A triple-slash directive only counts before the first statement.
-    expect(routes.indexOf('/// <reference')).toBeLessThan(routes.indexOf('declare module'));
+    expect(routes.indexOf('/// <reference')).toBeLessThan(routes.indexOf('declare global'));
     expect(await readFile(join(projectRoot, '.gio', 'css-modules.d.ts'), 'utf8')).toBe(CSS_MODULE_TYPES);
   });
 

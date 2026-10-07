@@ -28,6 +28,7 @@ import {
   type MetadataRoutes,
 } from './metadata-routes.ts';
 import type { ActionRedirect, PageAction } from './action.ts';
+import type { ParamsOf, RouteOrParams } from './route-params.ts';
 
 // JSX-bearing files (page, layout) may be .tsx/.jsx/.js; pure handlers
 // (route) may be .ts/.js. Order is precedence when several coexist.
@@ -61,8 +62,8 @@ export interface RedirectResult {
 }
 
 /** `{ props, headers, tags }` form of a getServerSideProps result. */
-export interface PropsResult {
-  props: Record<string, unknown>;
+export interface PropsResult<Props extends object = Record<string, unknown>> {
+  props: Props;
   headers?: GsspResponseHeaders;
   /**
    * Cache tags for this render, added to the page's `export const tags`
@@ -84,11 +85,14 @@ export interface RouteModule {
   load: () => Promise<PageModule>;
 }
 
-/** Context handed to getServerSideProps. */
-export interface GsspContext {
+/**
+ * Context handed to getServerSideProps. `GsspContext<'/posts/:id'>` (or
+ * `GsspContext<{ id: string }>`) types `params`.
+ */
+export interface GsspContext<Route extends RouteOrParams = Record<string, string>> {
   method: string;
   path: string;
-  params: Record<string, string>;
+  params: ParamsOf<Route>;
   query: Record<string, string>;
   /** Lowercased request headers. */
   headers: Record<string, string>;

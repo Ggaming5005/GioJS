@@ -25,6 +25,7 @@
  */
 import type { GioRequest } from './context.ts';
 import type { GsspResponseHeaders } from './router.ts';
+import type { ParamsOf, RouteOrParams } from './route-params.ts';
 
 const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
 
@@ -95,10 +96,13 @@ export interface ActionDataResult<Data = unknown> {
   headers?: GsspResponseHeaders;
 }
 
-/** The request a page action receives: route.ts's request, typed params. */
-export interface ActionArgs<Params extends Record<string, string> = Record<string, string>>
+/**
+ * The request a page action receives: route.ts's request, typed params -
+ * `ActionArgs<'/posts/:id'>` or `ActionArgs<{ id: string }>`.
+ */
+export interface ActionArgs<Route extends RouteOrParams = Record<string, string>>
   extends Omit<GioRequest, 'params'> {
-  params: Params;
+  params: ParamsOf<Route>;
 }
 
 /** Everything a page action may return. */

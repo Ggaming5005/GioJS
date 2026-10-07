@@ -207,12 +207,15 @@ jobs:
           cache: pnpm
           registry-url: 'https://registry.npmjs.org'
 
-      # giojs-react and create-giojs publish compiled dist/ that is not in git.
+      # giojs-react and create-giojs publish compiled dist/ that is not in git,
+      # and giojs-core its declaration files (dist/types/: app code typechecks
+      # against those, never against the .ts sources the worker runs).
       # Skipping this build is how @gio.js/react@0.1.0-beta.5 shipped empty.
       - run: pnpm install --frozen-lockfile
 
       - name: Build publishable dist/
         run: |
+          pnpm --filter @gio.js/core run build
           pnpm --filter @gio.js/react run build
           pnpm --filter create-giojs run build
 
