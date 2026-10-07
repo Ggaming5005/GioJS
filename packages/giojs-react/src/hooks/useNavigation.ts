@@ -18,7 +18,7 @@ import {
   refresh,
   type NavigateOptions,
 } from '../navigation.js';
-import type { GioRegisteredRoutes, RouteParamsOf } from '../typed-href.js';
+import type { RouteParamsOf, RoutePattern } from '../typed-href.js';
 
 /**
  * The routed path of the current page, without query or hash. With i18n the
@@ -29,14 +29,14 @@ export function usePathname(): string {
   return useNavigationState().pathname;
 }
 
-type ParamsFor<T> = T extends keyof GioRegisteredRoutes ? RouteParamsOf<T> : T;
+type ParamsFor<T> = T extends string ? RouteParamsOf<T> : T;
 
 /**
- * The matched route's dynamic segment values. Pass a registered pattern for
+ * The matched route's dynamic segment values. Pass a route pattern for
  * typed params - `useParams<'/posts/:id'>().id` - or a params shape.
  */
 export function useParams<
-  T extends Record<string, string> | (keyof GioRegisteredRoutes & string) = Record<string, string>,
+  T extends Record<string, string> | RoutePattern = Record<string, string>,
 >(): ParamsFor<T> {
   return useNavigationState().params as ParamsFor<T>;
 }

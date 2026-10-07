@@ -12,7 +12,15 @@
 import { describe, it, expect } from 'vitest';
 import React from 'react';
 import { renderRoute } from './ssr.ts';
-import { actionOutcome, isActionRedirect, redirect, type ActionData, type ActionArgs } from './action.ts';
+import {
+  actionOutcome,
+  assertValidRedirect,
+  isActionRedirect,
+  redirect,
+  type ActionData,
+  type ActionArgs,
+  type ActionRedirect,
+} from './action.ts';
 import { isMalformedBodyError, isUnsupportedMediaTypeError, parseFormData } from './request-body.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import type { IPCRequest, IPCResponse } from './context.ts';
@@ -115,7 +123,12 @@ describe('redirect()', () => {
     expect(isActionRedirect(r)).toBe(true);
     expect(isActionRedirect({ location: '/x', status: 303 })).toBe(false);
     // Another copy of the module (app modules load in their own namespace).
-    expect(isActionRedirect({ __gioRedirect: true, location: '/x', status: 303 })).toBe(true);
+    expect(isActionRedirect({ [Symbol.for('gio.actionRedirect')]: true, location: '/x', status: 303 })).toBe(
+      true,
+    );
+    // Parsed JSON can never carry the brand: a string key is not it.
+    expect(isActionRedirect(JSON.parse('{"__gioRedirect":true,"location":"/x","status":303}'))).toBe(false);
+    expect(isActionRedirect(JSON.parse(JSON.stringify(r)))).toBe(false);
   });
 
   it('takes a status or { status, headers }', () => {
@@ -131,6 +144,19 @@ describe('redirect()', () => {
     expect(() => redirect('/a', 304)).toThrow(TypeError);
     expect(() => redirect('')).toThrow(/non-empty/);
     expect(() => redirect('/a\r\nset-cookie: x=1')).toThrow(/control characters/);
+  });
+
+  it('assertValidRedirect() refuses a hand-built redirect that redirect() would not make', () => {
+    const brand = Symbol.for('gio.actionRedirect');
+    const forged = (location: unknown, status: unknown) =>
+      ({ [brand]: true, location, status }) as unknown as ActionRedirect;
+    expect(() => assertValidRedirect(redirect('/ok', 308))).not.toThrow();
+    expect(() => assertValidRedirect(forged('/x', 200))).toThrow(/301, 302, 303, 307 or 308/);
+    expect(() => assertValidRedirect(forged('/x', 999))).toThrow(TypeError);
+    expect(() => assertValidRedirect(forged('/x', '303'))).toThrow(TypeError);
+    expect(() => assertValidRedirect(forged('/x\r\nset-cookie: a=1', 303))).toThrow(/control characters/);
+    expect(() => assertValidRedirect(forged('', 303))).toThrow(/non-empty/);
+    expect(() => assertValidRedirect(forged(42, 303))).toThrow(/non-empty/);
   });
 });
 

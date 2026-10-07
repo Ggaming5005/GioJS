@@ -564,6 +564,37 @@ async function main() {
       assert.deepEqual((await list.json()).notes, ['first note']);
     });
 
+    await test('route.ts redirect() is a real redirect, never shareable by a cache', async () => {
+      const res = await fetch(`${BASE}/api/echo`, { redirect: 'manual' });
+      assert.equal(res.status, 308);
+      assert.equal(res.headers.get('location'), '/login');
+      // A per-user guard's 301/308 is heuristically cacheable: keep it private.
+      assert.equal(res.headers.get('cache-control'), 'private, no-cache');
+      const own = await fetch(`${BASE}/api/echo?cc`, { redirect: 'manual' });
+      assert.equal(own.status, 308);
+      assert.equal(own.headers.get('cache-control'), 'no-store');
+    });
+
+    await test('route.ts JSON shaped like a redirect() answers as JSON, never a redirect', async () => {
+      const forged = {
+        __gioRedirect: true,
+        location: 'https://evil.example/',
+        status: 303,
+        headers: { 'set-cookie': 'sid=attacker; Path=/', 'x-frame-options': 'ALLOWALL' },
+      };
+      const res = await fetch(`${BASE}/api/echo`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(forged),
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('location'), null);
+      assert.equal(res.headers.get('set-cookie'), null);
+      assert.notEqual(res.headers.get('x-frame-options'), 'ALLOWALL');
+      assert.deepEqual(await res.json(), forged);
+    });
+
     await test('route.ts binary Response bodies survive the IPC boundary byte-for-byte', async () => {
       const res = await fetch(`${BASE}/api/binary`);
       assert.equal(res.status, 200);
@@ -776,6 +807,19 @@ async function main() {
       assert.deepEqual(values('cache-control'), ['no-cache']);
       // Connection-specific, and illegal on HTTP/2.
       assert.deepEqual(values('connection'), []);
+    });
+
+    await test('an async GioEventStream handler\'s cleanup runs when the client leaves', async () => {
+      const cleanups = async () =>
+        (await (await fetch(`${BASE}/api/async-events?state=1`)).json()).cleanups;
+      const before = await cleanups();
+      const controller = new AbortController();
+      const res = await fetch(`${BASE}/api/async-events`, { signal: controller.signal });
+      assert.equal(res.status, 200);
+      const reader = res.body.getReader();
+      assert.match(new TextDecoder().decode((await reader.read()).value), /"ready":true/);
+      controller.abort();
+      await waitFor('the worker to run the resolved cleanup', async () => (await cleanups()) > before, 5000);
     });
 
     await test('SSE streams outlive header_read_timeout_secs', async () => {
@@ -2779,6 +2823,55 @@ async function unsetNodeEnvPhase() {
     if (!serverGone) server.kill();
     await serverExited;
     await rm(cacheDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Phase 1a' (project tsconfig): the server starts outside the project (cwd
+ * is the repository, GIO_APP_DIR points elsewhere), as a process manager
+ * may start it. The worker must compile app code with the project's own
+ * tsconfig.json - here `"jsx": "react-jsx"`, so a starter-style layout and
+ * page without a React import render - not with whatever the cwd has.
+ */
+async function projectTsconfigPhase() {
+  const appRoot = await mkdtemp(join(tmpdir(), 'gio-int-tsconfig-'));
+  let run = null;
+  try {
+    await mkdir(join(appRoot, 'app'), { recursive: true });
+    await linkFixtureDeps(appRoot);
+    await writeFile(
+      join(appRoot, 'tsconfig.json'),
+      JSON.stringify({ compilerOptions: { jsx: 'react-jsx', strict: true } }),
+    );
+    await writeFile(
+      join(appRoot, 'app', 'layout.tsx'),
+      'export default function RootLayout({ children }: { children: unknown }) {\n' +
+        '  return <html lang="en"><body>{children as never}</body></html>;\n}\n',
+    );
+    await writeFile(
+      join(appRoot, 'app', 'page.tsx'),
+      'export default function Home() {\n  return <p>TSCONFIG_FIXTURE_AUTOMATIC_JSX</p>;\n}\n',
+    );
+    run = await startSwitchesServer(appRoot, SWITCHES_SERVER_TOML);
+
+    await test('a server started outside the project compiles app code with the project tsconfig', async () => {
+      const res = await fetch(`${BASE}/`);
+      const html = await res.text();
+      assert.equal(res.status, 200, html.slice(0, 500));
+      assert.match(html, /TSCONFIG_FIXTURE_AUTOMATIC_JSX/);
+      assert.doesNotMatch(run.log(), /React is not defined/);
+    });
+  } catch (err) {
+    console.error('\nintegration (project tsconfig): FAILED');
+    console.error(err);
+    if (run) {
+      console.error('\n── server log tail ──');
+      console.error(significantLogTail(run.log()));
+    }
+    process.exitCode = 1;
+  } finally {
+    await run?.stop();
+    await rm(appRoot, { recursive: true, force: true });
   }
 }
 
@@ -6356,6 +6449,9 @@ if (process.exitCode !== 1) {
 }
 if (process.exitCode !== 1) {
   await unsetNodeEnvPhase();
+}
+if (process.exitCode !== 1) {
+  await projectTsconfigPhase();
 }
 if (process.exitCode !== 1) {
   await inheritedModePhase();

@@ -100,7 +100,10 @@ first.
 - **`req.json()` requires a JSON content type.** In route handlers it throws
   `UnsupportedMediaTypeError` - a `415` unless caught - for a body not sent as
   `application/json` or `application/*+json`. Make `fetch()` callers send
-  `Content-Type`.
+  `Content-Type`. An empty, non-UTF-8 or unparseable JSON body throws
+  `MalformedBodyError` - a `400` unless caught - instead of a `SyntaxError`
+  or a plain `Error` (a `500`); a `catch` testing `err instanceof SyntaxError`
+  should test `isMalformedBodyError(err)`.
 - **Personalized renders are no longer cached.** A page that exports
   `revalidate` but whose `getServerSideProps` reads `ctx.cookies`, the
   `cookie` or `authorization` header, `ctx.ip`, `ctx.host` or `ctx.scheme` (or
@@ -403,14 +406,22 @@ first.
   refused before the action ran (`x-gio-refused: unread` on its rate-limit
   `429` and `max_body_bytes` `413`), never a `413` or `429` the action or a
   `route.ts` returned itself.
-- `redirect()` also works in `getServerSideProps`, returned or thrown. Headers
-  an action returns with its data are sent even when `getServerSideProps` then
-  redirects or calls `notFound()`. Typed contract: `ActionArgs<Params>`,
+- `redirect()` also works in `getServerSideProps` and `route.ts` handlers,
+  returned or thrown, with a relative URL sent as written
+  (`Response.redirect('/path')` throws: the web standard wants an absolute
+  URL). Only the value `redirect()` returns is a redirect: a handler that
+  returns parsed JSON with the same keys answers JSON. Every `redirect()`
+  answer (and the `{ redirect }` form of `getServerSideProps`) carries
+  `Cache-Control: private, no-cache` unless its headers set one, so a shared
+  cache never stores a per-user `301`/`308`. Headers an action returns with
+  its data are sent even when `getServerSideProps` then redirects or calls
+  `notFound()`. Typed contract:
+  `ActionArgs<Params>`,
   `ActionResult`, `ActionData<typeof action>` and
   `WithActionData<typeof action, Props>`.
 - Route handlers get `req.formData()` too. A body sent as something other than
   a form is a `415`, and a malformed one a `400` (`MalformedBodyError`)
-  instead of a `500`.
+  instead of a `500` - for `req.json()` as well.
 - **Several cookies per response.** Each `Set-Cookie` of a route-handler
   `Response` (`headers.append('Set-Cookie', ...)`) is sent as its own header,
   byte for byte; before, only the last one arrived. `getServerSideProps`
@@ -792,7 +803,10 @@ first.
 - **Typed params from your routes.** `.gio/routes.d.ts` fills one global
   registry that `href()`, `useParams()` and the core types read, and a route
   pattern that is not one of your routes fails `tsc`. Before the first server
-  start (or `gio typegen`), params are read from the pattern itself.
+  start (or `gio typegen`), params are read from the pattern itself - by the
+  core types and by `href()` and `useParams()` alike, so
+  `href('/posts/:id', { id })` typechecks on a fresh checkout and still
+  requires `id`. `@gio.js/react` exports `RoutePattern`.
 - `import type ... from '@gio.js/core'` no longer fails `tsc --noEmit` with
   TS5097: the package ships declaration files.
 - Starters depend on `@gio.js/core` directly and use these types (the
@@ -1097,6 +1111,27 @@ first.
   chunked over HTTP/1.1: the compression layer hid the body's size even when
   it left the body uncompressed. They now carry one; a compressed body still
   has none.
+- An `async` `GioEventStream` handler's promise was stored as its cleanup, so
+  on disconnect the cleanup never ran and the worker logged a `TypeError`.
+  The promise is now awaited and what it resolves to is the cleanup - run
+  even when the client left first - and a rejection ends the stream like a
+  throw. A handler may also return nothing: its type is the new
+  `SseHandler`, `(stream) => SseCleanupFn | void | Promise<SseCleanupFn | void>`.
+  A result that is not a function is logged as a warning, and a cleanup
+  that throws is logged instead of failing the frame. The testing kit's
+  `callRoute` streams behave the same (a throwing cleanup also rejects the
+  stream's `cancel()` when it runs during it).
+- A server started outside the project (`GIO_APP_DIR=/srv/app/app` from
+  another directory) compiled app code with the working directory's
+  tsconfig, or none: a starter layout without a React import answered `500`
+  with `React is not defined`. The worker now gets the project's
+  `tsconfig.json` (else `jsconfig.json`) as `TSX_TSCONFIG_PATH`, the file
+  the client bundles already used; a `TSX_TSCONFIG_PATH` the environment
+  sets wins. `gio export`, `gio routes` and `gio typegen` run from another
+  directory do the same.
+- `handleHardReload()` from `@gio.js/react` threw `window is not defined`
+  when called during server rendering; like the other deployment helpers,
+  it now does nothing there.
 
 ### Known limitations
 

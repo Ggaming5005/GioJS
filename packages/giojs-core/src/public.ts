@@ -9,7 +9,7 @@
  * `allowImportingTsExtensions` and the package's own compiler settings.
  */
 export { GioEventStream, isGioEventStream } from './sse.ts';
-export type { SseStream, SseCleanupFn } from './sse.ts';
+export type { SseStream, SseCleanupFn, SseHandler } from './sse.ts';
 export type { GioRequest, GioSocket, WsHandler } from './context.ts';
 export { broadcast } from './ws-hub.ts';
 export type { BroadcastOptions } from './ws-hub.ts';

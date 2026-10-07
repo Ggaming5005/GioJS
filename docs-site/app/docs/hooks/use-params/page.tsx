@@ -31,9 +31,9 @@ export function LikeButton() {
       <PropsTable kind="Parameter" rows={[
         {
           name: 'T',
-          type: "keyof GioJS.RegisteredRoutes | Record<string, string>",
+          type: 'RoutePattern | Record<string, string>',
           default: 'Record<string, string>',
-          description: <>A route pattern (<code>&apos;/posts/:id&apos;</code>) types the result from the generated <code>.gio/routes.d.ts</code>; a shape (<code>{'{ id: string }'}</code>) is used as is.</>,
+          description: <>A route pattern (<code>&apos;/posts/:id&apos;</code>) types the result from the generated <code>.gio/routes.d.ts</code>, or from the pattern itself before that file exists; a shape (<code>{'{ id: string }'}</code>) is used as is.</>,
         },
       ]} />
       <p>The hook takes no arguments.</p>
@@ -106,9 +106,10 @@ export function Breadcrumbs() {
           <code>app/(shop)/products/[id]</code> is <code>&apos;/products/:id&apos;</code>.
         </li>
         <li>
-          Patterns autocomplete once <code>.gio/routes.d.ts</code> exists (written at every
-          server start) and is in your <code>tsconfig.json</code> <code>include</code>. Without
-          it, a pattern is a type error: pass a shape such as <code>{'{ id: string }'}</code>.
+          Patterns autocomplete, and a pattern that is not one of your routes fails{' '}
+          <code>tsc</code>, once <code>.gio/routes.d.ts</code> exists (written at every server
+          start) and is in your <code>tsconfig.json</code> <code>include</code>. Without it,
+          any pattern is accepted and its params are read from the pattern.
         </li>
         <li>
           In the server-only root layout the value is that of the page loaded in full: soft
@@ -129,7 +130,7 @@ export function Breadcrumbs() {
       </ul>
 
       <h2 id="version-history">Version history</h2>
-      <VersionHistory entries={[{ version: 'v0.1.0-beta.8', changes: <>Introduced, typed by <code>GioJS.RegisteredRoutes</code>.</> }]} />
+      <VersionHistory entries={[{ version: 'v0.1.0-beta.8', changes: <>Introduced, typed by <code>GioJS.RegisteredRoutes</code>, or by the pattern itself before <code>.gio/routes.d.ts</code> exists.</> }]} />
     </>
   );
 }

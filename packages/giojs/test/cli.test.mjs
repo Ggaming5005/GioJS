@@ -11,7 +11,7 @@
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -22,6 +22,7 @@ import {
   freePort,
   gioBin,
   hasStackTrace,
+  packageDir,
   run,
   runAsync,
   tempDir,
@@ -378,6 +379,54 @@ describe('gio routes / gio typegen', () => {
     const missing = run(['typegen'], { cwd: project, env: { GIO_APP_DIR: 'src/app' } });
     assert.equal(missing.status, 1);
     assert.match(missing.stderr, /no app\/ directory at .*src[\\/]app/);
+  });
+});
+
+describe('gio export / gio routes outside the project', () => {
+  // A project whose tsconfig selects the automatic JSX runtime (a page with
+  // no React import) and maps `@lib/*`: both work only with that tsconfig,
+  // not the cwd's.
+  const LAYOUT = 'export default function RootLayout({ children }: { children: unknown }) {\n' +
+    '  return <html lang="en"><body>{children as never}</body></html>;\n}\n';
+  let project;
+  before(() => {
+    project = tempProject({
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: { jsx: 'react-jsx', strict: true, baseUrl: '.', paths: { '@lib/*': ['lib/*'] } },
+      }),
+      'lib/greet.ts': 'export const greet = () => ({ hello: true });\n',
+      'app/layout.tsx': LAYOUT,
+      'app/page.tsx': 'export default function Home() {\n  return <p>EXPORT_AUTOMATIC_JSX</p>;\n}\n',
+      // Resolves only through the tsconfig's `paths`.
+      'app/api/hello/route.ts': "import { greet } from '@lib/greet';\nexport function GET() { return greet(); }\n",
+    });
+    const coreModules = join(packageDir, '..', 'giojs-core', 'node_modules');
+    mkdirSync(join(project, 'node_modules'));
+    for (const dep of ['react', 'react-dom']) {
+      symlinkSync(join(coreModules, dep), join(project, 'node_modules', dep), 'junction');
+    }
+  });
+
+  test('gio export compiles the app with the project tsconfig, whatever the cwd', () => {
+    const out = join(tempDir(), 'out');
+    const { status, stdout, stderr } = run(['export'], {
+      cwd: tempDir(),
+      env: { GIO_APP_DIR: join(project, 'app'), GIO_OUT_DIR: out },
+    });
+    assert.equal(status, 0, `${stdout}\n${stderr}`);
+    assert.doesNotMatch(stdout + stderr, /React is not defined/);
+    assert.match(readFileSync(join(out, 'index.html'), 'utf8'), /EXPORT_AUTOMATIC_JSX/);
+  });
+
+  test('gio routes loads route modules with the project tsconfig, whatever the cwd', () => {
+    const { status, stdout, stderr } = run(['routes', '--json'], {
+      cwd: tempDir(),
+      env: { GIO_APP_DIR: join(project, 'app') },
+    });
+    assert.equal(status, 0, stderr);
+    assert.doesNotMatch(stdout, /failed to load/);
+    const hello = JSON.parse(stdout).routes.find((r) => r.pattern === '/api/hello');
+    assert.deepEqual(hello.methods, ['GET']);
   });
 });
 

@@ -29,14 +29,18 @@ import type { ParamsOf, RouteOrParams } from './route-params.ts';
 
 const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
 
+/**
+ * The brand redirect() sets. Symbol.for, not a module-local symbol: app
+ * modules load in their own tsx namespace, so the caller's copy of this
+ * module is rarely the renderer's (see not-found.ts). Not a string key
+ * either: a route.ts handler that returns parsed client JSON as is must
+ * never be able to forge a redirect - JSON cannot carry a symbol key.
+ */
+const REDIRECT_BRAND = Symbol.for('gio.actionRedirect');
+
 /** What redirect() returns (or throws). Only the renderer should look inside. */
 export interface ActionRedirect {
-  /**
-   * Brand for cross-instance detection: app modules load in their own tsx
-   * namespace, so the caller's copy of this module is rarely the
-   * renderer's (see request-body.ts).
-   */
-  readonly __gioRedirect: true;
+  readonly [REDIRECT_BRAND]: true;
   readonly location: string;
   readonly status: number;
   readonly headers?: GsspResponseHeaders;
@@ -59,6 +63,21 @@ export interface RedirectInit {
  */
 export function redirect(url: string, init: number | RedirectInit = {}): ActionRedirect {
   const { status = 303, headers } = typeof init === 'number' ? { status: init } : init;
+  assertRedirectTarget(url, status);
+  return {
+    [REDIRECT_BRAND]: true,
+    location: url,
+    status,
+    ...(headers !== undefined ? { headers } : {}),
+  };
+}
+
+/**
+ * Throw a TypeError unless `url` and `status` are what redirect() accepts.
+ * The renderer checks again before answering (assertValidRedirect), so a
+ * hand-built ActionRedirect cannot send what redirect() would refuse.
+ */
+function assertRedirectTarget(url: unknown, status: unknown): void {
   if (typeof url !== 'string' || url === '') {
     throw new TypeError('redirect() needs a non-empty URL');
   }
@@ -67,15 +86,18 @@ export function redirect(url: string, init: number | RedirectInit = {}): ActionR
   if (/[\u0000-\u001f\u007f]/.test(url)) {
     throw new TypeError('redirect() URL contains control characters');
   }
-  if (!REDIRECT_STATUSES.has(status)) {
+  if (typeof status !== 'number' || !REDIRECT_STATUSES.has(status)) {
     throw new TypeError(`redirect() status must be 301, 302, 303, 307 or 308 (got ${String(status)})`);
   }
-  return {
-    __gioRedirect: true,
-    location: url,
-    status,
-    ...(headers !== undefined ? { headers } : {}),
-  };
+}
+
+/**
+ * Re-check a redirect before it is sent: the status is one redirect()
+ * allows and the location a non-empty string without control characters.
+ * A failure is a server bug, answered 500 by the caller - never sent.
+ */
+export function assertValidRedirect(redirect: ActionRedirect): void {
+  assertRedirectTarget(redirect.location, redirect.status);
 }
 
 /** Whether `value` came from redirect() (from any copy of this module). */
@@ -83,7 +105,7 @@ export function isActionRedirect(value: unknown): value is ActionRedirect {
   return (
     typeof value === 'object' &&
     value !== null &&
-    (value as { __gioRedirect?: unknown }).__gioRedirect === true
+    (value as Record<symbol, unknown>)[REDIRECT_BRAND] === true
   );
 }
 

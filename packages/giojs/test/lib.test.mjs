@@ -23,7 +23,7 @@ const {
   execCommand, declaresSubcommand, parseViewOutput, registryManifest, installDevCommand, shellQuote,
 } = require('../bin/lib/delegate.js');
 const { targetUrl, explanationFor } = require('../bin/lib/cache-explain.js');
-const { detectPackageManager } = require('../bin/lib/project.js');
+const { detectPackageManager, tsxEnv } = require('../bin/lib/project.js');
 
 describe('didYouMean', () => {
   const commands = ['dev', 'start', 'build', 'routes', 'doctor', 'typegen'];
@@ -372,6 +372,19 @@ describe('create-giojs delegation', () => {
     assert.equal(execCommand('npm', '1.2.3', 'win32').shell, true);
     assert.equal(shellQuote('./my app'), '"./my app"');
     assert.equal(shellQuote('--dry-run'), '--dry-run');
+  });
+
+  test('tsx children get the project tsconfig (else jsconfig), unless the env names one', () => {
+    const project = tempProject({ 'jsconfig.json': '{}' });
+    assert.equal(tsxEnv({ A: '1' }, project).TSX_TSCONFIG_PATH, join(project, 'jsconfig.json'));
+    const both = tempProject({ 'tsconfig.json': '{}', 'jsconfig.json': '{}' });
+    const env = tsxEnv({ A: '1' }, both);
+    assert.equal(env.TSX_TSCONFIG_PATH, join(both, 'tsconfig.json'));
+    assert.equal(env.A, '1');
+    assert.deepEqual(tsxEnv({ TSX_TSCONFIG_PATH: '/own.json' }, both), { TSX_TSCONFIG_PATH: '/own.json' });
+    // Neither file (a directory of that name is not one): tsx keeps its own lookup.
+    const none = tempProject({ 'tsconfig.json/x': '' });
+    assert.deepEqual(tsxEnv({ A: '1' }, none), { A: '1' });
   });
 
   test('package manager detection: user agent, then lockfile', () => {

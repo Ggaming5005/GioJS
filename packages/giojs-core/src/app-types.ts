@@ -116,8 +116,9 @@ export type GetStaticPaths<Route extends RouteOrParams = DefaultStaticParams> = 
 
 /**
  * A route.ts method handler: `export const GET: RouteHandler<'/api/posts/:id'> = req => ...`.
- * Return a web `Response` (sent as is), a `GioEventStream` (GET: switches
- * to SSE), `null`/`undefined` (204), or any JSON-serializable value (200
+ * Return a web `Response` (sent as is), a `GioEventStream` (switches to
+ * SSE), `redirect()` (its status and Location; thrown works too),
+ * `null`/`undefined` (204), or any JSON-serializable value (200
  * `application/json`). `notFound()` answers a JSON 404. Handler responses
  * are never cached.
  */

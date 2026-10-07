@@ -793,6 +793,39 @@ describe('callRoute', () => {
     await reader.cancel();
     expect(counter()).toBe(before + 1);
   });
+
+  it('awaits an async stream handler and runs the cleanup it resolves to', async () => {
+    const counter = (): number =>
+      Number((globalThis as Record<string, unknown>)['__testingKitSseCleanups'] ?? 0);
+    const closed = await callRoute('/api/events?count=1&async', { appDir });
+    expect(await closed.text()).toBe('id: 1\nevent: tick\ndata: {"n":1}\n\n');
+
+    const before = counter();
+    const res = await callRoute('/api/events?count=1&open&async', { appDir });
+    const reader = res.stream!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('data: {"n":1}');
+    await reader.cancel();
+    expect(counter()).toBe(before + 1);
+  });
+
+  it('reports a throwing cleanup: rejects cancel(), or logs it when an async handler resolves later', async () => {
+    const errorSpy = vi.mocked(logger.error);
+    errorSpy.mockClear();
+    const cleanupLogs = () => errorSpy.mock.calls.filter(([msg]) => msg === 'sse cleanup threw');
+
+    const sync = await callRoute('/api/events?count=1&open&throwCleanup', { appDir });
+    const reader = sync.stream!.getReader();
+    await reader.read();
+    await expect(reader.cancel()).rejects.toThrow('cleanup failed');
+    expect(cleanupLogs()).toHaveLength(1);
+
+    // Cancelled before the async handler resolves: its cleanup runs once it
+    // does, after cancel() has returned - only the log can report it.
+    const late = await callRoute('/api/events?count=1&open&async&throwCleanup', { appDir });
+    await late.stream!.cancel();
+    await vi.waitFor(() => expect(cleanupLogs()).toHaveLength(2));
+    expect(cleanupLogs()[1]![1]).toEqual({ error: 'cleanup failed' });
+  });
 });
 
 describe('server-only', () => {

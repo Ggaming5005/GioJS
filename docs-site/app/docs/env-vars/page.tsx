@@ -146,13 +146,15 @@ GIO_PORT=4000 GIO_LOG_FORMAT=json npx gio start`} />
         <code>gio build standalone</code> and <code>renderPage()</code> all follow it.
       </p>
       <p>
-        Start the server from the project root all the same. The worker compiles your
-        TypeScript with the <code>tsconfig.json</code> of its working directory, which is the
-        server&apos;s. Started from another directory, settings such as{' '}
-        <code>&quot;jsx&quot;: &quot;react-jsx&quot;</code> do not apply, and a component that
-        does not import React fails with <code>React is not defined</code>. The IPC sockets
-        (<a href="#gio-socket-path"><code>GIO_SOCKET_PATH</code></a>) also go in the working
-        directory&apos;s <code>.gio/</code>.
+        The worker compiles your TypeScript with the project root&apos;s{' '}
+        <code>tsconfig.json</code> (or <code>jsconfig.json</code>), wherever the server is
+        started - and so do <code>gio export</code>, <code>gio routes</code> and{' '}
+        <code>gio typegen</code> - so settings such as <code>&quot;jsx&quot;: &quot;react-jsx&quot;</code> apply
+        from any working directory. Without either file it falls back to tsx&apos;s own
+        lookup, which starts in the working directory; set{' '}
+        <code>TSX_TSCONFIG_PATH</code> to choose another file. The IPC sockets{' '}
+        (<a href="#gio-socket-path"><code>GIO_SOCKET_PATH</code></a>) still go in the
+        working directory&apos;s <code>.gio/</code>.
       </p>
 
       <h3 id="gio-public-dir">GIO_PUBLIC_DIR</h3>
@@ -432,6 +434,7 @@ GIO_PORT=4000 GIO_LOG_FORMAT=json npx gio start`} />
           <tr><td><code>GIO_WORKER_ERROR_FILE</code></td><td>Where a worker writes the error that ends it, so a worker that fails to boot is reported by the server with its own error (see <a href="/docs/cli/giojs-server#worker-boot-errors">worker boot errors</a>).</td></tr>
           <tr><td><code>GIO_BUILD_ID</code>, <code>GIO_REUSE_BUILD</code></td><td>Let pool workers load the first worker&apos;s client build instead of bundling again.</td></tr>
           <tr><td><code>GIO_NODE_SCRIPT</code>, <code>GIO_TSX_PKG</code>, <code>GIO_PNPM_ROOT</code>, <code>NODE_PATH</code></td><td>How to start the worker: its entry script (<code>packages/giojs-core/src/index.ts</code> by default, a bundle&apos;s <code>worker.js</code> in standalone) and the <code>tsx</code> loader that runs it.</td></tr>
+          <tr><td><code>TSX_TSCONFIG_PATH</code></td><td>The tsconfig <code>tsx</code> compiles app code with. The server (and <code>gio export</code>, <code>gio routes</code>, <code>gio typegen</code>) sets it to the project root&apos;s <code>tsconfig.json</code> (else <code>jsconfig.json</code>) unless the environment already sets it.</td></tr>
           <tr><td><code>GIO_STANDALONE</code></td><td><code>1</code> in a standalone bundle: the worker runs on plain <code>node</code>.</td></tr>
           <tr><td><code>GIO_UPDATE_SCHEMA</code></td><td>For contributors: <code>GIO_UPDATE_SCHEMA=1 cargo test -p giojs-server json_schema</code> regenerates <code>gio.schema.json</code>.</td></tr>
           <tr><td><code>VITEST</code></td><td>Set by vitest; the testing kit adjusts module loading under it and removes it from a <code>createTestServer()</code> server&apos;s environment.</td></tr>
@@ -548,7 +551,9 @@ export default defineConfig({
               <code>GIO_LOG_FORMAT</code>, <code>GIO_WORKER_INDEX</code> /{' '}
               <code>GIO_WORKER_COUNT</code>, <code>GIO_EXIT_ON_STDIN_EOF</code>,{' '}
               <code>GIO_SERVER_BIN</code>; <code>GIO_PUBLIC_*</code> inlined into client
-              bundles; <code>.env</code> files loaded at startup.
+              bundles; <code>.env</code> files loaded at startup. The worker compiles app
+              code with the project&apos;s <code>tsconfig.json</code> (it used the working
+              directory&apos;s) and gets <code>TSX_TSCONFIG_PATH</code>.
             </>
           ),
         },

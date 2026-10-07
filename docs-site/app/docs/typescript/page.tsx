@@ -87,9 +87,10 @@ export default function Post({ params }: PageProps<'/posts/:id'>) {
           (<code>@gio.js/core/testing</code>, <code>@gio.js/core/server-only</code>).
         </li>
         <li>
-          <code>paths</code> and <code>jsx</code> settings are honored when bundling too: the
-          client and standalone bundles use the project&apos;s <code>tsconfig.json</code>{' '}
-          (or <code>jsconfig.json</code>).
+          <code>paths</code> and <code>jsx</code> settings are honored on the server and
+          when bundling: the worker, the client bundles and standalone bundles all use the
+          project&apos;s <code>tsconfig.json</code> (or <code>jsconfig.json</code>), even
+          when the server starts from another directory.
         </li>
       </ul>
       <p>
@@ -182,9 +183,9 @@ href('/blgo/:slug', { slug: 'x' });           // tsc: not assignable to '/' | '/
       <p>
         Before <code>.gio/routes.d.ts</code> exists, these accept any pattern and parse its
         params from the string, so the <code>@gio.js/core</code> types work on a fresh
-        checkout. <code>href()</code> and <code>useParams&lt;pattern&gt;()</code> need the
-        registry: without it, <code>href(&apos;/blog/:slug&apos;, {'{ slug }'})</code> fails
-        with <code>Expected 1 arguments, but got 2</code>.
+        checkout. <code>href()</code> and <code>useParams&lt;pattern&gt;()</code> from{' '}
+        <code>@gio.js/react</code> do the same: <code>href(&apos;/blog/:slug&apos;, {'{ slug }'})</code>{' '}
+        typechecks before the first server start, and still requires <code>slug</code>.
       </p>
 
       <h3 id="gioregisteredroutes">GioRegisteredRoutes</h3>
@@ -263,7 +264,7 @@ export {};`} />
         { name: 'RouteHandler<Route>', description: <>A <code>route.ts</code> method handler: <code>(req: GioRequest&lt;Route&gt;) =&gt; unknown</code>.</> },
         { name: 'RouteHandlerFn', description: <>The untyped form the router calls.</> },
         { name: 'GioRequest<Route>', description: <>The request: <code>method</code>, <code>path</code>, <code>params</code>, <code>query</code>, <code>headers</code>, <code>cookies</code>, <code>body</code>, <code>bodyBase64</code>, <code>json()</code>, <code>formData()</code>, <code>ip</code>, <code>scheme</code>, <code>host</code>, <code>requestId</code>, <code>locale</code>.</> },
-        { name: 'SseStream, SseCleanupFn', description: <>The stream a <code>GioEventStream</code> callback writes to (<code>send</code>, <code>close</code>) and the cleanup function the callback returns.</> },
+        { name: 'SseHandler, SseStream, SseCleanupFn', description: <>The callback a <code>GioEventStream</code> runs, the stream it writes to (<code>send</code>, <code>close</code>), and the cleanup function it may return - or resolve to, when it is <code>async</code>.</> },
         { name: 'WsHandler, GioSocket', description: <>A <code>route.ts</code> <code>wsHandler</code> and the socket it gets (<code>send</code>, <code>close</code>, <code>join</code>, <code>leave</code>, <code>on</code>, <code>params</code>, <code>cookies</code>, ...).</> },
         { name: 'BroadcastOptions', description: <><code>broadcast()</code>&apos;s options: <code>{'{ except?: socketId }'}</code>.</> },
         { name: 'UseWebSocketOptions, UseWebSocketResult, ReconnectOptions, WebSocketData', description: <>From <code>@gio.js/react</code>: <code>useWebSocket()</code>&apos;s options, result, backoff settings and message type.</> },
@@ -305,7 +306,7 @@ export {};`} />
         { name: 'NavigateOptions, RouterNavigateOptions', description: <>Options of <code>navigate()</code> (<code>replace</code>, <code>scroll</code>, <code>transition</code>) and of <code>router.push</code> / <code>replace</code> (the same without <code>replace</code>).</> },
         { name: 'ReadonlyURLSearchParams', description: <><code>useSearchParams()</code>: <code>URLSearchParams</code> without the mutating methods.</> },
         { name: 'TransitionPreset, AnimatePreset', description: <>Names of the view-transition and <code>&lt;Animate&gt;</code> presets.</> },
-        { name: 'GioRegisteredRoutes, RouteParamsOf', description: <>The route registry as <code>@gio.js/react</code> sees it, and a registered pattern&apos;s params.</> },
+        { name: 'GioRegisteredRoutes, RouteParamsOf, RoutePattern', description: <>The route registry as <code>@gio.js/react</code> sees it, a pattern&apos;s params (registered, or parsed from the pattern), and the patterns <code>href()</code> accepts.</> },
       ]} />
 
       <h3 id="testing-types">Testing</h3>

@@ -36,7 +36,7 @@ export default function Page(): React.JSX.Element {
         <tbody>
           <tr><td><a href="#redirect-in-a-page-action"><code>redirect()</code></a></td><td>Page <code>action</code></td><td>After a form post (Post/Redirect/Get)</td><td><code>303</code></td></tr>
           <tr><td><a href="#redirect-in-getserversideprops"><code>redirect()</code> or <code>{'{ redirect }'}</code></a></td><td><code>getServerSideProps</code></td><td>Before rendering: auth checks, moved records</td><td><code>303</code>; <code>302</code> or <code>301</code> for the object form</td></tr>
-          <tr><td><a href="#redirect-in-a-route-handler">A redirect <code>Response</code></a></td><td><code>route.ts</code></td><td>API endpoints, short links, OAuth hops</td><td>yours</td></tr>
+          <tr><td><a href="#redirect-in-a-route-handler"><code>redirect()</code> or a redirect <code>Response</code></a></td><td><code>route.ts</code></td><td>API endpoints, short links, OAuth hops</td><td><code>303</code> for <code>redirect()</code>; yours for a <code>Response</code></td></tr>
           <tr><td><a href="#redirects-in-gio-toml"><code>[[redirects]]</code></a></td><td><code>gio.toml</code></td><td>Moved URLs known at deploy time</td><td><code>302</code></td></tr>
           <tr><td><a href="#redirects-in-middleware-ts"><code>redirects</code></a></td><td><code>middleware.ts</code></td><td>The same rules, typed and in TypeScript</td><td><code>302</code></td></tr>
           <tr><td><a href="#guards"><code>redirect_to</code></a></td><td><code>[[guards]]</code></td><td>Sending signed-out visitors to a login page</td><td><code>302</code> (fixed)</td></tr>
@@ -126,7 +126,9 @@ export async function getServerSideProps(ctx: GsspContext) {
 }`} />
       <p>
         Redirect answers are never stored in the page cache, even on a page that exports{' '}
-        <code>revalidate</code>. On a page cached with{' '}
+        <code>revalidate</code>, and carry <code>Cache-Control: private, no-cache</code>{' '}
+        unless their headers set one - a <code>301</code> is otherwise cacheable by default,
+        and a CDN would replay one visitor&apos;s redirect to everyone. On a page cached with{' '}
         <a href="/docs/page-exports/shell"><code>shell = &apos;cache&apos;</code></a>, the
         shell&apos;s <code>200</code> is already sent when <code>getServerSideProps</code>{' '}
         answers, so the page sends the visitor on with <code>location.replace()</code> (or
@@ -136,12 +138,15 @@ export async function getServerSideProps(ctx: GsspContext) {
 
       <h2 id="redirect-in-a-route-handler">Redirect in a route handler</h2>
       <p>
-        A <a href="/docs/file-conventions/route"><code>route.ts</code></a> handler returns a
-        web <code>Response</code>, so a redirect is a status and a <code>Location</code>{' '}
-        header. <code>Response.redirect()</code> needs an absolute URL; for a path on your own
-        site, build the response yourself:
+        A <a href="/docs/file-conventions/route"><code>route.ts</code></a> handler may return
+        or throw <code>redirect()</code>, as an action does: the answer has its status
+        (<code>303</code> unless you pick another), its headers and a{' '}
+        <code>Location</code> header with the URL as written, relative or absolute. A web{' '}
+        <code>Response</code> works too, but <code>Response.redirect()</code> accepts only
+        an absolute URL: on a path like <code>/</code> it throws, and the handler answers{' '}
+        <code>500</code>.
       </p>
-      <CodeBlock lang="ts" title="app/api/go/route.ts" code={`import type { GioRequest } from '@gio.js/core';
+      <CodeBlock lang="ts" title="app/api/go/route.ts" code={`import { redirect, type GioRequest } from '@gio.js/core';
 
 const LINKS: Record<string, string> = {
   docs: 'https://giojs.com/docs',
@@ -149,15 +154,11 @@ const LINKS: Record<string, string> = {
 };
 
 // /api/go?to=docs - a short-link endpoint.
-export function GET(req: GioRequest): Response {
+export function GET(req: GioRequest) {
   const target = LINKS[req.query['to'] ?? ''];
   if (target === undefined) return Response.json({ error: 'unknown link' }, { status: 404 });
-  return new Response(null, { status: 307, headers: { location: target } });
+  return redirect(target, 307);
 }`} />
-      <p>
-        <code>redirect()</code> from <code>@gio.js/core</code> is for actions and{' '}
-        <code>getServerSideProps</code>; a route handler that returns it does not redirect.
-      </p>
 
       <h2 id="redirects-in-gio-toml">[[redirects]] in gio.toml</h2>
       <p>
@@ -325,8 +326,11 @@ export function safeNext(value: string | undefined): string {
           version: 'v0.1.0-beta.8',
           changes: (
             <>
-              <code>redirect()</code> for page actions and <code>getServerSideProps</code>,
-              with headers. <code>*rest</code> matches zero segments. Rules match the
+              <code>redirect()</code> for page actions, <code>getServerSideProps</code> and{' '}
+              <code>route.ts</code> handlers, with headers. Redirects from actions,{' '}
+              <code>getServerSideProps</code> and handlers carry{' '}
+              <code>Cache-Control: private, no-cache</code> unless their headers set one.{' '}
+              <code>*rest</code> matches zero segments. Rules match the
               canonical path, and header rules apply to redirect responses. A per-visitor
               redirect on a PPR shell hit reaches the visitor.
             </>

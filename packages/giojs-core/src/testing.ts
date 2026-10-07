@@ -62,7 +62,8 @@ import {
 } from './router.ts';
 import { SESSION_SECRET_ENV } from './session.ts';
 import { renderRoute, type RenderExtras } from './ssr.ts';
-import { isGioEventStream, type GioEventStream, type SseStream } from './sse.ts';
+import { isGioEventStream, runEventStream, type GioEventStream, type SseRun } from './sse.ts';
+import { logger } from './logger.ts';
 import { discoverRouteModules } from './ws-router.ts';
 
 // ── app discovery (renderPage / callRoute) ───────────────────────────────────
@@ -619,41 +620,61 @@ function routeResponse(
 
 /**
  * Run a GioEventStream handler against a stream that frames events like
- * the server does. A handler that throws errors the stream (the server can
- * only end it - its headers are gone); cancelling the stream runs the
- * handler's cleanup like a client disconnect, while a stream the handler
- * closed itself is done with (ipc.ts drops its cleanup then too).
+ * the server does (runEventStream, as ipc.ts). A handler that throws or
+ * rejects errors the stream (the server can only end it - its headers are
+ * gone); cancelling the stream runs the handler's cleanup like a client
+ * disconnect - once an async handler resolves to it - while a stream the
+ * handler closed itself is done with. A cleanup that throws logs the
+ * server's error, and rejects cancel() when it ran during it (an async
+ * handler still running when the stream is cancelled runs its cleanup
+ * later: only the log shows that failure); a handler result that is not a
+ * cleanup function logs the server's warning.
  */
 function eventStream(source: GioEventStream): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
-  let cleanup: (() => void) | undefined;
+  let run: SseRun | undefined;
+  let cleanupFailure: { error: unknown } | undefined;
   let done = false;
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      const sink: SseStream = {
-        send(data, event, id) {
-          if (!done) controller.enqueue(encoder.encode(formatSseEvent(data, event, id)));
+      run = runEventStream(
+        source,
+        {
+          send(data, event, id) {
+            if (!done) controller.enqueue(encoder.encode(formatSseEvent(data, event, id)));
+          },
+          close() {
+            if (done) return;
+            done = true;
+            controller.close();
+          },
         },
-        close() {
-          if (done) return;
-          done = true;
-          cleanup = undefined;
-          controller.close();
+        {
+          onError(error) {
+            if (done) return;
+            done = true;
+            controller.error(error);
+          },
+          onCleanupError(error) {
+            // As ipc.ts logs it: a cleanup an async handler resolves to
+            // after cancel() has returned has no caller left to reject.
+            logger.error('sse cleanup threw', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+            cleanupFailure = { error };
+          },
+          onInvalidCleanup(value) {
+            logger.warn('GioEventStream handler returned something other than a cleanup function - ignored', {
+              returned: typeof value,
+            });
+          },
         },
-      };
-      try {
-        const returned = source.handler(sink);
-        if (!done) cleanup = returned;
-      } catch (handlerError) {
-        done = true;
-        controller.error(handlerError);
-      }
+      );
     },
     cancel() {
       done = true;
-      const pending = cleanup;
-      cleanup = undefined;
-      pending?.();
+      run?.disconnect();
+      if (cleanupFailure !== undefined) throw cleanupFailure.error;
     },
   });
 }

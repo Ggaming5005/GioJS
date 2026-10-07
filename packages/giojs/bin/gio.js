@@ -123,7 +123,7 @@ function cmdBuild(args) {
 // where no platform binary is installed.
 function cmdExport(args) {
   parseFlags('export', args, {});
-  const { findCoreDir, findTsxCli } = require('./lib/project');
+  const { findCoreDir, findTsxCli, projectPaths, tsxEnv } = require('./lib/project');
   const coreDir = findCoreDir();
   if (!coreDir) {
     console.error('gio export: @gio.js/core is not installed. Run your package manager\'s install.');
@@ -141,7 +141,11 @@ function cmdExport(args) {
   // NODE_ENV=development. An unset NODE_ENV would load React's dev build,
   // which writes Suspense error messages and stacks into the exported HTML.
   env.NODE_ENV = env.NODE_ENV === 'development' ? 'development' : 'production';
-  const r = spawnSync(process.execPath, [tsxCli, join(coreDir, 'src', 'export-cli.ts')], { stdio: 'inherit', env });
+  const { projectRoot } = projectPaths(env);
+  const r = spawnSync(process.execPath, [tsxCli, join(coreDir, 'src', 'export-cli.ts')], {
+    stdio: 'inherit',
+    env: tsxEnv(env, projectRoot),
+  });
   process.exit(r.status == null ? 1 : r.status);
 }
 

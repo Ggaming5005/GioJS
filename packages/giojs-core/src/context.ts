@@ -138,8 +138,9 @@ export interface GioRequest<Route extends RouteOrParams = Record<string, string>
   /**
    * Parse the body as JSON. The request must declare `application/json` (or
    * `application/*+json`): otherwise it throws `UnsupportedMediaTypeError`,
-   * which becomes a 415 response unless the handler catches it. Also throws
-   * on absent, base64, or malformed bodies. `body` stays available raw.
+   * which becomes a 415 response unless the handler catches it. An empty,
+   * non-UTF-8 (base64) or unparseable body throws `MalformedBodyError` (400
+   * unless caught). `body` stays available raw.
    */
   json<T = unknown>(): T;
   /**

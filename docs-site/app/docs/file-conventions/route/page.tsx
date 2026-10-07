@@ -64,7 +64,8 @@ export async function POST(req: GioRequest) {
         <thead><tr><th>The handler returns</th><th>The response</th></tr></thead>
         <tbody>
           <tr><td>A <code>Response</code></td><td>Sent as it is: status, headers, body (a <code>ReadableStream</code> body streams). Without a <code>Content-Type</code> it gets <code>text/plain</code>.</td></tr>
-          <tr><td>A <code>GioEventStream</code> (<code>GET</code> only)</td><td>A <code>text/event-stream</code> connection.</td></tr>
+          <tr><td>A <code>GioEventStream</code></td><td>A <code>text/event-stream</code> connection, from any method (a browser&apos;s <code>EventSource</code> sends <code>GET</code>).</td></tr>
+          <tr><td><a href="/docs/functions/redirect"><code>redirect()</code></a> (returned or thrown)</td><td>Its status (<code>303</code> by default) and headers, <code>Location</code> as written (a relative path works), no body.</td></tr>
           <tr><td><code>null</code> or <code>undefined</code></td><td><code>204</code> with no body.</td></tr>
           <tr><td>Any other value</td><td><code>200</code>, <code>application/json; charset=utf-8</code>, the value as JSON. A string becomes a JSON string (<code>&quot;hello&quot;</code>).</td></tr>
         </tbody>
@@ -83,9 +84,9 @@ export async function POST(req: GioRequest) {
           <strong>Errors.</strong> <code>notFound()</code> answers <code>404</code>{' '}
           <code>{'{"error":"Not Found"}'}</code>. <code>req.json()</code> or{' '}
           <code>req.formData()</code> on a body sent with another content type answers{' '}
-          <code>415</code>, and a form body that does not parse <code>400</code>. A JSON body
-          that does not parse makes <code>req.json()</code> throw a <code>SyntaxError</code>:
-          catch it to answer <code>400</code> yourself. Any other thrown error answers{' '}
+          <code>415</code>, and a body that does not parse (JSON or form) <code>400</code>{' '}
+          (<a href="/docs/functions/request-errors"><code>MalformedBodyError</code></a>). Any
+          other thrown error answers{' '}
           <code>500</code>{' '}
           <code>{'{"error":"Internal Server Error","digest":"..."}'}</code>, with the details in
           the log under that digest.
@@ -93,6 +94,9 @@ export async function POST(req: GioRequest) {
         <li>
           <strong>Never cached.</strong> Handler responses are not stored or coalesced, and
           GioJS adds no <code>Cache-Control</code> to them: set your own when you want one.
+          A <code>redirect()</code> is the exception: as from an action, it gets{' '}
+          <code>private, no-cache</code> unless its headers set one, so no CDN stores a
+          per-user guard&apos;s <code>301</code> or <code>308</code>.
         </li>
         <li>
           <strong>Before your code runs</strong>, the Rust server applies guards, redirects,
@@ -230,7 +234,7 @@ export async function POST(req: GioRequest) {
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Matched with pages by one precedence rule. A file that throws while it is imported answers <code>500</code>. <code>notFound()</code> answers a JSON <code>404</code>. <code>req.json()</code> requires a JSON content type (<code>415</code>). <code>RouteHandler</code> type. WebSocket handlers in dynamic folders.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Matched with pages by one precedence rule. A file that throws while it is imported answers <code>500</code>. <code>notFound()</code> answers a JSON <code>404</code>. <code>req.json()</code> requires a JSON content type (<code>415</code>), and a JSON body that does not parse is a <code>400</code> instead of a <code>500</code>. <code>redirect()</code> works in handlers. <code>RouteHandler</code> type. WebSocket handlers in dynamic folders.</> },
         { version: 'v0.1.0-beta.5', changes: <>HTTP method handlers (<code>GET</code>, <code>POST</code>, <code>PUT</code>, <code>PATCH</code>, <code>DELETE</code>), <code>405</code> with <code>Allow</code>, SSE from <code>GET</code>.</> },
         { version: 'v0.1.0-beta.1', changes: <>Introduced for <code>wsHandler</code> exports; <code>route.ts</code> or <code>route.js</code>.</> },
       ]} />

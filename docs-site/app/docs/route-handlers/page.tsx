@@ -78,7 +78,10 @@ export async function POST(req: GioRequest) {
         anything else it throws <a href="/docs/functions/request-errors"><code>UnsupportedMediaTypeError</code></a>, which becomes a{' '}
         <code>415 Unsupported Media Type</code> response unless you catch it - a form on
         another site can send <code>text/plain</code> without a CORS preflight, so a handler
-        must not treat it as JSON. <code>req.body</code> always holds the raw body:
+        must not treat it as JSON. A JSON body that is empty or does not parse throws{' '}
+        <a href="/docs/functions/request-errors#malformedbodyerror"><code>MalformedBodyError</code></a>,
+        a <code>400 Bad Request</code> unless you catch it: the client sent it, so it is not
+        logged as a handler failure. <code>req.body</code> always holds the raw body:
       </p>
       <CodeBlock lang="ts" code={`import { isUnsupportedMediaTypeError, type GioRequest } from '@gio.js/core';
 
@@ -106,7 +109,17 @@ export function POST(req: GioRequest) {
         <li>Any JSON-serializable value - sent as <code>application/json</code> with status 200.</li>
         <li>A web-standard <code>Response</code> - its status, headers, and body pass through. Binary bodies (images, files) are supported, and a <code>ReadableStream</code> body streams (see below).</li>
         <li><code>null</code> / <code>undefined</code> - 204 No Content.</li>
-        <li>A <a href="/docs/functions/gio-event-stream"><code>GioEventStream</code></a> (GET only) - switches the connection to SSE.</li>
+        <li>
+          <a href="/docs/functions/redirect"><code>redirect(url)</code></a>, returned or thrown -
+          its status (<code>303</code> by default), headers and <code>Location</code>, with the
+          URL sent as written, so a relative path works, and{' '}
+          <code>Cache-Control: private, no-cache</code> unless its headers set one.{' '}
+          <code>Response.redirect()</code> accepts only absolute URLs and throws (a{' '}
+          <code>500</code>) on a path. Only the value <code>redirect()</code> returns is a
+          redirect: a plain object such as parsed request JSON is always sent as JSON,
+          whatever its keys.
+        </li>
+        <li>A <a href="/docs/functions/gio-event-stream"><code>GioEventStream</code></a> - switches the connection to SSE. Any method may return one; a browser&apos;s <code>EventSource</code> always sends <code>GET</code>.</li>
       </ul>
       <CodeBlock lang="ts" code={`export function DELETE() {
   return new Response('gone', { status: 202, headers: { 'X-Reason': 'cleanup' } });
@@ -131,6 +144,10 @@ export async function POST(req: GioRequest) {
   headers.append('Set-Cookie', serializeCookie('theme', user.theme, { httpOnly: false }));
   return new Response(null, { status: 303, headers });
 }`} />
+      <p>
+        <code>{"redirect('/dashboard', { headers: { 'set-cookie': [a, b] } })"}</code> answers
+        the same way.
+      </p>
       <p>
         <a href="/docs/functions/cookies"><code>serializeCookie</code></a> applies secure defaults (<code>HttpOnly</code>,{' '}
         <code>SameSite=Lax</code>, <code>Secure</code> in production) and refuses values that

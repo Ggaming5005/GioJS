@@ -64,9 +64,11 @@ export function isFormContentType(contentType: string | undefined): boolean {
 }
 
 /**
- * Thrown by `GioRequest.formData()` for a body that claims a form encoding
- * but does not parse as one (a broken multipart body, a missing boundary).
- * Uncaught, it answers 400 Bad Request instead of a 500.
+ * Thrown by `GioRequest.json()` for a body declared as JSON that is not
+ * (empty, not UTF-8, or not parseable), and by `GioRequest.formData()` for a
+ * body that claims a form encoding but does not parse as one (a broken
+ * multipart body, a missing boundary). Uncaught, it answers 400 Bad Request
+ * instead of a 500: the client sent it, the handler did not fail.
  */
 export class MalformedBodyError extends Error {
   /** Brand for cross-instance detection (see UnsupportedMediaTypeError). */
@@ -86,6 +88,24 @@ export function isMalformedBodyError(value: unknown): value is MalformedBodyErro
     value !== null &&
     (value as { __gioMalformedBody?: unknown }).__gioMalformedBody === true
   );
+}
+
+/**
+ * Parse a forwarded request body declared as JSON (the caller has checked
+ * the content type). Rust forwards an empty body as null and a non-UTF-8
+ * one base64-encoded; neither is JSON (RFC 8259 text is UTF-8), so both
+ * are malformed, like a body JSON.parse rejects.
+ */
+export function parseJsonBody<T = unknown>(body: string | null, bodyBase64: boolean): T {
+  if (body === null) throw new MalformedBodyError('request body is not valid JSON: the body is empty');
+  if (bodyBase64) throw new MalformedBodyError('request body is not valid JSON: it is not UTF-8 text');
+  try {
+    return JSON.parse(body) as T;
+  } catch (err) {
+    throw new MalformedBodyError(
+      `request body is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 /**

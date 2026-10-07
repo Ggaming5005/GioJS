@@ -12,13 +12,13 @@
 const { spawnSync } = require('child_process');
 const { existsSync } = require('fs');
 const { join } = require('path');
-const { findCoreDir, findTsxCli, projectPaths } = require('./project');
+const { findCoreDir, findTsxCli, projectPaths, tsxEnv } = require('./project');
 
 const RESULT_MARKER = 'GIO_RESULT ';
 
 /** Run routes-cli.ts `command`; returns the parsed result or exits 1. */
 function runRoutesCli(command) {
-  const { appDir } = projectPaths();
+  const { appDir, projectRoot } = projectPaths();
   // Discovery in a missing directory finds nothing, and typegen would write
   // .gio/ wherever gio was run: the wrong directory must fail, not pass.
   if (!existsSync(appDir)) {
@@ -39,7 +39,7 @@ function runRoutesCli(command) {
     process.exit(1);
   }
   const result = spawnSync(process.execPath, [tsxCli, entry, command], {
-    env: { ...process.env, GIO_APP_DIR: appDir },
+    env: tsxEnv({ ...process.env, GIO_APP_DIR: appDir }, projectRoot),
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'inherit'],
     maxBuffer: 64 * 1024 * 1024,

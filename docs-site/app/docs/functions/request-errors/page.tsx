@@ -57,9 +57,9 @@ export default function Page(): React.JSX.Element {
           </tr>
           <tr>
             <td><code>req.json()</code></td>
-            <td>Declared as JSON but not valid JSON</td>
-            <td><code>SyntaxError</code> (from <code>JSON.parse</code>)</td>
-            <td><code>500</code></td>
+            <td>Declared as JSON but empty, not UTF-8 text, or not valid JSON</td>
+            <td><code>MalformedBodyError</code></td>
+            <td><code>400</code></td>
           </tr>
         </tbody>
       </table>
@@ -100,7 +100,7 @@ export default function Page(): React.JSX.Element {
       <h2 id="malformedbodyerror">MalformedBodyError</h2>
       <PropsTable kind="Field" rows={[
         { name: 'status', type: '400', description: <>The status it answers with.</> },
-        { name: 'message', type: 'string', description: <>Starts with <code>request body is not valid</code> and the media type, followed by the parser&apos;s reason.</> },
+        { name: 'message', type: 'string', description: <>Starts with <code>request body is not valid</code> and the media type (<code>JSON</code> for <code>req.json()</code>), followed by the reason: the parser&apos;s message, <code>the body is empty</code> or <code>it is not UTF-8 text</code>.</> },
         { name: 'name', type: 'string', description: <><code>&apos;MalformedBodyError&apos;</code></> },
       ]} />
 
@@ -146,14 +146,19 @@ export async function PUT(req: GioRequest) {
   }
 }`} />
       <h3 id="invalid-json-as-a-400">Invalid JSON as a 400</h3>
-      <CodeBlock lang="ts" title="app/api/settings/route.ts" code={`import type { GioRequest } from '@gio.js/core';
+      <p>
+        Uncaught, invalid JSON already answers <code>400</code>{' '}
+        <code>{'{"error":"Bad Request","message":"request body is not valid JSON: ..."}'}</code>.
+        Catch it to send your own body:
+      </p>
+      <CodeBlock lang="ts" title="app/api/settings/route.ts" code={`import { isMalformedBodyError, type GioRequest } from '@gio.js/core';
 
 export function PATCH(req: GioRequest) {
   let patch: unknown;
   try {
     patch = req.json();
   } catch (err) {
-    if (err instanceof SyntaxError) return Response.json({ error: 'Invalid JSON' }, { status: 400 });
+    if (isMalformedBodyError(err)) return Response.json({ error: 'Invalid JSON' }, { status: 400 });
     throw err;   // UnsupportedMediaTypeError stays a 415
   }
   return { applied: patch };
@@ -162,9 +167,12 @@ export function PATCH(req: GioRequest) {
       <h2 id="good-to-know">Good to know</h2>
       <ul>
         <li>
-          <strong>Invalid JSON is a 500</strong> unless you catch the <code>SyntaxError</code>{' '}
-          as above. <code>json()</code> also throws a plain <code>Error</code> for a request
-          without a body, or with a binary (base64) body.
+          <strong>Invalid JSON is a 400, not a <code>SyntaxError</code>.</strong>{' '}
+          <code>json()</code> throws <code>MalformedBodyError</code> for JSON that does not
+          parse, a request without a body, and a body that is not UTF-8 text (which the
+          server forwards base64-encoded). The parser&apos;s <code>SyntaxError</code> is not
+          rethrown, so a <code>catch</code> that tests <code>err instanceof SyntaxError</code>{' '}
+          no longer matches: test <code>isMalformedBodyError(err)</code>.
         </li>
         <li>
           <strong>Bodies over <code>[server] max_body_bytes</code></strong> (2 MiB by
@@ -198,7 +206,10 @@ export function PATCH(req: GioRequest) {
             <>
               Introduced. <code>req.json()</code> parses only bodies declared as JSON;{' '}
               <code>req.formData()</code> is new, with <code>MalformedBodyError</code> for
-              bodies that do not parse.
+              bodies that do not parse. <code>req.json()</code> throws{' '}
+              <code>MalformedBodyError</code> (a <code>400</code>) too, for an empty, non-UTF-8
+              or invalid JSON body, where it threw a <code>SyntaxError</code> or a plain{' '}
+              <code>Error</code> (a <code>500</code>).
             </>
           ),
         },

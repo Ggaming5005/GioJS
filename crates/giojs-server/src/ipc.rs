@@ -1900,7 +1900,35 @@ fn spawn_node_tsx(
     cmd.arg(&cli_mjs)
         .arg(node_script)
         .env("NODE_PATH", node_path);
+    let inherited = std::env::var_os(TSX_TSCONFIG_ENV).is_some();
+    if let Some(tsconfig) = worker_tsconfig(&crate::config::GioConfig::project_root(), inherited) {
+        tracing::debug!("worker tsconfig: {}", tsconfig.display());
+        cmd.env(TSX_TSCONFIG_ENV, tsconfig);
+    }
     spawn_worker_command(cmd, ipc_path, ws_path, token, dev_mode, extra_env)
+}
+
+/// tsx's tsconfig override (what its `--tsconfig` flag sets).
+const TSX_TSCONFIG_ENV: &str = "TSX_TSCONFIG_PATH";
+
+/// The tsconfig tsx compiles app code with: the project's own
+/// `tsconfig.json`, else its `jsconfig.json` - the file the client bundles
+/// use (client-build.ts `projectTsconfig`). Without it tsx looks in the
+/// worker's cwd, the server's: a server started outside the project
+/// compiled pages with another project's settings, or with none, and a
+/// starter layout without a React import (`"jsx": "react-jsx"`) answered
+/// `React is not defined`. None when `TSX_TSCONFIG_PATH` is already set
+/// (it wins) or the project has neither file.
+fn worker_tsconfig(project_root: &std::path::Path, inherited: bool) -> Option<std::path::PathBuf> {
+    if inherited {
+        return None;
+    }
+    let found = ["tsconfig.json", "jsconfig.json"]
+        .iter()
+        .map(|name| project_root.join(name))
+        .find(|candidate| candidate.is_file())?;
+    // Absolute, so it names the same file whatever the worker's cwd.
+    Some(std::path::absolute(&found).unwrap_or(found))
 }
 
 /// NODE_ENV for the worker. Rust's mode is the single source of truth: the
@@ -4047,6 +4075,34 @@ mod tests {
     #[test]
     fn standalone_env_forces_direct_node_launch() {
         assert!(worker_runs_without_tsx("some/worker.ts", Some("1")));
+    }
+
+    #[test]
+    fn worker_tsconfig_is_the_projects_own() {
+        let root = std::env::temp_dir().join(format!("gio-worker-tsconfig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // Neither file: tsx keeps its own lookup.
+        assert_eq!(worker_tsconfig(&root, false), None);
+        std::fs::write(root.join("jsconfig.json"), "{}").unwrap();
+        assert_eq!(
+            worker_tsconfig(&root, false),
+            Some(root.join("jsconfig.json"))
+        );
+        std::fs::write(root.join("tsconfig.json"), "{}").unwrap();
+        let tsconfig = worker_tsconfig(&root, false).unwrap();
+        assert_eq!(tsconfig, root.join("tsconfig.json"));
+        assert!(tsconfig.is_absolute());
+        // An explicit TSX_TSCONFIG_PATH wins.
+        assert_eq!(worker_tsconfig(&root, true), None);
+        // A directory of that name is not a config file.
+        let dir_root = root.join("nested");
+        std::fs::create_dir_all(dir_root.join("tsconfig.json")).unwrap();
+        assert_eq!(worker_tsconfig(&dir_root, false), None);
+        // A relative project root (GIO_APP_DIR=app gives ".") comes back absolute.
+        let cwd_relative = worker_tsconfig(std::path::Path::new("."), false);
+        assert!(cwd_relative.is_none_or(|path| path.is_absolute()));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
