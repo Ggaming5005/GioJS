@@ -36,7 +36,7 @@ export default function TestingPage(): React.JSX.Element {
           </tr>
           <tr>
             <td><a href="/docs/functions/call-route"><code>callRoute(path, options)</code></a></td>
-            <td>Your <a href="/docs/file-conventions/route"><code>route.ts</code></a> handler (or a page <code>action</code>), in your test process</td>
+            <td>Your <a href="/docs/file-conventions/route"><code>route.ts</code></a> handler (or a page <a href="/docs/page-exports/action"><code>action</code></a>), in your test process</td>
             <td>API handlers and form posts: JSON/form bodies, status codes, cookies, event streams</td>
           </tr>
           <tr>
@@ -297,7 +297,7 @@ it('blocks cross-site posts', async () => {
       <ul>
         <li><strong>Options:</strong> <code>appDir</code>, <code>env</code> (extra variables for the server and worker; <code>undefined</code> removes one - <code>{`{ NODE_ENV: 'development' }`}</code> gives a dev server), <code>port</code>, <code>binary</code>, <code>timeoutMs</code> (default 60 s).</li>
         <li><strong>Result:</strong> <code>url</code> (no trailing slash), <code>port</code>, <code>logs()</code> (server and worker output so far), <code>close()</code>.</li>
-        <li><strong>The binary</strong> is <code>GIO_SERVER_BIN</code> if set, else the platform binary <code>@gio.js/server</code> installed. Without one it throws, naming the package to install.</li>
+        <li><strong>The binary</strong> is the <code>binary</code> option if given, else <code>GIO_SERVER_BIN</code> if set (a path that does not exist throws, naming which of the two it came from), else the platform binary <code>@gio.js/server</code> installed, else - inside a checkout of the GioJS repository - <code>target/debug</code> or <code>target/release</code>. Without one it throws, naming the package to install.</li>
         <li><strong><code>close()</code></strong> kills the server and its worker&apos;s whole process group (the worker runs in its own group). Call it in <code>afterAll</code> / <code>after</code>: it frees the port and the processes right away.</li>
         <li><strong>A forgotten <code>close()</code></strong> leaves nothing behind either. A running server never keeps the test process alive, so the run still ends, and exit hooks take the servers down with it - also on a crash or Ctrl+C. Where no hook gets to run - the test process killed with <code>SIGKILL</code>, a vitest worker thread (<code>pool: &apos;threads&apos;</code>) torn down - each server&apos;s small watchdog process kills it as soon as the process or thread that started it is gone.</li>
         <li>The server speaks plain HTTP; a <code>gio.toml</code> with <a href="/docs/configuration/server-tls"><code>[server.tls]</code></a> enabled needs a test copy of the project without it.</li>

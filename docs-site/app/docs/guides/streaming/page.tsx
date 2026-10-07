@@ -417,8 +417,9 @@ export function Ticker(): React.JSX.Element {
         </li>
         <li>
           <strong>Compression</strong> (gzip or Brotli) applies to streamed pages and route
-          bodies as they stream - their length is unknown, so <code>[compression]
-          min_size_bytes</code> does not hold them back. Event streams are never compressed.
+          bodies as they stream - their length is unknown, so{' '}
+          <a href="/docs/configuration/compression"><code>[compression] min_size_bytes</code></a>{' '}
+          does not hold them back. Event streams are never compressed.
         </li>
         <li>
           <strong>Checking it:</strong> <code>curl -N</code> prints chunks as they arrive. A

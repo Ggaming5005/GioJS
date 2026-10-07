@@ -185,17 +185,19 @@ socket.on('message', (msg) => broadcast(room, msg, { except: socket.id }));`} />
       </p>
 
       <h2 id="on-the-client-usewebsocket">On the client: useWebSocket</h2>
-      <CodeBlock lang="tsx" code={`'use client';
+      <CodeBlock lang="tsx" title="components/Chat.tsx" code={`import { useState } from 'react';
 import { useWebSocket } from '@gio.js/react';
 
 export function Chat({ room }: { room: string }) {
+  const [text, setText] = useState('');
   const { send, lastMessage, readyState, isReconnecting } = useWebSocket(\`/chat/\${room}\`, {
     reconnect: { maxAttempts: 20, initialDelayMs: 500, maxDelayMs: 30_000 },
-    queueWhileDisconnected: true,        // buffer sends until (re)connected
-    onMessage: (msg) => appendToLog(msg), // every message, in order
+    queueWhileDisconnected: true,                 // buffer sends until (re)connected
+    onMessage: (msg) => console.log('chat', msg), // every message, in order
   });
   return (
-    <form onSubmit={(e) => { e.preventDefault(); send(text); }}>
+    <form onSubmit={(e) => { e.preventDefault(); if (send(text)) setText(''); }}>
+      <input value={text} onChange={(e) => setText(e.target.value)} />
       {isReconnecting ? 'Reconnecting…' : readyState === WebSocket.OPEN ? 'Live' : 'Connecting…'}
       <p>{String(lastMessage ?? '')}</p>
     </form>
@@ -216,7 +218,15 @@ export function Chat({ room }: { room: string }) {
         </li>
         <li>
           <code>send()</code> returns <code>false</code> when the message was dropped: the socket
-          is not open and queueing is off (or its 100-message queue is full).
+          is not open and queueing is off (or its 100-message queue is full), or the hook has
+          stopped - after <code>close()</code>, after unmount, or once it has given up
+          reconnecting. Queueing does not change that: a stopped hook queues nothing.
+        </li>
+        <li>
+          There is no <code>&apos;use client&apos;</code> directive to add: every page and
+          nested layout is server-rendered and hydrated (see{' '}
+          <a href="/docs/known-issues">Known issues</a>), and the hook only connects in the
+          browser.
         </li>
         <li>
           <code>lastMessage</code> drives renders, but React may batch two quick messages into

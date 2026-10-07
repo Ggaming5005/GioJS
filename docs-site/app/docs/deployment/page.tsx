@@ -90,12 +90,17 @@ export default function DeploymentPage(): React.JSX.Element {
   "status": "ok",
   "http2": true,
   "tls": false,
-  "deploymentId": "abc12345",
+  "deploymentId": "0e92bc3a01f4ea44",
   "nodeReady": true,
   "workers": { "configured": 2, "ready": 2 },
   "cacheEntries": 42,
   "uptimeSecs": 3600
 }`} />
+      <p>
+        <code>deploymentId</code> is 16 hex characters derived from the build, or the value
+        of <a href="/docs/env-vars#gio-deployment-id"><code>GIO_DEPLOYMENT_ID</code></a> (up to 64 characters)
+        when you pin one - compare it across instances to see that a rollout has finished.
+      </p>
 
       <h2 id="reverse-proxy">Behind a reverse proxy or load balancer</h2>
       <p>

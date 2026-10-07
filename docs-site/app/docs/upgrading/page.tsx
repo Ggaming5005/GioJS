@@ -105,19 +105,18 @@ npx gio doctor                       # the same check, plus Node, versions, tsco
       <ul>
         <li>
           <strong><code>0</code> now lifts a limit everywhere.</strong> In beta.7,{' '}
-          <code>[prefetch] max_concurrent = 0</code> or <code>max_per_second = 0</code> refused
-          every prefetch, <code>[websocket] max_connections = 0</code> closed every socket,{' '}
+          <a href="/docs/configuration/websocket"><code>[websocket] max_connections = 0</code></a> closed every socket,{' '}
           <code>[websocket] ping_interval_secs = 0</code> crashed every connection, and{' '}
           <code>[images] max_remote_bytes = 0</code> rejected every remote image. Each now
           means unlimited (no pings). If you used <code>0</code> to turn something off, use
           its switch:
-          <CodeBlock lang="diff" title="gio.toml" code={`  [prefetch]
-- max_concurrent = 0
-+ enabled = false
-
-  [websocket]
+          <CodeBlock lang="diff" title="gio.toml" code={`  [websocket]
 - max_connections = 0
 + enabled = false`} />
+          The <a href="/docs/configuration/prefetch"><code>[prefetch]</code></a> keys are new in beta.8 - beta.7 ignored the section and
+          always used the built-in budget - and follow the same rule:{' '}
+          <code>max_concurrent = 0</code> or <code>max_per_second = 0</code> lifts that
+          budget, and <code>[prefetch] enabled = false</code> turns prefetching off.
         </li>
         <li>
           <strong><code>[server] max_body_bytes = 0</code></strong> used to answer{' '}

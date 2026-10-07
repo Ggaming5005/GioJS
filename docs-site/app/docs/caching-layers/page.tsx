@@ -97,12 +97,14 @@ GET http://localhost:3000/posts/1
         Opt in by exporting <a href="/docs/page-exports/shell"><code>shell = 'cache'</code></a> next to <code>revalidate</code> on a
         page with Suspense boundaries:
       </p>
-      <CodeBlock lang="tsx" code={`import React, { Suspense, use } from 'react';
+      <CodeBlock lang="tsx" title="app/shop/page.tsx" code={`import React, { Suspense, use } from 'react';
+import type { GsspContext, InferPageProps } from '@gio.js/core';
+import { cartFor, type CartItem } from '../../lib/cart';
 
 export const revalidate = 60;
 export const shell = 'cache';
 
-export default function Page({ who }: PageProps): React.JSX.Element {
+export default function Page({ who }: InferPageProps<typeof getServerSideProps>): React.JSX.Element {
   return (
     <main>
       <h1>Storefront</h1>{/* shell: cached, identical for everyone */}

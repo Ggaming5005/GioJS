@@ -130,7 +130,7 @@ export default function Page(): React.JSX.Element {
           and a module it shadows is listed as skipped.
         </li>
         <li>
-          Page <code>metadata</code> / <a href="/docs/page-exports/generate-metadata"><code>generateMetadata</code></a> run at export time; relative
+          Page <a href="/docs/page-exports/metadata"><code>metadata</code></a> / <a href="/docs/page-exports/generate-metadata"><code>generateMetadata</code></a> run at export time; relative
           Open Graph and canonical URLs resolve against <code>metadataBase</code> or{' '}
           <code>GIO_SITE_URL</code>.
         </li>

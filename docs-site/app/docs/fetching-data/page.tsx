@@ -188,6 +188,15 @@ export async function getServerSideProps(ctx) {
         <code>ctx.requestId</code> (the response&apos;s <code>X-Request-Id</code>, for logs
         and downstream calls) does not mark the render: it never shapes the page.
       </p>
+      <p>
+        The same goes for the context{' '}
+        <a href="/docs/page-exports/generate-metadata"><code>generateMetadata</code></a>{' '}
+        gets: reading its cookies, credential headers, IP, host or scheme marks the render as
+        personalized too, because the tags it returns are part of the page. With{' '}
+        <a href="/docs/caching-layers#partial-prerendering-ppr">PPR</a> that includes metadata
+        built from the props of a <code>getServerSideProps</code> that read them: the{' '}
+        <code>&lt;head&gt;</code> is in the cached shell.
+      </p>
       <CodeBlock lang="tsx" code={`export const revalidate = 60;
 
 export async function getServerSideProps(ctx) {

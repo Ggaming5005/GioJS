@@ -309,7 +309,7 @@ export default function robots(): MetadataRoute.Robots {
         <li>
           A file of the same name in <a href="/docs/file-conventions/public-folder"><code>public/</code></a> wins: the server serves it before
           the request reaches the worker, and logs a startup warning naming the module that
-          never runs. A <code>page.tsx</code> or <a href="/docs/file-conventions/route"><code>route.ts</code></a> answering the same URL
+          never runs. A <a href="/docs/file-conventions/page"><code>page.tsx</code></a> or <a href="/docs/file-conventions/route"><code>route.ts</code></a> answering the same URL
           fails startup.
         </li>
         <li>

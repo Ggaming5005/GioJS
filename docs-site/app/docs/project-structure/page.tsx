@@ -146,7 +146,7 @@ weight = 600`} />
       <h2 id="optional-files">Optional files</h2>
       <ul>
         <li><a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a> - redirects, rewrites, headers and guards in TypeScript (<a href="/docs/middleware">Middleware</a>)</li>
-        <li><a href="/docs/gio-config"><code>gio.config.ts</code></a> - Node plugins (<a href="/docs/configuration">Configuration</a>)</li>
+        <li><a href="/docs/gio-config"><code>gio.config.ts</code></a> - Node plugins and their hooks (<a href="/docs/configuration#gioconfigts">Configuration</a>)</li>
         <li><a href="/docs/file-conventions/sitemap"><code>app/sitemap.ts</code></a>, <a href="/docs/file-conventions/robots"><code>app/robots.ts</code></a>, <a href="/docs/file-conventions/manifest"><code>app/manifest.ts</code></a> - generated SEO files (<a href="/docs/metadata">Metadata &amp; SEO</a>)</li>
         <li><a href="/docs/file-conventions/route"><code>route.ts</code></a> in any folder - an API endpoint (<a href="/docs/route-handlers">Route Handlers</a>)</li>
       </ul>

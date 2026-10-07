@@ -208,15 +208,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           Styles: keep <code>style-src &apos;self&apos; &apos;unsafe-inline&apos;</code>, without
           a nonce. React renders <code>style</code> props as <code>style=&quot;...&quot;</code>{' '}
           attributes, which only <code>&apos;unsafe-inline&apos;</code> allows, and{' '}
-          <a href="/docs/components/animate"><code>&lt;Animate&gt;</code></a> and <code>&lt;Link&gt;</code> view transitions add
+          <a href="/docs/components/animate"><code>&lt;Animate&gt;</code></a> and{' '}
+          <a href="/docs/components/gio-link"><code>&lt;GioLink&gt;</code></a> view transitions add
           inline <code>&lt;style&gt;</code> elements that React hoists into the head without a
-          nonce (<code>&lt;Animate&gt;</code> sets a <code>style</code> attribute as well). Adding{' '}
+          nonce (<code>&lt;Animate&gt;</code> sets a <code>style</code> attribute as well, and
+          so does <a href="/docs/components/gio-image"><code>&lt;GioImage&gt;</code></a> with{' '}
+          <code>fill</code> or <code>placeholder=&quot;blur&quot;</code>). Adding{' '}
           <code>&apos;nonce-{'{nonce}'}&apos;</code> or a hash to <code>style-src</code> makes
           browsers ignore <code>&apos;unsafe-inline&apos;</code> and blocks all of these.
           GioJS&apos;s critical CSS and built-in 404 page carry the nonce, so a nonce-only{' '}
           <code>style-src</code> is possible only for an app that uses no{' '}
-          <code>style</code> props, no <code>&lt;Animate&gt;</code> and no{' '}
-          <code>&lt;Link&gt;</code> transitions.
+          <code>style</code> props, no <code>&lt;Animate&gt;</code>, no{' '}
+          <code>&lt;GioLink&gt;</code> transitions and no <code>&lt;GioImage&gt;</code>{' '}
+          with <code>fill</code> or a blur placeholder.
         </li>
         <li>
           Static export (<a href="/docs/cli/export"><code>gio export</code></a>) has no server to set the header or the
@@ -325,19 +329,31 @@ check_origin = true      # default; false accepts upgrades from any website`} />
 
       <h2 id="behind-a-reverse-proxy">Behind a reverse proxy</h2>
       <p>
-        The CSRF and WebSocket checks compare <code>Origin</code> with the{' '}
-        <code>Host</code> header GioJS receives, so the proxy must pass the original host
-        through. With nginx keep:
+        The CSRF and WebSocket checks compare <code>Origin</code> with the host the browser
+        addressed. That is the <code>Host</code> header GioJS receives, unless the request
+        comes from a proxy listed in{' '}
+        <a href="/docs/configuration/server"><code>[server] trusted_proxies</code></a>: then
+        its <code>X-Forwarded-Host</code> (or the <code>host=</code> of{' '}
+        <code>Forwarded</code>, with <code>proxy_headers = &quot;forwarded&quot;</code>)
+        counts instead. So the proxy must either pass the original host through, as nginx
+        does with:
       </p>
       <CodeBlock lang="nginx" code={`location / {
     proxy_pass       http://127.0.0.1:3000;
     proxy_set_header Host $host;   # required: Origin is compared with it
 }`} />
       <p>
-        A proxy that rewrites <code>Host</code> to an internal name makes every same-origin
-        browser request look cross-origin (403). If you cannot pass the host through, list
-        your public origin in <code>trusted_origins</code>. When the proxy terminates TLS,
-        also set <code>hsts</code> explicitly (see <a href="#hsts">HSTS</a>).
+        or send the public host in a forwarding header, from an address you list in{' '}
+        <code>trusted_proxies</code>:
+      </p>
+      <CodeBlock lang="toml" code={`[server]
+trusted_proxies = ["127.0.0.1"]   # the proxy's address or CIDR; its X-Forwarded-Host counts`} />
+      <p>
+        A proxy that rewrites <code>Host</code> to an internal name and is not listed in{' '}
+        <code>trusted_proxies</code> makes every same-origin browser request look
+        cross-origin (403). If you can do neither, list your public origin in{' '}
+        <code>trusted_origins</code>. When the proxy terminates TLS, also set{' '}
+        <code>hsts</code> explicitly (see <a href="#hsts">HSTS</a>).
       </p>
 
       <h2 id="reference">Reference</h2>

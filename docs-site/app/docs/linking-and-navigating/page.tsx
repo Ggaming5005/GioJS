@@ -52,6 +52,17 @@ export default function Page(): React.JSX.Element {
         <code>[server] skew_protection = false</code>: the id is then ignored and old pages
         keep navigating softly.
       </p>
+      <p>
+        <a href="/docs/components/gio-link"><code>&lt;GioLink&gt;</code></a> navigates softly - and prefetches - only for an{' '}
+        <code>href</code> that starts with <code>/</code> (a path on your own origin) or with{' '}
+        <code>#</code> (a jump on the same page). Anything else is an ordinary link: a full
+        page load with no prefetch. That includes a query-only <code>href=&quot;?page=2&quot;</code>,
+        a relative <code>href=&quot;about&quot;</code> and an absolute URL, even one on your
+        own origin - write <code>/search?page=2</code> or <code>/blog/about</code> instead.{' '}
+        <code>router.push()</code> and <code>navigate()</code> resolve their argument against
+        the current URL first, so <code>router.push(&apos;?page=2&apos;)</code> does navigate
+        softly.
+      </p>
       <div className="callout">
         The root layout (<a href="/docs/file-conventions/layout"><code>app/layout.tsx</code></a>) is server-only HTML: a soft navigation
         does not re-render it, so anything it derives from the URL (an active nav link) keeps
@@ -96,7 +107,18 @@ export default function PostPage() {
           <a href="/docs/hooks/use-search-params"><code>useSearchParams()</code></a> returns the query as a read-only{' '}
           <code>URLSearchParams</code>: <code>set</code>, <code>append</code>,{' '}
           <code>delete</code> and <code>sort</code> throw. To change the query, navigate. A
-          query key that appears more than once keeps one value (the last).
+          query key that appears more than once keeps one value (the last), and the order of
+          the keys is not kept: the server hands the query to the page as a map. In a{' '}
+          <a href="/docs/cli/export">static export</a> it is always empty - each page is
+          rendered once, for no query - so read <code>window.location.search</code> in an
+          effect there.
+        </li>
+        <li>
+          The path and the params are not decoded beyond what the server normalizes: escapes
+          of unreserved characters (<code>%41</code>) become the character, everything else
+          stays percent-encoded - <code>/blog/caf%C3%A9</code> gives a pathname of{' '}
+          <code>/blog/caf%C3%A9</code> and a <code>slug</code> param of <code>caf%C3%A9</code>.
+          Call <code>decodeURIComponent()</code> on a param to show it.
         </li>
         <li>
           <code>useLocale()</code> returns the request locale, during server rendering too, so{' '}

@@ -765,3 +765,21 @@ test('the protections page states the request-id and revalidation-token rules', 
   assert.match(read('crates/giojs-server/src/revalidate.rs'), /pub const MIN_TOKEN_BYTES: usize = 32;/);
   assert.ok(page.includes('must be at least 32 bytes'));
 });
+
+test('the caching guide states the stale window and what revalidate = false means', () => {
+  const page = docsPage('caching');
+  const swr = rustDefault('crates/giojs-server/src/config.rs', 'default_cache_swr_multiplier');
+  // The example is revalidate = 60: a window of swr x 60 seconds, i.e. swr minutes.
+  assert.ok(page.includes(`(${swr} times by default: up to ${swr} minutes for`), `swr_multiplier default ${swr}`);
+  assert.match(read('packages/giojs-core/src/ssr.ts'), /\? 31536000\b/, 'revalidate = false moved - update the guide and this test');
+  assert.ok(page.includes('<code>revalidate = false</code> is a one-year max age (<code>31536000</code> seconds'));
+});
+
+test('the health-check samples show a deployment id of the derived length', () => {
+  const derive = rustFnBody('crates/giojs-server/src/ipc.rs', 'derive_deployment_id');
+  assert.match(derive, /16 hex chars/, 'the derived id changed length - update the samples and this test');
+  for (const source of [docsPage('deployment'), read('docs', 'deployment', 'README.md')]) {
+    const id = /"deploymentId": "([^"]*)"/.exec(source)?.[1];
+    assert.match(id ?? '', /^[0-9a-f]{16}$/, `deploymentId sample ${id}`);
+  }
+});

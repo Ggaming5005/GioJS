@@ -126,7 +126,7 @@ Two security settings depend on the proxy too (see the *Security* docs page):
   "status": "ok",
   "http2": true,
   "tls": false,
-  "deploymentId": "abc12345",
+  "deploymentId": "0e92bc3a01f4ea44",
   "nodeReady": true,
   "workers": { "configured": 1, "ready": 1 },
   "cacheEntries": 42,
