@@ -1,14 +1,23 @@
 //! giojs-server/src/ipc.rs
 //!
-//! Rust side of the Node IPC bridge: spawns and supervises the Node worker
-//! (respawning it with backoff if it exits), multiplexes requests over one
-//! persistent socket / named-pipe connection using 4-byte length-prefixed
-//! JSON frames, and reconnects on disconnect. The handshake is authenticated
-//! with per-instance token proofs so a foreign local process can neither
-//! impersonate the worker nor drive it.
+//! Rust side of the Node IPC bridge: spawns and supervises a pool of Node
+//! workers (`[server] workers`, one by default), each respawned with backoff
+//! on its own if it exits. Every worker gets its own socket / named-pipe
+//! endpoints and token; requests are multiplexed over one persistent
+//! connection per worker using 4-byte length-prefixed JSON frames, and
+//! dispatched to the ready worker with the fewest requests in flight. The
+//! handshake is authenticated with per-worker token proofs so a foreign
+//! local process can neither impersonate a worker nor drive it.
+//!
+//! The first worker is the builder: only it bundles the client code into
+//! `.gio/build` (and writes `.gio/routes.d.ts`). The others start once it is
+//! READY and load its build manifest instead (REUSE_BUILD_ENV), so N workers
+//! never race on the same files - and in production a respawned worker,
+//! the builder included, reuses the build too.
 
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +26,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
@@ -77,6 +86,34 @@ const RESPAWN_BACKOFF_MAX_MS: u64 = 30_000;
 /// reading would otherwise block the select loop forever, starving the
 /// child-exit and restart arms.
 const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a worker gets to exit on its own at server shutdown before its
+/// tree is killed. Covers the worker's plugin shutdown hooks, which it bounds
+/// at SHUTDOWN_GRACE_MS (5s, giojs-core/src/worker-boot.ts).
+const WORKER_SHUTDOWN_GRACE: Duration = Duration::from_secs(6);
+
+/// Upper bound for `[server] workers = "auto"`: past a handful of workers a
+/// render pool is memory-bound long before it is CPU-bound.
+pub const AUTO_WORKERS_MAX: usize = 8;
+
+/// Set to "1" on a worker that must load the builder's client build
+/// (`.gio/build/manifest.json`) instead of bundling: every worker but the
+/// first, and in production every respawn. "0" otherwise - set either way,
+/// so an inherited value can never make the builder skip its build.
+pub const REUSE_BUILD_ENV: &str = "GIO_REUSE_BUILD";
+/// Per-server-process build identity, written into the build manifest by the
+/// builder and required back by every worker that reuses it: a manifest a
+/// previous run left behind never passes for this run's build.
+pub const BUILD_ID_ENV: &str = "GIO_BUILD_ID";
+/// The worker's position in the pool ("0" for the builder), set on every
+/// spawn and respawn: app code (a plugin's `onStartup`, say) can keep
+/// one-time work to a single worker.
+pub const WORKER_INDEX_ENV: &str = "GIO_WORKER_INDEX";
+/// The pool size. Above 1, other workers serve from the builder's
+/// `.gio/build` while a worker boots, so no worker may bundle into it then:
+/// one told to reuse the build fails its boot when the manifest is unusable
+/// (the supervisor retries it) instead of emptying the shared directory,
+/// and the builder fails its boot when it cannot write the manifest.
+pub const WORKER_COUNT_ENV: &str = "GIO_WORKER_COUNT";
 
 /// Per-instance IPC endpoint paths. On Windows the pipe namespace is global,
 /// so the names carry a per-process random suffix to avoid collisions between
@@ -115,6 +152,27 @@ impl IpcPaths {
             }
         });
         IpcPaths { http, ws }
+    }
+
+    /// Endpoints of pool worker `index`: worker 0 keeps the resolved paths
+    /// (env overrides included), the others derive their own from them.
+    pub fn for_worker(&self, index: usize) -> Self {
+        if index == 0 {
+            return self.clone();
+        }
+        IpcPaths {
+            http: worker_endpoint(&self.http, index),
+            ws: worker_endpoint(&self.ws, index),
+        }
+    }
+}
+
+/// `path` with a `-w<index>` suffix, kept in front of a `.sock` extension so
+/// `remove_stale_sockets` still recognizes the file.
+fn worker_endpoint(path: &str, index: usize) -> String {
+    match path.strip_suffix(".sock") {
+        Some(stem) => format!("{stem}-w{index}.sock"),
+        None => format!("{path}-w{index}"),
     }
 }
 
@@ -332,9 +390,39 @@ impl Drop for TrackedChunk {
 }
 
 /// A registered streaming body: where its frames go, and its flow control.
+/// Counts toward its worker's load until it is unregistered: the worker is
+/// still rendering it.
 struct RenderStreamTx {
     tx: mpsc::UnboundedSender<RenderFrame>,
     flow: Arc<StreamFlow>,
+    _load: InFlight,
+}
+
+/// A registered SSE stream (a GioEventStream head). Counts toward its
+/// worker's load until it is unregistered (sse_done, sse_close, drain): the
+/// worker keeps a producer running for it long after its request returned.
+struct SseStreamTx {
+    tx: mpsc::UnboundedSender<Option<Bytes>>,
+    _load: InFlight,
+}
+
+/// One unit of a worker's dispatch load, released on drop - so a request
+/// counts from dispatch until its future ends however it ends (answer,
+/// timeout, client disconnect), and a stream (streaming render or SSE)
+/// until it is unregistered.
+struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    fn new(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// A chunk frame's payload: UTF-8 text, or base64 when the worker flagged
@@ -552,15 +640,43 @@ pub fn decode_body(body: String, body_base64: bool) -> bytes::Bytes {
     }
 }
 
+/// The Node render workers: a pool of one or more supervised workers behind
+/// one request API. Requests go to the ready worker with the fewest in
+/// flight; everything a request starts (its stream's chunks, cancel and
+/// close frames, flow control) stays on the worker that started it.
 #[derive(Clone)]
 pub struct IpcClient {
-    inner: Arc<IpcClientInner>,
+    pool: Arc<WorkerPool>,
 }
 
-struct IpcClientInner {
+struct WorkerPool {
+    /// Fixed for the server's lifetime; a dead worker keeps its slot while
+    /// its supervisor brings it back.
+    workers: Vec<Arc<WorkerInner>>,
+    /// Breaks dispatch ties round-robin, so a burst arriving while every
+    /// worker is idle still spreads across them.
+    cursor: AtomicUsize,
+    deployment_id: String,
+    /// Bumped each time any worker's connection is (re)established.
+    generation: Arc<watch::Sender<u64>>,
+    /// `revalidate` frames from every worker, each tagged with its worker so
+    /// the ack goes back to the one waiting for it.
+    revalidate_rx: std::sync::Mutex<Option<mpsc::Receiver<WorkerRevalidation>>>,
+    /// Each worker's WebSocket bridge endpoint and token (ws_ipc.rs).
+    ws_endpoints: Vec<(String, String)>,
+    /// Set once at server shutdown: every supervisor stops its worker.
+    shutdown: watch::Sender<bool>,
+    supervisors: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+/// One worker's connection state, shared by its supervisor, its reader loop
+/// and the pool.
+struct WorkerInner {
+    /// Position in the pool: the `worker` log field and metrics label.
+    index: usize,
     pending: DashMap<String, oneshot::Sender<IpcSendResult>>,
     /// Channels for active SSE streams: req_id → sender of Option<Bytes> chunks
-    sse_streams: DashMap<String, mpsc::UnboundedSender<Option<Bytes>>>,
+    sse_streams: DashMap<String, SseStreamTx>,
     /// Channels for active streaming SSR bodies: req_id → frame sender.
     /// RenderFrame::End terminates the stream (chunk_end, clean or aborted).
     render_streams: DashMap<String, RenderStreamTx>,
@@ -575,30 +691,39 @@ struct IpcClientInner {
     worker_rules: std::sync::RwLock<Arc<RuleSet>>,
     /// Dev-watch: asks the supervisor to kill and respawn the worker.
     restart_tx: mpsc::Sender<()>,
-    /// Bumped by the supervisor each time the connection is (re)established;
-    /// watchers await a change to know a restart completed.
-    generation: tokio::sync::watch::Sender<u64>,
-    /// True while the worker connection is live (health/readiness signal).
-    connected: std::sync::atomic::AtomicBool,
+    /// Bumped by the supervisor each time this worker's connection is
+    /// (re)established; its WebSocket bridge reconnects on a change.
+    generation: watch::Sender<u64>,
+    /// The pool-wide counterpart, bumped alongside `generation`.
+    pool_generation: Arc<watch::Sender<u64>>,
+    /// True while the worker connection is live (health/readiness signal,
+    /// and whether dispatch may pick this worker).
+    connected: AtomicBool,
     /// Server runtime mode: worker error frames become the full dev error
     /// page in dev, and a generic page with only an error reference otherwise.
     dev_mode: bool,
     /// `revalidate` frames from the worker, executed by main.rs (which owns
     /// the cache) and answered with `send_revalidate_ack`.
     revalidate_tx: mpsc::Sender<WorkerRevalidation>,
-    revalidate_rx: std::sync::Mutex<Option<mpsc::Receiver<WorkerRevalidation>>>,
+    /// Requests awaiting their answer, streaming bodies still rendering and
+    /// open SSE streams: the load dispatch balances on (see InFlight).
+    in_flight: Arc<AtomicUsize>,
+    /// Times the supervisor respawned this worker's process.
+    restarts: AtomicU64,
 }
 
-/// Queued worker purges. A worker flooding purges past this gets "busy"
-/// acks instead of growing an unbounded queue. The worker keeps at most
-/// MAX_REVALIDATIONS_IN_FLIGHT (16, giojs-core/src/revalidate.ts) unacked,
-/// so a burst of parallel revalidateTag calls never gets here.
+/// Queued worker purges, per worker. A worker flooding purges past this gets
+/// "busy" acks instead of growing an unbounded queue. The worker keeps at
+/// most MAX_REVALIDATIONS_IN_FLIGHT (16, giojs-core/src/revalidate.ts)
+/// unacked, so a burst of parallel revalidateTag calls never gets here.
 const REVALIDATE_QUEUE: usize = 64;
 
-/// A `revalidate` frame from the worker (`revalidateTag` / `revalidatePath`
+/// A `revalidate` frame from a worker (`revalidateTag` / `revalidatePath`
 /// in @gio.js/core). The worker awaits the matching `revalidate_ack`.
 #[derive(Debug)]
 pub struct WorkerRevalidation {
+    /// The pool worker that sent it, and so the one the ack must reach.
+    pub worker: usize,
     pub id: String,
     pub request: crate::revalidate::RevalidateRequest,
 }
@@ -616,13 +741,58 @@ struct RevalidateFrame {
     prefix: bool,
 }
 
-/// Everything needed to (re)spawn the Node worker with the right environment.
+/// One worker's state as health and metrics report it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerStatus {
+    pub ready: bool,
+    pub in_flight: usize,
+    pub restarts: u64,
+}
+
+/// What dispatch weighs for one worker.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WorkerLoad {
+    pub ready: bool,
+    pub in_flight: usize,
+}
+
+/// The worker a new request (or WebSocket) goes to: the fewest in flight
+/// among ready workers, ties broken round-robin from `cursor`. A worker that
+/// is down or respawning is skipped; with none ready the pick rotates over
+/// all of them, and the request meets a recovering worker's fast 503 - what
+/// a lone worker does when it is down.
+pub(crate) fn pick_worker(
+    count: usize,
+    cursor: usize,
+    load: impl Fn(usize) -> WorkerLoad,
+) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let start = cursor % count;
+    let mut best: Option<(usize, usize)> = None;
+    for offset in 0..count {
+        let index = (start + offset) % count;
+        let candidate = load(index);
+        if candidate.ready && best.is_none_or(|(_, fewest)| candidate.in_flight < fewest) {
+            best = Some((index, candidate.in_flight));
+        }
+    }
+    best.map_or(start, |(index, _)| index)
+}
+
+/// Everything needed to (re)spawn one Node worker with the right environment.
 struct NodeWorker {
+    index: usize,
     script: String,
     ipc_path: String,
     ws_path: String,
     token: String,
     dev_mode: bool,
+    /// Load the builder's client build instead of bundling (REUSE_BUILD_ENV).
+    reuse_build: bool,
+    /// Workers in the pool (WORKER_COUNT_ENV).
+    pool_size: usize,
     /// Server settings the worker renders with (e.g. GIO_IMAGE_CONFIG),
     /// handed to every respawn too. Those named in
     /// `config::WORKER_RENDER_SETTINGS_ENV` also feed the deployment ID.
@@ -634,116 +804,361 @@ struct NodeWorker {
 /// before waiting, which would tell a healthy worker its server is gone.
 type StdinGuard = Option<tokio::process::ChildStdin>;
 
+/// A spawned worker process.
+struct WorkerProcess {
+    child: tokio::process::Child,
+    stdin: StdinGuard,
+    /// Captured at spawn: child.id() is None once the wrapper is gone, but
+    /// its process group (and any orphaned runtime child) may live on.
+    pid: Option<u32>,
+}
+
+impl WorkerProcess {
+    /// Kill the worker's whole tree (see kill_worker_tree).
+    async fn kill(&mut self) {
+        kill_worker_tree(&mut self.child, self.pid).await;
+    }
+
+    fn exited(&mut self) -> bool {
+        !matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
 impl NodeWorker {
-    fn spawn(&self) -> anyhow::Result<(tokio::process::Child, StdinGuard)> {
+    /// The environment of this (re)spawn: the server settings plus where the
+    /// worker stands in the pool and whether it builds. All set either way,
+    /// so an inherited value never leaks in.
+    fn env(&self) -> Vec<(String, String)> {
+        let mut env = self.extra_env.clone();
+        env.push((
+            REUSE_BUILD_ENV.to_string(),
+            if self.reuse_build { "1" } else { "0" }.to_string(),
+        ));
+        env.push((WORKER_INDEX_ENV.to_string(), self.index.to_string()));
+        env.push((WORKER_COUNT_ENV.to_string(), self.pool_size.to_string()));
+        env
+    }
+
+    fn spawn(&self) -> anyhow::Result<WorkerProcess> {
+        let env = self.env();
         let mut child = spawn_node_tsx(
             &self.script,
             &self.ipc_path,
             &self.ws_path,
             &self.token,
             self.dev_mode,
-            &self.extra_env,
+            &env,
         )?;
         let stdin = child.stdin.take();
-        Ok((child, stdin))
+        let pid = child.id();
+        Ok(WorkerProcess { child, stdin, pid })
+    }
+}
+
+impl WorkerInner {
+    fn new(
+        index: usize,
+        write_tx: mpsc::Sender<Bytes>,
+        restart_tx: mpsc::Sender<()>,
+        deployment_id: String,
+        pool_generation: Arc<watch::Sender<u64>>,
+        revalidate_tx: mpsc::Sender<WorkerRevalidation>,
+        dev_mode: bool,
+    ) -> Self {
+        WorkerInner {
+            index,
+            pending: DashMap::new(),
+            sse_streams: DashMap::new(),
+            render_streams: DashMap::new(),
+            write_tx,
+            deployment_id,
+            route_manifest: std::sync::RwLock::new(Vec::new()),
+            worker_rules: std::sync::RwLock::new(Arc::new(RuleSet::default())),
+            restart_tx,
+            generation: watch::channel(0u64).0,
+            pool_generation,
+            connected: AtomicBool::new(false),
+            dev_mode,
+            revalidate_tx,
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            restarts: AtomicU64::new(0),
+        }
+    }
+
+    fn load(&self) -> WorkerLoad {
+        WorkerLoad {
+            ready: self.connected.load(Ordering::Relaxed),
+            in_flight: self.in_flight.load(Ordering::Relaxed),
+        }
+    }
+
+    fn status(&self) -> WorkerStatus {
+        WorkerStatus {
+            ready: self.connected.load(Ordering::Relaxed),
+            in_flight: self.in_flight.load(Ordering::Relaxed),
+            restarts: self.restarts.load(Ordering::Relaxed),
+        }
     }
 }
 
 impl IpcClient {
+    /// Start a pool of `workers` Node workers. Returns once the first (the
+    /// builder) is READY; the others boot after it, in the background, and
+    /// join dispatch as each becomes READY.
     pub async fn start(
         node_script: &str,
         paths: &IpcPaths,
-        token: &str,
         dev_mode: bool,
         extra_env: Vec<(String, String)>,
+        workers: usize,
     ) -> anyhow::Result<Self> {
-        let worker = NodeWorker {
-            script: node_script.to_string(),
-            ipc_path: paths.http.clone(),
-            ws_path: paths.ws.clone(),
-            token: token.to_string(),
-            dev_mode,
-            extra_env,
-        };
-        let (mut child, stdin_guard) = worker.spawn()?;
-        let spawned_pid = child.id();
-        info!("Node process spawned (pid {:?})", spawned_pid);
+        let workers = workers.max(1);
+        let deployment_id = generate_deployment_id(&extra_env);
+        let mut extra_env = extra_env;
+        extra_env.push((
+            BUILD_ID_ENV.to_string(),
+            uuid::Uuid::new_v4().simple().to_string(),
+        ));
+        let generation = Arc::new(watch::channel(1u64).0);
+        let (revalidate_tx, revalidate_rx) = mpsc::channel(REVALIDATE_QUEUE * workers);
+        let (shutdown, _) = watch::channel(false);
 
-        let deployment_id = generate_deployment_id(&worker.extra_env);
+        struct Slot {
+            node: NodeWorker,
+            inner: Arc<WorkerInner>,
+            write_rx: mpsc::Receiver<Bytes>,
+            restart_rx: mpsc::Receiver<()>,
+        }
+        let mut slots = Vec::with_capacity(workers);
+        let mut ws_endpoints = Vec::with_capacity(workers);
+        for index in 0..workers {
+            let worker_paths = paths.for_worker(index);
+            let token = generate_token();
+            ws_endpoints.push((worker_paths.ws.clone(), token.clone()));
+            let (write_tx, write_rx) = mpsc::channel::<Bytes>(256);
+            let (restart_tx, restart_rx) = mpsc::channel::<()>(1);
+            slots.push(Slot {
+                node: NodeWorker {
+                    index,
+                    script: node_script.to_string(),
+                    ipc_path: worker_paths.http,
+                    ws_path: worker_paths.ws,
+                    token,
+                    dev_mode,
+                    reuse_build: index > 0,
+                    pool_size: workers,
+                    extra_env: extra_env.clone(),
+                },
+                inner: Arc::new(WorkerInner::new(
+                    index,
+                    write_tx,
+                    restart_tx,
+                    deployment_id.clone(),
+                    generation.clone(),
+                    revalidate_tx.clone(),
+                    dev_mode,
+                )),
+                write_rx,
+                restart_rx,
+            });
+        }
 
+        // The builder boots alone and the server waits for it: its failure
+        // to come up (a protocol mismatch, a broken app) fails startup, and
+        // the others must not start before its build is on disk.
+        let builder = &slots[0];
+        let mut process = builder.node.spawn()?;
+        info!(worker = 0, "Node process spawned (pid {:?})", process.pid);
         let connection = match connect_and_handshake(
-            &worker.ipc_path,
+            &builder.node.ipc_path,
             &deployment_id,
-            &worker.token,
+            &builder.node.token,
             STARTUP_CONNECT_ATTEMPTS,
         )
         .await
         {
             Ok(conn) => conn,
             Err(e) => {
-                kill_worker_tree(&mut child, spawned_pid).await;
+                process.kill().await;
                 return Err(e);
             }
         };
-        let WorkerConnection {
-            reader,
-            writer,
-            route_manifest,
-            worker_rules,
-        } = connection;
+        let streams = install_connection(&builder.inner, connection);
 
-        let (write_tx, write_rx) = mpsc::channel::<Bytes>(256);
-        let (restart_tx, restart_rx) = mpsc::channel::<()>(1);
-        let (generation, _) = tokio::sync::watch::channel(1u64);
-        let (revalidate_tx, revalidate_rx) = mpsc::channel(REVALIDATE_QUEUE);
+        let workers_inner: Vec<Arc<WorkerInner>> =
+            slots.iter().map(|slot| slot.inner.clone()).collect();
+        let mut supervisors = Vec::with_capacity(workers);
+        let mut initial = Some((process, streams));
+        for slot in slots {
+            // Worker 0 hands over its live process and connection; the rest
+            // start in recovery, which spawns and connects them.
+            let (process, streams) = match initial.take() {
+                Some((process, streams)) => (Some(process), Some(streams)),
+                None => (None, None),
+            };
+            supervisors.push(tokio::spawn(ipc_supervisor(
+                slot.node,
+                process,
+                streams,
+                slot.write_rx,
+                slot.restart_rx,
+                shutdown.subscribe(),
+                slot.inner,
+            )));
+        }
 
-        let client = IpcClient {
-            inner: Arc::new(IpcClientInner {
-                pending: DashMap::new(),
-                sse_streams: DashMap::new(),
-                render_streams: DashMap::new(),
-                write_tx,
+        Ok(IpcClient {
+            pool: Arc::new(WorkerPool {
+                workers: workers_inner,
+                cursor: AtomicUsize::new(0),
                 deployment_id,
-                route_manifest: std::sync::RwLock::new(route_manifest),
-                worker_rules: std::sync::RwLock::new(Arc::new(worker_rules)),
-                restart_tx,
                 generation,
-                connected: std::sync::atomic::AtomicBool::new(true),
-                dev_mode,
-                revalidate_tx,
                 revalidate_rx: std::sync::Mutex::new(Some(revalidate_rx)),
+                ws_endpoints,
+                shutdown,
+                supervisors: std::sync::Mutex::new(supervisors),
             }),
-        };
-
-        // Supervisor owns the child and the connection: it respawns the
-        // worker if it exits and reconnects on socket errors.
-        let inner = client.inner.clone();
-        tokio::spawn(ipc_supervisor(
-            worker,
-            (child, stdin_guard),
-            reader,
-            writer,
-            write_rx,
-            restart_rx,
-            inner,
-        ));
-
-        Ok(client)
+        })
     }
 
-    /// Dev-watch: ask the supervisor to kill and respawn the worker (fresh
-    /// module cache, fresh route discovery, fresh client bundles). No-op if a
-    /// restart is already queued.
+    /// The worker the next request goes to (see pick_worker).
+    fn pick(&self) -> &Arc<WorkerInner> {
+        let workers = &self.pool.workers;
+        if workers.len() == 1 {
+            return &workers[0];
+        }
+        let cursor = self.pool.cursor.fetch_add(1, Ordering::Relaxed);
+        &workers[pick_worker(workers.len(), cursor, |i| workers[i].load())]
+    }
+
+    /// Dev-watch: ask the supervisors to kill and respawn the workers (fresh
+    /// module cache, fresh route discovery, fresh client bundles). No-op for
+    /// a worker whose restart is already queued.
     pub fn restart_worker(&self) {
-        let _ = self.inner.restart_tx.try_send(());
+        for worker in &self.pool.workers {
+            let _ = worker.restart_tx.try_send(());
+        }
     }
 
-    /// Receiver that changes each time the IPC connection is (re)established.
-    pub fn subscribe_generation(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.inner.generation.subscribe()
+    /// Receiver that changes each time a worker connection is (re)established.
+    pub fn subscribe_generation(&self) -> watch::Receiver<u64> {
+        self.pool.generation.subscribe()
     }
 
     pub async fn send_request(&self, req: IpcRequest) -> anyhow::Result<IpcSendResult> {
+        let worker = self.pick().clone();
+        worker.send_request(req).await
+    }
+
+    /// Notify Node that the SSE client disconnected so it can run cleanup.
+    pub fn send_sse_close(&self, req_id: &str) {
+        // The Node-side sse_done reply normally removes the registry entry,
+        // but a respawned worker knows nothing about this stream id - remove
+        // it here so entries can never outlive their client across respawns.
+        // The worker still holding the entry is the one feeding the stream.
+        let owner = self
+            .pool
+            .workers
+            .iter()
+            .find(|worker| worker.sse_streams.remove(req_id).is_some());
+        self.send_to_owner(owner, "sse_close", req_id);
+    }
+
+    /// Terminate a streaming render whose Rust-side body was dropped (client
+    /// disconnect or idle timeout) so Node aborts the React render.
+    pub fn send_render_close(&self, req_id: &str) {
+        let owner = self
+            .pool
+            .workers
+            .iter()
+            .find(|worker| worker.render_streams.remove(req_id).is_some());
+        self.send_to_owner(owner, "cancel", req_id);
+    }
+
+    /// A stream's control frame goes to the worker that holds the stream.
+    /// One no worker holds has most likely ended already, but every worker
+    /// is told anyway: request ids are unique, so the others ignore it, and
+    /// a render nobody reads must never keep running.
+    fn send_to_owner(&self, owner: Option<&Arc<WorkerInner>>, frame_type: &str, req_id: &str) {
+        match owner {
+            Some(worker) => send_cancel_like_frame(worker, frame_type, req_id),
+            None => {
+                for worker in &self.pool.workers {
+                    send_cancel_like_frame(worker, frame_type, req_id);
+                }
+            }
+        }
+    }
+
+    /// The workers' purge requests. Yields the receiver once; the caller
+    /// owns executing them and acking each with `send_revalidate_ack`.
+    pub fn take_revalidations(&self) -> Option<mpsc::Receiver<WorkerRevalidation>> {
+        self.pool
+            .revalidate_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    /// Answer a `revalidate` frame of pool worker `worker`: `Ok(purged
+    /// entries)` once the purge happened, or why it was refused. Lost if the
+    /// connection drops first - the worker's own timeout covers that.
+    pub async fn send_revalidate_ack(
+        &self,
+        worker: usize,
+        id: &str,
+        outcome: Result<usize, String>,
+    ) {
+        if let Some(worker) = self.pool.workers.get(worker) {
+            send_revalidate_ack_frame(worker, id, outcome).await;
+        }
+    }
+
+    /// Each worker's WebSocket bridge: (socket path, token, a receiver that
+    /// changes whenever that worker's connection is (re)established).
+    pub fn ws_endpoints(&self) -> Vec<WsEndpoint> {
+        self.pool
+            .workers
+            .iter()
+            .zip(&self.pool.ws_endpoints)
+            .map(|(worker, (path, token))| WsEndpoint {
+                path: path.clone(),
+                token: token.clone(),
+                worker_connected: worker.generation.subscribe(),
+            })
+            .collect()
+    }
+
+    /// Server shutdown: every worker gets to exit on its own (its stdin pipe
+    /// closes, it runs its plugin shutdown hooks) within
+    /// WORKER_SHUTDOWN_GRACE, then whatever is left of its tree is killed.
+    /// Returns once every worker is gone.
+    pub async fn shutdown(&self) {
+        self.pool.shutdown.send_replace(true);
+        let supervisors = std::mem::take(
+            &mut *self
+                .pool
+                .supervisors
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        for supervisor in supervisors {
+            let _ = supervisor.await;
+        }
+    }
+}
+
+/// A worker's WebSocket bridge endpoint, for ws_ipc.rs.
+pub struct WsEndpoint {
+    pub path: String,
+    pub token: String,
+    /// Changes whenever the worker's HTTP connection is (re)established:
+    /// its WebSocket server is listening from then on.
+    pub worker_connected: watch::Receiver<u64>,
+}
+
+impl WorkerInner {
+    async fn send_request(self: &Arc<Self>, req: IpcRequest) -> anyhow::Result<IpcSendResult> {
         let id = req.id.clone();
         let payload = Bytes::from(serde_json::to_vec(&req)?);
         if payload.len() > MAX_IPC_MESSAGE_SIZE {
@@ -752,22 +1167,23 @@ impl IpcClient {
             }
             .into());
         }
+        let _load = InFlight::new(&self.in_flight);
         let (tx, rx) = oneshot::channel();
-        self.inner.pending.insert(id.clone(), tx);
+        self.pending.insert(id.clone(), tx);
 
         // While armed, dropping this future - client disconnect mid-render,
         // or the timeout below - removes the pending waiter and tells Node to
         // abort the render instead of finishing work nobody will read.
         let mut cancel_guard = CancelGuard {
-            inner: &self.inner,
+            inner: self,
             id: &id,
             armed: true,
         };
 
-        if self.inner.write_tx.send(payload).await.is_err() {
+        if self.write_tx.send(payload).await.is_err() {
             // The request never reached Node - nothing to cancel there.
             cancel_guard.armed = false;
-            self.inner.pending.remove(&id);
+            self.pending.remove(&id);
             anyhow::bail!("IPC writer closed");
         }
 
@@ -783,6 +1199,7 @@ impl IpcClient {
                 {
                     error!(
                         id = %id,
+                        worker = self.index,
                         digest = %frame_error.digest,
                         error = %frame_error.error,
                         "worker response frame failed to parse - answered 500"
@@ -794,7 +1211,7 @@ impl IpcClient {
                 // Waiter was removed and dropped by recovery code - the
                 // connection is gone, so a cancel frame has nowhere to go.
                 cancel_guard.armed = false;
-                self.inner.pending.remove(&id);
+                self.pending.remove(&id);
                 anyhow::bail!("IPC sender dropped")
             }
             Err(_) => {
@@ -803,39 +1220,6 @@ impl IpcClient {
                 anyhow::bail!("IPC timeout")
             }
         }
-    }
-
-    /// Notify Node that the SSE client disconnected so it can run cleanup.
-    pub fn send_sse_close(&self, req_id: &str) {
-        // The Node-side sse_done reply normally removes the registry entry,
-        // but a respawned worker knows nothing about this stream id - remove
-        // it here so entries can never outlive their client across respawns.
-        self.inner.sse_streams.remove(req_id);
-        send_cancel_like_frame(&self.inner, "sse_close", req_id);
-    }
-
-    /// Terminate a streaming render whose Rust-side body was dropped (client
-    /// disconnect or idle timeout) so Node aborts the React render.
-    pub fn send_render_close(&self, req_id: &str) {
-        self.inner.render_streams.remove(req_id);
-        send_cancel_like_frame(&self.inner, "cancel", req_id);
-    }
-
-    /// The worker's purge requests. Yields the receiver once; the caller
-    /// owns executing them and acking each with `send_revalidate_ack`.
-    pub fn take_revalidations(&self) -> Option<mpsc::Receiver<WorkerRevalidation>> {
-        self.inner
-            .revalidate_rx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-    }
-
-    /// Answer a worker `revalidate` frame: `Ok(purged entries)` once the
-    /// purge happened, or why it was refused. Lost if the connection drops
-    /// first - the worker's own timeout covers that.
-    pub async fn send_revalidate_ack(&self, id: &str, outcome: Result<usize, String>) {
-        send_revalidate_ack_frame(&self.inner, id, outcome).await;
     }
 }
 
@@ -857,11 +1241,7 @@ fn revalidate_ack_frame(id: &str, outcome: Result<usize, String>) -> serde_json:
     }
 }
 
-async fn send_revalidate_ack_frame(
-    inner: &IpcClientInner,
-    id: &str,
-    outcome: Result<usize, String>,
-) {
+async fn send_revalidate_ack_frame(inner: &WorkerInner, id: &str, outcome: Result<usize, String>) {
     let Ok(payload) = serde_json::to_vec(&revalidate_ack_frame(id, outcome)) else {
         return;
     };
@@ -871,15 +1251,16 @@ async fn send_revalidate_ack_frame(
 /// Queue a worker `revalidate` frame for main.rs, or ack the refusal right
 /// away so the worker never waits out its timeout for nothing. Never awaits:
 /// the reader loop must keep draining frames.
-fn handle_revalidate_frame(inner: &IpcClientInner, val: serde_json::Value) {
+fn handle_revalidate_frame(inner: &WorkerInner, val: serde_json::Value) {
     let frame = match serde_json::from_value::<RevalidateFrame>(val) {
         Ok(frame) => frame,
         Err(e) => {
-            warn!(error = %e, "malformed revalidate frame from the worker - ignored");
+            warn!(worker = inner.index, error = %e, "malformed revalidate frame from the worker - ignored");
             return;
         }
     };
     let revalidation = WorkerRevalidation {
+        worker: inner.index,
         id: frame.id,
         request: crate::revalidate::RevalidateRequest {
             tags: frame.tags,
@@ -892,7 +1273,7 @@ fn handle_revalidate_frame(inner: &IpcClientInner, val: serde_json::Value) {
             mpsc::error::TrySendError::Full(r) => (r, "too many revalidations queued"),
             mpsc::error::TrySendError::Closed(r) => (r, "revalidation is unavailable"),
         };
-        warn!(id = %revalidation.id, reason, "worker revalidation refused");
+        warn!(worker = inner.index, id = %revalidation.id, reason, "worker revalidation refused");
         // Best-effort like cancel frames: if even this cannot be queued, the
         // worker's timeout answers the caller.
         if let Ok(payload) = serde_json::to_vec(&revalidate_ack_frame(
@@ -907,7 +1288,7 @@ fn handle_revalidate_frame(inner: &IpcClientInner, val: serde_json::Value) {
 /// Removes the pending waiter and sends a `cancel` frame when a request
 /// future is dropped (client disconnect) or times out while still armed.
 struct CancelGuard<'a> {
-    inner: &'a IpcClientInner,
+    inner: &'a WorkerInner,
     id: &'a str,
     armed: bool,
 }
@@ -925,7 +1306,7 @@ impl Drop for CancelGuard<'_> {
 /// Best-effort control frame `{type, id}` (cancel / sse_close). Dropped if
 /// the write channel is full or the connection is down - Node then just
 /// finishes a render nobody reads, which is the pre-cancel behavior.
-fn send_cancel_like_frame(inner: &IpcClientInner, frame_type: &str, req_id: &str) {
+fn send_cancel_like_frame(inner: &WorkerInner, frame_type: &str, req_id: &str) {
     let Ok(payload) = serde_json::to_vec(&serde_json::json!({
         "type": frame_type,
         "id": req_id,
@@ -937,37 +1318,47 @@ fn send_cancel_like_frame(inner: &IpcClientInner, frame_type: &str, req_id: &str
 
 impl IpcClient {
     pub fn deployment_id(&self) -> &str {
-        &self.inner.deployment_id
+        &self.pool.deployment_id
+    }
+
+    /// The worker whose READY data (routes, middleware rules) the server
+    /// uses: the first ready one - every worker loads the same app - or,
+    /// while none is, the first worker's last known data.
+    fn reference_worker(&self) -> &WorkerInner {
+        let workers = &self.pool.workers;
+        workers
+            .iter()
+            .find(|worker| worker.connected.load(Ordering::Relaxed))
+            .unwrap_or(&workers[0])
     }
 
     pub fn route_manifest(&self) -> Vec<RouteInfo> {
-        self.inner
+        self.reference_worker()
             .route_manifest
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
-    /// Compiled middleware.ts rules from the current worker connection.
+    /// Compiled middleware.ts rules from a live worker connection.
     /// Arc clone only - the set itself is compiled once per (re)connect.
     pub fn worker_rules(&self) -> Arc<RuleSet> {
-        self.inner
+        self.reference_worker()
             .worker_rules
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
-    /// True while the IPC connection to the Node worker is live. False during
-    /// respawn/reconnect windows - cached and static content still serves.
-    pub fn worker_ready(&self) -> bool {
-        self.inner
-            .connected
-            .load(std::sync::atomic::Ordering::Relaxed)
+    /// Per-worker readiness, load and restarts, in pool order. A worker is
+    /// ready while its connection is live, so the server is as long as any
+    /// worker is - cached and static content serves either way.
+    pub fn worker_statuses(&self) -> Vec<WorkerStatus> {
+        self.pool.workers.iter().map(|w| w.status()).collect()
     }
 
     pub fn sse_stream_count(&self) -> usize {
-        self.inner.sse_streams.len()
+        self.pool.workers.iter().map(|w| w.sse_streams.len()).sum()
     }
 }
 
@@ -1400,7 +1791,7 @@ async fn connect_and_handshake(
 // ── IPC supervisor - reconnects on disconnect ─────────────────────────────────
 
 /// Dispatch loop for frames arriving from Node. Exits when the connection dies.
-async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
+async fn run_reader_loop(mut reader: BoxReader, inner: Arc<WorkerInner>) {
     loop {
         match read_frame(&mut reader).await {
             Ok(frame) => {
@@ -1411,15 +1802,23 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                             Some("sse_chunk") => {
                                 let id = val["id"].as_str().unwrap_or("");
                                 let data = val["data"].as_str().unwrap_or("");
-                                if let Some(tx) = inner.sse_streams.get(id) {
-                                    let _ = tx.send(Some(Bytes::from(data.to_owned())));
+                                let delivered = inner.sse_streams.get(id).map(|stream| {
+                                    stream.tx.send(Some(Bytes::from(data.to_owned()))).is_ok()
+                                });
+                                if delivered == Some(false) {
+                                    // Its reader is gone without an sse_close
+                                    // (dropped before it was ever read): stop
+                                    // the producer, and the stream stops
+                                    // counting as this worker's load.
+                                    inner.sse_streams.remove(id);
+                                    send_sse_close_frame(&inner, id);
                                 }
                                 continue;
                             }
                             Some("sse_done") => {
                                 let id = val["id"].as_str().unwrap_or("").to_string();
-                                if let Some((_, tx)) = inner.sse_streams.remove(&id) {
-                                    let _ = tx.send(None);
+                                if let Some((_, stream)) = inner.sse_streams.remove(&id) {
+                                    let _ = stream.tx.send(None);
                                 }
                                 continue;
                             }
@@ -1509,7 +1908,13 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
 
                         let result = if is_sse {
                             let (tx, rx) = mpsc::unbounded_channel::<Option<Bytes>>();
-                            inner.sse_streams.insert(resp_id.clone(), tx);
+                            inner.sse_streams.insert(
+                                resp_id.clone(),
+                                SseStreamTx {
+                                    tx,
+                                    _load: InFlight::new(&inner.in_flight),
+                                },
+                            );
                             IpcSendResult::SseStream {
                                 response: resp,
                                 body_rx: rx,
@@ -1517,9 +1922,14 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                         } else if resp.streaming {
                             let (tx, rx) = mpsc::unbounded_channel::<RenderFrame>();
                             let flow = StreamFlow::new(&resp_id, &inner.write_tx);
-                            inner
-                                .render_streams
-                                .insert(resp_id.clone(), RenderStreamTx { tx, flow });
+                            inner.render_streams.insert(
+                                resp_id.clone(),
+                                RenderStreamTx {
+                                    tx,
+                                    flow,
+                                    _load: InFlight::new(&inner.in_flight),
+                                },
+                            );
                             IpcSendResult::RenderStream {
                                 response: resp,
                                 body_rx: rx,
@@ -1542,11 +1952,11 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                             }
                         }
                     }
-                    Err(e) => error!("IPC JSON error: {e}"),
+                    Err(e) => error!(worker = inner.index, "IPC JSON error: {e}"),
                 }
             }
             Err(e) => {
-                error!("IPC read error: {e}");
+                error!(worker = inner.index, "IPC read error: {e}");
                 break;
             }
         }
@@ -1558,7 +1968,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
 /// leniently from the raw JSON. Answer that request with a 500 now instead
 /// of letting it wait out IPC_RESPONSE_TIMEOUT, and tell Node to stop any
 /// stream the frame may have opened.
-fn fail_malformed_response(inner: &IpcClientInner, id: &str, parse_error: &str) {
+fn fail_malformed_response(inner: &WorkerInner, id: &str, parse_error: &str) {
     send_cancel_like_frame(inner, "cancel", id);
     let Some((_, tx)) = inner.pending.remove(id) else {
         error!(id = %id, error = %parse_error, "unparseable worker response frame for no pending request");
@@ -1586,7 +1996,7 @@ fn fail_malformed_response(inner: &IpcClientInner, id: &str, parse_error: &str) 
 }
 
 /// Tell Node to run cleanup for an SSE stream whose Rust-side receiver is gone.
-fn send_sse_close_frame(inner: &IpcClientInner, req_id: &str) {
+fn send_sse_close_frame(inner: &WorkerInner, req_id: &str) {
     send_cancel_like_frame(inner, "sse_close", req_id);
 }
 
@@ -1664,7 +2074,7 @@ fn unavailable_response(id: &str) -> IpcResponse {
 }
 
 /// Send 503 responses to all in-flight requests waiting on the IPC connection.
-fn drain_pending_with_503(inner: &IpcClientInner) {
+fn drain_pending_with_503(inner: &WorkerInner) {
     let ids: Vec<String> = inner.pending.iter().map(|e| e.key().clone()).collect();
     for id in ids {
         if let Some((_, tx)) = inner.pending.remove(&id) {
@@ -1676,11 +2086,11 @@ fn drain_pending_with_503(inner: &IpcClientInner) {
 /// Terminate every in-flight SSE stream. The worker that was feeding them is
 /// gone and the respawned one knows nothing about their ids: without this,
 /// clients hang on silent connections and the registry grows across respawns.
-fn drain_sse_streams(inner: &IpcClientInner) {
+fn drain_sse_streams(inner: &WorkerInner) {
     let ids: Vec<String> = inner.sse_streams.iter().map(|e| e.key().clone()).collect();
     for id in ids {
-        if let Some((_, tx)) = inner.sse_streams.remove(&id) {
-            let _ = tx.send(None);
+        if let Some((_, stream)) = inner.sse_streams.remove(&id) {
+            let _ = stream.tx.send(None);
         }
     }
 }
@@ -1688,7 +2098,7 @@ fn drain_sse_streams(inner: &IpcClientInner) {
 /// Terminate every in-flight streaming SSR body on disconnect, for the same
 /// reason as `drain_sse_streams`: the respawned worker will never send the
 /// chunk_end these streams are waiting for.
-fn drain_render_streams(inner: &IpcClientInner) {
+fn drain_render_streams(inner: &WorkerInner) {
     let ids: Vec<String> = inner
         .render_streams
         .iter()
@@ -1707,147 +2117,228 @@ enum ServeEnd {
     ConnLost,
     /// The Node process exited.
     ChildExit,
-    /// The IpcClient was dropped - the server is shutting down.
+    /// The server is shutting down.
     Shutdown,
 }
 
-/// Owns the Node child and the IPC connection. Serves frames until the
-/// connection or the child dies, then drains in-flight requests with 503,
-/// respawns the worker if needed, and reconnects - forever, with capped
-/// backoff. The worker being down is an outage to recover from, never a
-/// reason to give up.
+/// Adopt a fresh connection: publish what its READY frame delivered, mark
+/// the worker ready for dispatch, and announce the (re)connect.
+fn install_connection(inner: &WorkerInner, connection: WorkerConnection) -> (BoxReader, BoxWriter) {
+    *inner
+        .route_manifest
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = connection.route_manifest;
+    *inner
+        .worker_rules
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = Arc::new(connection.worker_rules);
+    inner.connected.store(true, Ordering::Relaxed);
+    inner.generation.send_modify(|generation| *generation += 1);
+    inner
+        .pool_generation
+        .send_modify(|generation| *generation += 1);
+    (connection.reader, connection.writer)
+}
+
+/// Resolves once shutdown is requested (or the pool is gone).
+async fn shutdown_requested(shutdown: &mut watch::Receiver<bool>) {
+    let _ = shutdown.wait_for(|stop| *stop).await;
+}
+
+/// The exit of `process`; never resolves without one.
+async fn process_exit(
+    process: &mut Option<WorkerProcess>,
+) -> std::io::Result<std::process::ExitStatus> {
+    match process {
+        Some(process) => process.child.wait().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Owns one worker's Node process and IPC connection. Serves frames until
+/// the connection or the process dies, then drains that worker's in-flight
+/// requests with 503 (the other workers keep serving), respawns it if
+/// needed, and reconnects - forever, with capped backoff. A worker being
+/// down is an outage to recover from, never a reason to give up. A worker
+/// that starts without a process or connection boots through the same
+/// recovery path.
 async fn ipc_supervisor(
-    worker: NodeWorker,
-    (mut child, mut _stdin_guard): (tokio::process::Child, StdinGuard),
-    mut reader: BoxReader,
-    mut writer: BoxWriter,
+    mut worker: NodeWorker,
+    mut process: Option<WorkerProcess>,
+    mut streams: Option<(BoxReader, BoxWriter)>,
     mut write_rx: mpsc::Receiver<Bytes>,
     mut restart_rx: mpsc::Receiver<()>,
-    inner: Arc<IpcClientInner>,
+    mut shutdown: watch::Receiver<bool>,
+    inner: Arc<WorkerInner>,
 ) {
-    // Remembered across exits: child.id() is None once the wrapper is gone,
-    // but its process group (and any orphaned runtime child) may live on.
-    let mut worker_pid = child.id();
+    let index = worker.index;
+    let mut booted = streams.is_some();
     loop {
-        let mut reader_task = tokio::spawn(run_reader_loop(reader, inner.clone()));
+        if let Some((reader, mut writer)) = streams.take() {
+            // The build is on disk now: in production a respawn loads it
+            // instead of bundling again. Dev restarts must rebuild - they
+            // exist to pick up edits.
+            if !worker.dev_mode {
+                worker.reuse_build = true;
+            }
+            let mut reader_task = tokio::spawn(run_reader_loop(reader, inner.clone()));
 
-        let serve_end = loop {
-            tokio::select! {
-                _ = &mut reader_task => break ServeEnd::ConnLost,
-                status = child.wait() => {
-                    error!(status = ?status, "Node worker exited");
-                    reader_task.abort();
-                    // The wrapper is gone but its runtime child may not be.
-                    kill_worker_tree(&mut child, worker_pid).await;
-                    break ServeEnd::ChildExit;
-                }
-                // Dev-watch requested a restart: kill the worker and let the
-                // recovery loop respawn it fresh.
-                _ = restart_rx.recv() => {
-                    info!("worker restart requested (dev watch)");
-                    reader_task.abort();
-                    kill_worker_tree(&mut child, worker_pid).await;
-                    break ServeEnd::ChildExit;
-                }
-                frame_opt = write_rx.recv() => {
-                    match frame_opt {
-                        None => {
-                            reader_task.abort();
-                            break ServeEnd::Shutdown;
+            let serve_end = loop {
+                tokio::select! {
+                    _ = &mut reader_task => break ServeEnd::ConnLost,
+                    status = process_exit(&mut process) => {
+                        error!(worker = index, status = ?status, "Node worker exited");
+                        reader_task.abort();
+                        // The wrapper is gone but its runtime child may not be.
+                        if let Some(process) = process.as_mut() {
+                            process.kill().await;
                         }
-                        Some(bytes) => {
-                            if let Err(e) =
-                                write_frame_bounded(&mut writer, &bytes, IPC_WRITE_TIMEOUT).await
-                            {
-                                error!("IPC write error: {e}");
+                        break ServeEnd::ChildExit;
+                    }
+                    // Dev-watch requested a restart: kill the worker and let the
+                    // recovery loop respawn it fresh.
+                    _ = restart_rx.recv() => {
+                        info!(worker = index, "worker restart requested (dev watch)");
+                        reader_task.abort();
+                        if let Some(process) = process.as_mut() {
+                            process.kill().await;
+                        }
+                        break ServeEnd::ChildExit;
+                    }
+                    _ = shutdown_requested(&mut shutdown) => {
+                        reader_task.abort();
+                        break ServeEnd::Shutdown;
+                    }
+                    frame_opt = write_rx.recv() => {
+                        match frame_opt {
+                            None => {
                                 reader_task.abort();
-                                break ServeEnd::ConnLost;
+                                break ServeEnd::Shutdown;
+                            }
+                            Some(bytes) => {
+                                if let Err(e) =
+                                    write_frame_bounded(&mut writer, &bytes, IPC_WRITE_TIMEOUT).await
+                                {
+                                    error!(worker = index, "IPC write error: {e}");
+                                    reader_task.abort();
+                                    break ServeEnd::ConnLost;
+                                }
                             }
                         }
                     }
                 }
-            }
-        };
-
-        if matches!(serve_end, ServeEnd::Shutdown) {
-            kill_worker_tree(&mut child, worker_pid).await;
-            return;
-        }
-
-        inner
-            .connected
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        drain_pending_with_503(&inner);
-        drain_sse_streams(&inner);
-        drain_render_streams(&inner);
-
-        // Recovery loop: respawn the worker if it is dead, then reconnect.
-        // Between rounds, requests queued for the dead connection are failed
-        // fast with 503 instead of sitting until their 30s timeout.
-        let mut backoff_ms = 250u64;
-        let connection = loop {
-            let child_dead = child.try_wait().map(|s| s.is_some()).unwrap_or(true);
-            // A freshly respawned worker needs the full startup budget: boot
-            // (discovery + esbuild bundling) takes seconds on slow machines,
-            // and the short reconnect budget made the supervisor kill workers
-            // mid-boot and respawn them forever. The short budget is only for
-            // a live worker whose socket was lost.
-            let connect_attempts = if child_dead {
-                STARTUP_CONNECT_ATTEMPTS
-            } else {
-                RECONNECT_ATTEMPTS
             };
-            if child_dead {
-                match worker.spawn() {
-                    Ok((new_child, new_stdin_guard)) => {
-                        child = new_child;
-                        // Dropping the old guard closes the dead worker's pipe.
-                        _stdin_guard = new_stdin_guard;
-                        worker_pid = child.id();
-                        info!("Node worker respawned (pid {:?})", worker_pid);
-                    }
-                    Err(e) => error!(error = %e, "Node worker respawn failed"),
-                }
-            }
-            match connect_and_handshake(
-                &worker.ipc_path,
-                &inner.deployment_id,
-                &worker.token,
-                connect_attempts,
-            )
-            .await
-            {
-                Ok(conn) => break conn,
-                Err(e) => {
-                    warn!(error = %e, "IPC recovery round failed - killing worker and retrying");
-                    // A worker that is alive but not completing the handshake
-                    // is wedged; kill it so the next round starts fresh.
-                    kill_worker_tree(&mut child, worker_pid).await;
-                }
-            }
-            if fail_queued_writes(&mut write_rx, &inner, Duration::from_millis(backoff_ms)).await {
-                kill_worker_tree(&mut child, worker_pid).await;
+
+            inner.connected.store(false, Ordering::Relaxed);
+            drain_pending_with_503(&inner);
+            drain_sse_streams(&inner);
+            drain_render_streams(&inner);
+
+            if matches!(serve_end, ServeEnd::Shutdown) {
+                stop_worker(index, process).await;
                 return;
             }
-            backoff_ms = (backoff_ms * 2).min(RESPAWN_BACKOFF_MAX_MS);
-        };
+        }
 
-        reader = connection.reader;
-        writer = connection.writer;
-        *inner
-            .route_manifest
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = connection.route_manifest;
-        *inner
-            .worker_rules
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = Arc::new(connection.worker_rules);
-        inner
-            .connected
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        inner.generation.send_modify(|generation| *generation += 1);
-        info!("IPC connection restored");
+        let connection = tokio::select! {
+            connection = recover_worker(&worker, &mut process, &mut write_rx, &inner) => connection,
+            _ = shutdown_requested(&mut shutdown) => None,
+        };
+        let Some(connection) = connection else {
+            stop_worker(index, process).await;
+            return;
+        };
+        streams = Some(install_connection(&inner, connection));
+        if std::mem::replace(&mut booted, true) {
+            info!(worker = index, "IPC connection restored");
+        } else {
+            info!(worker = index, "Node worker joined the pool");
+        }
     }
+}
+
+/// Recovery loop: respawn the worker if it is dead (or was never spawned),
+/// then reconnect. Between rounds, requests queued for the dead connection
+/// are failed fast with 503 instead of sitting until their 30s timeout.
+/// None when the write channel closed (shut down).
+async fn recover_worker(
+    worker: &NodeWorker,
+    process: &mut Option<WorkerProcess>,
+    write_rx: &mut mpsc::Receiver<Bytes>,
+    inner: &WorkerInner,
+) -> Option<WorkerConnection> {
+    let mut backoff_ms = 250u64;
+    loop {
+        let dead = process.as_mut().is_none_or(WorkerProcess::exited);
+        // A freshly (re)spawned worker needs the full startup budget: boot
+        // (discovery + esbuild bundling) takes seconds on slow machines,
+        // and the short reconnect budget made the supervisor kill workers
+        // mid-boot and respawn them forever. The short budget is only for
+        // a live worker whose socket was lost.
+        let connect_attempts = if dead {
+            STARTUP_CONNECT_ATTEMPTS
+        } else {
+            RECONNECT_ATTEMPTS
+        };
+        if dead {
+            match worker.spawn() {
+                Ok(spawned) => {
+                    let pid = spawned.pid;
+                    // Dropping the old process closes the dead worker's pipe.
+                    if process.replace(spawned).is_some() {
+                        inner.restarts.fetch_add(1, Ordering::Relaxed);
+                        info!(worker = worker.index, "Node worker respawned (pid {pid:?})");
+                    } else {
+                        info!(worker = worker.index, "Node process spawned (pid {pid:?})");
+                    }
+                }
+                Err(e) => error!(worker = worker.index, error = %e, "Node worker respawn failed"),
+            }
+        }
+        match connect_and_handshake(
+            &worker.ipc_path,
+            &inner.deployment_id,
+            &worker.token,
+            connect_attempts,
+        )
+        .await
+        {
+            Ok(conn) => return Some(conn),
+            Err(e) => {
+                warn!(worker = worker.index, error = %e, "IPC recovery round failed - killing worker and retrying");
+                // A worker that is alive but not completing the handshake
+                // is wedged; kill it so the next round starts fresh.
+                if let Some(process) = process.as_mut() {
+                    process.kill().await;
+                }
+            }
+        }
+        if fail_queued_writes(write_rx, inner, Duration::from_millis(backoff_ms)).await {
+            return None;
+        }
+        backoff_ms = (backoff_ms * 2).min(RESPAWN_BACKOFF_MAX_MS);
+    }
+}
+
+/// Stop a worker at server shutdown: closing its stdin pipe makes it run its
+/// own graceful exit (EXIT_ON_STDIN_EOF_ENV - plugin shutdown hooks
+/// included); past WORKER_SHUTDOWN_GRACE, or after it exits, its whole tree
+/// is killed so no runtime child outlives the server.
+async fn stop_worker(index: usize, process: Option<WorkerProcess>) {
+    let Some(mut process) = process else {
+        return;
+    };
+    drop(process.stdin.take());
+    if timeout(WORKER_SHUTDOWN_GRACE, process.child.wait())
+        .await
+        .is_err()
+    {
+        warn!(
+            worker = index,
+            "Node worker did not exit in time at shutdown - killing it"
+        );
+    }
+    process.kill().await;
 }
 
 /// During recovery downtime, sleep for `backoff` while failing any frames
@@ -1856,7 +2347,7 @@ async fn ipc_supervisor(
 /// when the write channel closed (IpcClient dropped - shut down).
 async fn fail_queued_writes(
     write_rx: &mut mpsc::Receiver<Bytes>,
-    inner: &IpcClientInner,
+    inner: &WorkerInner,
     backoff: Duration,
 ) -> bool {
     let deadline = tokio::time::Instant::now() + backoff;
@@ -1911,26 +2402,53 @@ pub fn test_client_with_write_channel() -> (IpcClient, mpsc::Receiver<Bytes>) {
 /// `test_client_with_write_channel` in an explicit runtime mode.
 #[cfg(test)]
 pub fn test_client_with_mode(dev_mode: bool) -> (IpcClient, mpsc::Receiver<Bytes>) {
-    let (write_tx, write_rx) = mpsc::channel::<Bytes>(64);
-    let (revalidate_tx, revalidate_rx) = mpsc::channel(REVALIDATE_QUEUE);
-    let client = IpcClient {
-        inner: Arc::new(IpcClientInner {
-            pending: DashMap::new(),
-            sse_streams: DashMap::new(),
-            render_streams: DashMap::new(),
+    let (client, mut write_rxs) = test_pool(1, dev_mode);
+    (client, write_rxs.remove(0))
+}
+
+/// Test-only pool of `workers` ready workers with no processes behind them:
+/// each one's frames land on its receiver.
+#[cfg(test)]
+pub(crate) fn test_pool(workers: usize, dev_mode: bool) -> (IpcClient, Vec<mpsc::Receiver<Bytes>>) {
+    let generation = Arc::new(watch::channel(1u64).0);
+    let (revalidate_tx, revalidate_rx) = mpsc::channel(REVALIDATE_QUEUE * workers);
+    let mut inners = Vec::new();
+    let mut write_rxs = Vec::new();
+    for index in 0..workers {
+        let (write_tx, write_rx) = mpsc::channel::<Bytes>(64);
+        let inner = WorkerInner::new(
+            index,
             write_tx,
-            deployment_id: "dep-test".into(),
-            route_manifest: std::sync::RwLock::new(Vec::new()),
-            worker_rules: std::sync::RwLock::new(Arc::new(RuleSet::default())),
-            restart_tx: mpsc::channel(1).0,
-            generation: tokio::sync::watch::channel(1u64).0,
-            connected: std::sync::atomic::AtomicBool::new(true),
+            mpsc::channel(1).0,
+            "dep-test".into(),
+            generation.clone(),
+            revalidate_tx.clone(),
             dev_mode,
-            revalidate_tx,
+        );
+        inner.connected.store(true, Ordering::Relaxed);
+        inners.push(Arc::new(inner));
+        write_rxs.push(write_rx);
+    }
+    let client = IpcClient {
+        pool: Arc::new(WorkerPool {
+            workers: inners,
+            cursor: AtomicUsize::new(0),
+            deployment_id: "dep-test".into(),
+            generation,
             revalidate_rx: std::sync::Mutex::new(Some(revalidate_rx)),
+            ws_endpoints: vec![(String::new(), String::new()); workers],
+            shutdown: watch::channel(false).0,
+            supervisors: std::sync::Mutex::new(Vec::new()),
         }),
     };
-    (client, write_rx)
+    (client, write_rxs)
+}
+
+#[cfg(test)]
+impl IpcClient {
+    fn worker(&self, index: usize) -> &Arc<WorkerInner> {
+        &self.pool.workers[index]
+    }
 }
 
 #[cfg(test)]
@@ -2026,7 +2544,7 @@ mod tests {
         let result = client.send_request(req).await;
         assert!(result.is_err());
         assert!(
-            client.inner.pending.is_empty(),
+            client.worker(0).pending.is_empty(),
             "failed send must not leak its pending waiter"
         );
     }
@@ -2057,7 +2575,10 @@ mod tests {
             .downcast_ref::<RequestTooLarge>()
             .expect("a typed error the HTTP layer answers 413 for");
         assert!(too_large.frame_bytes > MAX_IPC_MESSAGE_SIZE);
-        assert!(client.inner.pending.is_empty(), "no waiter for a request never sent");
+        assert!(
+            client.worker(0).pending.is_empty(),
+            "no waiter for a request never sent"
+        );
         assert!(write_rx.try_recv().is_err(), "nothing may reach the worker");
     }
 
@@ -2221,9 +2742,12 @@ mod tests {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (client, _write_rx) = test_client_with_mode(dev_mode);
         let (tx, rx) = oneshot::channel();
-        client.inner.pending.insert("req-e".into(), tx);
+        client.worker(0).pending.insert("req-e".into(), tx);
         let (read_half, _keep_write_open) = tokio::io::split(server_io);
-        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), client.inner.clone()));
+        let reader_task = tokio::spawn(run_reader_loop(
+            Box::new(read_half),
+            client.worker(0).clone(),
+        ));
         let (_r, mut node_writer) = tokio::io::split(client_io);
         write_frame(&mut node_writer, &serde_json::to_vec(&frame).unwrap())
             .await
@@ -2342,9 +2866,12 @@ mod tests {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (client, _write_rx) = test_client_with_write_channel();
         let (tx, rx) = oneshot::channel();
-        client.inner.pending.insert("req-s".into(), tx);
+        client.worker(0).pending.insert("req-s".into(), tx);
         let (read_half, _keep_write_open) = tokio::io::split(server_io);
-        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), client.inner.clone()));
+        let reader_task = tokio::spawn(run_reader_loop(
+            Box::new(read_half),
+            client.worker(0).clone(),
+        ));
 
         let (_r, mut node_writer) = tokio::io::split(client_io);
         let head = serde_json::json!({
@@ -2386,7 +2913,7 @@ mod tests {
             .unwrap();
         assert_eq!(body_rx.recv().await, Some(RenderFrame::End));
         assert!(
-            client.inner.render_streams.is_empty(),
+            client.worker(0).render_streams.is_empty(),
             "chunk_end must unregister the stream"
         );
         reader_task.abort();
@@ -2397,9 +2924,12 @@ mod tests {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (client, mut write_rx) = test_client_with_write_channel();
         let (tx, rx) = oneshot::channel();
-        client.inner.pending.insert("req-bad".into(), tx);
+        client.worker(0).pending.insert("req-bad".into(), tx);
         let (read_half, _keep_write_open) = tokio::io::split(server_io);
-        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), client.inner.clone()));
+        let reader_task = tokio::spawn(run_reader_loop(
+            Box::new(read_half),
+            client.worker(0).clone(),
+        ));
 
         // `status` mistyped: the frame cannot become an IpcResponse.
         let (_r, mut node_writer) = tokio::io::split(client_io);
@@ -2433,7 +2963,7 @@ mod tests {
             !resp.body.contains("invalid type"),
             "never echoes the parse error"
         );
-        assert!(client.inner.pending.is_empty());
+        assert!(client.worker(0).pending.is_empty());
 
         // Node is told to stop whatever the frame belonged to.
         let cancel = write_rx.recv().await.expect("cancel frame queued");
@@ -2443,7 +2973,7 @@ mod tests {
 
         // The connection survives: the next frame is delivered normally.
         let (tx, rx) = oneshot::channel();
-        client.inner.pending.insert("req-ok".into(), tx);
+        client.worker(0).pending.insert("req-ok".into(), tx);
         let good = serde_json::json!({
             "id": "req-ok", "status": 200, "headers": {}, "body": "ok",
             "cacheable": false, "cacheMaxAge": 0, "route": "/posts/:id",
@@ -2529,7 +3059,10 @@ mod tests {
         let mut revalidations = client.take_revalidations().expect("receiver");
         assert!(client.take_revalidations().is_none(), "handed out once");
         let (read_half, _keep_write_open) = tokio::io::split(server_io);
-        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), client.inner.clone()));
+        let reader_task = tokio::spawn(run_reader_loop(
+            Box::new(read_half),
+            client.worker(0).clone(),
+        ));
         let (_r, mut node_writer) = tokio::io::split(client_io);
 
         write_frame(
@@ -2572,7 +3105,7 @@ mod tests {
     #[tokio::test]
     async fn revalidate_acks_carry_the_purge_count() {
         let (client, mut write_rx) = test_client_with_write_channel();
-        client.send_revalidate_ack("rv-9", Ok(3)).await;
+        client.send_revalidate_ack(0, "rv-9", Ok(3)).await;
         let ack: serde_json::Value =
             serde_json::from_slice(&write_rx.recv().await.unwrap()).unwrap();
         assert_eq!(
@@ -2585,27 +3118,37 @@ mod tests {
     async fn drain_render_streams_terminates_bodies_on_disconnect() {
         let (client, _write_rx) = test_client_with_write_channel();
         let (tx, mut rx) = mpsc::unbounded_channel::<RenderFrame>();
-        let flow = StreamFlow::new("req-d", &client.inner.write_tx);
-        client
-            .inner
-            .render_streams
-            .insert("req-d".into(), RenderStreamTx { tx, flow });
-        drain_render_streams(&client.inner);
+        let flow = StreamFlow::new("req-d", &client.worker(0).write_tx);
+        let worker = client.worker(0);
+        worker.render_streams.insert(
+            "req-d".into(),
+            RenderStreamTx {
+                tx,
+                flow,
+                _load: InFlight::new(&worker.in_flight),
+            },
+        );
+        drain_render_streams(client.worker(0));
         assert_eq!(rx.recv().await, Some(RenderFrame::End));
-        assert!(client.inner.render_streams.is_empty());
+        assert!(client.worker(0).render_streams.is_empty());
     }
 
     #[tokio::test]
     async fn send_render_close_unregisters_and_sends_cancel_frame() {
         let (client, mut write_rx) = test_client_with_write_channel();
         let (tx, _rx) = mpsc::unbounded_channel::<RenderFrame>();
-        let flow = StreamFlow::new("req-c", &client.inner.write_tx);
-        client
-            .inner
-            .render_streams
-            .insert("req-c".into(), RenderStreamTx { tx, flow });
+        let flow = StreamFlow::new("req-c", &client.worker(0).write_tx);
+        let worker = client.worker(0);
+        worker.render_streams.insert(
+            "req-c".into(),
+            RenderStreamTx {
+                tx,
+                flow,
+                _load: InFlight::new(&worker.in_flight),
+            },
+        );
         client.send_render_close("req-c");
-        assert!(client.inner.render_streams.is_empty());
+        assert!(client.worker(0).render_streams.is_empty());
         let frame = write_rx.recv().await.expect("cancel frame queued");
         let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
         assert_eq!(value["type"], "cancel");
@@ -2625,7 +3168,7 @@ mod tests {
     #[tokio::test]
     async fn stream_flow_pauses_above_the_high_mark_and_resumes_once_drained() {
         let (client, mut write_rx) = test_client_with_write_channel();
-        let flow = StreamFlow::new("req-f", &client.inner.write_tx);
+        let flow = StreamFlow::new("req-f", &client.worker(0).write_tx);
         let first = flow.track(vec![0u8; 600 * 1024]);
         assert!(write_rx.try_recv().is_err(), "under the high mark: no pause");
         let second = flow.track(vec![1u8; 600 * 1024]);
@@ -2656,13 +3199,16 @@ mod tests {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (client, _write_rx) = test_client_with_write_channel();
         let (read_half, _keep_write_open) = tokio::io::split(server_io);
-        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), client.inner.clone()));
+        let reader_task = tokio::spawn(run_reader_loop(
+            Box::new(read_half),
+            client.worker(0).clone(),
+        ));
         let (_r, mut node_writer) = tokio::io::split(client_io);
 
         // A route.ts event-stream Response: streaming head + chunk frames,
         // binary-safe via bodyBase64.
         let (tx, rx) = oneshot::channel();
-        client.inner.pending.insert("req-e".into(), tx);
+        client.worker(0).pending.insert("req-e".into(), tx);
         let head = serde_json::json!({
             "id": "req-e", "status": 200,
             "headers": {"content-type": "text/event-stream"},
@@ -2699,7 +3245,7 @@ mod tests {
 
         // A buffered event-stream body is a complete response.
         let (tx, rx) = oneshot::channel();
-        client.inner.pending.insert("req-b".into(), tx);
+        client.worker(0).pending.insert("req-b".into(), tx);
         write_frame(
             &mut node_writer,
             br#"{"id":"req-b","status":200,"headers":{"content-type":"text/event-stream"},"body":"data: x\n\n","cacheable":false,"cacheMaxAge":0}"#,
@@ -2710,7 +3256,7 @@ mod tests {
 
         // GioEventStream's empty head still opens an SSE stream.
         let (tx, rx) = oneshot::channel();
-        client.inner.pending.insert("req-g".into(), tx);
+        client.worker(0).pending.insert("req-g".into(), tx);
         write_frame(
             &mut node_writer,
             br#"{"id":"req-g","status":200,"headers":{"content-type":"text/event-stream"},"body":"","cacheable":false,"cacheMaxAge":0}"#,
@@ -2962,5 +3508,485 @@ mod tests {
         };
         assert!(err.contains("protocol mismatch"), "got: {err}");
         server_task.await.unwrap();
+    }
+
+    // ── Worker pool ──────────────────────────────────────────────────────────
+
+    fn loads(spec: &[(bool, usize)]) -> Vec<WorkerLoad> {
+        spec.iter()
+            .map(|&(ready, in_flight)| WorkerLoad { ready, in_flight })
+            .collect()
+    }
+
+    #[test]
+    fn dispatch_picks_the_least_loaded_ready_worker() {
+        let pool = loads(&[(true, 3), (true, 1), (true, 2)]);
+        for cursor in 0..6 {
+            assert_eq!(pick_worker(3, cursor, |i| pool[i]), 1, "cursor {cursor}");
+        }
+    }
+
+    #[test]
+    fn dispatch_ties_rotate_round_robin() {
+        let pool = loads(&[(true, 0), (true, 0), (true, 0)]);
+        let picks: Vec<usize> = (0..6).map(|c| pick_worker(3, c, |i| pool[i])).collect();
+        assert_eq!(picks, vec![0, 1, 2, 0, 1, 2]);
+        // Only the tied workers share the rotation.
+        let pool = loads(&[(true, 2), (true, 0), (true, 0)]);
+        let picks: Vec<usize> = (0..4).map(|c| pick_worker(3, c, |i| pool[i])).collect();
+        assert_eq!(picks, vec![1, 1, 2, 1]);
+    }
+
+    #[test]
+    fn dispatch_skips_workers_that_are_down_or_respawning() {
+        // The idle worker is respawning: the busy ready one still wins.
+        let pool = loads(&[(false, 0), (true, 7)]);
+        for cursor in 0..4 {
+            assert_eq!(pick_worker(2, cursor, |i| pool[i]), 1);
+        }
+    }
+
+    #[test]
+    fn dispatch_with_no_ready_worker_rotates_over_all() {
+        let pool = loads(&[(false, 0), (false, 0), (false, 5)]);
+        let picks: Vec<usize> = (0..3).map(|c| pick_worker(3, c, |i| pool[i])).collect();
+        assert_eq!(picks, vec![0, 1, 2], "each gets its turn at a fast 503");
+        assert_eq!(pick_worker(0, 5, |_| unreachable!()), 0);
+    }
+
+    #[test]
+    fn worker_endpoints_are_distinct_per_worker() {
+        let base = IpcPaths {
+            http: ".gio/ipc-1-abc.sock".into(),
+            ws: r"\\.\pipe\giojs-ws-1-abc".into(),
+        };
+        let first = base.for_worker(0);
+        assert_eq!(first.http, base.http, "worker 0 keeps the resolved paths");
+        assert_eq!(first.ws, base.ws);
+        let second = base.for_worker(1);
+        assert_eq!(
+            second.http, ".gio/ipc-1-abc-w1.sock",
+            "still a stale-socket match"
+        );
+        assert_eq!(second.ws, r"\\.\pipe\giojs-ws-1-abc-w1");
+        assert_ne!(base.for_worker(2).http, second.http);
+    }
+
+    /// The worker whose write channel received a frame, and the frame.
+    async fn next_frame_from(
+        write_rxs: &mut [mpsc::Receiver<Bytes>],
+    ) -> (usize, serde_json::Value) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                for (index, rx) in write_rxs.iter_mut().enumerate() {
+                    if let Ok(frame) = rx.try_recv() {
+                        return (index, serde_json::from_slice(&frame).unwrap());
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a frame within 1s")
+    }
+
+    fn request(id: &str) -> IpcRequest {
+        IpcRequest {
+            id: id.into(),
+            method: "GET".into(),
+            path: "/".into(),
+            params: HashMap::new(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+            body_base64: false,
+            deployment_id: "dep-test".into(),
+            locale: "en".into(),
+            skip_shell: false,
+            client: IpcClientFields::default(),
+        }
+    }
+
+    fn answer(client: &IpcClient, worker: usize, id: &str, status: u16) {
+        let (_, tx) = client.worker(worker).pending.remove(id).expect("pending");
+        let mut resp = unavailable_response(id);
+        resp.status = status;
+        let _ = tx.send(IpcSendResult::Response(resp));
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_spread_and_count_until_answered() {
+        let (client, mut write_rxs) = test_pool(2, false);
+        let first = tokio::spawn({
+            let client = client.clone();
+            async move { client.send_request(request("r1")).await }
+        });
+        let (first_worker, frame) = next_frame_from(&mut write_rxs).await;
+        assert_eq!(frame["id"], "r1");
+        assert_eq!(client.worker(first_worker).status().in_flight, 1);
+
+        // r1 is still in flight: the next request goes to the other worker
+        // whatever the round-robin cursor says.
+        let second = tokio::spawn({
+            let client = client.clone();
+            async move { client.send_request(request("r2")).await }
+        });
+        let (second_worker, frame) = next_frame_from(&mut write_rxs).await;
+        assert_eq!(frame["id"], "r2");
+        assert_ne!(second_worker, first_worker);
+
+        answer(&client, first_worker, "r1", 200);
+        answer(&client, second_worker, "r2", 201);
+        let statuses = [first, second].map(|task| async move {
+            match task.await.unwrap().unwrap() {
+                IpcSendResult::Response(resp) => resp.status,
+                _ => panic!("buffered response expected"),
+            }
+        });
+        let [a, b] = statuses;
+        assert_eq!((a.await, b.await), (200, 201));
+        let statuses = client.worker_statuses();
+        assert!(statuses.iter().all(|s| s.in_flight == 0), "{statuses:?}");
+    }
+
+    #[tokio::test]
+    async fn a_dead_worker_fails_only_its_own_requests() {
+        let (client, mut write_rxs) = test_pool(2, false);
+        let mut tasks = HashMap::new();
+        for id in ["a", "b"] {
+            let task = tokio::spawn({
+                let client = client.clone();
+                async move { client.send_request(request(id)).await }
+            });
+            let (worker, _) = next_frame_from(&mut write_rxs).await;
+            tasks.insert(worker, task);
+        }
+        assert_eq!(tasks.len(), 2, "one request on each worker");
+
+        // What the supervisor does when worker 0's connection dies.
+        let dead = client.worker(0);
+        dead.connected.store(false, Ordering::Relaxed);
+        drain_pending_with_503(dead);
+        match tasks.remove(&0).unwrap().await.unwrap().unwrap() {
+            IpcSendResult::Response(resp) => assert_eq!(resp.status, 503),
+            _ => panic!("buffered 503 expected"),
+        }
+        assert_eq!(
+            client.worker(1).pending.len(),
+            1,
+            "the other request lives on"
+        );
+
+        // Until it is back, new requests only reach the live worker.
+        for id in ["c", "d", "e"] {
+            let client = client.clone();
+            let id = id.to_string();
+            tokio::spawn(async move { client.send_request(request(&id)).await });
+            let (worker, frame) = next_frame_from(&mut write_rxs).await;
+            assert_eq!(worker, 1, "{frame}");
+        }
+        let health = client.worker_statuses();
+        assert!(!health[0].ready && health[1].ready);
+    }
+
+    #[tokio::test]
+    async fn stream_frames_stay_on_the_worker_that_started_the_stream() {
+        let (client, mut write_rxs) = test_pool(3, false);
+        let owner = client.worker(2);
+        let (tx, _rx) = mpsc::unbounded_channel::<RenderFrame>();
+        owner.render_streams.insert(
+            "req-s".into(),
+            RenderStreamTx {
+                tx,
+                flow: StreamFlow::new("req-s", &owner.write_tx),
+                _load: InFlight::new(&owner.in_flight),
+            },
+        );
+        assert_eq!(owner.status().in_flight, 1, "a rendering stream is load");
+        client.send_render_close("req-s");
+        let (worker, frame) = next_frame_from(&mut write_rxs).await;
+        assert_eq!((worker, frame["type"].as_str()), (2, Some("cancel")));
+        assert_eq!(owner.status().in_flight, 0, "unregistered, unloaded");
+
+        let (tx, _rx) = mpsc::unbounded_channel::<Option<Bytes>>();
+        let sse_owner = client.worker(1);
+        sse_owner.sse_streams.insert(
+            "req-e".into(),
+            SseStreamTx {
+                tx,
+                _load: InFlight::new(&sse_owner.in_flight),
+            },
+        );
+        assert_eq!(client.sse_stream_count(), 1);
+        assert_eq!(
+            sse_owner.status().in_flight,
+            1,
+            "an open SSE stream is load"
+        );
+        client.send_sse_close("req-e");
+        let (worker, frame) = next_frame_from(&mut write_rxs).await;
+        assert_eq!((worker, frame["type"].as_str()), (1, Some("sse_close")));
+        assert_eq!(sse_owner.status().in_flight, 0, "closed, unloaded");
+
+        // Owned streams told nobody else.
+        assert!(write_rxs.iter_mut().all(|rx| rx.try_recv().is_err()));
+        // A stream no worker holds: every worker hears it (unique ids).
+        client.send_render_close("req-unknown");
+        for rx in &mut write_rxs {
+            let frame: serde_json::Value = serde_json::from_slice(&rx.try_recv().unwrap()).unwrap();
+            assert_eq!(frame["id"], "req-unknown");
+        }
+    }
+
+    /// Feed a GioEventStream head for `id` through the reader loop and
+    /// return the SSE body it opens.
+    async fn open_sse<W: AsyncWrite + Unpin>(
+        node_writer: &mut W,
+        worker: &WorkerInner,
+        id: &str,
+    ) -> mpsc::UnboundedReceiver<Option<Bytes>> {
+        let (tx, rx) = oneshot::channel();
+        worker.pending.insert(id.into(), tx);
+        let head = serde_json::json!({
+            "id": id, "status": 200,
+            "headers": {"content-type": "text/event-stream"},
+            "body": "", "cacheable": false, "cacheMaxAge": 0,
+        });
+        write_frame(node_writer, &serde_json::to_vec(&head).unwrap())
+            .await
+            .unwrap();
+        match rx.await.unwrap() {
+            IpcSendResult::SseStream { body_rx, .. } => body_rx,
+            _ => panic!("an empty event-stream head opens an SSE stream"),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_sse_streams_count_as_their_workers_load() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client, mut write_rxs) = test_pool(2, false);
+        let worker = client.worker(0).clone();
+        let (read_half, _keep_write_open) = tokio::io::split(server_io);
+        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), worker.clone()));
+        let (_r, mut node_writer) = tokio::io::split(client_io);
+
+        // The head answered its request, but the worker keeps a producer
+        // running for the stream: still load, and dispatch looks elsewhere.
+        let mut body = open_sse(&mut node_writer, &worker, "sse-done").await;
+        assert_eq!(worker.status().in_flight, 1);
+        for _ in 0..2 {
+            assert_eq!(
+                client.pick().index,
+                1,
+                "the worker holding the stream is busier"
+            );
+        }
+        write_frame(&mut node_writer, br#"{"type":"sse_done","id":"sse-done"}"#)
+            .await
+            .unwrap();
+        assert_eq!(body.recv().await, Some(None));
+        assert_eq!(worker.status().in_flight, 0, "sse_done releases it");
+
+        let _body = open_sse(&mut node_writer, &worker, "sse-closed").await;
+        assert_eq!(worker.status().in_flight, 1);
+        client.send_sse_close("sse-closed");
+        assert_eq!(
+            worker.status().in_flight,
+            0,
+            "the client's sse_close releases it"
+        );
+        let (owner, frame) = next_frame_from(&mut write_rxs).await;
+        assert_eq!((owner, frame["id"].as_str()), (0, Some("sse-closed")));
+
+        // A stream whose reader went away without an sse_close: its next
+        // chunk unregisters it and stops the producer.
+        drop(open_sse(&mut node_writer, &worker, "sse-orphan").await);
+        assert_eq!(worker.status().in_flight, 1);
+        write_frame(
+            &mut node_writer,
+            br#"{"type":"sse_chunk","id":"sse-orphan","data":"data: x\n\n"}"#,
+        )
+        .await
+        .unwrap();
+        let (owner, frame) = next_frame_from(&mut write_rxs).await;
+        assert_eq!(owner, 0);
+        assert_eq!(frame["type"], "sse_close");
+        assert_eq!(frame["id"], "sse-orphan");
+        assert!(worker.sse_streams.is_empty());
+        assert_eq!(worker.status().in_flight, 0);
+
+        // A lost connection drains the rest.
+        let mut body = open_sse(&mut node_writer, &worker, "sse-drained").await;
+        assert_eq!(worker.status().in_flight, 1);
+        drain_sse_streams(&worker);
+        assert_eq!(body.recv().await, Some(None));
+        assert_eq!(worker.status().in_flight, 0, "drained, unloaded");
+        reader_task.abort();
+    }
+
+    #[test]
+    fn every_spawn_tells_the_worker_its_place_in_the_pool() {
+        let mut node = NodeWorker {
+            index: 2,
+            script: "unused.js".into(),
+            ipc_path: String::new(),
+            ws_path: String::new(),
+            token: String::new(),
+            dev_mode: false,
+            reuse_build: true,
+            pool_size: 3,
+            extra_env: vec![("GIO_IMAGE_CONFIG".into(), "{}".into())],
+        };
+        let env: HashMap<String, String> = node.env().into_iter().collect();
+        assert_eq!(env[WORKER_INDEX_ENV], "2");
+        assert_eq!(env[WORKER_COUNT_ENV], "3");
+        assert_eq!(env[REUSE_BUILD_ENV], "1");
+        assert_eq!(env["GIO_IMAGE_CONFIG"], "{}", "server settings ride along");
+
+        node.index = 0;
+        node.reuse_build = false;
+        node.pool_size = 1;
+        let env: HashMap<String, String> = node.env().into_iter().collect();
+        assert_eq!(env[WORKER_INDEX_ENV], "0");
+        assert_eq!(env[WORKER_COUNT_ENV], "1");
+        assert_eq!(env[REUSE_BUILD_ENV], "0");
+    }
+
+    #[tokio::test]
+    async fn revalidations_from_any_worker_are_acked_to_that_worker() {
+        let (client, mut write_rxs) = test_pool(2, false);
+        let mut revalidations = client.take_revalidations().expect("receiver");
+        handle_revalidate_frame(
+            client.worker(1),
+            serde_json::json!({ "type": "revalidate", "id": "rv-w1", "paths": ["/x"] }),
+        );
+        let queued = revalidations.recv().await.unwrap();
+        assert_eq!((queued.worker, queued.id.as_str()), (1, "rv-w1"));
+        client
+            .send_revalidate_ack(queued.worker, &queued.id, Ok(2))
+            .await;
+        let (worker, ack) = next_frame_from(&mut write_rxs).await;
+        assert_eq!(worker, 1);
+        assert_eq!(ack["id"], "rv-w1");
+        assert_eq!(ack["purged"], 2);
+    }
+
+    fn rules_with_redirect(from: &str) -> RuleSet {
+        RuleSet::compile(
+            &serde_json::from_value::<MiddlewareRules>(serde_json::json!({
+                "redirects": [{ "from": from, "to": "/" }],
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn worker_rules_come_from_the_first_ready_worker() {
+        let (client, _write_rxs) = test_pool(2, false);
+        *client.worker(0).worker_rules.write().unwrap() = Arc::new(rules_with_redirect("/w0"));
+        *client.worker(1).worker_rules.write().unwrap() = Arc::new(rules_with_redirect("/w1"));
+        assert!(redirects(&client.worker_rules(), "/w0"));
+        client.worker(0).connected.store(false, Ordering::Relaxed);
+        let rules = client.worker_rules();
+        assert!(redirects(&rules, "/w1"), "worker 0 is down");
+        assert!(!redirects(&rules, "/w0"));
+        // None ready: the first worker's last known rules, never none at all.
+        client.worker(1).connected.store(false, Ordering::Relaxed);
+        assert!(redirects(&client.worker_rules(), "/w0"));
+    }
+
+    fn redirects(rules: &RuleSet, path: &str) -> bool {
+        matches!(
+            rules.apply(path, None),
+            crate::rules::RuleOutcome::Redirect { .. }
+        )
+    }
+
+    #[tokio::test]
+    async fn installing_a_connection_marks_the_worker_ready_and_announces_it() {
+        let (client, _write_rxs) = test_pool(2, false);
+        let worker = client.worker(1);
+        worker.connected.store(false, Ordering::Relaxed);
+        let pool_generation = client.subscribe_generation();
+        let mut endpoints = client.ws_endpoints();
+        let (a, _b) = tokio::io::duplex(64);
+        let (reader, writer) = tokio::io::split(a);
+        let _streams = install_connection(
+            worker,
+            WorkerConnection {
+                reader: Box::new(reader),
+                writer: Box::new(writer),
+                route_manifest: vec![RouteInfo {
+                    pattern: "/w1".into(),
+                    has_ws_handler: false,
+                }],
+                worker_rules: rules_with_redirect("/installed"),
+            },
+        );
+        assert!(worker.status().ready);
+        assert!(pool_generation.has_changed().unwrap());
+        assert!(
+            endpoints[1].worker_connected.has_changed().unwrap(),
+            "its WS bridge reconnects"
+        );
+        assert!(!endpoints[0].worker_connected.has_changed().unwrap());
+        // Worker 0 is ready too and comes first: it stays the reference.
+        assert!(client.route_manifest().is_empty());
+        client.worker(0).connected.store(false, Ordering::Relaxed);
+        assert_eq!(client.route_manifest()[0].pattern, "/w1");
+        assert!(redirects(&client.worker_rules(), "/installed"));
+        let _ = endpoints.remove(0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_a_supervisor_and_answers_its_waiters() {
+        let (write_tx, write_rx) = mpsc::channel::<Bytes>(8);
+        let (restart_tx, restart_rx) = mpsc::channel(1);
+        let (revalidate_tx, _revalidate_rx) = mpsc::channel(1);
+        let inner = Arc::new(WorkerInner::new(
+            0,
+            write_tx,
+            restart_tx,
+            "dep-test".into(),
+            Arc::new(watch::channel(0u64).0),
+            revalidate_tx,
+            false,
+        ));
+        let (ours, _worker_side) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(ours);
+        inner.connected.store(true, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        inner.pending.insert("waiting".into(), tx);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let node = NodeWorker {
+            index: 0,
+            script: "unused.js".into(),
+            ipc_path: String::new(),
+            ws_path: String::new(),
+            token: String::new(),
+            dev_mode: false,
+            reuse_build: false,
+            pool_size: 1,
+            extra_env: Vec::new(),
+        };
+        let supervisor = tokio::spawn(ipc_supervisor(
+            node,
+            None,
+            Some((Box::new(reader), Box::new(writer))),
+            write_rx,
+            restart_rx,
+            shutdown_rx,
+            inner.clone(),
+        ));
+        shutdown.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor stops at once")
+            .unwrap();
+        assert!(!inner.status().ready);
+        match rx.await.unwrap() {
+            IpcSendResult::Response(resp) => assert_eq!(resp.status, 503),
+            _ => panic!("buffered 503 expected"),
+        }
     }
 }

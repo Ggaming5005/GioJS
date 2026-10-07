@@ -41,7 +41,18 @@ The listen address comes from the `[server]` section of `gio.toml` (default `0.0
 
 ## Process supervision
 
-Stop the server with `SIGTERM`: it stops accepting, closes idle keep-alive connections, lets in-flight requests finish (8 s at most) and takes its Node worker down with it. A server killed without warning (`SIGKILL`, the OOM killer, a crash) never leaves the worker running: the worker's stdin is a pipe the server holds open, and the worker exits when it reads end-of-file. `gio` and a standalone `run.mjs` launch the server the same way (piped stdin plus `GIO_EXIT_ON_STDIN_EOF=1`), so killing the launcher stops the server and frees the port.
+Stop the server with `SIGTERM`: it stops accepting, closes idle keep-alive connections, lets in-flight requests finish (8 s at most), then gives each Node worker a few seconds to run its plugin shutdown hooks and exit before taking it down. A server killed without warning (`SIGKILL`, the OOM killer, a crash) never leaves a worker running: each worker's stdin is a pipe the server holds open, and the worker exits when it reads end-of-file. `gio` and a standalone `run.mjs` launch the server the same way (piped stdin plus `GIO_EXIT_ON_STDIN_EOF=1`), so killing the launcher stops the server and frees the port.
+
+## Sizing: render workers
+
+A server renders on one Node worker by default. When uncached renders are the bottleneck, run a pool - `[server] workers = N`, or `"auto"` for one per CPU core (at most 8):
+
+```toml
+[server]
+workers = 4
+```
+
+Requests go to the ready worker with the fewest in flight (open SSE streams and streaming responses count until they end), a crashed worker fails only its own in-flight requests while the others serve, and only the first worker builds the client bundles - a worker that cannot load that build fails its boot and is retried rather than rebuilding under the others. Each worker is a full Node process with its own copy of the app, so budget one worker's RSS (often 100-200 MB) per worker and size container memory limits for the whole pool; `"auto"` counts CPUs, not memory. Module-level state is per worker, and so are Node plugin hooks: `onStartup` runs in every worker and again on each respawn, so keep one-time jobs (migrations, schedulers, queue consumers) out of it or run them only where `GIO_WORKER_INDEX` is `"0"`, idempotently. Dev mode always runs one worker. `/_gio/metrics` exposes `gio_worker_in_flight` and `gio_worker_restarts_total` per worker; `gio_memory_bytes` is the Rust process only, so read worker RSS from `ps`/`top` or your container metrics.
 
 ## Multi-instance deployments
 
@@ -112,9 +123,10 @@ Two security settings depend on the proxy too (see the *Security* docs page):
   "tls": false,
   "deploymentId": "abc12345",
   "nodeReady": true,
+  "workers": { "configured": 1, "ready": 1 },
   "cacheEntries": 42,
   "uptimeSecs": 3600
 }
 ```
 
-It always returns `200` - cached and static content still serves while the Node worker respawns, so probe logic that needs the SSR worker should read the `nodeReady` field (`false` during a worker respawn) rather than the status code.
+It always returns `200` - cached and static content still serves while the Node worker respawns, so probe logic that needs the SSR worker should read the `nodeReady` field (`false` while no worker is ready - with a pool, only when every worker is respawning) rather than the status code. `workers` counts the configured and ready workers.

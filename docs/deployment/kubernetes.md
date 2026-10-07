@@ -85,6 +85,8 @@ spec:
               port: 3000
             initialDelaySeconds: 15
             periodSeconds: 30
+          # Sized for one render worker. With [server] workers = N, add
+          # roughly one worker's RSS per extra worker to the memory limit.
           resources:
             requests:
               memory: "128Mi"

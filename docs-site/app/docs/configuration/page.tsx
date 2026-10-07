@@ -33,6 +33,7 @@ http2_keep_alive_timeout_secs = 20  # ...and drop them if the ack takes longer
 trusted_proxies = []    # reverse proxies whose forwarding headers count (see Reverse proxies)
 proxy_headers = "x-forwarded"       # "x-forwarded" (X-Forwarded-*) or "forwarded" (RFC 7239)
 accept_request_id = true            # keep a trusted proxy's X-Request-Id (false = always generate)
+workers = 1             # Node render processes: a count or "auto" (see Render workers)
 
 [server.tls]
 enabled = false         # set true to terminate TLS in GioJS directly
@@ -168,6 +169,70 @@ allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer t
         <a href="/docs/deployment">deployment guide</a> has settings for each proxy.
       </div>
 
+      <h2 id="render-workers">Render workers</h2>
+      <p>
+        Pages, <code>getServerSideProps</code> and route handlers run in a Node worker
+        process the Rust server supervises. By default there is one, so all rendering
+        shares one CPU core: a slow render holds up the renders queued behind it (cache
+        hits, static files and images never wait - Rust serves those). To render on
+        several cores, run a pool:
+      </p>
+      <CodeBlock lang="toml" code={`[server]
+workers = 4        # or "auto": one per CPU core, at most 8`} />
+      <ul>
+        <li>
+          Each request goes to the ready worker with the fewest requests in flight (an
+          open SSE stream or a streaming response counts until it ends). A
+          streaming response, an SSE stream or a Partial Prerendering hole render stays
+          on the worker that started it, and each WebSocket stays on one worker for its
+          lifetime. Room broadcasts (<code>broadcast(room, ...)</code>) reach sockets on
+          every worker - room membership lives in the Rust server.
+        </li>
+        <li>
+          Workers are supervised one by one: a crashed worker fails only the requests it
+          had in flight (503) and is respawned while the others keep serving.
+        </li>
+        <li>
+          Only the first worker bundles the client code into <code>.gio/build</code> and
+          writes <code>.gio/routes.d.ts</code>; the others start once it is ready and
+          load its build, so a pool costs no extra build time. In production a respawned
+          worker reuses that build too. No worker rebuilds while others serve from{' '}
+          <code>.gio/build</code>: one that cannot load the build fails its boot and is
+          retried, and a first worker that cannot record its build stops startup.
+        </li>
+        <li>
+          Every worker loads the same app, and the middleware rules of{' '}
+          <code>middleware.ts</code> are taken from the first ready worker.{' '}
+          <code>revalidatePath</code> / <code>revalidateTag</code> purge the one cache
+          the Rust server holds, whichever worker calls them.
+        </li>
+        <li>
+          Module-level state is per worker. A counter or an in-memory store kept in a
+          module variable exists once per worker, so it is not shared - keep shared state
+          in a database, a cache server or the session cookie.
+        </li>
+        <li>
+          Node plugin hooks (<code>plugins</code> in <code>gio.config.ts</code>) run per
+          worker too: <code>onStartup</code> runs in every worker, and again when a
+          worker is respawned, and <code>onShutdown</code> in every worker as it stops.
+          One-time work (a migration, a scheduler, a queue consumer) belongs outside the
+          server or behind a guard: each worker gets <code>GIO_WORKER_INDEX</code>{' '}
+          (<code>&quot;0&quot;</code> for the first) and <code>GIO_WORKER_COUNT</code>, so{' '}
+          <code>process.env.GIO_WORKER_INDEX === &apos;0&apos;</code> limits a job to one
+          worker per server - keep it idempotent, as that worker can be respawned too.
+        </li>
+      </ul>
+      <p>
+        Every worker is a full Node process with its own copy of your app and React, so
+        memory grows with the pool - plan for roughly the RSS of one worker (often
+        100-200 MB) per worker, and see{' '}
+        <a href="/docs/deployment#sizing">Sizing</a> before raising it. Dev mode always
+        runs one worker: every edit restarts it with a fresh build.{' '}
+        <code>/_gio/health</code> reports{' '}
+        <code>workers: {'{'} configured, ready {'}'}</code>, and the metrics carry each
+        worker&apos;s load and restarts.
+      </p>
+
       <h2>Reverse proxies &amp; client IPs</h2>
       <p>
         Behind a reverse proxy or load balancer, every connection GioJS sees comes from
@@ -262,7 +327,7 @@ accept_request_id = false   # ignore incoming X-Request-Id, even from trusted pr
           <tr>
             <td><code>/_gio/health</code></td>
             <td>always on</td>
-            <td>Liveness probe - always returns <code>200</code> with a JSON body: <code>{'{'}status, http2, tls, deploymentId, nodeReady, cacheEntries, uptimeSecs{'}'}</code>. <code>nodeReady</code> is <code>false</code> while the Node SSR worker is respawning (cached and static content still serves) - readiness probes should check that field.</td>
+            <td>Liveness probe - always returns <code>200</code> with a JSON body: <code>{'{'}status, http2, tls, deploymentId, nodeReady, workers, cacheEntries, uptimeSecs{'}'}</code>. <code>nodeReady</code> is <code>false</code> while no Node SSR worker is ready - during a respawn of the only worker, or of every worker in a pool (cached and static content still serves) - so readiness probes should check that field. <code>workers</code> is <code>{'{'} configured, ready {'}'}</code> (see <a href="#render-workers">Render workers</a>).</td>
           </tr>
           <tr>
             <td><code>/_gio/metrics</code></td>
@@ -434,7 +499,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
           <tr><td><code>GIO_APP_DIR</code></td><td>Path to the <code>app/</code> directory; <code>gio.toml</code> is loaded from its parent</td><td>app</td></tr>
           <tr><td><code>GIO_HOST</code> / <code>GIO_PORT</code></td><td>Override <code>[server] host</code> / <code>port</code> without editing <code>gio.toml</code> (a second instance, a platform-assigned port). The host must be an IP address; a malformed value stops startup</td><td><code>[server]</code> values</td></tr>
           <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the build content and the gio.toml <code>[images]</code> settings). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
-          <tr><td><code>GIO_SOCKET_PATH</code></td><td>Rust-to-Node IPC path; the server passes the resolved value to the Node worker</td><td>per-instance <code>.gio/ipc-&lt;pid&gt;-&lt;rand&gt;.sock</code> (Unix), unique named pipe (Windows)</td></tr>
+          <tr><td><code>GIO_SOCKET_PATH</code></td><td>Rust-to-Node IPC path; the server passes the resolved value to the Node worker (in a <a href="#render-workers">worker pool</a>, the other workers get it with a <code>-w&lt;N&gt;</code> suffix)</td><td>per-instance <code>.gio/ipc-&lt;pid&gt;-&lt;rand&gt;.sock</code> (Unix), unique named pipe (Windows)</td></tr>
           <tr><td><code>GIO_PUBLIC_DIR</code></td><td>Directory served at the site root and under <code>/public/*</code></td><td><code>public/</code> next to <code>app/</code></td></tr>
           <tr><td><code>GIO_REVALIDATE_TOKEN</code></td><td>Bearer token that enables <code>POST /_gio/revalidate</code> (<a href="/docs/caching">on-demand revalidation</a>); at least 32 bytes, or the server refuses to start. Overrides <code>[revalidate] token</code></td><td>unset (endpoint disabled)</td></tr>
           <tr><td><code>GIO_SESSION_SECRET</code></td><td>Key material for <a href="/docs/authentication">sessions</a> and <code>require_session</code> guards: at least 32 bytes, comma-separated to rotate (the first signs, all verify). Required in production once sessions are used</td><td>unset (development: an ephemeral secret per server start)</td></tr>
@@ -443,6 +508,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
           <tr><td><code>RUST_LOG</code></td><td>Rust log filter (info/debug/trace)</td><td>info</td></tr>
           <tr><td><code>GIO_LOG_FORMAT</code></td><td><code>json</code> or <code>text</code>: the server&apos;s log format, overriding <code>[logging] format</code> (see <a href="/docs/observability">Observability</a>)</td><td>text</td></tr>
           <tr><td><code>GIO_EXIT_ON_STDIN_EOF</code></td><td><code>1</code>: shut down gracefully when stdin reaches end-of-file. Set by launchers that start the server with a piped stdin they hold open (<code>gio</code>, a standalone <code>run.mjs</code>), so a launcher killed outright never leaves the server behind; ignored when stdin is not a pipe (see <a href="/docs/deployment">Deployment</a>)</td><td>unset</td></tr>
+          <tr><td><code>GIO_WORKER_INDEX</code> / <code>GIO_WORKER_COUNT</code></td><td>Set by the server in each Node worker, for your code to read: the worker&apos;s index in the pool (<code>0</code> for the first) and the pool size (see <a href="#render-workers">Render workers</a>). Any value you set is replaced</td><td>set per worker</td></tr>
           <tr><td><code>GIO_PUBLIC_*</code></td><td>Inlined into client bundles at build time (see below); every other variable is server-only</td><td>-</td></tr>
         </tbody>
       </table>

@@ -5,18 +5,26 @@
 //! framing as the HTTP IPC channel. Binary WebSocket payloads cross the
 //! pipe base64-encoded with `isBinary: true`; text payloads pass through
 //! unchanged for backward compatibility.
+//!
+//! One client per pool worker. Each browser WebSocket is pinned to one
+//! worker for its lifetime (its handler state lives there); room and route
+//! membership lives in the shared Rust registry, so a broadcast from any
+//! worker reaches sockets pinned to every worker.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::Message;
 use bytes::{BufMut, Bytes, BytesMut};
+use dashmap::DashSet;
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
+use crate::ipc::WsEndpoint;
 use crate::ws_registry::WsRegistry;
 
 const MAX_WS_IPC_FRAME_BYTES: usize = 64 * 1024 * 1024;
@@ -29,6 +37,55 @@ type BoxWsWriter = Box<dyn AsyncWrite + Unpin + Send>;
 
 pub struct WsIpcClient {
     write_tx: mpsc::Sender<Bytes>,
+    /// True while the bridge to this client's worker is up.
+    connected: Arc<AtomicBool>,
+    /// Browser connections pinned to this worker, closed when it goes away.
+    owned: Arc<DashSet<String>>,
+}
+
+/// The WebSocket bridges of every pool worker.
+pub struct WsIpcPool {
+    clients: Vec<Arc<WsIpcClient>>,
+    cursor: AtomicUsize,
+}
+
+impl WsIpcPool {
+    /// Bridge every worker. The first worker is READY already and must
+    /// connect now, as a lone worker always had to (failing disables
+    /// WebSockets); the others connect in the background once their worker
+    /// comes up.
+    pub async fn connect(
+        ws_registry: Arc<WsRegistry>,
+        endpoints: Vec<WsEndpoint>,
+    ) -> anyhow::Result<Self> {
+        let mut clients = Vec::with_capacity(endpoints.len());
+        for (index, endpoint) in endpoints.into_iter().enumerate() {
+            let client = if index == 0 {
+                WsIpcClient::connect(ws_registry.clone(), endpoint).await?
+            } else {
+                WsIpcClient::start_disconnected(ws_registry.clone(), endpoint)
+            };
+            clients.push(Arc::new(client));
+        }
+        Ok(Self {
+            clients,
+            cursor: AtomicUsize::new(0),
+        })
+    }
+
+    /// The worker a new browser connection is pinned to: the connected one
+    /// holding the fewest sockets (see `ipc::pick_worker`).
+    pub fn pick(&self) -> Arc<WsIpcClient> {
+        let cursor = self.cursor.fetch_add(1, Ordering::Relaxed);
+        let index = crate::ipc::pick_worker(self.clients.len(), cursor, |i| {
+            let client = &self.clients[i];
+            crate::ipc::WorkerLoad {
+                ready: client.connected.load(Ordering::Relaxed),
+                in_flight: client.owned.len(),
+            }
+        });
+        Arc::clone(&self.clients[index])
+    }
 }
 
 /// What the worker learns about a connection when it opens: enough for a
@@ -85,23 +142,44 @@ impl WsIpcClient {
     /// (e.g. across a Node worker respawn).
     pub async fn connect(
         ws_registry: Arc<WsRegistry>,
-        path: String,
-        token: String,
+        endpoint: WsEndpoint,
     ) -> anyhow::Result<Self> {
-        let (reader, mut writer) = connect_ws_transport(&path, WS_CONNECT_ATTEMPTS).await?;
-        send_ws_auth(&mut writer, &token).await?;
+        let (reader, mut writer) =
+            connect_ws_transport(&endpoint.path, WS_CONNECT_ATTEMPTS).await?;
+        send_ws_auth(&mut writer, &endpoint.token).await?;
+        Ok(Self::spawn(ws_registry, endpoint, Some((reader, writer))))
+    }
 
+    /// A client whose supervisor connects once the worker comes up.
+    fn start_disconnected(ws_registry: Arc<WsRegistry>, endpoint: WsEndpoint) -> Self {
+        Self::spawn(ws_registry, endpoint, None)
+    }
+
+    fn spawn(
+        ws_registry: Arc<WsRegistry>,
+        endpoint: WsEndpoint,
+        connection: Option<(BoxWsReader, BoxWsWriter)>,
+    ) -> Self {
         let (write_tx, write_rx) = mpsc::channel::<Bytes>(256);
+        let connected = Arc::new(AtomicBool::new(false));
+        let owned = Arc::new(DashSet::new());
         tokio::spawn(ws_ipc_supervisor(
-            path,
-            token,
-            reader,
-            writer,
+            WsSupervisor {
+                path: endpoint.path,
+                token: endpoint.token,
+                worker_connected: Some(endpoint.worker_connected),
+                registry: ws_registry,
+                connected: connected.clone(),
+                owned: owned.clone(),
+            },
+            connection,
             write_rx,
-            ws_registry,
         ));
-
-        Ok(Self { write_tx })
+        Self {
+            write_tx,
+            connected,
+            owned,
+        }
     }
 
     pub fn send_ws_connect(
@@ -110,6 +188,7 @@ impl WsIpcClient {
         info: &WsConnectInfo,
         addr: &std::net::SocketAddr,
     ) {
+        self.owned.insert(conn_id.to_string());
         self.send_frame(ws_connect_frame(conn_id, info, addr));
     }
 
@@ -125,6 +204,7 @@ impl WsIpcClient {
     }
 
     pub fn send_ws_disconnect(&self, conn_id: &str, code: u16, reason: &str) {
+        self.owned.remove(conn_id);
         self.send_frame(json!({
             "type": "ws_disconnect",
             "connId": conn_id,
@@ -158,56 +238,89 @@ impl WsIpcClient {
     }
 }
 
-/// Supervises the WS IPC connection: serves frames until the socket dies,
-/// then closes all browser WebSockets (Node lost their state) and reconnects
-/// forever with capped backoff. Outbound frames queued while disconnected
-/// are delivered after reconnect (bounded channel; overflow is dropped by
-/// `send_frame`).
-async fn ws_ipc_supervisor(
+/// What a WS IPC supervisor owns besides its streams.
+struct WsSupervisor {
     path: String,
     token: String,
-    mut reader: BoxWsReader,
-    mut writer: BoxWsWriter,
-    mut write_rx: mpsc::Receiver<Bytes>,
+    /// Changes when the worker's HTTP connection is (re)established - its
+    /// WebSocket server is up, so a reconnect need not wait out the backoff.
+    /// None once the pool is gone.
+    worker_connected: Option<watch::Receiver<u64>>,
     registry: Arc<WsRegistry>,
-) {
-    loop {
-        let mut reader_task = tokio::spawn(ws_reader_loop(reader, registry.clone()));
+    connected: Arc<AtomicBool>,
+    owned: Arc<DashSet<String>>,
+}
 
-        let lost = loop {
-            tokio::select! {
-                _ = &mut reader_task => break true,
-                frame_opt = write_rx.recv() => {
-                    match frame_opt {
-                        None => {
-                            reader_task.abort();
-                            break false;
-                        }
-                        Some(payload) => {
-                            if let Err(e) = write_ws_frame(&mut writer, &payload).await {
-                                error!(error = %e, "WS IPC write failed");
+/// Supervises the WS IPC connection: serves frames until the socket dies,
+/// then closes the browser WebSockets pinned to this worker (Node lost their
+/// state) and reconnects forever with capped backoff - at once when the
+/// worker reports READY again. Outbound frames queued while disconnected
+/// are delivered after reconnect (bounded channel; overflow is dropped by
+/// `send_frame`). Starts in the reconnect phase without a connection.
+async fn ws_ipc_supervisor(
+    mut sup: WsSupervisor,
+    mut connection: Option<(BoxWsReader, BoxWsWriter)>,
+    mut write_rx: mpsc::Receiver<Bytes>,
+) {
+    // A worker still booting has no WebSocket server yet: wait for its READY
+    // instead of logging failed attempts until it has one, then connect.
+    let mut connect_at_once = connection.is_none();
+    if connect_at_once {
+        if let Some(rx) = sup.worker_connected.as_mut() {
+            // Generation 0: the worker has not connected yet (it may have
+            // before this task ran - a prebuilt worker boots fast).
+            if *rx.borrow_and_update() == 0 && rx.changed().await.is_err() {
+                sup.worker_connected = None;
+            }
+        }
+    }
+    loop {
+        if let Some((reader, mut writer)) = connection.take() {
+            sup.connected.store(true, Ordering::Relaxed);
+            let mut reader_task = tokio::spawn(ws_reader_loop(reader, sup.registry.clone()));
+
+            let lost = loop {
+                tokio::select! {
+                    _ = &mut reader_task => break true,
+                    frame_opt = write_rx.recv() => {
+                        match frame_opt {
+                            None => {
                                 reader_task.abort();
-                                break true;
+                                break false;
+                            }
+                            Some(payload) => {
+                                if let Err(e) = write_ws_frame(&mut writer, &payload).await {
+                                    error!(error = %e, "WS IPC write failed");
+                                    reader_task.abort();
+                                    break true;
+                                }
                             }
                         }
                     }
                 }
+            };
+            sup.connected.store(false, Ordering::Relaxed);
+
+            if !lost {
+                return;
             }
-        };
 
-        if !lost {
-            return;
+            // The worker lost its connections' state; close their browser
+            // sockets so clients reconnect (and land on a live worker).
+            let pinned: Vec<String> = sup.owned.iter().map(|id| id.key().clone()).collect();
+            for conn_id in &pinned {
+                sup.owned.remove(conn_id);
+            }
+            sup.registry.close_connections(&pinned);
         }
-
-        // The Node side lost every connection's state; close the browser
-        // sockets so clients reconnect and re-register on the new worker.
-        registry.close_all();
 
         let mut backoff_ms = 500u64;
         let (new_reader, new_writer) = loop {
-            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-            match connect_ws_transport(&path, 1).await {
-                Ok((r, mut w)) => match send_ws_auth(&mut w, &token).await {
+            if !std::mem::take(&mut connect_at_once) {
+                wait_for_retry(Duration::from_millis(backoff_ms), &mut sup.worker_connected).await;
+            }
+            match connect_ws_transport(&sup.path, 1).await {
+                Ok((r, mut w)) => match send_ws_auth(&mut w, &sup.token).await {
                     Ok(()) => break (r, w),
                     Err(e) => warn!(error = %e, "WS IPC reconnect auth write failed"),
                 },
@@ -215,9 +328,26 @@ async fn ws_ipc_supervisor(
             }
             backoff_ms = (backoff_ms * 2).min(WS_RECONNECT_BACKOFF_MAX_MS);
         };
-        reader = new_reader;
-        writer = new_writer;
-        info!("WS IPC reconnected");
+        connection = Some((new_reader, new_writer));
+        info!("WS IPC connected");
+    }
+}
+
+/// Sleep out `backoff`, or less when the worker reconnects meanwhile.
+async fn wait_for_retry(backoff: Duration, worker_connected: &mut Option<watch::Receiver<u64>>) {
+    let Some(rx) = worker_connected else {
+        tokio::time::sleep(backoff).await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::time::sleep(backoff) => {}
+        changed = rx.changed() => {
+            if changed.is_err() {
+                // The pool is gone: plain backoff from now on, never a spin.
+                *worker_connected = None;
+                tokio::time::sleep(backoff).await;
+            }
+        }
     }
 }
 
@@ -498,6 +628,111 @@ pub(crate) mod b64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn endpoint(worker_connected: watch::Receiver<u64>) -> WsEndpoint {
+        WsEndpoint {
+            path: "unused".into(),
+            token: String::new(),
+            worker_connected,
+        }
+    }
+
+    #[tokio::test]
+    async fn new_sockets_go_to_the_connected_worker_holding_the_fewest() {
+        let registry = Arc::new(WsRegistry::new());
+        let (_ready_a, rx_a) = watch::channel(0u64);
+        let (_ready_b, rx_b) = watch::channel(0u64);
+        let pool = WsIpcPool {
+            clients: vec![
+                Arc::new(WsIpcClient::start_disconnected(
+                    registry.clone(),
+                    endpoint(rx_a),
+                )),
+                Arc::new(WsIpcClient::start_disconnected(
+                    registry.clone(),
+                    endpoint(rx_b),
+                )),
+            ],
+            cursor: AtomicUsize::new(0),
+        };
+        let picked = |pool: &WsIpcPool| {
+            let client = pool.pick();
+            pool.clients
+                .iter()
+                .position(|c| Arc::ptr_eq(c, &client))
+                .unwrap()
+        };
+        // Nothing connected yet: take turns (frames queue until it is).
+        assert_eq!((picked(&pool), picked(&pool)), (0, 1));
+
+        for client in &pool.clients {
+            client.connected.store(true, Ordering::Relaxed);
+        }
+        let info = WsConnectInfo::default();
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        pool.clients[0].send_ws_connect("c1", &info, &addr);
+        pool.clients[0].send_ws_connect("c2", &info, &addr);
+        assert_eq!(picked(&pool), 1, "the emptier worker");
+        assert_eq!(picked(&pool), 1);
+        pool.clients[0].send_ws_disconnect("c1", 1000, "");
+        pool.clients[1].send_ws_connect("c3", &info, &addr);
+        pool.clients[1].send_ws_connect("c4", &info, &addr);
+        assert_eq!(picked(&pool), 0);
+        pool.clients[0].connected.store(false, Ordering::Relaxed);
+        assert_eq!(picked(&pool), 1, "a worker whose bridge is down is skipped");
+    }
+
+    #[tokio::test]
+    async fn a_lost_bridge_closes_only_its_own_sockets() {
+        let registry = Arc::new(WsRegistry::new());
+        let (tx_own, mut rx_own) = mpsc::unbounded_channel();
+        let (tx_other, mut rx_other) = mpsc::unbounded_channel();
+        registry.register("own", "/ws", tx_own);
+        registry.register("other", "/ws", tx_other);
+        let owned = Arc::new(DashSet::new());
+        owned.insert("own".to_string());
+        let connected = Arc::new(AtomicBool::new(false));
+        let (ours, worker_side) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(ours);
+        let (_write_tx, write_rx) = mpsc::channel::<Bytes>(8);
+        let supervisor = tokio::spawn(ws_ipc_supervisor(
+            WsSupervisor {
+                path: "unused".into(),
+                token: String::new(),
+                worker_connected: None,
+                registry: registry.clone(),
+                connected: connected.clone(),
+                owned: owned.clone(),
+            },
+            Some((Box::new(reader), Box::new(writer))),
+            write_rx,
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !connected.load(Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bridge up");
+
+        drop(worker_side); // the worker died
+        let frame = tokio::time::timeout(Duration::from_secs(1), rx_own.recv())
+            .await
+            .expect("its socket is closed at once")
+            .unwrap();
+        assert!(
+            matches!(frame, Message::Close(Some(ref f)) if f.code == 1001),
+            "{frame:?}"
+        );
+        assert!(!connected.load(Ordering::Relaxed));
+        assert!(owned.is_empty());
+        assert!(
+            rx_other.try_recv().is_err(),
+            "sockets on other workers live on"
+        );
+        assert_eq!(registry.active_count(), 1);
+        supervisor.abort();
+    }
 
     #[tokio::test]
     async fn ws_ipc_message_framing_round_trip() {

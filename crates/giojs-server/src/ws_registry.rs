@@ -170,14 +170,7 @@ impl WsRegistry {
     }
 
     pub fn close_all(&self) {
-        use axum::extract::ws::CloseFrame;
-        // 1001, not 1000: clients treat a normal close as final, while this
-        // one (shutdown, or the worker that held the state restarting) is
-        // exactly when they should reconnect.
-        let close = Message::Close(Some(CloseFrame {
-            code: axum::extract::ws::close_code::AWAY,
-            reason: std::borrow::Cow::Borrowed("server shutdown"),
-        }));
+        let close = away_close("server shutdown");
         let ids: Vec<String> = self.senders.iter().map(|e| e.key().clone()).collect();
         for id in ids {
             if let Some((_, tx)) = self.senders.remove(&id) {
@@ -189,6 +182,34 @@ impl WsRegistry {
         self.conn_rooms.clear();
         self.pending.clear();
     }
+
+    /// `close_all` for the connections one pool worker held: that worker is
+    /// gone with their state, while sockets on the other workers live on.
+    /// Their route-index entries go when their connection tasks deregister.
+    pub fn close_connections(&self, conn_ids: &[String]) {
+        let close = away_close("worker restarted");
+        for conn_id in conn_ids {
+            if let Some((_, tx)) = self.senders.remove(conn_id) {
+                let _ = tx.send(close.clone());
+            }
+            self.pending.remove(conn_id);
+            if let Some((_, joined)) = self.conn_rooms.remove(conn_id) {
+                for room in joined.iter() {
+                    self.remove_member(room.as_str(), conn_id);
+                }
+            }
+        }
+    }
+}
+
+/// 1001, not 1000: clients treat a normal close as final, while this one
+/// (shutdown, or the worker that held the state restarting) is exactly when
+/// they should reconnect.
+fn away_close(reason: &'static str) -> Message {
+    Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: axum::extract::ws::close_code::AWAY,
+        reason: std::borrow::Cow::Borrowed(reason),
+    }))
 }
 
 #[cfg(test)]
@@ -200,6 +221,36 @@ mod tests {
         mpsc::UnboundedReceiver<Message>,
     ) {
         mpsc::unbounded_channel()
+    }
+
+    #[test]
+    fn close_connections_closes_only_the_named_sockets() {
+        let reg = WsRegistry::new();
+        let (tx1, mut rx1) = make_conn();
+        let (tx2, mut rx2) = make_conn();
+        reg.register("conn1", "/chat", tx1);
+        reg.register("conn2", "/chat", tx2);
+        for conn in ["conn1", "conn2"] {
+            reg.accept(conn);
+            assert!(reg.join(conn, "lobby"));
+        }
+        reg.close_connections(&["conn1".to_string()]);
+        match rx1.try_recv().expect("close frame queued") {
+            Message::Close(Some(frame)) => {
+                assert_eq!(frame.code, axum::extract::ws::close_code::AWAY);
+            }
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+        assert_eq!(reg.active_count(), 1);
+        reg.broadcast_room("lobby", Message::Text("still here".into()), None);
+        assert_eq!(rx2.try_recv().unwrap(), Message::Text("still here".into()));
+        assert!(
+            rx1.try_recv().is_err(),
+            "a closed socket gets no room traffic"
+        );
+        reg.deregister("conn1", "/chat");
+        reg.deregister("conn2", "/chat");
+        assert_eq!(reg.room_count(), 0);
     }
 
     #[test]

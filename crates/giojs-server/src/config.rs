@@ -510,8 +510,66 @@ pub struct ServerConfig {
     /// X-Request-Id through instead of setting one (AWS ALB, Google Cloud LB).
     #[serde(default = "default_accept_request_id")]
     pub accept_request_id: bool,
+    /// Node render workers: 1 (default), a count, or "auto".
+    #[serde(default)]
+    pub workers: WorkersSetting,
     #[serde(default)]
     pub tls: TlsConfig,
+}
+
+/// Largest explicit `[server] workers` count: a sanity bound, since every
+/// worker is a full Node process with its own copy of the app in memory.
+pub const MAX_WORKERS: usize = 64;
+
+/// `[server] workers = 1 | N | "auto"`: how many Node processes render.
+/// "auto" is one per available CPU core, at most `ipc::AUTO_WORKERS_MAX`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkersSetting {
+    Count(usize),
+    Auto,
+}
+
+impl Default for WorkersSetting {
+    /// One worker keeps a fresh install's memory profile; more is opt-in.
+    fn default() -> Self {
+        WorkersSetting::Count(1)
+    }
+}
+
+impl WorkersSetting {
+    /// The worker count, given the cores available (None when unknown).
+    pub fn resolve(self, available_cores: Option<usize>) -> usize {
+        match self {
+            WorkersSetting::Count(count) => count,
+            WorkersSetting::Auto => available_cores
+                .unwrap_or(1)
+                .clamp(1, crate::ipc::AUTO_WORKERS_MAX),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkersSetting {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Count(i64),
+            Name(String),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Count(count) if (1..=MAX_WORKERS as i64).contains(&count) => {
+                Ok(WorkersSetting::Count(count as usize))
+            }
+            Raw::Name(name) if name == "auto" => Ok(WorkersSetting::Auto),
+            Raw::Count(count) => Err(D::Error::custom(format!(
+                "workers = {count}: expected 1 to {MAX_WORKERS}, or \"auto\""
+            ))),
+            Raw::Name(name) => Err(D::Error::custom(format!(
+                "workers = {name:?}: expected a count (1 to {MAX_WORKERS}) or \"auto\""
+            ))),
+        }
+    }
 }
 
 fn default_http2() -> bool {
@@ -602,6 +660,7 @@ impl Default for ServerConfig {
             trusted_proxies: Default::default(),
             proxy_headers: Default::default(),
             accept_request_id: default_accept_request_id(),
+            workers: WorkersSetting::default(),
             tls: TlsConfig::default(),
         }
     }
@@ -793,6 +852,61 @@ mod tests {
         let config = result.unwrap();
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 4321);
+    }
+
+    fn load_server_toml(name: &str, server_body: &str) -> Result<GioConfig, ConfigError> {
+        let path = unique_temp_path(name);
+        std::fs::write(
+            &path,
+            format!("[server]\nhost = \"127.0.0.1\"\nport = 4321\n{server_body}"),
+        )
+        .unwrap();
+        let result = GioConfig::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        result
+    }
+
+    #[test]
+    fn workers_default_to_one_and_parse_counts_and_auto() {
+        let omitted = load_server_toml("workers_default.toml", "").unwrap();
+        assert_eq!(omitted.server.workers, WorkersSetting::Count(1));
+        assert_eq!(ServerConfig::default().workers, WorkersSetting::Count(1));
+        let four = load_server_toml("workers_four.toml", "workers = 4\n").unwrap();
+        assert_eq!(four.server.workers, WorkersSetting::Count(4));
+        assert_eq!(
+            four.server.workers.resolve(Some(2)),
+            4,
+            "an explicit count is exact"
+        );
+        let auto = load_server_toml("workers_auto.toml", "workers = \"auto\"\n").unwrap();
+        assert_eq!(auto.server.workers, WorkersSetting::Auto);
+    }
+
+    #[test]
+    fn auto_workers_follow_the_cores_up_to_the_cap() {
+        assert_eq!(WorkersSetting::Auto.resolve(Some(3)), 3);
+        assert_eq!(
+            WorkersSetting::Auto.resolve(Some(64)),
+            crate::ipc::AUTO_WORKERS_MAX
+        );
+        assert_eq!(WorkersSetting::Auto.resolve(None), 1, "unknown core count");
+        assert_eq!(WorkersSetting::Auto.resolve(Some(0)), 1);
+    }
+
+    #[test]
+    fn invalid_worker_counts_stop_startup() {
+        for (name, body) in [
+            ("workers_zero.toml", "workers = 0\n"),
+            ("workers_negative.toml", "workers = -2\n"),
+            ("workers_huge.toml", "workers = 65\n"),
+            ("workers_word.toml", "workers = \"many\"\n"),
+            ("workers_float.toml", "workers = 1.5\n"),
+        ] {
+            let err = load_server_toml(name, body).expect_err(body);
+            assert!(matches!(err, ConfigError::Parse { .. }), "{body}: {err}");
+        }
+        let err = load_server_toml("workers_zero_msg.toml", "workers = 0\n").unwrap_err();
+        assert!(err.to_string().contains("expected 1 to 64"), "{err}");
     }
 
     #[test]
