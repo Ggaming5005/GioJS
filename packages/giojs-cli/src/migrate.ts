@@ -67,15 +67,27 @@ const UNSUPPORTED_APP_FILES: Record<string, string> = {
   template: 'template.* files are not supported - use a layout',
   default: 'parallel-route default.* files are not supported',
   'global-error': 'global-error.* is not supported - app/error.tsx catches render errors',
-  'opengraph-image': 'generated OG images are not supported - put a static image in public/ and reference it in a <meta> tag',
-  'twitter-image': 'generated images are not supported - use a static image from public/',
-  icon: 'icon.* files are not supported - put the icon in public/ and <link rel="icon"> it from the root layout',
-  'apple-icon': 'apple-icon.* is not supported - put it in public/ and link it from the root layout',
-  sitemap: 'sitemap.* is not supported - serve it from a route.ts handler (app/sitemap.xml/route.ts) or public/',
-  robots: 'robots.* is not supported - put robots.txt in public/',
-  manifest: 'manifest.* is not supported - put the manifest in public/',
   middleware: '',
 };
+/** Next's file-based metadata images (icon.png, opengraph-image2.jpg, ...). */
+const METADATA_IMAGE = /^(icon|apple-icon|opengraph-image|twitter-image)\d*$/;
+const METADATA_IMAGE_EXT = /^\.(ico|png|jpe?g|gif|svg|webp)$/i;
+/** The metadata field each file-based image becomes. */
+const METADATA_IMAGE_FIELD: Record<string, (url: string) => string> = {
+  icon: url => `icons: { icon: '${url}' }`,
+  'apple-icon': url => `icons: { apple: '${url}' }`,
+  'opengraph-image': url => `openGraph: { images: '${url}' }`,
+  'twitter-image': url => `twitter: { images: '${url}' }`,
+};
+/** Static files Next serves from app/ as they are; GioJS serves them from public/. */
+const STATIC_METADATA_FILES = new Set(['favicon.ico', 'robots.txt', 'sitemap.xml', 'manifest.json', 'manifest.webmanifest']);
+/** app/sitemap.ts & co. - what GioJS serves each at. */
+const METADATA_ROUTES: Record<string, string> = { sitemap: '/sitemap.xml', robots: '/robots.txt', manifest: '/manifest.webmanifest' };
+/** Next linked a web app manifest from every page by itself; GioJS renders that link from metadata only. */
+const manifestLinkTodo = (url: string): string =>
+  `Next.js linked the manifest from every page: add manifest: '${url}' to the root layout's metadata export (GioJS renders <link rel="manifest"> from it)`;
+/** A module starting (after comments) with 'use server'. */
+const USE_SERVER_PROLOGUE = /^\uFEFF?(?:\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*(['"])use server\1/;
 
 export function extOf(path: string): string {
   const match = /\.[^./]+$/.exec(path);
@@ -285,6 +297,60 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
     }
   }
 
+  // Next's metadata files. app/sitemap.ts, robots.ts and manifest.ts work as
+  // they are; the static files Next serves straight from app/ move to
+  // public/, which is where GioJS serves files from; file-based images move
+  // too, but GioJS only links them from metadata, so they get a TODO.
+  const metadataFile = (f: string, target: string): void => {
+    const base = posix.basename(target);
+    const stem = stemOf(target);
+    const ext = extOf(target);
+    const dirSegments = posix.dirname(target).split('/').slice(1);
+    // Route groups add no URL segment; dynamic, private and @slot folders have no static URL.
+    const urlSegments = dirSegments.filter(s => !/^\(.*\)$/.test(s));
+    const url = urlSegments.every(s => !/[[\]@]/.test(s) && !s.startsWith('_')) ? '/' + [...urlSegments, base].join('/') : undefined;
+    if (STATIC_METADATA_FILES.has(base) && (dirSegments.length === 0 || base === 'sitemap.xml') && url !== undefined) {
+      if (claim(f, `public${url}`) && base.startsWith('manifest.')) {
+        plan.todos.push({ file: `public${url}`, message: manifestLinkTodo(url) });
+      }
+      return;
+    }
+    if (stem in METADATA_ROUTES && SOURCE_EXTENSIONS.has(ext)) {
+      if (dirSegments.length > 0) {
+        plan.todos.push({ file: target, message: `only app/${stem}.ts at the app root is served (at ${METADATA_ROUTES[stem] as string}) - merge this one into it, or serve it from a route.ts` });
+        return;
+      }
+      if (ext === '.tsx' || ext === '.jsx') {
+        plan.todos.push({ file: target, message: `rename it to app/${stem}.${ext === '.tsx' ? 'ts' : 'js'} - GioJS loads app/${stem}.ts or .js` });
+      } else {
+        plan.notes.push(`${target} works as it is: GioJS serves it at ${METADATA_ROUTES[stem] as string}, resolves relative URLs against GIO_SITE_URL (set it to the site's origin) and caches the output for its revalidate export (default 3600 seconds).`);
+      }
+      // GioJS serves the manifest but links it only from metadata.
+      if (stem === 'manifest') plan.todos.push({ file: target, message: manifestLinkTodo(METADATA_ROUTES[stem] as string) });
+      return;
+    }
+    const image = METADATA_IMAGE.exec(stem);
+    if (image === null) return;
+    const kind = image[1] as string;
+    if (SOURCE_EXTENSIONS.has(ext)) {
+      plan.todos.push({
+        file: target,
+        message: `generated ${kind} files (ImageResponse) are not supported: render the image once into public/ and set it from metadata (${(METADATA_IMAGE_FIELD[kind] as (u: string) => string)('/...')}), or produce it in a route.ts handler (binary Responses work) and point metadata at that URL`,
+      });
+      return;
+    }
+    if (!METADATA_IMAGE_EXT.test(ext)) return;
+    const segment = dirSegments.length === 0 ? 'app/layout' : `app/${dirSegments.join('/')}/layout (or page)`;
+    const alt = files.has(`${posix.dirname(f)}/${stem}.alt.txt`) ? ` - its alt text is in ${stem}.alt.txt` : '';
+    if (url === undefined) {
+      plan.todos.push({ file: target, message: `file-based ${kind} images are not picked up by GioJS, and this folder has no static URL: put the image in public/ and set it from generateMetadata (${(METADATA_IMAGE_FIELD[kind] as (u: string) => string)('/...')})${alt}` });
+      return;
+    }
+    if (claim(f, `public${url}`)) {
+      plan.todos.push({ file: `public${url}`, message: `Next.js linked this ${kind} automatically; GioJS links it from metadata - add ${(METADATA_IMAGE_FIELD[kind] as (u: string) => string)(url)} to the metadata export of ${segment}${alt}` });
+    }
+  };
+
   // app/ component files must be .tsx/.jsx/.js; route handlers .ts/.js.
   for (const f of fileList) {
     const target = moves.get(f)?.to ?? f;
@@ -295,9 +361,10 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
     if (stem === 'route' && (ext === '.tsx' || ext === '.jsx')) {
       plan.todos.push({ file: target, message: 'route handlers must be route.ts or route.js in GioJS - rename it (move any JSX out)' });
     }
-    if (stem in UNSUPPORTED_APP_FILES && UNSUPPORTED_APP_FILES[stem] !== '' && (SOURCE_EXTENSIONS.has(ext) || /\.(png|jpe?g|ico|svg|xml|txt|webmanifest|json)$/.test(ext))) {
+    if (stem in UNSUPPORTED_APP_FILES && UNSUPPORTED_APP_FILES[stem] !== '' && SOURCE_EXTENSIONS.has(ext)) {
       plan.todos.push({ file: target, message: UNSUPPORTED_APP_FILES[stem] as string });
     }
+    metadataFile(f, target);
     const segments = target.split('/');
     if (segments.some(s => s.startsWith('@'))) plan.todos.push({ file: target, message: 'parallel routes (@slot folders) are not supported' });
     if (segments.some(s => /^\(\.{1,3}\)/.test(s))) plan.todos.push({ file: target, message: 'intercepting routes ((.)folder) are not supported' });
@@ -394,6 +461,13 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
     return relativeSpecifier(newDir, posix.normalize(posix.join(oldDir, spec)));
   };
 
+  // Modules whose exports are all Server Actions: a form posting to one of
+  // their imports becomes a <GioForm>.
+  const actionModules = new Set<string>();
+  for (const f of fileList) {
+    if (isSource(f) && USE_SERVER_PROLOGUE.test(await read(f))) actionModules.add(f);
+  }
+
   for (const f of fileList) {
     const move = moves.get(f);
     const to = move?.to ?? f;
@@ -415,6 +489,13 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
       ...(move !== undefined ? { originalPath: f } : {}),
       rewriteSpecifier: rewriterFor(f, to),
       classicJsx: !files.has('tsconfig.json'),
+      serverActionModule: (spec: string) => {
+        // `@/` is the alias create-next-app sets up (the root, or src/ with a src/ directory).
+        const candidates = spec.startsWith('.')
+          ? [resolveImport(files, posix.dirname(f), spec)]
+          : spec.startsWith('@/') ? ['.', 'src'].map(dir => resolveImport(files, dir, spec.slice(2))) : [];
+        return candidates.some(resolved => resolved !== undefined && actionModules.has(resolved));
+      },
       cssUrl: (spec: string) => {
         const resolved = resolveImport(files, posix.dirname(f), spec) ?? posix.normalize(posix.join(posix.dirname(f), spec));
         return stylesheetUrl(moves.get(resolved)?.to ?? resolved);
@@ -528,6 +609,7 @@ function roleFor(path: string): FileRole {
   const stem = stemOf(path);
   if (stem === 'route') return 'app-route';
   if (/^app\/layout\.[jt]sx?$/.test(path)) return 'app-root-layout';
+  if (/^app\/(sitemap|robots|manifest)\.[jt]s$/.test(path)) return 'app-metadata-route';
   return COMPONENT_CONVENTIONS.has(stem) ? 'app-page' : 'source';
 }
 

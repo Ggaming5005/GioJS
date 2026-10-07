@@ -296,6 +296,99 @@ test('an app-router project under src/app moves to app/ and keeps its structure'
   }
 });
 
+test('app router metadata files: conventions GioJS serves stay, static files move to public/, Server Action forms post to page actions', async () => {
+  const root = await writeTree({
+    'package.json': '{"name":"meta","dependencies":{"next":"15.0.0","react":"19.0.0","react-dom":"19.0.0"}}\n',
+    'tsconfig.json': '{ "compilerOptions": { "jsx": "preserve" } }\n',
+    'app/layout.tsx': "import type { Metadata } from 'next';\n\nexport const metadata: Metadata = { title: { default: 'Meta', template: '%s | Meta' } };\n\nexport default function RootLayout({ children }: { children: React.ReactNode }) {\n  return (\n    <html lang=\"en\">\n      <body>{children}</body>\n    </html>\n  );\n}\n",
+    'app/sitemap.ts': "import type { MetadataRoute } from 'next';\n\nexport default function sitemap(): MetadataRoute.Sitemap {\n  return [{ url: 'https://example.com/' }];\n}\n",
+    'app/robots.txt': 'User-agent: *\n',
+    'app/manifest.json': '{ "name": "Meta" }\n',
+    'app/favicon.ico': 'ico',
+    'app/icon.png': 'png',
+    'app/(site)/blog/opengraph-image.png': 'png',
+    'app/(site)/blog/opengraph-image.alt.txt': 'The blog',
+    'app/(site)/blog/[slug]/opengraph-image.jpg': 'jpg',
+    'app/(site)/blog/[slug]/page.tsx': 'export default function Post() { return <p />; }\n',
+    'app/twitter-image.tsx': "export default function Image() { return null; }\n",
+    'app/docs/sitemap.ts': 'export default function sitemap() { return []; }\n',
+    'app/actions.ts': "'use server';\n\nexport async function createPost(formData: FormData) {\n  await save(formData.get('title'));\n}\n\ndeclare function save(v: unknown): Promise<void>;\n",
+    'app/edit/page.tsx': "import { createPost } from '@/app/actions';\n\nexport default function Edit() {\n  return <form action={createPost} />;\n}\n",
+    'app/new/page.tsx': "import { createPost } from '../actions';\n\nexport default function New() {\n  return (\n    <form action={createPost}>\n      <input name=\"title\" />\n    </form>\n  );\n}\n",
+  });
+  try {
+    const plan = await planMigration(root);
+    await applyMigration(plan);
+    const tree = await readTree(root);
+    // GioJS serves these from public/, exactly where Next served them from app/.
+    for (const file of ['robots.txt', 'manifest.json', 'favicon.ico', 'icon.png', 'blog/opengraph-image.png']) {
+      assert.ok(tree[`public/${file}`] !== undefined, `public/${file}`);
+      assert.equal(tree[`app/${file}`], undefined);
+    }
+    // No static URL for a dynamic folder's image: it stays, flagged.
+    assert.equal(tree['app/(site)/blog/[slug]/opengraph-image.jpg'], 'jpg');
+    assert.equal(tree['app/sitemap.ts'], "import type { MetadataRoute } from '@gio.js/core';\n\nexport default function sitemap(): MetadataRoute.Sitemap {\n  return [{ url: 'https://example.com/' }];\n}\n");
+    assert.match(tree['app/layout.tsx'] as string, /^import type \{ Metadata \} from '@gio\.js\/core';\n\nexport const metadata: Metadata = /);
+    assert.doesNotMatch(tree['app/layout.tsx'] as string, /TODO/);
+    assert.match(tree['app/new/page.tsx'] as string, /<GioForm>\n {6}<input name="title" \/>\n {4}<\/GioForm>/);
+    // Through create-next-app's @/ alias too.
+    assert.match(tree['app/edit/page.tsx'] as string, /^import \{ createPost \} from '@\/app\/actions';\nimport \{ GioForm \} from '@gio\.js\/react';[\s\S]*<GioForm \/>/);
+    assert.match(tree['app/actions.ts'] as string, /^\/\/ TODO\(gio-migrate\): Server Action: /);
+
+    const todos = plan.todos.map(t => `${t.file ?? ''}: ${t.message}`);
+    const has = (pattern: RegExp): void => assert.ok(todos.some(t => pattern.test(t)), `${pattern} in\n${todos.join('\n')}`);
+    has(/^public\/manifest\.json: Next\.js linked the manifest from every page: add manifest: '\/manifest\.json' to the root layout's metadata export \(GioJS renders <link rel="manifest"> from it\)$/);
+    has(/^public\/icon\.png: Next\.js linked this icon automatically; GioJS links it from metadata - add icons: \{ icon: '\/icon\.png' \} to the metadata export of app\/layout$/);
+    has(/^public\/blog\/opengraph-image\.png: [^\n]+add openGraph: \{ images: '\/blog\/opengraph-image\.png' \} to the metadata export of app\/\(site\)\/blog\/layout \(or page\) - its alt text is in opengraph-image\.alt\.txt$/);
+    has(/^app\/\(site\)\/blog\/\[slug\]\/opengraph-image\.jpg: file-based opengraph-image images are not picked up by GioJS, and this folder has no static URL/);
+    has(/^app\/twitter-image\.tsx: generated twitter-image files \(ImageResponse\) are not supported/);
+    has(/^app\/docs\/sitemap\.ts: only app\/sitemap\.ts at the app root is served \(at \/sitemap\.xml\)/);
+    assert.ok(!todos.some(t => /^app\/sitemap\.ts|not supported - put|is not supported - serve/.test(t)), todos.join('\n'));
+    assert.ok(plan.notes.some(n => /^app\/sitemap\.ts works as it is: GioJS serves it at \/sitemap\.xml, resolves relative URLs against GIO_SITE_URL/.test(n)));
+
+    const report = tree['MIGRATION_REPORT.md'] as string;
+    assert.match(report, /\n## Server Actions\n\nGioJS has no Server Actions\. A form's action becomes the page's `action` export/);
+    assert.match(report, /export async function action\(req: ActionArgs\) \{\n {2}const form = await req\.formData\(\);/);
+    assert.match(report, /<GioForm> \{\/\* was <form action=\{createPost\}> \*\/\}/);
+    assert.match(report, /- `export const metadata`, `generateMetadata\(ctx, \{ props \}\)`, `app\/sitemap\.ts`, `app\/robots\.ts` and `app\/manifest\.ts` work like in Next\.js, except that pages link the manifest only when the metadata says so \(`manifest: '\/manifest\.webmanifest'`\)/);
+    assert.doesNotMatch(report, /there are no Server Components, `'use client'` or Server Actions/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('app/manifest.ts is kept, with a TODO to link it from the root layout metadata the way Next linked it on its own', async () => {
+  const manifest = "import type { MetadataRoute } from 'next';\n\nexport default function manifest(): MetadataRoute.Manifest {\n  return { name: 'Meta', start_url: '/', display: 'standalone' };\n}\n";
+  const root = await writeTree({
+    'package.json': '{"name":"pwa","dependencies":{"next":"15.0.0","react":"19.0.0","react-dom":"19.0.0"}}\n',
+    'app/layout.tsx': "export default function RootLayout({ children }: { children: React.ReactNode }) {\n  return (\n    <html lang=\"en\">\n      <body>{children}</body>\n    </html>\n  );\n}\n",
+    'app/manifest.ts': manifest,
+  });
+  try {
+    const plan = await planMigration(root);
+    assert.equal(plan.files.find(f => f.to === 'app/manifest.ts')?.content, manifest.replace("from 'next'", "from '@gio.js/core'"));
+    // GioJS serves it at /manifest.webmanifest, but renders <link rel="manifest"> from metadata only.
+    assert.deepEqual(plan.todos.filter(t => t.file === 'app/manifest.ts').map(t => t.message), [
+      "Next.js linked the manifest from every page: add manifest: '/manifest.webmanifest' to the root layout's metadata export (GioJS renders <link rel=\"manifest\"> from it)",
+    ]);
+    assert.ok(plan.notes.some(n => /^app\/manifest\.ts works as it is: GioJS serves it at \/manifest\.webmanifest/.test(n)), plan.notes.join('\n'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a project without Server Actions gets no Server Actions section in the report', async () => {
+  const root = await writeTree(pagesProject);
+  try {
+    const plan = await planMigration(root);
+    const report = plan.files.find(f => f.to === 'MIGRATION_REPORT.md')?.content as string;
+    assert.doesNotMatch(report, /## Server Actions/);
+    assert.match(report, /- Forms post to the page's own `export async function action\(req\)`/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a JavaScript project without tsconfig.json gets React in scope for JSX', async () => {
   const root = await writeTree({
     'package.json': '{"name":"js-app","dependencies":{"next":"14.0.0"}}\n',

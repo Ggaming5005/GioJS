@@ -105,7 +105,22 @@ npm run dev`} />
           </tr>
           <tr>
             <td><code>next/navigation</code></td>
-            <td>The hooks move to <code>@gio.js/react</code> unchanged, <code>notFound</code> to <code>@gio.js/core</code>; <code>redirect()</code> gets a TODO (return <code>{'{ redirect }'}</code> from <code>getServerSideProps</code>)</td>
+            <td>
+              The hooks move to <code>@gio.js/react</code> unchanged, <code>notFound</code> to{' '}
+              <code>@gio.js/core</code>. <code>redirect()</code>/<code>permanentRedirect()</code> become{' '}
+              <code>redirect</code> from <code>@gio.js/core</code>, which returns the redirect instead of
+              throwing it: <code>redirect(url)</code> as a statement becomes{' '}
+              <code>throw redirect(url)</code> (<code>redirect(url, 308)</code> for a permanent one) -
+              what <code>getServerSideProps</code>, <code>generateMetadata</code>, page actions and the
+              helpers they call may throw. <code>return redirect(url)</code> becomes{' '}
+              <code>throw redirect(url)</code> too, except directly in{' '}
+              <code>getServerSideProps</code> or a page action, the only places that read a returned
+              redirect (a guard helper&apos;s caller would take it for a value, and{' '}
+              <code>generateMetadata</code> would merge it as metadata). Directly in a route handler
+              it becomes a 307/308 <code>Response</code>; while rendering a component or in a hook
+              it gets a TODO (redirect from{' '}
+              <code>getServerSideProps</code>, or <code>navigate()</code> in the browser)
+            </td>
           </tr>
           <tr>
             <td><code>next/head</code></td>
@@ -129,15 +144,74 @@ npm run dev`} />
           </tr>
           <tr>
             <td><code>export const metadata</code> / <code>generateMetadata</code></td>
-            <td>Left in place with a TODO: GioJS does not read them, so the page would render without its <code>&lt;title&gt;</code> and SEO tags. Render <code>&lt;title&gt;</code>/<code>&lt;meta&gt;</code> in the component instead (React 19 hoists them into <code>&lt;head&gt;</code>); for a static title/description the TODO spells out the tags</td>
+            <td>
+              Kept - GioJS reads both on pages and layouts, with the same field names, title
+              templates and root-to-page merge (see Metadata &amp; SEO); the <code>Metadata</code>{' '}
+              type now comes from <code>@gio.js/core</code>. Fields GioJS does not render get a TODO
+              naming them: <code>applicationName</code>, <code>generator</code>,{' '}
+              <code>referrer</code>, <code>creator</code>, <code>publisher</code>,{' '}
+              <code>category</code>, <code>verification</code> and the like with their{' '}
+              <code>other: {'{ name: content }'}</code> replacement; <code>viewport</code>,{' '}
+              <code>appleWebApp</code>, <code>appLinks</code>, <code>itunes</code>,{' '}
+              <code>facebook</code>, <code>alternates.types</code>, <code>icons.other</code> and Open
+              Graph article fields as having no equivalent. <code>generateMetadata</code> gets GioJS's{' '}
+              <code>(ctx, {'{ props }'})</code> signature: <code>params</code> is unchanged,{' '}
+              <code>searchParams</code> becomes <code>query: searchParams</code>, an unused{' '}
+              <code>parent</code> is dropped and a used one gets a TODO (segments merge on their own)
+            </td>
           </tr>
           <tr>
             <td><code>'use client'</code> / <code>'use server'</code></td>
-            <td>Removed - every GioJS page hydrates; Server Actions get a TODO to become a <code>route.ts</code> handler</td>
+            <td>
+              Removed - every GioJS page hydrates. <code>&lt;form action={'{serverAction}'}&gt;</code>{' '}
+              becomes <code>&lt;GioForm&gt;</code>, which posts to the page&apos;s own URL, and each
+              Server Action gets a TODO to move into that page&apos;s{' '}
+              <code>export async function action(req)</code> (a non-form one into a{' '}
+              <code>route.ts</code> handler); the report sketches the result. A button&apos;s{' '}
+              <code>formAction={'{serverAction}'}</code> becomes{' '}
+              <code>name="intent" value="serverAction"</code> for the page&apos;s action to branch on,
+              and its <code>&lt;form&gt;</code> becomes a <code>&lt;GioForm&gt;</code> as well. A client
+              function as a form action is React 19&apos;s own and stays
+            </td>
+          </tr>
+          <tr>
+            <td><code>next/cache</code></td>
+            <td>
+              <code>revalidatePath</code>/<code>revalidateTag</code> from <code>@gio.js/core</code>{' '}
+              (<code>'layout'</code> becomes <code>{"{ type: 'prefix' }"}</code>, a route pattern such
+              as <code>/posts/[id]</code> gets a TODO, and so does each <code>revalidateTag</code>: it
+              purges the pages that declare the tag with <code>export const tags</code>).{' '}
+              <code>unstable_cache(fn)</code> becomes{' '}
+              <code>fn</code> and <code>'use cache'</code> is removed, both with a TODO: GioJS caches
+              whole pages (<code>export const revalidate</code> and <code>export const tags</code>),
+              and <code>fetch()</code>&apos;s <code>next</code> options are flagged - Node&apos;s{' '}
+              <code>fetch</code> has no data cache. <code>noStore()</code> calls are removed, and{' '}
+              <code>export const dynamic = 'force-static'</code> on a page becomes{' '}
+              <code>export const revalidate = false</code> (on a layout it gets a TODO: GioJS reads{' '}
+              <code>revalidate</code> from pages only, so each page below it needs the export)
+            </td>
+          </tr>
+          <tr>
+            <td>Metadata files</td>
+            <td>
+              <code>app/sitemap.ts</code>, <code>app/robots.ts</code> and <code>app/manifest.ts</code>{' '}
+              are kept: GioJS serves them at the same URLs from the same return shapes (sitemap{' '}
+              <code>images</code>/<code>videos</code> and <code>generateSitemaps</code> get a TODO).
+              Next linked the manifest from every page on its own; GioJS renders that{' '}
+              <code>&lt;link rel="manifest"&gt;</code> from metadata only, so{' '}
+              <code>app/manifest.ts</code> gets a TODO to add{' '}
+              <code>manifest: '/manifest.webmanifest'</code> to the root layout&apos;s metadata.
+              The static files Next serves from <code>app/</code> - <code>favicon.ico</code>,{' '}
+              <code>robots.txt</code>, <code>sitemap.xml</code>, <code>manifest.json</code>,{' '}
+              <code>icon.png</code>, <code>opengraph-image.png</code>, ... - move to{' '}
+              <code>public/</code>; images and the manifest get a TODO to reference them from{' '}
+              <code>metadata</code> (<code>icons</code>, <code>openGraph.images</code>,{' '}
+              <code>manifest</code>), which Next did implicitly
+            </td>
           </tr>
           <tr>
             <td><code>next/server</code> in route handlers</td>
-            <td><code>NextResponse.json</code>/<code>redirect</code> → <code>Response</code>, <code>NextRequest</code> → <code>GioRequest</code>; <code>request.nextUrl</code>, <code>headers.get()</code> and the <code>{'{ params }'}</code> argument get a TODO (GioJS passes a <code>GioRequest</code> with plain objects)</td>
+            <td><code>NextResponse.json</code>/<code>redirect</code> → <code>Response</code>, <code>NextRequest</code> → <code>GioRequest</code>; <code>request.nextUrl</code>, <code>headers.get()</code>, <code>text()</code> and the <code>{'{ params }'}</code> argument get a TODO (GioJS passes a <code>GioRequest</code> with plain objects, <code>json()</code> and <code>formData()</code>)</td>
           </tr>
           <tr>
             <td>CSS imports</td>
@@ -198,13 +272,59 @@ headers = { "X-Frame-Options" = "DENY" }`} />
           <code> /blog/*path</code>, which also matches <code>/blog</code> itself, with a TODO
           comment saying so
         </li>
-        <li><code>basePath</code>, <code>trailingSlash</code>, <code>webpack</code>, <code>experimental</code> and the rest are listed in the report - GioJS compiles with esbuild, so webpack and SWC options don't apply</li>
+        <li>
+          <code>experimental.serverActions</code> points at page actions (<code>bodySizeLimit</code>{' '}
+          → <code>[server] max_body_bytes</code>, <code>allowedOrigins</code> →{' '}
+          <code>[security.csrf] trusted_origins</code>), <code>experimental.ppr</code> at{' '}
+          <code>export const shell = 'cache'</code>; typed routes need no flag
+        </li>
+        <li><code>basePath</code>, <code>trailingSlash</code>, <code>webpack</code>, other <code>experimental</code> flags and the rest are listed in the report - GioJS compiles with esbuild, so webpack and SWC options don't apply</li>
       </ul>
       <p>
         An existing <code>gio.toml</code> is never overwritten. New tables are merged into it when
         no table or key would be defined twice; otherwise the converted sections go to
         <code> gio.migrated.toml</code> (not loaded by GioJS) for you to merge by hand. To convert
         just the config: <code>npx create-giojs migrate --config next.config.js</code>.
+      </p>
+
+      <h2>Server Actions → page actions</h2>
+      <p>
+        A form&apos;s Server Action becomes the page&apos;s <code>action</code> export: a POST to
+        the page runs it, and <code>&lt;GioForm&gt;</code> (which the migration already put in
+        place of the <code>&lt;form&gt;</code>) posts to it - with or without JavaScript:
+      </p>
+      <CodeBlock lang="tsx" code={`// Next.js
+async function createPost(formData: FormData) {
+  'use server';
+  await db.posts.create({ title: String(formData.get('title')) });
+  redirect('/posts');
+}
+// <form action={createPost}>...</form>
+
+// GioJS - app/posts/new/page.tsx
+import { redirect, type ActionArgs, type WithActionData } from '@gio.js/core';
+import { GioForm } from '@gio.js/react';
+
+export async function action(req: ActionArgs) {
+  const title = String((await req.formData()).get('title') ?? '');
+  if (title === '') return { status: 422, data: { error: 'Title is required' } };
+  await db.posts.create({ title });
+  return redirect('/posts');
+}
+
+export default function NewPost({ actionData }: WithActionData<typeof action>) {
+  return (
+    <GioForm>
+      <input name="title" />
+      {actionData?.error && <p role="alert">{actionData.error}</p>}
+      <button>Create</button>
+    </GioForm>
+  );
+}`} />
+      <p>
+        <code>useFormStatus()</code> becomes <code>useGioFormState()</code>, values passed with{' '}
+        <code>.bind()</code> become hidden inputs, and <code>useActionState</code>&apos;s result is
+        the page&apos;s <code>actionData</code> prop. The migration flags each of these.
       </p>
 
       <h2>What needs a human</h2>
@@ -219,8 +339,13 @@ headers = { "X-Frame-Options" = "DENY" }`} />
           a nested layout or the pages (flagged)
         </li>
         <li>
-          <strong>Server Actions</strong> - become <code>route.ts</code> handlers called with
-          <code> fetch()</code> or a form post
+          <strong>Server Actions</strong> - the forms already post through{' '}
+          <code>&lt;GioForm&gt;</code>; move each action&apos;s body into the page&apos;s{' '}
+          <code>export async function action(req)</code> (fields from{' '}
+          <code>await req.formData()</code>, answer with <code>redirect(url)</code> or{' '}
+          <code>{'{ status: 422, data }'}</code> to re-render with <code>actionData</code> - see Forms
+          and Mutations). Actions called from code become <code>route.ts</code> handlers called
+          with <code>fetch()</code>
         </li>
         <li>
           <strong>Middleware</strong> - declarative redirects, rewrites, headers, and session or
@@ -231,16 +356,25 @@ headers = { "X-Frame-Options" = "DENY" }`} />
         </li>
         <li>
           <strong>Unsupported app router files</strong> - <code>template</code>, parallel
-          (<code>@slot</code>) and intercepting routes, generated <code>icon</code>/
-          <code>opengraph-image</code>/<code>sitemap</code> files are listed in the report
+          (<code>@slot</code>) and intercepting routes, generated (<code>.tsx</code>){' '}
+          <code>icon</code>/<code>opengraph-image</code>/<code>twitter-image</code> files (GioJS has
+          no image generation: put a rendered image in <code>public/</code>) and nested{' '}
+          <code>sitemap.ts</code> files (only <code>app/sitemap.ts</code> is served) are listed in
+          the report
+        </li>
+        <li>
+          <strong>Data caching</strong> - <code>unstable_cache</code>, <code>'use cache'</code> and{' '}
+          <code>fetch()</code> cache options become page caching: <code>export const revalidate</code>{' '}
+          plus <code>export const tags</code> for the pages <code>revalidateTag()</code> should purge
         </li>
       </ul>
 
       <div className="callout">
         Run <code>npx tsc --noEmit</code> after migrating: types imported from <code>next</code>
         (<code>NextPage</code>, <code>GetStaticProps</code>, <code>NextApiRequest</code>, ...)
-        are flagged but not rewritten, and the compiler points at every place that still uses
-        them.
+        are flagged but not rewritten - only <code>Metadata</code> and{' '}
+        <code>MetadataRoute</code>, which <code>@gio.js/core</code> exports under the same names,
+        are - and the compiler points at every place that still uses them.
       </div>
     </>
   );
