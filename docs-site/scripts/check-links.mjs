@@ -42,17 +42,6 @@ const scriptFile = fileURLToPath(import.meta.url);
 export const PENDING = new Set([
   // Wave B API reference and guide pages, written in parallel. Remove each
   // entry when its page lands (check-links warns about stale ones).
-  '/docs/page-exports',
-  '/docs/page-exports/get-server-side-props',
-  '/docs/page-exports/action',
-  '/docs/page-exports/metadata',
-  '/docs/page-exports/generate-metadata',
-  '/docs/page-exports/revalidate',
-  '/docs/page-exports/tags',
-  '/docs/page-exports/shell',
-  '/docs/page-exports/get-static-paths',
-  '/docs/page-exports/http-methods',
-  '/docs/page-exports/ws-handler',
   '/docs/configuration/app',
   '/docs/configuration/server',
   '/docs/configuration/server-tls',

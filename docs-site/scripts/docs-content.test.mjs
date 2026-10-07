@@ -316,3 +316,53 @@ test('the public/ and route.ts pages state the limits the server decides', () =>
     assert.ok(docsPage(page).includes(`{'{"error":"Method Not Allowed"}'}`), `${page}: 405 body`);
   }
 });
+
+test('the page-exports reference states the limits and codes the code decides', () => {
+  const core = (file) => read('packages/giojs-core/src', file);
+  const constant = (file, name) => {
+    const m = new RegExp(`(?:export )?const ${name}(?::[^=]+)? = ([^;]+);`).exec(core(file));
+    assert.ok(m, `${name} not found in packages/giojs-core/src/${file} - update this test`);
+    return m[1].trim();
+  };
+  // tags: 64 per render, 256 bytes each, `_gio:` reserved.
+  const tags = docsPage('page-exports/tags');
+  assert.equal(constant('revalidate.ts', 'MAX_CACHE_TAGS'), '64');
+  assert.equal(constant('revalidate.ts', 'MAX_CACHE_TAG_BYTES'), '256');
+  assert.equal(constant('revalidate.ts', 'RESERVED_TAG_PREFIX'), "'_gio:'");
+  assert.match(tags, /at most 256 bytes/);
+  assert.match(tags, /at most 64 tags/);
+  assert.match(tags, /<code>_gio:<\/code> are reserved/);
+  // revalidate = false is one year; metadata routes default to 3600.
+  const ssr = core('ssr.ts');
+  assert.match(ssr, /pageModule\.revalidate === false\s*\?\s*31536000/);
+  assert.equal(constant('metadata-routes.ts', 'DEFAULT_METADATA_REVALIDATE'), '3600');
+  const revalidate = docsPage('page-exports/revalidate');
+  assert.match(revalidate, /<code>31536000<\/code> seconds/);
+  assert.match(revalidate, /defaults to\{' '\}\s*<code>3600<\/code>/);
+  // redirect() defaults to 303; the getServerSideProps redirect object is 301/302.
+  assert.match(core('action.ts'), /const \{ status = 303, headers \}/);
+  assert.match(ssr, /status: result\.redirect\.permanent \? 301 : 302/);
+  assert.match(docsPage('page-exports/action'), /<code>303 See Other<\/code>/);
+  // route.ts methods, and the WebSocket close codes.
+  assert.match(core('router.ts'), /HANDLER_METHODS = \['GET', 'POST', 'PUT', 'PATCH', 'DELETE'\] as const/);
+  assert.equal(constant('ws-ipc.ts', 'WS_REJECTED_CODE'), '4401');
+  assert.equal(constant('ws-ipc.ts', 'WS_NO_HANDLER_CODE'), '4404');
+  const ws = docsPage('page-exports/ws-handler');
+  assert.match(ws, /<code>4401<\/code> <code>unauthorized<\/code>/);
+  assert.match(ws, /<code>4404<\/code> <code>no websocket handler<\/code>/);
+});
+
+test('the shell and getServerSideProps references match the PPR path and query parsing', () => {
+  const ssr = read('packages/giojs-core/src/ssr.ts');
+  const main = read('crates/giojs-server/src/main.rs');
+  const shell = docsPage('page-exports/shell');
+  // PPR streams GET renders only, so a HEAD request (curl -I) never shows a ppr X-Gio-Cache.
+  assert.match(ssr, /const streamingAvailable =\s*extras\?\.streaming === true &&\s*req\.method === 'GET'/);
+  assert.doesNotMatch(shell, /curl -sI/);
+  // The holes fallback reloads once with this cookie.
+  assert.match(main, /const PPR_BYPASS_COOKIE: &str = "__gio_ppr_bypass";/);
+  assert.match(shell, /<code>__gio_ppr_bypass<\/code>/);
+  // A query string becomes one value per name, the last one winning (a HashMap collect).
+  assert.match(main, /fn parse_query\(query_str: &str\) -> HashMap<String, String> \{[\s\S]{0,400}?\.collect\(\)/);
+  assert.match(docsPage('page-exports/get-server-side-props'), /the last one when a name repeats/);
+});
