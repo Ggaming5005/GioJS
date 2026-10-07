@@ -168,7 +168,7 @@ export function PATCH(req: GioRequest) {
       <ul>
         <li>
           <strong>Invalid JSON is a 400, not a <code>SyntaxError</code>.</strong>{' '}
-          <code>json()</code> throws <code>MalformedBodyError</code> for JSON that does not
+          <code>req.json()</code> throws <code>MalformedBodyError</code> for JSON that does not
           parse, a request without a body, and a body that is not UTF-8 text (which the
           server forwards base64-encoded). The parser&apos;s <code>SyntaxError</code> is not
           rethrown, so a <code>catch</code> that tests <code>err instanceof SyntaxError</code>{' '}
