@@ -71,7 +71,12 @@ export default function DeploymentPage(): React.JSX.Element {
         is <code>false</code> while no worker is ready (with a worker pool, only when every
         worker is down at once), and <code>workers</code> counts the ready ones. Readiness
         probes should read <code>nodeReady</code>.
-        Use it for readiness probes, load balancer health checks, and uptime monitors:
+        Use it for readiness probes, load balancer health checks, and uptime monitors.
+        With <code>[health] details = false</code> it answers only{' '}
+        <code>{'{'}&quot;status&quot;:&quot;ok&quot;,&quot;nodeReady&quot;:...{'}'}</code>; with{' '}
+        <code>[health] enabled = false</code> it is a <code>404</code>, and probes must use
+        a page of your own (the port only opens once a worker is ready, so{' '}
+        <code>gio start</code> and the testing kit treat that <code>404</code> as ready):
       </p>
       <pre>
         <code>{`{
@@ -318,6 +323,13 @@ workers = "auto"   # one per CPU core, at most 8 - or an exact count`}</code>
       <pre>
         <code>{`GIO_DEPLOYMENT_ID=release-2026-09-06`}</code>
       </pre>
+      <p>
+        A browser still running the previous deployment&apos;s code gets a <code>409</code>{' '}
+        on its next client navigation and reloads into the new build. If your rollout keeps
+        the old client chunks reachable (a CDN in front), <code>[server] skew_protection =
+        false</code> ignores the old id instead, so those pages keep navigating without a
+        reload (startup logs a warning).
+      </p>
     </>
   );
 }

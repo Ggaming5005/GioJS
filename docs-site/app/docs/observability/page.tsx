@@ -11,8 +11,8 @@ export default function Page(): React.JSX.Element {
       <p className="page-subtitle">Health checks, Prometheus metrics, request IDs and JSON logs, and the dev dashboard.</p>
       <p>Two endpoints are served directly by Rust:</p>
       <ul>
-        <li><strong>/_gio/health</strong> - liveness probe, always on</li>
-        <li><strong>/_gio/metrics</strong> - Prometheus metrics, opt-in via [metrics] in gio.toml</li>
+        <li><strong>/_gio/health</strong> - liveness probe, on unless <code>[health] enabled = false</code> (<code>[health] details = false</code> keeps only status and readiness)</li>
+        <li><strong>/_gio/metrics</strong> - Prometheus metrics, opt-in via [metrics] in gio.toml; with neither a token nor an <code>ip_allowlist</code> it answers this machine only</li>
       </ul>
       <CodeBlock lang="toml" code={`[metrics]
 enabled = true

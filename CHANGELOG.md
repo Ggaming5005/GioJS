@@ -164,6 +164,20 @@ first.
   first commit (`--no-git` skips it).
 - **Building the server from source needs Rust 1.89** or newer (`rust-version`
   in `Cargo.toml`, checked in CI).
+- **`/_gio/metrics` answers only this machine by default.** A `[metrics]`
+  section with neither a `token` nor an `ip_allowlist` used to serve every
+  client, with a startup warning; it now answers loopback clients only (the
+  client after `trusted_proxies` resolution) and `403` to everyone else. Set a
+  `token` or an `ip_allowlist` for your scraper, or
+  `ip_allowlist = ["0.0.0.0/0", "::/0"]` to keep it open (startup warns).
+- **`[server] max_body_bytes = 0` means no limit of its own.** It used to
+  answer `413` to every request with a body. Bodies are now bounded only by
+  the worker's 64 MiB message cap (about 48 MiB of binary body), and startup
+  warns.
+- **`[dev] allowed_hosts = ["*"]` answers any host.** The entry used to be
+  dropped as invalid; it now opens the dev endpoints and error details to
+  every `Host` from every machine, with a startup warning. open-in-editor
+  still needs a same-origin request.
 
 ### Security
 
@@ -660,6 +674,29 @@ first.
 - **`[dev] watch_ignore`** (`["data/**", "*.db.json"]`): files the app writes
   into the project no longer restart the dev worker. The page cache's own
   writes never do.
+- **Protections and features can be turned off, and stay on by default:**
+  `[security] default_headers = false` drops the three built-in headers
+  (`[security.headers]` entries still apply), `[server] skew_protection =
+  false` ignores `x-deployment-id` (no `409` hard reloads), `[dev] devtools =
+  false` unroutes `/_gio/devtools*` and strips the overlay's codeframes,
+  editor links and live reload, `[dev] watch = false` runs dev without the
+  watcher, and `[dev] allowed_hosts = ["*"]` answers any host.
+- **`[health]`:** `enabled = false` unroutes `/_gio/health` (`404`; `gio
+  dev`/`gio start` and the testing kit then treat any answer as ready), and
+  `details = false` answers only `{"status":"ok","nodeReady":...}`, without
+  the deployment id or the worker topology.
+- **`[env] files = false`** loads no `.env` files; `GIO_ENV_FILES=0` does the
+  same and `GIO_ENV_FILES=1` forces them on, whatever `gio.toml` says. The
+  server, `gio export`, `gio build standalone`, the testing kit and the `gio`
+  CLI's fallback reader all follow both.
+- **One warning per loosened protection.** `[security.csrf] enabled = false`,
+  `[security.websocket] check_origin = false`, `default_headers = false`,
+  `allowed_hosts = ["*"]`, `max_body_bytes = 0` (or above what a worker
+  message can carry), `max_connections = 0`, metrics open to every client, a
+  `/0` in `trusted_proxies` and `skew_protection = false` each log one startup
+  warning naming the key, and `--check-config` (and `gio doctor`) report the
+  same text under `warnings`, along with ignored `[dev] allowed_hosts`
+  entries.
 - `defineConfig` and `type GioConfig` from `@gio.js/core` type
   `gio.config.ts`.
 - **`giojs-server --check-config`** loads the `.env` files and `gio.toml`
@@ -886,8 +923,11 @@ first.
   not a previous standalone build.
 - Every production start warned that `/_gio/metrics` is unauthenticated, even
   with metrics off (no `[metrics]` section, or `enabled = false`), where the
-  endpoint answers `404`. The warning now appears only when metrics are
-  enabled without a `token` or `ip_allowlist`.
+  endpoint answers `404`. Metrics without a `token` or `ip_allowlist` now
+  answer this machine only, and the warning is for an allowlist that opens
+  them to everyone.
+- `[security.csrf] enabled = false` turned CSRF protection off silently; it
+  now logs a warning, like `[security.websocket] check_origin = false`.
 - A standalone build whose app had a module that throws while it is imported
   (a missing `GIO_SESSION_SECRET`) never started: `worker.js` evaluated every
   module at load, the worker died and the server gave up with

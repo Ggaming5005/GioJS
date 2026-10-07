@@ -42,7 +42,10 @@ export default function Page(): React.JSX.Element {
         and the router hooks show the URL the redirect landed on. When a new deployment went
         live since the page loaded, the navigation becomes a full load of the new build (the
         router sends the page&apos;s deployment id with every request; a prefetch that finds
-        a new deployment never reloads the page, the click does).
+        a new deployment never reloads the page, the click does). A blue/green or rolling
+        setup that keeps the old build&apos;s chunks reachable can turn that off with{' '}
+        <code>[server] skew_protection = false</code>: the id is then ignored and old pages
+        keep navigating softly.
       </p>
       <div className="callout">
         The root layout (<code>app/layout.tsx</code>) is server-only HTML: a soft navigation

@@ -53,6 +53,17 @@ referrer-policy = ""                     # remove a default
 permissions-policy = "camera=(), microphone=(), geolocation=()"
 cross-origin-opener-policy = "same-origin"
 cross-origin-resource-policy = "same-site"`} />
+      <p>
+        To drop all three built-in headers at once - a CDN or proxy in front sets its own -
+        use <code>[security] default_headers = false</code>. Startup then logs a warning.
+        Entries in <code>[security.headers]</code> are still sent (and an empty value there
+        still removes a single header), and HSTS keeps its own <code>hsts</code> setting.
+      </p>
+      <CodeBlock lang="toml" code={`[security]
+default_headers = false                  # no nosniff, X-Frame-Options or Referrer-Policy
+
+[security.headers]
+x-content-type-options = "nosniff"       # but keep this one`} />
 
       <h3>Precedence</h3>
       <p>
@@ -261,6 +272,12 @@ exempt = [                                           # same patterns as [[redire
         setting to change, and is logged once per origin. Rust&apos;s own{' '}
         <code>/_gio</code> endpoints have their own checks.
       </p>
+      <p>
+        <code>enabled = false</code> turns the check off, for apps whose forms carry their own
+        CSRF tokens; startup logs a warning naming the key. Prefer{' '}
+        <code>trusted_origins</code> or <code>exempt</code> when only some origins or paths
+        need it.
+      </p>
       <div className="callout">
         CSRF protection covers state-changing methods only. Keep <code>GET</code> handlers
         free of side effects, and keep setting <code>SameSite=Lax</code> (or{' '}
@@ -313,6 +330,7 @@ check_origin = true      # default; false accepts upgrades from any website`} />
 
       <h2>Reference</h2>
       <CodeBlock lang="toml" code={`[security]
+default_headers = true    # false drops nosniff, X-Frame-Options and Referrer-Policy
 csp = "default-src 'self'; script-src 'self' 'nonce-{nonce}' 'strict-dynamic'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
 csp_report_only = ""      # same syntax, sent as Content-Security-Policy-Report-Only
 hsts = true               # unset: only with [server.tls]; true | false | "raw" | { max_age, include_subdomains, preload }

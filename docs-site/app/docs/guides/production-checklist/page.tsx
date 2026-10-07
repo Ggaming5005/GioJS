@@ -237,15 +237,17 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         </li>
         <li>
           <strong>Metrics</strong>: <code>[metrics] enabled = true</code> with an{' '}
-          <code>ip_allowlist</code> or <code>token</code> - never open to the internet (the
-          server warns at startup when metrics are enabled without either). Alert
+          <code>ip_allowlist</code> or <code>token</code> - without either it answers only
+          this machine, and an allowlist of <code>0.0.0.0/0</code> with no token logs a
+          warning at startup. Alert
           on 5xx rates per <code>route</code>, p95 latency, and a climbing{' '}
           <code>gio_worker_restarts_total</code>.
         </li>
         <li>
           <strong>Health checks</strong> on <code>/_gio/health</code>. It always answers 200
           while the server runs; read <code>nodeReady</code> for &quot;can render
-          right now&quot;. See <a href="/docs/deployment#health-check">Health check</a>.
+          right now&quot;. <code>[health] details = false</code> keeps the deployment id and
+          worker counts out of it. See <a href="/docs/deployment#health-check">Health check</a>.
         </li>
         <li>
           <strong>Graceful stops</strong>: stop with <code>SIGTERM</code> and allow at least

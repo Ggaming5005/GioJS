@@ -206,7 +206,8 @@ export default function KnownLimitationsPage(): React.JSX.Element {
         <li>
           <strong>Request bodies are buffered.</strong> Uploads are read whole into memory,
           capped by <code>[server] max_body_bytes</code> (2 MiB by default) and, because the
-          body crosses to the worker in one piece, at roughly 48 MiB whatever the setting.
+          body crosses to the worker in one piece, at roughly 48 MiB whatever the setting -{' '}
+          <code>0</code> included, which means no limit of its own.
           Upload large files straight to object storage with presigned URLs. See{' '}
           <a href="/docs/forms">Forms and Mutations</a>.
         </li>

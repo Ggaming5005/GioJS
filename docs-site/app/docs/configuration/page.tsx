@@ -30,7 +30,7 @@ router = "app"          # the app/ router is the only one
 host = "0.0.0.0"        # IP address to bind; GIO_HOST overrides
 port = 3000             # GIO_PORT, then PORT, override
 http2 = true            # HTTP/2 support
-max_body_bytes = 2097152  # request body limit (2 MiB)
+max_body_bytes = 2097152  # request body limit (2 MiB); 0 = none of its own (64 MiB IPC cap)
 max_connections = 10000   # concurrent connections (see Connection limits)
 tls_handshake_timeout_secs = 10
 header_read_timeout_secs = 10       # slowloris guard; also the HTTP/1.1 idle timeout
@@ -42,6 +42,7 @@ http2_keep_alive_timeout_secs = 20  # ...and drop them if the ack takes longer
 trusted_proxies = []    # reverse proxies whose forwarding headers count (see Reverse proxies)
 proxy_headers = "x-forwarded"       # "x-forwarded" (X-Forwarded-*) or "forwarded" (RFC 7239)
 accept_request_id = true            # keep a trusted proxy's X-Request-Id (false = always generate)
+skew_protection = true  # 409 + hard reload for a client from another deployment (false = ignore)
 workers = 1             # Node render processes: a count or "auto" (see Render workers)
 
 [server.tls]
@@ -119,6 +120,7 @@ redirect_to = "/login"
 # require_cookie = "session"  # alone: only checks the cookie is present
 
 [security]              # see Security
+default_headers = true  # false drops nosniff, X-Frame-Options and Referrer-Policy
 csp = ""                # Content-Security-Policy; "{nonce}" = fresh nonce per response
 csp_report_only = ""    # same syntax, sent as Content-Security-Policy-Report-Only
 hsts = true             # unset: only with [server.tls]; true | false | "raw" | { max_age, include_subdomains, preload }
@@ -143,7 +145,15 @@ detect_from = ["path", "accept-language", "cookie"]
 [metrics]
 enabled = false         # expose /_gio/metrics (Prometheus); off when this section is absent
 token = ""              # require "Authorization: Bearer <token>" when set
-ip_allowlist = []       # restrict by client IP or CIDR, e.g. ["10.0.0.5", "10.1.0.0/16"]
+ip_allowlist = []       # client IPs or CIDRs, e.g. ["10.0.0.5", "10.1.0.0/16"]; with no token
+                        # either, loopback clients only; ["0.0.0.0/0", "::/0"] = everyone
+
+[health]
+enabled = true          # serve /_gio/health (false = 404)
+details = true          # false: only {"status":"ok","nodeReady":...}
+
+[env]
+files = true            # load the .env files at startup; GIO_ENV_FILES=0|1 wins
 
 [logging]
 format = "text"         # "json": one JSON object per line (GIO_LOG_FORMAT overrides)
@@ -152,7 +162,9 @@ format = "text"         # "json": one JSON object per line (GIO_LOG_FORMAT overr
 token = ""              # enables POST /_gio/revalidate (>= 32 bytes); GIO_REVALIDATE_TOKEN wins
 
 [dev]                   # only read when NODE_ENV=development
-allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer to
+allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer to; ["*"] = any
+devtools = true         # false: /_gio/devtools* is a 404, the overlay shows no codeframes
+watch = true            # restart the worker on source changes
 watch_ignore = []       # globs the dev watcher never restarts for, e.g. ["data/**", "*.db"]
 
 [x-mytool]              # tables named x-* are left alone, for other tools
@@ -268,7 +280,9 @@ giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: inval
         <code>.css</code>, <code>.toml</code>, ...), so SQLite databases, logs and uploads
         your app writes never restart it - but a JSON data file (a lowdb{' '}
         <code>db.json</code>) would, after every write. List such files in{' '}
-        <code>[dev] watch_ignore</code>:
+        <code>[dev] watch_ignore</code>, or set <code>[dev] watch = false</code> to run
+        without the watcher at all (a huge monorepo, a network filesystem, a container out
+        of inotify watches) and restart the server yourself after a change:
       </p>
       <CodeBlock lang="toml" code={`[dev]
 watch_ignore = ["data/**", "*.db.json", "public/uploads"]`} />
@@ -515,8 +529,8 @@ accept_request_id = false   # ignore incoming X-Request-Id, even from trusted pr
         <tbody>
           <tr>
             <td><code>/_gio/health</code></td>
-            <td>always on</td>
-            <td>Liveness probe - always returns <code>200</code> with a JSON body: <code>{'{'}status, http2, tls, deploymentId, nodeReady, workers, cacheEntries, uptimeSecs{'}'}</code>. <code>nodeReady</code> is <code>false</code> while no Node SSR worker is ready - during a respawn of the only worker, or of every worker in a pool (cached and static content still serves) - so readiness probes should check that field. <code>workers</code> is <code>{'{'} configured, ready {'}'}</code> (see <a href="#render-workers">Render workers</a>).</td>
+            <td>on</td>
+            <td>Liveness probe - returns <code>200</code> with a JSON body: <code>{'{'}status, http2, tls, deploymentId, nodeReady, workers, cacheEntries, uptimeSecs{'}'}</code>. <code>nodeReady</code> is <code>false</code> while no Node SSR worker is ready - during a respawn of the only worker, or of every worker in a pool (cached and static content still serves) - so readiness probes should check that field. <code>workers</code> is <code>{'{'} configured, ready {'}'}</code> (see <a href="#render-workers">Render workers</a>). <code>[health] details = false</code> leaves only <code>{'{'}status, nodeReady{'}'}</code>, so the deployment ID and worker topology are not public; <code>[health] enabled = false</code> unroutes it (<code>404</code>).</td>
           </tr>
           <tr>
             <td><code>/_gio/metrics</code></td>
@@ -531,8 +545,10 @@ accept_request_id = false   # ignore incoming X-Request-Id, even from trusted pr
         </tbody>
       </table>
       <p>
-        Metrics are opt-in so you never expose them by accident. Turn them on,
-        and lock them down for anything beyond localhost:
+        Metrics are opt-in so you never expose them by accident. A{' '}
+        <code>[metrics]</code> section with neither a token nor an allowlist answers only
+        clients on this machine (loopback); anything else gets <code>403</code>. Open it up
+        with either or both:
       </p>
       <CodeBlock lang="toml" code={`[metrics]
 enabled = true          # serve /_gio/metrics
@@ -553,12 +569,13 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
         quietly matching nobody.
       </p>
       <div className="callout">
-        In production (<code>NODE_ENV</code> not <code>development</code>), GioJS
-        logs a warning at startup when metrics are enabled with neither{' '}
-        <code>token</code> nor <code>ip_allowlist</code> set - unauthenticated metrics are
-        fine on localhost but should never face the public internet. With metrics off
-        (no <code>[metrics]</code> section, or <code>enabled = false</code>) the endpoint
-        answers <code>404</code> and there is no warning.
+        Loopback means the client after <code>trusted_proxies</code> resolution: behind a
+        proxy on the same machine, list it in <code>trusted_proxies</code> so its
+        forwarded clients are not mistaken for local ones. To serve metrics to every
+        client with no token, say so explicitly with{' '}
+        <code>ip_allowlist = [&quot;0.0.0.0/0&quot;, &quot;::/0&quot;]</code> - the server
+        then logs a warning at startup. With metrics off (no <code>[metrics]</code>{' '}
+        section, or <code>enabled = false</code>) the endpoint answers <code>404</code>.
       </div>
 
       <h2>Dev endpoints &amp; allowed hosts</h2>
@@ -619,7 +636,8 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
       <p>
         Entries are hostnames or IPs; a port or a pasted{' '}
         <code>http(s)://</code> prefix is ignored, and an entry that is not a
-        host is skipped with a startup warning naming it. Pages themselves
+        host is skipped with a startup warning naming it (<code>--check-config</code>{' '}
+        and <code>gio doctor</code> report it too). Pages themselves
         are unaffected; without the entry only the overlay codeframes,
         open-in-editor, live reload, the dashboard, and the details on SSR
         error pages stop working from that host. When bound to{' '}
@@ -636,6 +654,16 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         port mapping the connection comes from another address, so{' '}
         <code>localhost</code> itself needs an entry there.
       </div>
+      <p>
+        <code>allowed_hosts = [&quot;*&quot;]</code> answers any <code>Host</code> from
+        any machine, error details included, and logs a loud warning at startup: DNS
+        rebinding is no longer blocked. The <code>Origin</code> and{' '}
+        <code>Sec-Fetch-Site</code> checks still apply, so open-in-editor stays
+        same-origin. To have no dev endpoints at all, set{' '}
+        <code>[dev] devtools = false</code>: <code>/_gio/devtools*</code> answers{' '}
+        <code>404</code>, and the error overlay shows the message and stack without
+        codeframes, editor links or live reload.
+      </p>
 
       <h2>Security</h2>
       <p>
@@ -646,8 +674,20 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         cross-site <code>POST</code>/<code>PUT</code>/<code>PATCH</code>/<code>DELETE</code>{' '}
         requests and WebSocket upgrades are refused with <code>403</code>. A
         Content-Security-Policy with per-response nonces is one line away. Headers your app
-        or a <code>[[headers]]</code> rule sets win over these defaults. See{' '}
+        or a <code>[[headers]]</code> rule sets win over these defaults, and{' '}
+        <code>[security] default_headers = false</code> drops the three built-in ones. See{' '}
         <a href="/docs/security">Security</a> for every option.
+      </p>
+      <p>
+        Every protection you turn off or loosen in <code>gio.toml</code> -{' '}
+        <code>[security.csrf] enabled = false</code>,{' '}
+        <code>[security.websocket] check_origin = false</code>,{' '}
+        <code>default_headers = false</code>, <code>[dev] allowed_hosts = [&quot;*&quot;]</code>,{' '}
+        <code>[server] max_body_bytes = 0</code> or <code>max_connections = 0</code>,
+        metrics open to every client, a <code>/0</code> in <code>trusted_proxies</code>,{' '}
+        <code>skew_protection = false</code> - logs one warning at startup naming the key,
+        and <code>giojs-server --check-config</code> (and <code>gio doctor</code>) reports
+        the same text under <code>warnings</code>.
       </p>
 
       <h2 id="rate-limits">Rate limits</h2>
@@ -705,6 +745,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
           <tr><td><code>GIO_HOST</code> / <code>GIO_PORT</code></td><td>Override <code>[server] host</code> / <code>port</code> without editing <code>gio.toml</code> (a second instance, a test server). The host must be an IP address; a malformed value stops startup (see <a href="#listen-address">Listen address</a>)</td><td><code>[server]</code> values</td></tr>
           <tr><td><code>PORT</code></td><td>The port hosting platforms assign (Heroku, Render, Railway, Fly.io, Cloud Run): overrides <code>[server] port</code>; <code>GIO_PORT</code> wins over it</td><td>unset</td></tr>
           <tr><td><code>GIO_CACHE_DIR</code></td><td>Page cache directory, overriding <code>[cache] disk_path</code>; may be absolute</td><td><code>.gio/cache/pages</code></td></tr>
+          <tr><td><code>GIO_ENV_FILES</code></td><td><code>0</code> skips the <a href="#env-files">.env files</a>, <code>1</code> loads them, whatever <code>[env] files</code> says (for platforms that inject the environment and should ignore stray files). Any other value stops startup</td><td>unset (<code>[env] files</code> decides)</td></tr>
           <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the client build the server produced at startup, the app&apos;s server-side sources, the gio.toml <code>[images]</code> settings, the served <code>[[fonts]]</code> files and the i18n default locale). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
           <tr><td><code>GIO_SOCKET_PATH</code></td><td>Rust-to-Node IPC path; the server passes the resolved value to the Node worker (in a <a href="#render-workers">worker pool</a>, the other workers get it with a <code>-w&lt;N&gt;</code> suffix)</td><td>per-instance <code>.gio/ipc-&lt;pid&gt;-&lt;rand&gt;.sock</code> (Unix), unique named pipe (Windows)</td></tr>
           <tr><td><code>GIO_PUBLIC_DIR</code></td><td>Directory served at the site root and under <code>/public/*</code></td><td><code>public/</code> next to <code>app/</code></td></tr>
@@ -775,6 +816,13 @@ API_ENDPOINT=\${GIO_PUBLIC_API_URL}/v2`} />
         <li>
           <code>gio export</code> and <code>gio build standalone</code> load the same files
           with the same rules (<code>production</code> mode for standalone builds).
+        </li>
+        <li>
+          <code>[env] files = false</code> in <code>gio.toml</code> loads none of them, and
+          the environment is all there is. <code>GIO_ENV_FILES=0</code> does the same
+          without editing the file, and <code>GIO_ENV_FILES=1</code> loads them even when{' '}
+          <code>gio.toml</code> says no. The server, <code>gio export</code>,{' '}
+          <code>gio build standalone</code> and the testing kit all follow both.
         </li>
       </ul>
 
