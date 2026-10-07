@@ -34,7 +34,8 @@ npm create giojs@latest my-app -- --features tailwind,api,auth,db,docker,ci`} />
       <CodeBlock lang="bash" code={`gio add tailwind                         # runs create-giojs add
 npx create-giojs add tailwind            # the same, without the gio CLI
 npx create-giojs add auth db --dry-run   # show what would change
-npx create-giojs add docker --cwd ./my-app`} />
+npx create-giojs add docker --cwd ./my-app
+npx create-giojs add --ci --features db  # create's flag spellings work too`} />
       <ul>
         <li>
           <strong>Your changes win.</strong> If a file a new feature adds already exists with

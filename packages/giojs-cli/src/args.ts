@@ -58,8 +58,11 @@ const BOOLEAN_FLAGS: Record<string, (args: CliArgs) => void> = {
   '-v': args => { args.version = true; },
 };
 
-/** `--tailwind`, `--db`, ... plus their aliases (`--database`, `--github-actions`). */
-const FEATURE_FLAGS: Record<string, FeatureName> = Object.fromEntries(
+/**
+ * `--tailwind`, `--db`, ... plus their aliases (`--database`,
+ * `--github-actions`). `create-giojs add` takes them too.
+ */
+export const FEATURE_FLAGS: Readonly<Record<string, FeatureName>> = Object.fromEntries(
   Object.entries(FEATURE_ALIASES).map(([alias, feature]) => [`--${alias}`, feature]),
 );
 
@@ -69,21 +72,29 @@ function addFeatures(args: CliArgs, features: readonly FeatureName[]): void {
   args.features = [...new Set([...(args.features ?? []), ...features])];
 }
 
-/** `--features a,b,c`: every name must be a known feature (or alias). */
-function parseFeatureList(value: string | undefined): FeatureName[] {
+/** A feature by name or alias; a usage error, with a near miss's hint, otherwise. */
+export function featureArg(name: string): FeatureName {
+  const feature = featureByName(name);
+  if (feature !== undefined) return feature;
+  const hint = didYouMean(name.trim().toLowerCase(), Object.keys(FEATURE_ALIASES));
+  throw new UsageError(
+    `Unknown feature "${name.trim()}" - ${hint !== undefined ? `did you mean ${hint}? Choose` : 'choose'} from: ` +
+      FEATURE_NAMES.join(', '),
+  );
+}
+
+/**
+ * `--features a,b,c` (the list is `value`): every name must be a known
+ * feature (or alias); the empty `--features=` adds none.
+ */
+export function parseFeatureList(value: string | undefined): FeatureName[] {
   if (value === undefined || value.startsWith('-')) {
     throw new UsageError(`--features needs a comma-separated list: ${FEATURE_NAMES.join(',')}`);
   }
   return value
     .split(',')
     .filter(name => name.trim() !== '')
-    .map(name => {
-      const feature = featureByName(name);
-      if (feature === undefined) {
-        throw new UsageError(`Unknown feature "${name.trim()}" - choose from: ${FEATURE_NAMES.join(', ')}`);
-      }
-      return feature;
-    });
+    .map(featureArg);
 }
 
 export const KNOWN_FLAGS: readonly string[] = [

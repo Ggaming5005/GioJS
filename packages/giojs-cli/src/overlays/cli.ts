@@ -64,6 +64,12 @@ export interface CreateFeaturesResult {
   steps: string;
   /** Every file the overlays wrote, project-relative and '/'-separated. */
   files: string[];
+  /**
+   * The files among them that were already there and that the overlays
+   * added to rather than wrote whole (a pre-existing .env.development
+   * given the demo login): they still hold what was in them before.
+   */
+  merged: string[];
 }
 
 export interface CreateFeaturesOptions {
@@ -85,7 +91,7 @@ export async function applyCreateFeatures(
   features: readonly FeatureName[],
   options: CreateFeaturesOptions = {},
 ): Promise<CreateFeaturesResult> {
-  if (features.length === 0) return { steps: '', files: [] };
+  if (features.length === 0) return { steps: '', files: [], merged: [] };
   const plan = await planOverlays(destDir, features, project, { force: options.force === true });
   const problem = unsupportedMessage(plan.unsupported.map(u => u.feature), project.mode);
   if (problem !== null) throw new UsageError(`${problem}.`);
@@ -96,5 +102,5 @@ export async function applyCreateFeatures(
   options.planned?.([...plan.writes.keys()]);
   await applyPlan(destDir, plan);
   console.log(`Added: ${plan.features.map(feature => OVERLAYS[feature].title).join(', ')}.`);
-  return { steps: formatPostSteps(plan), files: [...plan.writes.keys()] };
+  return { steps: formatPostSteps(plan), files: [...plan.writes.keys()], merged: plan.merged };
 }

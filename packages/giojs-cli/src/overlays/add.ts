@@ -10,16 +10,20 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
+import { didYouMean, FEATURE_FLAGS, featureArg, parseFeatureList, UsageError } from '../args.js';
 import { applyPlan, planOverlays, type OverlayPlan, type ProjectInfo } from './apply.js';
 import { formatConflicts, formatPostSteps } from './cli.js';
 import { detectPackageManager } from './package-manager.js';
-import { OVERLAYS, featureByName } from './registry.js';
+import { OVERLAYS } from './registry.js';
 import { FEATURE_NAMES, type FeatureName, type PackageJson } from './types.js';
 
 export const ADD_USAGE = `Usage: create-giojs add <feature...> [options]
 
 Adds starter features to an existing GioJS project:
 ${FEATURE_NAMES.map(name => `  ${name.padEnd(10)} ${OVERLAYS[name].hint}`).join('\n')}
+
+The features can also be given the way create takes them: --tailwind,
+--auth, ... or --features tailwind,auth.
 
 Files you changed are never overwritten. Running it again is safe: a
 feature that is already set up (all its files exist) keeps your edits to
@@ -30,8 +34,10 @@ and shows what the feature would change.
 Options:
   --cwd <dir>   the project directory (default: the current directory)
   --dry-run     show what would change without writing anything
-  --force       overwrite files and scripts that differ from the feature's
-  -h, --help    show this help`;
+  -f, --force   overwrite files and scripts that differ from the feature's
+  -h, --help    show this help
+
+An unknown option or feature is a usage error (exit code 2).`;
 
 interface AddArgs {
   features: FeatureName[];
@@ -41,29 +47,60 @@ interface AddArgs {
   help: boolean;
 }
 
+const BOOLEAN_FLAGS: Record<string, (args: AddArgs) => void> = {
+  '--dry-run': args => { args.dryRun = true; },
+  '--force': args => { args.force = true; },
+  '-f': args => { args.force = true; },
+  '--help': args => { args.help = true; },
+  '-h': args => { args.help = true; },
+};
+
+const KNOWN_FLAGS: readonly string[] = [
+  ...Object.keys(BOOLEAN_FLAGS),
+  ...Object.keys(FEATURE_FLAGS),
+  '--cwd',
+  '--features',
+];
+
+/**
+ * Strict like create's parser (args.ts), whose feature flags it takes too:
+ * an unknown option or feature is a UsageError with a did-you-mean hint.
+ */
 function parseAddArgs(argv: readonly string[], cwd: string): AddArgs {
   const args: AddArgs = { features: [], cwd, dryRun: false, force: false, help: false };
+  const add = (features: readonly FeatureName[]): void => {
+    for (const feature of features) if (!args.features.includes(feature)) args.features.push(feature);
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
     // The npm-style separator pnpm, yarn and bun pass on (`... add -- --dry-run`).
     if (arg === '--') continue;
-    if (arg === '-h' || arg === '--help') args.help = true;
-    else if (arg === '--dry-run') args.dryRun = true;
-    else if (arg === '--force') args.force = true;
-    else if (arg === '--cwd') {
-      const dir = argv[++i];
-      if (dir === undefined) throw new Error('--cwd needs a directory');
-      args.cwd = resolve(cwd, dir);
-    } else if (arg.startsWith('-')) {
-      throw new Error(`Unknown option ${arg}\n\n${ADD_USAGE}`);
-    } else {
-      for (const name of arg.split(',').filter(part => part.trim() !== '')) {
-        const feature = featureByName(name);
-        if (feature === undefined) {
-          throw new Error(`Unknown feature "${name}" - choose from: ${FEATURE_NAMES.join(', ')}`);
-        }
-        if (!args.features.includes(feature)) args.features.push(feature);
+    const [flag, inlineValue] = arg.startsWith('--') && arg.includes('=')
+      ? [arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)]
+      : [arg, undefined];
+
+    const setter = Object.hasOwn(BOOLEAN_FLAGS, flag) ? BOOLEAN_FLAGS[flag] : undefined;
+    const feature = Object.hasOwn(FEATURE_FLAGS, flag) ? FEATURE_FLAGS[flag] : undefined;
+    if (setter !== undefined || feature !== undefined) {
+      if (inlineValue !== undefined) throw new UsageError(`${flag} does not take a value`);
+      if (setter !== undefined) setter(args);
+      if (feature !== undefined) add([feature]);
+    } else if (flag === '--features') {
+      add(parseFeatureList(inlineValue ?? argv[++i]));
+    } else if (flag === '--cwd') {
+      const dir = inlineValue ?? argv[++i];
+      if (dir === undefined || dir === '' || (inlineValue === undefined && dir.startsWith('-'))) {
+        throw new UsageError('--cwd needs a directory');
       }
+      args.cwd = resolve(cwd, dir);
+    } else if (arg.startsWith('-') && arg !== '-') {
+      const hint = didYouMean(flag, KNOWN_FLAGS);
+      throw new UsageError(
+        `Unknown option ${flag}${hint !== undefined ? ` - did you mean ${hint}?` : ''}\n` +
+          'Run create-giojs add --help to see the features and options.',
+      );
+    } else {
+      add(arg.split(',').filter(part => part.trim() !== '').map(featureArg));
     }
   }
   return args;
@@ -138,16 +175,18 @@ export async function runAdd(argv: string[], cwd: string = process.cwd()): Promi
   try {
     args = parseAddArgs(argv, cwd);
   } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    return 1;
+    if (!(err instanceof UsageError)) throw err;
+    // create's usage-error contract: `Error: ...`, exit code 2.
+    console.error(`Error: ${err.message}`);
+    return 2;
   }
   if (args.help) {
     console.log(ADD_USAGE);
     return 0;
   }
   if (args.features.length === 0) {
-    console.error(`Name at least one feature to add.\n\n${ADD_USAGE}`);
-    return 1;
+    console.error(`Error: Name at least one feature to add.\n\n${ADD_USAGE}`);
+    return 2;
   }
 
   let project: ProjectInfo;

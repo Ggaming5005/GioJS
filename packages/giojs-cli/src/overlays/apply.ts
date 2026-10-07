@@ -64,7 +64,14 @@ export interface OverlayPlan {
   /** Final content per project-relative path, in planning order. */
   writes: Map<string, string>;
   created: string[];
+  /** Paths that already existed on disk (so not in `created`). */
   updated: string[];
+  /**
+   * The `updated` paths whose new content builds on what was on disk - a
+   * line appended to a .env, an edit to a page - rather than a file the
+   * plan writes whole. The rest of `writes` holds only the overlays' content.
+   */
+  merged: string[];
   conflicts: Conflict[];
   /** Files and scripts of features already set up that the user changed. */
   kept: Kept[];
@@ -232,6 +239,7 @@ export async function planOverlays(
     writes: fs.writes,
     created: [],
     updated: [],
+    merged: [],
     conflicts: [],
     kept: [],
     manual: [],
@@ -248,6 +256,8 @@ export async function planOverlays(
   }
   if (plan.unsupported.length > 0) return plan;
 
+  // Paths some overlay wrote whole: whatever was on disk is gone from them.
+  const wholeFiles = new Set<string>();
   for (const name of ordered) {
     const overlay = OVERLAYS[name];
     const issuesBefore = plan.conflicts.length + plan.manual.length;
@@ -275,10 +285,12 @@ export async function planOverlays(
       const existing = await fs.read(file.path);
       if (existing === undefined || existing === file.content) {
         await write(file.path, file.content);
+        wholeFiles.add(file.path);
       } else if (file.onExisting === 'keep') {
         continue;
       } else if (options.force === true) {
         await write(file.path, file.content);
+        wholeFiles.add(file.path);
       } else if (setUp) {
         plan.kept.push({ feature: name, path: file.path });
       } else {
@@ -391,6 +403,7 @@ export async function planOverlays(
     const steps = overlay.postSteps?.(ctx) ?? [];
     if (steps.length > 0) plan.postSteps.push({ feature: name, steps });
   }
+  plan.merged = plan.updated.filter(path => !wholeFiles.has(path));
   return plan;
 }
 

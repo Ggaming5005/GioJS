@@ -38,7 +38,7 @@ npm create giojs@latest my-app -- --ts --server
 #   -h, --help / -v, --version
 ```
 
-Without a terminal (CI, piped input) nothing is asked: unanswered options take their defaults (and no starter features). A non-empty target directory is refused unless `--force` (whose initial commit then holds only the files the scaffold created - what was already there stays untracked); unknown flags are an error with a did-you-mean hint; Ctrl+C at a prompt exits without writing anything.
+Without a terminal (CI, piped input) nothing is asked: unanswered options take their defaults (and no starter features). A non-empty target directory is refused unless `--force` (whose initial commit then holds only the files the scaffold created - what was already there stays untracked, even a file such as `.env.development` that a starter feature added lines to); unknown flags are an error with a did-you-mean hint; Ctrl+C at a prompt exits without writing anything.
 
 ## Starter features
 
@@ -46,9 +46,10 @@ Pick them in the "Add features" prompt, pass the flags above, or add them to an 
 
 ```bash
 npx create-giojs add tailwind auth
-#   --dry-run   show what would change, write nothing
-#   --force     overwrite files you changed (otherwise: keep or refuse, see below)
-#   --cwd <dir> the project directory
+#   --dry-run    show what would change, write nothing
+#   -f, --force  overwrite files you changed (otherwise: keep or refuse, see below)
+#   --cwd <dir>  the project directory
+npx create-giojs add --tailwind --features auth,db   # create's feature flags work too
 ```
 
 - **tailwind** - Tailwind CSS v4 via its CLI; `npm run dev` runs the watcher next to the server
@@ -60,7 +61,7 @@ npx create-giojs add tailwind auth
 
 A static site (`--static`) takes **tailwind** and **ci**; the others need the server, and asking for them is an error before anything is written. The generated commands (Dockerfile, CI workflow, next steps) use the package manager the app is installed with: `--pm`, or the one that ran `create`; for `add`, the project's lockfile.
 
-`add` never overwrites a file you changed. A feature that is already set up keeps your edits to its files, so running it again (alone or next to a new feature) is safe; a file of yours in the way of a new feature is a conflict that stops the run before anything is written, with a diff. Details: https://giojs.com/docs/starter-features
+Like `create`, `add` treats an unknown option or feature as a usage error (exit code 2, with a did-you-mean hint). It never overwrites a file you changed. A feature that is already set up keeps your edits to its files, so running it again (alone or next to a new feature) is safe; a file of yours in the way of a new feature is a conflict that stops the run before anything is written, with a diff. Details: https://giojs.com/docs/starter-features
 
 ## Migrating from Next.js
 

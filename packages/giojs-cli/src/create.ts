@@ -83,8 +83,14 @@ async function rollback(config: ProjectConfig, extra: readonly string[]): Promis
 
 interface WrittenProject {
   linksMonorepo: boolean;
-  /** The template and feature files written, relative and '/'-separated. */
+  /**
+   * The files this run wrote whole - the template's and the features' -
+   * relative and '/'-separated. A file that was already there and that a
+   * feature only added to (a --force run's .env.development) is not one.
+   */
   files: string[];
+  /** Files that were already there and that a feature added to. */
+  amended: string[];
   /** The chosen features' next steps (empty without features). */
   featureSteps: string;
 }
@@ -122,7 +128,13 @@ async function writeProject(config: ProjectConfig): Promise<WrittenProject> {
       },
     );
     controller.signal.throwIfAborted();
-    return { linksMonorepo, files: [...new Set([...files, ...features.files])], featureSteps: features.steps };
+    // A file the features added to still holds what it held before: the
+    // template's, or - when the template did not write it - what was in
+    // the directory, which a --force commit must leave out.
+    const template = new Set(files);
+    const amended = features.merged.filter(path => !template.has(path));
+    const added = features.files.filter(path => !amended.includes(path));
+    return { linksMonorepo, files: [...new Set([...files, ...added])], amended, featureSteps: features.steps };
   } catch (err) {
     const removed = await rollback(config, featureFiles);
     if (!controller.signal.aborted) throw err;
@@ -145,7 +157,8 @@ function install(dir: string, pm: PackageManager): boolean {
   return false;
 }
 
-function reportGit(dir: string, include?: (path: string) => boolean): void {
+/** `amended`: files that were already there and that the features added to. */
+function reportGit(dir: string, include?: (path: string) => boolean, amended: readonly string[] = []): void {
   const result = initGitRepository(dir, 'Initial commit from create-giojs', include);
   switch (result.status) {
     case 'committed': {
@@ -153,8 +166,12 @@ function reportGit(dir: string, include?: (path: string) => boolean): void {
       const { leftOut } = result;
       if (leftOut.length > 0) {
         const shown = leftOut.slice(0, 5).join(', ') + (leftOut.length > 5 ? `, ... (${leftOut.length} files)` : '');
+        const changed = amended.filter(path => leftOut.includes(path));
         console.log(
           `Note: files that were already in the directory are not in the commit: ${shown}\n` +
+            (changed.length > 0
+              ? `  ${changed.join(', ')} ${changed.length === 1 ? 'is' : 'are'} left out although the features added to ${changed.length === 1 ? 'it' : 'them'}.\n`
+              : '') +
             '  Review them before you commit them (a .env may hold secrets).',
         );
       }
@@ -198,17 +215,17 @@ export async function create(args: CliArgs): Promise<void> {
   const preexisting = config.git && config.targetState === 'not-empty'
     ? new Set(await readdir(config.targetDir))
     : undefined;
-  const { linksMonorepo, files, featureSteps } = await writeProject(config);
+  const { linksMonorepo, files, amended, featureSteps } = await writeProject(config);
 
   const installed = config.installDeps && install(config.targetDir, config.packageManager);
   // After the install, so the initial commit includes the lockfile. Over
-  // existing files it holds only what this run created: the template's
-  // files and anything outside the entries that were already there.
+  // existing files it holds only what this run created: the files it wrote
+  // whole and anything outside the entries that were already there.
   const written = new Set(files);
   const include = preexisting === undefined
     ? undefined
     : (path: string): boolean => written.has(path) || !preexisting.has(path.split('/')[0] ?? path);
-  if (config.git) reportGit(config.targetDir, include);
+  if (config.git) reportGit(config.targetDir, include, amended);
 
   const pm = config.packageManager;
   const steps = [

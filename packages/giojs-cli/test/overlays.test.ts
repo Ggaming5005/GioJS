@@ -88,6 +88,7 @@ test('feature flags are part of create\'s strict parser, with --features lists a
   assert.deepEqual(parseArgs(['my-app', '--', '--auth']).features, ['auth']);
   assert.throws(() => parseArgs(['--features', 'redis']), (err: unknown) =>
     err instanceof UsageError && /Unknown feature "redis"/.test(err.message));
+  assert.throws(() => parseArgs(['--features', 'tailwnd']), /Unknown feature "tailwnd" - did you mean tailwind\? Choose from: /);
   assert.throws(() => parseArgs(['--features']), /--features needs a comma-separated list/);
   assert.throws(() => parseArgs(['--auth=1']), /--auth does not take a value/);
   // A near miss of a feature flag gets the strict parser's hint.
@@ -523,6 +524,26 @@ test('applying every overlay twice changes nothing the second time', async () =>
   }
 });
 
+test('a plan tells the files it adds to from the files it writes whole', async () => {
+  await withProject('ts', async project => {
+    await writeFile(join(project.dir, '.env.development'), 'API_KEY=mine\n');
+    await writeFile(join(project.dir, 'Dockerfile'), 'FROM scratch\n');
+    const plan = await applyFeatures(project, ['auth', 'docker'], { force: true });
+    assert.deepEqual(plan.conflicts, []);
+    // Added to: what was in them before is still there.
+    for (const path of ['.env.development', '.env.example', 'gio.toml']) {
+      assert.ok(plan.merged.includes(path), `${path} not in merged: ${plan.merged.join(', ')}`);
+    }
+    assert.match(await read(project.dir, '.env.development'), /^API_KEY=mine\n[\s\S]*^DEMO_EMAIL=/m);
+    // Written whole: the Dockerfile --force replaced, and the new files.
+    assert.ok(plan.updated.includes('Dockerfile'));
+    for (const path of ['Dockerfile', 'app/login/page.tsx', '.dockerignore']) {
+      assert.ok(!plan.merged.includes(path), `${path} is in merged`);
+    }
+    for (const path of plan.merged) assert.ok(plan.updated.includes(path), `${path} merged but not updated`);
+  });
+});
+
 // ── `create-giojs add` ────────────────────────────────────────────────────────
 
 test('add applies a feature to an existing project and is idempotent', async () => {
@@ -639,18 +660,60 @@ test('add --dry-run writes nothing; a static site cannot get server features', a
   );
 });
 
-test('add explains bad input', async () => {
+test('add explains bad input; a usage error exits 2 like create\'s', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'gio-add-'));
   try {
-    assert.match(runCli(['add'], dir).stderr, /Name at least one feature/);
-    assert.match(runCli(['add', 'redis'], dir).stderr, /Unknown feature "redis"/);
-    assert.match(runCli(['add', 'api'], dir).stderr, /No package\.json/);
+    const usage = (args: string[], message: RegExp): void => {
+      const result = runCli(['add', ...args], dir);
+      assert.equal(result.status, 2, `add ${args.join(' ')}: ${result.stderr}`);
+      assert.match(result.stderr, message, `add ${args.join(' ')}`);
+    };
+    usage([], /^Error: Name at least one feature to add\.$/m);
+    usage(['redis'], /^Error: Unknown feature "redis" - choose from: tailwind, api, auth, db, docker, ci$/m);
+    usage(['tailwnd'], /^Error: Unknown feature "tailwnd" - did you mean tailwind\? Choose from: /m);
+    usage(['--tailwnd'], /^Error: Unknown option --tailwnd - did you mean --tailwind\?$/m);
+    usage(['ci', '--dry'], /^Error: Unknown option --dry\nRun create-giojs add --help/m);
+    usage(['--features'], /^Error: --features needs a comma-separated list/m);
+    usage(['--features', 'ci,redis'], /^Error: Unknown feature "redis"/m);
+    usage(['--ci=1'], /^Error: --ci does not take a value$/m);
+    usage(['ci', '--cwd'], /^Error: --cwd needs a directory$/m);
+    usage(['ci', '--cwd', '--dry-run'], /^Error: --cwd needs a directory$/m);
+    // Not a usage error: there is no project here.
+    const missing = runCli(['add', 'api'], dir);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /No package\.json/);
     const help = runCli(['add', '--help'], dir);
     assert.equal(help.status, 0);
     for (const name of ALL_FEATURES) assert.match(help.stdout, new RegExp(`^  ${name} `, 'm'));
+    assert.match(help.stdout, /--features tailwind,auth/);
+    assert.match(help.stdout, /^ {2}-f, --force /m);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('add takes the features the way create does: --ci, --features a,b, aliases, -f', async () => {
+  await withProject('ts', async project => {
+    // `npm create giojs -- --ci`, then the same spelling for an existing app.
+    const flag = runCli(['add', '--ci', '--database', '--dry-run'], project.dir);
+    assert.equal(flag.status, 0, flag.stderr);
+    assert.match(flag.stdout, /Would create:[\s\S]*\.github\/workflows\/ci\.yml/);
+    assert.match(flag.stdout, /lib\/db\.server\.ts/);
+    for (const args of [['--features', 'docker,ci'], ['--features=docker', '--github-actions'], ['--', 'docker', '--ci']]) {
+      const listed = runCli(['add', ...args, '--dry-run'], project.dir);
+      assert.equal(listed.status, 0, `${args.join(' ')}: ${listed.stderr}`);
+      assert.match(listed.stdout, /^ {2}Dockerfile$/m, args.join(' '));
+      assert.match(listed.stdout, /^ {2}\.github\/workflows\/ci\.yml$/m, args.join(' '));
+    }
+    assert.ok(!existsSync(join(project.dir, 'Dockerfile')), 'a dry run wrote');
+
+    // -f is --force, as in create.
+    await writeFile(join(project.dir, 'Dockerfile'), 'FROM scratch\n');
+    assert.equal(runCli(['add', '--docker'], project.dir).status, 1);
+    const forced = runCli(['add', '--docker', '-f', '--cwd=.'], project.dir);
+    assert.equal(forced.status, 0, forced.stderr);
+    assert.match(await read(project.dir, 'Dockerfile'), /gio build standalone/);
+  });
 });
 
 // ── the create flow ───────────────────────────────────────────────────────────
@@ -777,6 +840,55 @@ test('create-giojs --force over an existing file lets the feature replace it; th
       }
       assert.ok(!tracked.includes('notes.txt'));
     }
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('create-giojs --force leaves a file of the user\'s that a feature added to out of the commit', async t => {
+  const cwd = await mkdtemp(join(tmpdir(), 'gio-create-features-'));
+  try {
+    const app = join(cwd, 'app');
+    await mkdir(app);
+    // A secret of the user's, in the file the auth feature puts its demo login in.
+    await writeFile(join(app, '.env.development'), 'API_KEY=super-secret\n');
+    await writeFile(join(app, 'notes.txt'), 'mine\n');
+    const result = spawnSync(
+      process.execPath,
+      [join(cliDir, 'dist', 'index.js'), 'app', '--force', '--no-install', '--auth', '--db', '--tailwind'],
+      {
+        cwd,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          npm_config_user_agent: '',
+          GIT_AUTHOR_NAME: 'Test',
+          GIT_AUTHOR_EMAIL: 'test@example.com',
+          GIT_COMMITTER_NAME: 'Test',
+          GIT_COMMITTER_EMAIL: 'test@example.com',
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    // The feature still adds its lines; the user's stay.
+    const env = await read(app, '.env.development');
+    assert.match(env, /^API_KEY=super-secret$/m);
+    assert.match(env, /^DEMO_EMAIL=/m);
+    if (!/Initialized a git repository with an initial commit/.test(result.stdout)) {
+      t.skip(`no initial commit here:\n${result.stdout}`);
+      return;
+    }
+    const tracked = spawnSync('git', ['ls-files'], { cwd: app, encoding: 'utf8' }).stdout.split('\n');
+    assert.ok(!tracked.includes('.env.development'), 'the user\'s .env.development was committed');
+    assert.ok(!tracked.includes('notes.txt'));
+    // Files the template wrote and the features added to are the scaffold's.
+    for (const file of ['.env.example', 'gio.toml', 'package.json', 'app/login/page.tsx', 'lib/db.server.ts']) {
+      assert.ok(tracked.includes(file), `${file} not committed:\n${tracked.join('\n')}`);
+    }
+    const committed = spawnSync('git', ['show', 'HEAD:.env.development'], { cwd: app, encoding: 'utf8' });
+    assert.notEqual(committed.status, 0, committed.stdout);
+    assert.match(result.stdout, /not in the commit: [^\n]*\.env\.development/);
+    assert.match(result.stdout, /^ {2}\.env\.development is left out although the features added to it\.$/m);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

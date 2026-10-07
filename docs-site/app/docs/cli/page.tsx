@@ -398,8 +398,17 @@ Starter features (any combination; asked for when none is given):
       </p>
       <CodeBlock lang="bash" code={`npx create-giojs add tailwind auth
 #   --dry-run      show what would change, write nothing
-#   --force        overwrite files and scripts that differ from the feature's
-#   --cwd <dir>    the project directory (default: the current one)`} />
+#   -f, --force    overwrite files and scripts that differ from the feature's
+#   --cwd <dir>    the project directory (default: the current one)
+npx create-giojs add --tailwind --features auth,db   # create's feature flags work too`} />
+      <p>
+        Its parser is as strict as <code>create-giojs</code>&apos;s: an unknown option or
+        feature is a usage error (exit code <code>2</code>) with a suggestion (
+        <code>tailwnd</code> → <em>did you mean <code>tailwind</code>?</em>), and so is no
+        feature at all. A run that is refused - a conflict, a server feature for a static
+        site, no project in the directory - exits with code <code>1</code> and writes
+        nothing.
+      </p>
     </>
   );
 }
