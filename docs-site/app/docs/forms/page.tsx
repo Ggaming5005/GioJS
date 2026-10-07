@@ -123,7 +123,14 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         <code>405</code> (with <code>Allow: GET, HEAD, POST</code>); give those their own{' '}
         <code>route.ts</code>. A page without an <code>action</code> answers every mutation with{' '}
         <code>405</code>. A <code>route.ts</code> in the same folder that exports{' '}
-        <code>POST</code> takes the POST; one that does not passes it on to the action.
+        <code>POST</code> takes the POST; one that does not passes it on to the action (and a
+        405 from that folder lists both files&apos; methods).
+      </p>
+      <p>
+        Headers the action returns with its data are sent whatever answers in the end: the
+        re-rendered page, or a redirect, 404 or error page that replaces it.{' '}
+        <code>redirect()</code> works in <code>getServerSideProps</code> too, returned or
+        thrown - see <a href="/docs/fetching-data">Data Fetching</a>.
       </p>
 
       <h2>Redirect after a change (Post/Redirect/Get)</h2>
@@ -150,6 +157,16 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
       <p>
         A URL from user input (a <code>?next=</code> parameter) must be checked before you
         redirect to it - otherwise the action is an open redirect.
+      </p>
+      <p>
+        Redirects to other sites - a payment page, an identity provider - work from{' '}
+        <code>GioForm</code> as well. Its requests carry <code>x-gio-form: 1</code>, and the
+        server answers their 301/302/303 redirects with a <code>204</code> naming the target in{' '}
+        <code>x-gio-redirect</code> (cookies included) instead: <code>fetch</code> would
+        otherwise follow the redirect itself and fail the cross-origin check after the action
+        had already run. <code>GioForm</code> then fetches a same-origin target (revalidating
+        the HTTP cache) and hands any other to the browser. A 307/308, which repeats the POST,
+        is still followed by <code>fetch</code>. Plain form posts always get the real redirect.
       </p>
 
       <h2>Validation errors</h2>
@@ -193,13 +210,29 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         <code>aria-busy=&quot;true&quot;</code> (style it with{' '}
         <code>form[aria-busy=&quot;true&quot;]</code>).
       </p>
-      <p>Answers the router cannot render fall back to what the browser would do:</p>
+      <p>
+        Answers the router cannot render fall back to what the browser would do - but a
+        submission is never sent twice when the action may already have run:
+      </p>
       <ul>
-        <li>A redirect to something that is not a GioJS page (a file, JSON) - loaded as a full page.</li>
         <li>
-          An error that is not a GioJS page - the server&apos;s 413 for a too-large upload, a 429,
-          a 503 while the worker restarts - <code>onError</code> runs, then the form is submitted
-          natively so the browser shows the real response.
+          A redirect to another site, or to something that is not a GioJS page (a file, JSON) -
+          loaded as a full page (a <code>GET</code>). The form stays pending while the page
+          unloads, unless the target is a download (<code>Content-Disposition: attachment</code>)
+          or the back/forward cache brings the page back.
+        </li>
+        <li>
+          A refusal that comes before the action runs - the server&apos;s 413 for a too-large
+          upload, a 429 from its rate limiter, a deployment change - <code>onError</code> runs
+          (for the 413 and 429), then the form is submitted natively so the browser shows the
+          real response.
+        </li>
+        <li>
+          Any other error that is not a GioJS page - a 500 when the action threw (and no{' '}
+          <code>error.tsx</code> rendered it), a 502/504 from a proxy or a timeout while the
+          action may still be running, an error <code>Response</code> the action returned -
+          goes to <code>onError</code> with <code>result.response</code>. Nothing changes on
+          screen and nothing is re-sent: show the failure from <code>lastResult</code>.
         </li>
         <li>
           A 2xx that is not a page (an action returning <code>Response.json(...)</code>) - goes to{' '}

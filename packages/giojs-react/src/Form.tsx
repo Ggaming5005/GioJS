@@ -12,14 +12,16 @@
  * persistent root, so state outside what changed - typed input included -
  * survives.
  *
- * Answers the router cannot render fall back to what the browser would do:
- * a redirect to a non-GioJS page is loaded, and an error response that is
- * not a GioJS page (the server's 413 for an upload over max_body_bytes, a
- * 429, a 503 while the worker restarts, a deployment-skew 409) is submitted
- * again natively, so the browser shows it with its real status. A 2xx that
- * is not a page (an action returning JSON) is reported to onSuccess and
- * changes nothing on screen - it is never sent twice. A network failure is
- * reported to onError and the form stays as it is, input intact.
+ * Answers the router cannot render fall back to what the browser would do,
+ * without ever running the action twice: a redirect to another site or to
+ * a non-GioJS page is loaded (a GET). A refusal that comes before the action
+ * runs - the server's 413 for an upload over max_body_bytes, a 429 from its
+ * rate limiter, a deployment-skew 409 - is submitted again natively, so the
+ * browser shows it with its real status. Every other answer that is not a
+ * page may come after the action ran (a 500 when it threw past its writes,
+ * a 504 while it is still running, a Response of its own): it goes to
+ * onSuccess / onError with the response and is never sent again - nor is a
+ * network failure, which leaves the form as it is, input intact.
  *
  * While a submission is pending, further submits are ignored and the form
  * carries aria-busy. useGioFormState() exposes { pending, lastResult } to
@@ -32,11 +34,18 @@ import { submitForm, type FormSubmitOutcome } from './navigation.js';
 export interface GioFormResult {
   /** The final status was 2xx. */
   ok: boolean;
-  /** The final response's status (after redirects); 0 when the request failed. */
+  /**
+   * The final response's status (after redirects); 0 when the request
+   * failed. For a redirect the browser follows on its own (another site, a
+   * page the router could not fetch), the submission's own 2xx.
+   */
   status: number;
-  /** Path + query of the final response - the page now shown, after a redirect. */
+  /**
+   * Path + query of the final response - the page now shown, after a
+   * redirect. A redirect to another site gives its absolute URL.
+   */
   url: string;
-  /** The action answered with a redirect (fetch followed it). */
+  /** The action answered with a redirect. */
   redirected: boolean;
   /** The `actionData` of the page the answer rendered, if any. */
   data?: unknown;
@@ -80,6 +89,13 @@ const FormStateContext = React.createContext<GioFormState>(IDLE);
 export function useGioFormState(): GioFormState {
   return React.useContext(FormStateContext);
 }
+
+/**
+ * Error statuses that mean the server refused the request unread - its 413
+ * for a body over max_body_bytes, a 429 from its rate limiter - so handing
+ * the browser the same submission cannot repeat the action.
+ */
+const REFUSED_UNREAD: ReadonlySet<number> = new Set([413, 429]);
 
 type Submitter = HTMLButtonElement | HTMLInputElement;
 
@@ -183,7 +199,19 @@ export const GioForm = React.forwardRef<HTMLFormElement, GioFormProps>(function 
     }
     const result = resultOf(outcome, target);
     if (outcome.kind === 'loading') {
-      // The page is going away; stay pending so nothing is sent twice.
+      if (outcome.download) {
+        // The browser saves the file and this page stays.
+        finish(result);
+      } else {
+        // The page is going away; stay pending so nothing is sent twice -
+        // unless the back/forward cache brings it back.
+        const restored = (event: PageTransitionEvent): void => {
+          if (!event.persisted) return;
+          window.removeEventListener('pageshow', restored);
+          finish(result);
+        };
+        window.addEventListener('pageshow', restored);
+      }
       (result.ok ? onSuccess : onError)?.(result);
       return;
     }
@@ -195,7 +223,9 @@ export const GioForm = React.forwardRef<HTMLFormElement, GioFormProps>(function 
     }
     onError?.(result);
     if (outcome.kind === 'response') {
-      submitNatively(form, submitter);
+      // Refused unread: the browser may send it again to show the answer.
+      // Anything else is never re-sent - the action may already have run.
+      if (REFUSED_UNREAD.has(outcome.status)) submitNatively(form, submitter);
       return;
     }
     // A re-render with errors: start keyboard and screen-reader users at

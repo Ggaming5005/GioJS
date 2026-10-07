@@ -1745,6 +1745,27 @@ async function main() {
       assert.match(await page.text(), /GUESTBOOK_ENTRY Ada Lovelace/);
     });
 
+    await test('page action: a GioForm submission gets its redirect in x-gio-redirect, cookies kept', async () => {
+      // fetch would follow a 3xx itself - off-site into a CORS failure after
+      // the action ran - so the client router is told where to go instead.
+      const offsite = await formPost('intent=donate', { 'x-gio-form': '1' });
+      assert.equal(offsite.status, 204);
+      assert.equal(offsite.headers['x-gio-redirect'], 'https://pay.example/checkout/42');
+      assert.equal(offsite.headers.location, undefined);
+      assert.match(String(offsite.headers['set-cookie']), /donation=42; Path=\//);
+      assert.equal(offsite.headers['x-gio-cache'], 'bypass');
+      // A plain form post (no JavaScript) still gets the real 303.
+      const plain = await formPost('intent=donate');
+      assert.equal(plain.status, 303);
+      assert.equal(plain.headers.location, 'https://pay.example/checkout/42');
+
+      const signed = await formPost('name=Grace+Hopper', { 'x-gio-form': '1' });
+      assert.equal(signed.status, 204);
+      assert.equal(signed.headers['x-gio-redirect'], '/guestbook?signed=Grace%20Hopper');
+      const page = await fetch(`${BASE}${signed.headers['x-gio-redirect']}`);
+      assert.match(await page.text(), /GUESTBOOK_ENTRY Grace Hopper/);
+    });
+
     await test('page action: a 422 re-render shows field errors and is never cached', async () => {
       // The page exports revalidate: its GET is cached...
       await (await fetch(`${BASE}/guestbook`)).text();

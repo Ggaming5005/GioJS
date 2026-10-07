@@ -1018,7 +1018,8 @@ describe('page and route.ts precedence', () => {
     });
     const put = await render('PUT', '/contact', routes, handlers);
     expect(put.status).toBe(405);
-    expect(put.allow).toBe('POST');
+    // The URL serves the page's GET/HEAD and the route.ts's POST.
+    expect(put.allow).toBe('GET, HEAD, POST');
   });
 });
 

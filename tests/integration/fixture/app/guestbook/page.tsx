@@ -4,7 +4,8 @@
  * A page action behind a plain HTML form - nothing here needs JavaScript. A
  * signed entry is stored and answered with a 303 (Post/Redirect/Get); an
  * empty name re-renders with 422 and the field error from actionData; a
- * multipart upload reports the file it received, byte for byte. Exports
+ * multipart upload reports the file it received, byte for byte; a donation
+ * redirects off-site (GioForm gets that target in x-gio-redirect). Exports
  * `revalidate` on purpose: the GET is cached, the action's answers never
  * are - nor do they ever replace the cached GET. (A real app would call
  * revalidatePath after storing; the redirect's query is a fresh key here.)
@@ -19,6 +20,10 @@ const entries: string[] = [];
 
 export async function action(req: ActionArgs) {
   const form = await req.formData();
+  if (form.get('intent') === 'donate') {
+    // Off-site, the way a checkout or sign-in hop is.
+    return redirect('https://pay.example/checkout/42', { headers: { 'set-cookie': 'donation=42; Path=/' } });
+  }
   const attachment = form.get('attachment');
   if (attachment instanceof File) {
     const bytes = Buffer.from(await attachment.arrayBuffer());

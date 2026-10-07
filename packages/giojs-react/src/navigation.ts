@@ -788,18 +788,33 @@ export async function refresh(): Promise<void> {
 
 // ── form submissions ──────────────────────────────────────────────────────────
 
+/** The request header marking a GioForm submission (giojs-core ssr.ts). */
+const FORM_SUBMISSION_HEADER = 'x-gio-form';
+/**
+ * Where the server names the target of a redirect answering a submission:
+ * a 204 instead of a 3xx, which fetch would follow on its own - off-site,
+ * into a CORS failure after the action had already run.
+ */
+const FORM_REDIRECT_HEADER = 'x-gio-redirect';
+
 /**
  * How a form submission ended (GioForm turns it into its result and
  * callbacks). `status`, `url` (path + query) and `redirected` describe the
- * final response, after any redirect fetch followed.
+ * final response, after any redirect.
  */
 export type FormSubmitOutcome =
   /** A GioJS page - the action's re-render, or where its redirect led - is on screen. */
   | { kind: 'shown'; status: number; url: string; redirected: boolean; actionData: unknown }
   /** Not a GioJS page and not a redirect: nothing was rendered. */
   | { kind: 'response'; status: number; url: string; redirected: boolean; response: Response }
-  /** A redirect led somewhere the router cannot render: the browser is loading it. */
-  | { kind: 'loading'; status: number; url: string; redirected: boolean }
+  /**
+   * A redirect led somewhere the router cannot render - another site, a
+   * file, a page it could not fetch - and the browser is loading it. When
+   * the browser goes there without the router seeing the answer, `status`
+   * is the submission's own (2xx) and, off-site, `url` the absolute target.
+   * `download`: the target is a file the browser saves, so this page stays.
+   */
+  | { kind: 'loading'; status: number; url: string; redirected: boolean; download: boolean }
   /** Deployment skew: the server refused the request before the action ran. */
   | { kind: 'reload' }
   /** A newer navigation took over; its page is the one shown. */
@@ -818,40 +833,114 @@ function envelopeActionData(page: ParsedPage): unknown {
   }
 }
 
+function pageRequestHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { Accept: 'text/html' };
+  const id = getDeploymentId();
+  if (id) headers['x-deployment-id'] = id;
+  return headers;
+}
+
+/**
+ * A redirect's Location resolved against the URL that answered it, or null
+ * when it is not an http(s) URL - browsers refuse to follow those too, and
+ * a javascript: target must never reach location.assign.
+ */
+function redirectTarget(location: string, base: string): URL | null {
+  let target: URL;
+  try {
+    target = new URL(location, new URL(base, window.location.href));
+  } catch {
+    return null;
+  }
+  return target.protocol === 'http:' || target.protocol === 'https:' ? target : null;
+}
+
+/**
+ * GET a same-origin redirect target, revalidating any copy in the HTTP
+ * cache: it shows what the mutation changed. Null when only the browser can
+ * load it - unreachable, redirecting on off-site (a sign-in), or answered
+ * from a newer deployment.
+ */
+async function fetchRedirectTarget(path: string): Promise<Response | null> {
+  try {
+    const res = await fetch(path, { headers: pageRequestHeaders(), cache: 'no-cache' });
+    return isHardReloadResponse(res) ? null : res;
+  } catch {
+    return null;
+  }
+}
+
+/** A file download (Content-Disposition: attachment): loading it leaves this page on screen. */
+function isAttachment(res: Response): boolean {
+  return /^\s*attachment\b/i.test(res.headers.get('content-disposition') ?? '');
+}
+
 /**
  * POST `body` to `url` (same-origin path + query) and render the answer the
  * way a navigation renders a page: through the persistent root, so state
- * outside what changed survives. fetch follows a redirect itself, so the
- * Post/Redirect/Get target arrives in the same response and is shown under
- * its own URL (a new history entry, scrolled to the top); a re-render of
- * the same URL replaces the current entry and keeps the scroll position.
- * Never rejects. Internal: GioForm's half of the router.
+ * outside what changed survives. A redirect's target (Post/Redirect/Get) -
+ * which the server names in x-gio-redirect for these requests - is fetched
+ * and shown under its own URL (a new history entry, scrolled to the top);
+ * one on another site is handed to the browser. A re-render of the same URL
+ * replaces the current entry and keeps the scroll position. Never rejects.
+ * Internal: GioForm's half of the router.
  */
 export async function submitForm(url: string, body: FormData | URLSearchParams): Promise<FormSubmitOutcome> {
   if (typeof window === 'undefined') return { kind: 'superseded' };
   ensureRouter();
   const fromPathname = pathnameOf(renderedUrl ?? currentPageUrl());
   const seq = beginNavigation();
-  const headers: Record<string, string> = { Accept: 'text/html' };
-  const id = getDeploymentId();
-  if (id) headers['x-deployment-id'] = id;
   let res: Response;
   // A mutation: no page prefetched before (or during) it may be shown after.
   invalidatePrefetchCache();
   try {
-    res = await fetch(url, { method: 'POST', body, headers });
+    res = await fetch(url, {
+      method: 'POST',
+      body,
+      headers: { ...pageRequestHeaders(), [FORM_SUBMISSION_HEADER]: '1' },
+      // A redirect fetch does follow itself (a 307/308, one from the
+      // server's own rules) must not be answered from the HTTP cache either.
+      cache: 'no-cache',
+    });
   } catch (error) {
     return { kind: 'failed', error };
   } finally {
     invalidatePrefetchCache();
   }
   if (isHardReloadResponse(res)) return { kind: 'reload' };
-  const { status, redirected } = res;
+  let { status, redirected } = res;
+  let requested = url;
+  let hash = '';
+  const location = res.headers.get(FORM_REDIRECT_HEADER);
+  if (location !== null) {
+    // The action ran and redirected: from here on, only GETs.
+    const target = redirectTarget(location, res.url || url);
+    if (target === null) {
+      const error = new TypeError(`GioForm: refusing to follow a redirect to ${JSON.stringify(location)}`);
+      return { kind: 'failed', error };
+    }
+    if (!isCurrentNavigation(seq)) return { kind: 'superseded' };
+    redirected = true;
+    if (target.origin !== window.location.origin) {
+      hardNavigate(target.href, false);
+      return { kind: 'loading', status, url: target.href, redirected, download: false };
+    }
+    requested = target.pathname + target.search;
+    hash = target.hash;
+    const followed = await fetchRedirectTarget(requested);
+    if (followed === null) {
+      if (!isCurrentNavigation(seq)) return { kind: 'superseded' };
+      hardNavigate(requested + hash, false);
+      return { kind: 'loading', status, url: requested, redirected, download: false };
+    }
+    res = followed;
+    status = res.status;
+  }
   // Callbacks get the untouched response when it is not a page.
   const raw = res.clone();
   let result: PageResult;
   try {
-    result = await judgePage(res, url);
+    result = await judgePage(res, requested);
   } catch (error) {
     return { kind: 'failed', error };
   }
@@ -862,22 +951,23 @@ export async function submitForm(url: string, body: FormData | URLSearchParams):
     if (!redirected) return { kind: 'response', status, url: result.url, redirected, response: raw };
     // The action already ran and sent the browser on: loading the target is
     // the GET the browser would make anyway.
-    hardNavigate(result.url, false);
-    return { kind: 'loading', status, url: result.url, redirected };
+    hardNavigate(result.url + hash, false);
+    return { kind: 'loading', status, url: result.url, redirected, download: isAttachment(raw) };
   }
+  const shownUrl = result.url + hash;
   const mode = result.url === currentPageUrl() ? 'replace' : 'push';
   const focusedBefore = document.activeElement;
   let shown: boolean;
   try {
-    shown = await showPage(page, result.url, mode, false, seq);
+    shown = await showPage(page, shownUrl, mode, false, seq);
   } catch {
     if (!isCurrentNavigation(seq)) return { kind: 'superseded' };
-    hardNavigate(result.url, mode === 'replace');
-    return { kind: 'loading', status, url: result.url, redirected };
+    hardNavigate(shownUrl, mode === 'replace');
+    return { kind: 'loading', status, url: result.url, redirected, download: false };
   }
   if (!shown) return { kind: 'superseded' };
   const newPage = window.location.pathname !== fromPathname;
-  if (newPage) scrollAfterPush('');
+  if (newPage || hash !== '') scrollAfterPush(hash);
   focusAndAnnounce(focusedBefore, { newPage, keepView: !newPage });
   return { kind: 'shown', status, url: result.url, redirected, actionData: envelopeActionData(page) };
 }

@@ -7,10 +7,13 @@
  * submit posts the fields (submitter included, multipart when asked) and is
  * pending until the answer is shown - a redirect's target pushed under its
  * own URL, an action's re-render (422 + actionData) swapped in place. A
- * second submit while pending is ignored. Answers the router cannot render
- * fall back to a native submission, except a 2xx (never sent twice) and a
- * network failure (reported, form kept). Submissions it must not touch
- * (GET, other targets, other origins, reloadDocument) stay native.
+ * second submit while pending is ignored. Of the answers the router cannot
+ * render, only refusals that come before the action (413, 429, deployment
+ * skew) are submitted again natively; a 5xx, an action's own error
+ * Response, a 2xx and a network failure are reported and never re-sent. A
+ * redirect named in x-gio-redirect is fetched (same origin) or handed to
+ * the browser (another site). Submissions it must not touch (GET, other
+ * targets, other origins, reloadDocument) stay native.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React, { act } from 'react';
@@ -100,6 +103,13 @@ function click(selector: string): void {
 }
 
 const mainText = (): string | null => document.querySelector('#__gio main')?.textContent ?? null;
+
+/** A pageshow / pagehide event; `persisted`: restored from the back/forward cache. */
+function pageTransition(type: string, persisted: boolean): Event {
+  const event = new Event(type);
+  Object.defineProperty(event, 'persisted', { value: persisted });
+  return event;
+}
 
 /**
  * A client runtime keeping everything in #__gio but its <main> - where the
@@ -309,6 +319,54 @@ describe('GioForm submission', () => {
     expect(mainText()).toBe('form page');
   });
 
+  it('resubmits natively on a 429 too: the rate limiter refused it unread', async () => {
+    serve(() => new Response('429 Too Many Requests', { status: 429, headers: { 'content-type': 'text/plain' } }));
+    render(
+      <mod.GioForm>
+        <button type="submit">Go</button>
+      </mod.GioForm>,
+    );
+    click('button');
+    await settle();
+    expect(nativeSubmits).toHaveLength(1);
+  });
+
+  it('never re-sends an error the action may have caused: a 500, a 504, a Response of its own', async () => {
+    const answers: Array<() => Response> = [
+      // The action threw after writing (no error.* page renders it).
+      () => new Response('500 Internal Server Error', { status: 500, headers: { 'content-type': 'text/plain' } }),
+      // The IPC deadline passed while the action keeps running.
+      () => new Response('504 Gateway Timeout', { status: 504, headers: { 'content-type': 'text/plain' } }),
+      () => new Response('<html><body>Bad Gateway</body></html>', { status: 502, headers: { 'content-type': 'text/html' } }),
+      // The action answered with an error Response itself.
+      () => Response.json({ error: 'conflict' }, { status: 409 }),
+    ];
+    for (const answer of answers) {
+      const calls = serve(answer);
+      const onError = vi.fn();
+      const form = render(
+        <mod.GioForm onError={onError}>
+          <input name="note" />
+          <button type="submit">Go</button>
+          <Status />
+        </mod.GioForm>,
+      );
+      const input = form.querySelector('input');
+      if (input === null) throw new Error('no input');
+      input.value = 'typed';
+      click('button');
+      await settle();
+      const status = answer().status;
+      expect(calls, String(status)).toHaveLength(1);
+      expect(nativeSubmits, String(status)).toEqual([]);
+      expect(assigned, String(status)).toEqual([]);
+      expect(onError).toHaveBeenCalledWith(expect.objectContaining({ ok: false, status, response: expect.any(Response) }));
+      expect(statusText()).toBe(`idle:${status}:null`);
+      expect(input.value).toBe('typed');
+      expect(mainText()).toBe('form page');
+    }
+  });
+
   it('never re-sends a 2xx answer that is not a page: onSuccess gets the response', async () => {
     serve(() => Response.json({ id: 7 }, { status: 201 }));
     const onSuccess = vi.fn();
@@ -376,6 +434,53 @@ describe('GioForm submission', () => {
     expect(nativeSubmits).toEqual([]);
     // The page is going away: it stays pending, so nothing is sent twice.
     expect(statusText()).toBe('pending:none');
+  });
+
+  it('stops being pending when the page comes back from the back/forward cache', async () => {
+    serve(() => {
+      const res = new Response('{}', { headers: { 'content-type': 'application/json' } });
+      Object.defineProperty(res, 'url', { value: new URL('/api/done', window.location.href).href });
+      Object.defineProperty(res, 'redirected', { value: true });
+      return res;
+    });
+    render(
+      <mod.GioForm>
+        <button type="submit">Go</button>
+        <Status />
+      </mod.GioForm>,
+    );
+    click('button');
+    await settle();
+    expect(statusText()).toBe('pending:none');
+    // A page shown fresh (not restored) changes nothing.
+    act(() => { window.dispatchEvent(pageTransition('pageshow', false)); });
+    expect(statusText()).toBe('pending:none');
+    act(() => { window.dispatchEvent(pageTransition('pageshow', true)); });
+    expect(statusText()).toBe('idle:200:null');
+    expect(container.querySelector('form')?.hasAttribute('aria-busy')).toBe(false);
+  });
+
+  it('stops being pending after a redirect to a download, which leaves the page on screen', async () => {
+    serve(() => {
+      const res = new Response('%PDF-1.7', {
+        headers: { 'content-type': 'application/pdf', 'content-disposition': 'attachment; filename="r.pdf"' },
+      });
+      Object.defineProperty(res, 'url', { value: new URL('/reports/1.pdf', window.location.href).href });
+      Object.defineProperty(res, 'redirected', { value: true });
+      return res;
+    });
+    const onSuccess = vi.fn();
+    render(
+      <mod.GioForm onSuccess={onSuccess}>
+        <button type="submit">Go</button>
+        <Status />
+      </mod.GioForm>,
+    );
+    click('button');
+    await settle();
+    expect(assigned).toEqual(['/reports/1.pdf']);
+    expect(statusText()).toBe('idle:200:null');
+    expect(onSuccess).toHaveBeenCalledWith(expect.objectContaining({ ok: true, url: '/reports/1.pdf' }));
   });
 
   it('sends multipart FormData (files included) when the enctype asks for it', async () => {
@@ -472,6 +577,118 @@ describe('GioForm submission', () => {
     click('button');
     await settle();
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('GioForm redirects named in x-gio-redirect', () => {
+  /** A 204 naming the target, as the server answers a GioForm submission's redirect. */
+  const redirectAnswer = (location: string): Response =>
+    new Response(null, { status: 204, headers: { 'x-gio-redirect': location } });
+
+  /** fetch answering the POST with `post` and each GET with `get(url)`. */
+  function serveRoutes(post: () => Response, get: (url: string) => Response | Promise<Response>): FetchCall[] {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+        calls.push({ url: String(input), init });
+        return init.method === 'POST' ? post() : get(String(input));
+      }),
+    );
+    return calls;
+  }
+
+  const headerOf = (call: FetchCall | undefined, name: string): string | undefined =>
+    (call?.init.headers as Record<string, string> | undefined)?.[name];
+
+  it('marks the submission, and hands an off-site target (checkout, sign-in) to the browser', async () => {
+    const calls = serveRoutes(() => redirectAnswer('https://checkout.example/c/cs_1'), () => {
+      throw new Error('an off-site target is never fetched');
+    });
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+    render(
+      <mod.GioForm onSuccess={onSuccess} onError={onError}>
+        <button type="submit">Pay</button>
+        <Status />
+      </mod.GioForm>,
+    );
+    click('button');
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(headerOf(calls[0], 'x-gio-form')).toBe('1');
+    expect(calls[0]?.init.cache).toBe('no-cache');
+    expect(assigned).toEqual(['https://checkout.example/c/cs_1']);
+    expect(nativeSubmits).toEqual([]);
+    expect(onError).not.toHaveBeenCalled();
+    expect(onSuccess).toHaveBeenCalledWith(
+      expect.objectContaining({ ok: true, redirected: true, url: 'https://checkout.example/c/cs_1' }),
+    );
+    // Leaving for another site: nothing more may be sent from here.
+    expect(statusText()).toBe('pending:none');
+  });
+
+  it('fetches a same-origin target fresh and shows it under its own URL', async () => {
+    const calls = serveRoutes(
+      () => redirectAnswer('/thanks?id=7#receipt'),
+      () => pageResponse({ main: 'thanks page', title: 'Thanks' }),
+    );
+    const onSuccess = vi.fn();
+    render(
+      <mod.GioForm onSuccess={onSuccess}>
+        <button type="submit">Go</button>
+        <Status />
+      </mod.GioForm>,
+    );
+    click('button');
+    await settle();
+    expect(calls.map(c => `${c.init.method ?? 'GET'} ${c.url}`)).toEqual(['POST /contact', 'GET /thanks?id=7']);
+    // The page the mutation changed is revalidated, never served stale from the HTTP cache.
+    expect(calls[1]?.init.cache).toBe('no-cache');
+    expect(headerOf(calls[1], 'x-gio-form')).toBeUndefined();
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe('/thanks?id=7#receipt');
+    expect(mainText()).toBe('thanks page');
+    expect(onSuccess).toHaveBeenCalledWith(
+      expect.objectContaining({ ok: true, status: 200, redirected: true, url: '/thanks?id=7' }),
+    );
+    expect(assigned).toEqual([]);
+    expect(nativeSubmits).toEqual([]);
+  });
+
+  it('lets the browser load a target it cannot fetch (one redirecting on off-site) - a GET, never the POST again', async () => {
+    const calls = serveRoutes(
+      () => redirectAnswer('/login/start'),
+      () => {
+        throw new TypeError('Failed to fetch');
+      },
+    );
+    render(
+      <mod.GioForm>
+        <button type="submit">Go</button>
+      </mod.GioForm>,
+    );
+    click('button');
+    await settle();
+    expect(calls).toHaveLength(2);
+    expect(assigned).toEqual(['/login/start']);
+    expect(nativeSubmits).toEqual([]);
+  });
+
+  it('refuses a target that is not an http(s) URL', async () => {
+    serveRoutes(() => redirectAnswer('javascript:alert(1)'), () => pageResponse({ main: 'x' }));
+    const onError = vi.fn();
+    render(
+      <mod.GioForm onError={onError}>
+        <button type="submit">Go</button>
+        <Status />
+      </mod.GioForm>,
+    );
+    click('button');
+    await settle();
+    expect(assigned).toEqual([]);
+    expect(nativeSubmits).toEqual([]);
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ ok: false, status: 0, error: expect.any(TypeError) }));
+    expect(statusText()).toBe('idle:0:null');
   });
 });
 

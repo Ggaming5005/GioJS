@@ -432,6 +432,44 @@ describe('page action dispatch', () => {
     expect('error' in res && res.error).toBe(true);
   });
 
+  it('keeps the headers of an action whose re-render becomes a redirect, a 404 or an error page', async () => {
+    const action = () => ({ data: { saved: true }, headers: { 'set-cookie': 'flash=1; Path=/', 'x-action': 'ran' } });
+    const redirected = await send(
+      post('/contact', 'x=1'),
+      routeWith('/contact', {
+        action,
+        getServerSideProps: async ctx => (ctx.actionData ? { redirect: { destination: '/done' } } : { props: {} }),
+      }),
+    );
+    expect(redirected.status).toBe(302);
+    expect(redirected.headers['location']).toBe('/done');
+    expect(redirected.setCookies).toEqual(['flash=1; Path=/']);
+    expect(redirected.headers['x-action']).toBe('ran');
+
+    const missing = await send(
+      post('/contact', 'x=1'),
+      routeWith('/contact', { action, getServerSideProps: async () => ({ notFound: true }) }),
+    );
+    expect(missing.status).toBe(404);
+    expect(missing.setCookies).toEqual(['flash=1; Path=/']);
+
+    const errorPage = { default: () => React.createElement('p', null, 'failed') } as unknown as PageModule;
+    const failed = await send(
+      post('/contact', 'x=1'),
+      routeWith('/contact', {
+        action,
+        getServerSideProps: async () => {
+          throw new Error('render broke');
+        },
+      }),
+      { specialPages: { error: async () => errorPage } },
+    );
+    expect(failed.status).toBe(500);
+    expect(failed.setCookies).toEqual(['flash=1; Path=/']);
+    // The page's own content-type wins over nothing the action said.
+    expect(failed.headers['content-type']).toContain('text/html');
+  });
+
   it('runs onResponse plugins on the action answer', async () => {
     const registry = new NodePluginRegistry();
     registry.register({
@@ -475,11 +513,139 @@ describe('page actions next to a route.ts', () => {
     expect(res.status).toBe(200);
     expect(printed(res).actionData).toEqual({ from: 'action' });
 
-    // Without an action, the 405 names the route.ts methods, as before.
+    // Without an action, the 405 names the page's methods and the route.ts's.
     const none = await send(post('/contact', 'x=1'), routeWith('/contact', {}), {
       handlers: handlers('/contact', { DELETE: () => null }),
     });
     expect(none.status).toBe(405);
-    expect(none.headers['allow']).toBe('DELETE');
+    expect(none.headers['allow']).toBe('GET, HEAD, DELETE');
+  });
+
+  it("answers other methods with a 405 listing both files' methods", async () => {
+    const routes = routeWith('/contact', { action: () => null });
+    const put = await send({ ...post('/contact', 'x=1'), method: 'PUT' }, routes, {
+      handlers: handlers('/contact', { DELETE: () => null }),
+    });
+    expect(put.status).toBe(405);
+    expect(put.headers['allow']).toBe('GET, HEAD, POST, DELETE');
+    // A route.ts more specific than any page keeps its own 405.
+    const api = await send({ ...post('/api/form', 'x=1'), method: 'PUT' }, new Map(), {
+      handlers: handlers('/api/form', { POST: () => null }),
+    });
+    expect(api.headers['allow']).toBe('POST');
+  });
+});
+
+describe('redirect() in getServerSideProps', () => {
+  const get = (path: string): IPCRequest => ({ ...post(path, null), method: 'GET' });
+
+  it('answers a returned redirect() like an action redirect', async () => {
+    const res = await send(
+      get('/contact'),
+      routeWith('/contact', {
+        getServerSideProps: async () => redirect('/login', { headers: { 'set-cookie': 'next=/contact; Path=/' } }),
+      }),
+    );
+    expect(res.status).toBe(303);
+    expect(res.headers['location']).toBe('/login');
+    expect(res.setCookies).toEqual(['next=/contact; Path=/']);
+    expect(res.body).toBe('');
+    expect(res.cacheable).toBe(false);
+  });
+
+  it('answers a thrown redirect() - from a shared helper - instead of failing the render', async () => {
+    const requireUser = (cookies: Record<string, string>): string => {
+      if (cookies['sid'] === undefined) throw redirect('/login', 307);
+      return cookies['sid'];
+    };
+    const routes = routeWith('/contact', {
+      revalidate: 60,
+      getServerSideProps: async ctx => ({ props: { title: requireUser(ctx.cookies) } }),
+    });
+    const res = await send(get('/contact'), routes);
+    expect(res.status).toBe(307);
+    expect(res.headers['location']).toBe('/login');
+    expect(res.cacheable).toBe(false);
+
+    const signedIn = get('/contact');
+    signedIn.headers['cookie'] = 'sid=ada';
+    expect(printed(await send(signedIn, routes)).title).toBe('ada');
+  });
+});
+
+describe('redirects answering a GioForm submission', () => {
+  const formPost = (path: string, body: string): IPCRequest => {
+    const req = post(path, body);
+    req.headers['x-gio-form'] = '1';
+    return req;
+  };
+
+  it('name the target in x-gio-redirect on a 204, cookies kept, instead of a 3xx fetch would follow', async () => {
+    const routes = routeWith('/checkout', {
+      action: () =>
+        redirect('https://pay.example/session/1', { headers: { 'set-cookie': 'order=1; Path=/', 'x-order': '1' } }),
+    });
+    const res = await send(formPost('/checkout', 'x=1'), routes);
+    expect(res.status).toBe(204);
+    expect(res.headers['x-gio-redirect']).toBe('https://pay.example/session/1');
+    expect(res.headers['location']).toBeUndefined();
+    expect(res.headers['x-order']).toBe('1');
+    expect(res.setCookies).toEqual(['order=1; Path=/']);
+    expect(res.body).toBe('');
+    expect(res.cacheable).toBe(false);
+
+    // A plain form post (no JavaScript) gets the real 303.
+    const plain = await send(post('/checkout', 'x=1'), routes);
+    expect(plain.status).toBe(303);
+    expect(plain.headers['location']).toBe('https://pay.example/session/1');
+  });
+
+  it('covers redirect Responses, getServerSideProps redirects and route.ts handlers too', async () => {
+    const asResponse = await send(
+      formPost('/contact', 'x=1'),
+      routeWith('/contact', { action: () => Response.redirect('https://idp.example/authorize', 302) }),
+    );
+    expect(asResponse.status).toBe(204);
+    expect(asResponse.headers['x-gio-redirect']).toBe('https://idp.example/authorize');
+    expect(asResponse.bodyBase64).toBeUndefined();
+
+    const fromGssp = await send(
+      formPost('/contact', 'x=1'),
+      routeWith('/contact', {
+        action: () => ({ saved: true }),
+        getServerSideProps: async () => ({ redirect: { destination: '/done', permanent: false } }),
+      }),
+    );
+    expect(fromGssp.status).toBe(204);
+    expect(fromGssp.headers['x-gio-redirect']).toBe('/done');
+
+    const handlerRoutes = new Map<string, RouteModule>();
+    const fromHandler = await send(formPost('/api/subscribe', 'x=1'), handlerRoutes, {
+      handlers: new Map([
+        [
+          '/api/subscribe',
+          {
+            filePath: '/fake/route.ts',
+            urlPattern: '/api/subscribe',
+            methods: new Map<string, RouteHandlerFn>([['POST', () => Response.redirect('https://example.com/ok', 303)]]),
+          },
+        ],
+      ]),
+    });
+    expect(fromHandler.status).toBe(204);
+    expect(fromHandler.headers['x-gio-redirect']).toBe('https://example.com/ok');
+  });
+
+  it('leave 307/308 (they repeat the POST) and every other answer alone', async () => {
+    const repost = await send(formPost('/contact', 'x=1'), routeWith('/contact', { action: () => redirect('/v2', 307) }));
+    expect(repost.status).toBe(307);
+    expect(repost.headers['location']).toBe('/v2');
+
+    const invalid = await send(
+      formPost('/contact', 'x=1'),
+      routeWith('/contact', { action: () => ({ status: 422, data: { error: 'bad' } }) }),
+    );
+    expect(invalid.status).toBe(422);
+    expect(printed(invalid).actionData).toEqual({ error: 'bad' });
   });
 });

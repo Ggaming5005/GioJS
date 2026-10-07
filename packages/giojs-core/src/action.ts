@@ -20,7 +20,8 @@
  * non-GET response).
  *
  * redirect() and notFound() may also be thrown, from the action or anything
- * it calls.
+ * it calls. getServerSideProps may return or throw redirect() too, so one
+ * guard (`requireUser()`) serves pages and actions alike.
  */
 import type { GioRequest } from './context.ts';
 import type { GsspResponseHeaders } from './router.ts';
@@ -48,11 +49,12 @@ export interface RedirectInit {
 }
 
 /**
- * Answer the action with a redirect: `return redirect('/thanks')`. The
- * default 303 makes the browser GET the target, so a reload there never
- * repeats the POST. Pass `{ status, headers }` (or just a status) for
- * anything else; a URL built from user input must be checked first - an
- * unvalidated `?next=` parameter is an open redirect.
+ * Answer the action (or getServerSideProps) with a redirect:
+ * `return redirect('/thanks')`. The default 303 makes the browser GET the
+ * target, so a reload there never repeats the POST. Pass
+ * `{ status, headers }` (or just a status) for anything else; a URL built
+ * from user input must be checked first - an unvalidated `?next=`
+ * parameter is an open redirect.
  */
 export function redirect(url: string, init: number | RedirectInit = {}): ActionRedirect {
   const { status = 303, headers } = typeof init === 'number' ? { status: init } : init;
