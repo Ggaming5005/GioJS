@@ -163,12 +163,25 @@ test('the server scaffold boots and serves the starter with self-hosted fonts', 
     const html = await home.text();
     assert.match(html, /Welcome to <em>your app<\/em>/);
     assert.match(html, /<title>server-app<\/title>/);
-    assert.match(html, /<link rel="preload" href="\/_gio\/fonts\/fraunces-400-normal\.woff2" as="font"/);
+    // Font files are cached as immutable, so a public/fonts/ file is served
+    // under a name with its content hash: an edited font gets a new URL.
+    const preloads = [...html.matchAll(/<link rel="preload" href="(\/_gio\/fonts\/[^"]+)" as="font"/g)]
+      .map(match => match[1] ?? '');
+    assert.equal(preloads.length, 4, html.slice(0, 2000));
+    for (const family of ['fraunces-400-normal', 'fraunces-400-italic', 'jetbrains-mono-400-normal', 'jetbrains-mono-600-normal']) {
+      assert.ok(preloads.some(url => new RegExp(`^/_gio/fonts/${family}-[0-9a-f]{8}\\.woff2$`).test(url)),
+        `no hashed preload for ${family}: ${preloads.join(', ')}`);
+    }
     assert.match(html, /<link rel="stylesheet" href="\/_next\/static\/css\/[^"]+\.css"/, 'app/globals.css is linked');
 
-    const font = await fetch(`${base}/_gio/fonts/jetbrains-mono-600-normal.woff2`);
-    assert.equal(font.status, 200);
-    assert.equal(Buffer.from(await font.arrayBuffer()).subarray(0, 4).toString('latin1'), 'wOF2');
+    const fontCss = await (await fetch(`${base}/_gio/fonts/fonts.css`)).text();
+    for (const url of preloads) {
+      assert.ok(fontCss.includes(`url('${url}')`), `fonts.css does not use ${url}:\n${fontCss}`);
+      const font = await fetch(`${base}${url}`);
+      assert.equal(font.status, 200, url);
+      assert.match(font.headers.get('cache-control') ?? '', /immutable/);
+      assert.equal(Buffer.from(await font.arrayBuffer()).subarray(0, 4).toString('latin1'), 'wOF2');
+    }
 
     const post = await fetch(`${base}/posts/42`);
     assert.equal(post.status, 200);

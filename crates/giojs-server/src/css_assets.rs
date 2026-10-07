@@ -91,7 +91,9 @@ pub fn css_response(asset: &CssAsset, request_headers: &HeaderMap) -> Response {
 
 /// Cache-Control for `/_gio/fonts/*`, chosen by request path so 304s carry
 /// the same policy as 200s. `fonts.css` is regenerated from gio.toml on every
-/// start; the `.woff2` files are written once and never rewritten in place.
+/// start; a `.woff2` name never gets new content (a downloaded font is
+/// written once, a local one's name carries a hash of its content - see
+/// `giojs_font::download_fonts`).
 pub fn font_cache_control(request_path: &str) -> HeaderValue {
     if request_path.ends_with(".css") {
         HeaderValue::from_static(REVALIDATE_CACHE_CONTROL)

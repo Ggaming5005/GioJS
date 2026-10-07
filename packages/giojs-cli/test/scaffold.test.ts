@@ -188,6 +188,41 @@ test('git init makes an initial commit of the scaffold', async () => {
   assert.equal(git(['status', '--porcelain'], appDir, env), '', 'everything is committed');
 });
 
+test('a --force scaffold commits only what it created, never the files already there', async () => {
+  const cwd = await newCaseDir();
+  const target = join(cwd, 'taken');
+  await mkdir(join(target, 'notes'), { recursive: true });
+  await mkdir(join(target, 'app'), { recursive: true });
+  await writeFile(join(target, '.env'), 'API_KEY=sk-secret\n');
+  await writeFile(join(target, 'notes', 'todo.txt'), 'mine\n');
+  await writeFile(join(target, 'app', 'mine.tsx'), 'export {};\n');
+  await writeFile(join(target, 'package.json'), '{"name":"mine"}\n');
+  // A stand-in package manager whose install writes a lockfile, as npm does.
+  const bin = join(cwd, 'bin');
+  await mkdir(bin);
+  await writeFile(join(bin, 'npm'), '#!/bin/sh\necho "{}" > package-lock.json\n', { mode: 0o755 });
+  const env = withIdentity();
+  const pathWithNpm = process.platform === 'win32' ? undefined : `${bin}:${process.env['PATH'] ?? ''}`;
+
+  const result = runCli(
+    ['taken', '--force', ...(pathWithNpm === undefined ? ['--no-install'] : [])],
+    { cwd, env: { ...env, ...(pathWithNpm === undefined ? {} : { PATH: pathWithNpm }) } },
+  );
+  assertOk(result);
+  assert.match(result.stdout, /Initialized a git repository with an initial commit/);
+  assert.match(result.stdout, /not in the commit: .*\.env/);
+  const files = git(['ls-files'], target, env).split('\n');
+  for (const file of ['.gitignore', 'package.json', 'app/page.tsx', 'gio.toml']) {
+    assert.ok(files.includes(file), `${file} is not committed: ${files.join(', ')}`);
+  }
+  if (pathWithNpm !== undefined) assert.ok(files.includes('package-lock.json'), 'the new lockfile is committed');
+  for (const file of ['.env', 'notes/todo.txt', 'app/mine.tsx']) {
+    assert.ok(!files.includes(file), `${file} was already there and must not be committed`);
+  }
+  const untracked = git(['status', '--porcelain', '--untracked-files=all'], target, env).split('\n').sort();
+  assert.deepEqual(untracked, ['?? .env', '?? app/mine.tsx', '?? notes/todo.txt']);
+});
+
 test('a failed initial commit (no git identity) leaves the repository and a note', async () => {
   const cwd = await newCaseDir();
   const result = runCli(['app', '--no-install'], { cwd, env: withoutIdentity() });

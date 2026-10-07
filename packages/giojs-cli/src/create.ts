@@ -76,7 +76,13 @@ async function rollback(config: ProjectConfig): Promise<boolean> {
   return config.targetState !== 'not-empty';
 }
 
-async function writeProject(config: ProjectConfig): Promise<boolean> {
+interface WrittenProject {
+  linksMonorepo: boolean;
+  /** The template files written, relative and '/'-separated. */
+  files: string[];
+}
+
+async function writeProject(config: ProjectConfig): Promise<WrittenProject> {
   // Ctrl+C while files are being written stops the copy before its next
   // file and rolls back, instead of leaving a project that looks complete
   // but is missing files.
@@ -85,10 +91,10 @@ async function writeProject(config: ProjectConfig): Promise<boolean> {
   process.once('SIGINT', onSigint);
   try {
     const typescript = config.language === 'ts';
-    await copyTemplate(config.template, config.targetDir, config.packageName, controller.signal);
+    const files = await copyTemplate(config.template, config.targetDir, config.packageName, controller.signal);
     const linksMonorepo = await patchPackageJson(config.targetDir, config.mode, typescript);
     if (config.mode === 'static') await applyStaticVariant(config.targetDir, typescript);
-    return linksMonorepo;
+    return { linksMonorepo, files };
   } catch (err) {
     const removed = await rollback(config);
     if (!controller.signal.aborted) throw err;
@@ -111,12 +117,21 @@ function install(dir: string, pm: PackageManager): boolean {
   return false;
 }
 
-function reportGit(dir: string): void {
-  const result = initGitRepository(dir, 'Initial commit from create-giojs');
+function reportGit(dir: string, include?: (path: string) => boolean): void {
+  const result = initGitRepository(dir, 'Initial commit from create-giojs', include);
   switch (result.status) {
-    case 'committed':
+    case 'committed': {
       console.log('Initialized a git repository with an initial commit.');
+      const { leftOut } = result;
+      if (leftOut.length > 0) {
+        const shown = leftOut.slice(0, 5).join(', ') + (leftOut.length > 5 ? `, ... (${leftOut.length} files)` : '');
+        console.log(
+          `Note: files that were already in the directory are not in the commit: ${shown}\n` +
+            '  Review them before you commit them (a .env may hold secrets).',
+        );
+      }
       break;
+    }
     case 'unavailable':
       console.log('Note: git was not found, so no repository was created.');
       break;
@@ -151,12 +166,22 @@ export async function create(args: CliArgs): Promise<void> {
   const modeLabel = config.mode === 'static' ? 'static site' : 'server app';
   const displayDir = relative(process.cwd(), config.targetDir) || '.';
   console.log(`\nCreating ${config.packageName} in ${config.targetDir} - ${langLabel}, ${modeLabel}...`);
-  const linksMonorepo = await writeProject(config);
+  // A --force run's directory already holds files that are not ours to commit.
+  const preexisting = config.git && config.targetState === 'not-empty'
+    ? new Set(await readdir(config.targetDir))
+    : undefined;
+  const { linksMonorepo, files } = await writeProject(config);
   console.log('Template copied.');
 
   const installed = config.installDeps && install(config.targetDir, config.packageManager);
-  // After the install, so the initial commit includes the lockfile.
-  if (config.git) reportGit(config.targetDir);
+  // After the install, so the initial commit includes the lockfile. Over
+  // existing files it holds only what this run created: the template's
+  // files and anything outside the entries that were already there.
+  const written = new Set(files);
+  const include = preexisting === undefined
+    ? undefined
+    : (path: string): boolean => written.has(path) || !preexisting.has(path.split('/')[0] ?? path);
+  if (config.git) reportGit(config.targetDir, include);
 
   const pm = config.packageManager;
   const steps = [

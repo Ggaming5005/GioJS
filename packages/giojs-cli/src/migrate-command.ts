@@ -70,6 +70,8 @@ export function parseMigrateArgs(argv: string[], cwd = process.cwd()): MigrateAr
   let dirSet = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
+    // The npm-style separator, which pnpm, yarn and bun pass on.
+    if (arg === '--') continue;
     if (arg === '--dry-run' || arg === '-n') args.dryRun = true;
     else if (arg === '--yes' || arg === '-y') args.yes = true;
     else if (arg === '--help' || arg === '-h') args.help = true;

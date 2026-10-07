@@ -35,7 +35,7 @@ npm create giojs@latest my-app -- --ts --server
 #   -h, --help / -v, --version
 ```
 
-Without a terminal (CI, piped input) nothing is asked: unanswered options take their defaults. A non-empty target directory is refused unless `--force`; unknown flags are an error with a did-you-mean hint; Ctrl+C at a prompt exits without writing anything.
+Without a terminal (CI, piped input) nothing is asked: unanswered options take their defaults. A non-empty target directory is refused unless `--force` (whose initial commit then holds only the files the scaffold created - what was already there stays untracked); unknown flags are an error with a did-you-mean hint; Ctrl+C at a prompt exits without writing anything.
 
 ## Migrating from Next.js
 
