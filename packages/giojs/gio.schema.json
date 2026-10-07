@@ -597,9 +597,8 @@
           "default": true
         },
         "ip_allowlist": {
-          "description": "Only these client IPs or CIDR blocks may scrape (after\n`trusted_proxies` resolution).",
+          "description": "Only these client IPs or CIDR blocks may scrape (after\n`trusted_proxies` resolution). A malformed entry fails startup.",
           "type": "array",
-          "default": [],
           "items": {
             "type": "string"
           }

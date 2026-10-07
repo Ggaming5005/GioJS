@@ -14,6 +14,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildManifestPath,
+  clientBuildHash,
+  deploymentBuildHash,
   loadClientBuild,
   readBuildManifest,
   reuseBuildRequested,
@@ -187,5 +189,57 @@ describe('loadClientBuild', () => {
     expect(loaded).toEqual(sampleBuild());
     const unstarted = await loadClientBuild({ projectRoot, reuse: false, shared: false, buildId: undefined, build });
     expect(unstarted).toEqual(sampleBuild());
+  });
+});
+
+describe('clientBuildHash', () => {
+  it('is the same for the same build, whatever the discovery order', () => {
+    const build = sampleBuild();
+    const reordered: ClientBuild = {
+      clientScripts: new Map([...build.clientScripts].reverse()),
+      stylesheets: build.stylesheets,
+    };
+    expect(clientBuildHash(build)).toMatch(/^[0-9a-f]{64}$/);
+    expect(clientBuildHash(reordered)).toBe(clientBuildHash(build));
+  });
+
+  it('changes with any chunk or stylesheet the build links', () => {
+    const base = clientBuildHash(sampleBuild());
+    const newCss = sampleBuild();
+    newCss.stylesheets.routes.set('/', ['/_next/static/css/root-DDD.css']);
+    expect(clientBuildHash(newCss)).not.toBe(base);
+    const newChunk = sampleBuild();
+    newChunk.clientScripts.set('/', '/_next/static/chunks/route-index-EEE.js');
+    expect(clientBuildHash(newChunk)).not.toBe(base);
+    const newSegment = sampleBuild();
+    newSegment.stylesheets.segmentPages.set('error:', ['/_next/static/css/root-CCC.css']);
+    expect(clientBuildHash(newSegment)).not.toBe(base);
+  });
+
+  it('leaves out the per-process build id (restarts of the same code agree)', async () => {
+    await writeBuildManifest(projectRoot, sampleBuild(), 'run-1');
+    const first = await readBuildManifest(projectRoot, 'run-1');
+    await writeBuildManifest(projectRoot, sampleBuild(), 'run-2');
+    const second = await readBuildManifest(projectRoot, 'run-2');
+    if (!('build' in first) || !('build' in second)) throw new Error('manifest unreadable');
+    expect(clientBuildHash(second.build)).toBe(clientBuildHash(first.build));
+  });
+});
+
+describe('deploymentBuildHash', () => {
+  it('is the client build hash when no server sources were hashed', () => {
+    expect(deploymentBuildHash(sampleBuild())).toBe(clientBuildHash(sampleBuild()));
+    expect(deploymentBuildHash(sampleBuild(), '')).toBe(clientBuildHash(sampleBuild()));
+  });
+
+  it('changes with the server sources even when the client build does not', () => {
+    const a = deploymentBuildHash(sampleBuild(), 'server-a');
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(a).not.toBe(clientBuildHash(sampleBuild()));
+    expect(deploymentBuildHash(sampleBuild(), 'server-a')).toBe(a);
+    expect(deploymentBuildHash(sampleBuild(), 'server-b')).not.toBe(a);
+    const newChunk = sampleBuild();
+    newChunk.clientScripts.set('/', '/_next/static/chunks/route-index-EEE.js');
+    expect(deploymentBuildHash(newChunk, 'server-a')).not.toBe(a);
   });
 });

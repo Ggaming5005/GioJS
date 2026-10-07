@@ -23,8 +23,10 @@ const PLACEHOLDER_PATTERN = /^[0-9a-f]{32}$/;
  * The server replaces it in the headers and the body of every dynamic
  * response, whatever the content type; a response that sets its own
  * Content-Encoding cannot be checked and is refused (500) while nonces are
- * on. The placeholder rotates with each deployment - delete
- * `<cache dir>/meta/csp-nonce-placeholder-*` and restart to rotate it sooner.
+ * on. The placeholder rotates with a new GIO_DEPLOYMENT_ID, a new standalone
+ * build or a change to the gio.toml settings pages render with (not with a
+ * code-only redeploy) - delete `<cache dir>/meta/csp-nonce-placeholder-*` and
+ * restart to rotate it.
  * Read per call (cheap), so tests and static export see the current
  * environment.
  */

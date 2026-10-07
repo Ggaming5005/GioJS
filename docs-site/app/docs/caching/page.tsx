@@ -20,7 +20,7 @@ export const revalidate = false;
 // (omit the export)`} />
       <h2>How it works</h2>
       <p>Cached pages are served from memory in microseconds. When a page is stale, GioJS serves the stale copy immediately and revalidates in the background - visitors never wait.</p>
-      <div className="callout">Cache keys are deployment-ID aware, so a redeploy automatically invalidates stale entries.</div>
+      <div className="callout">Cache keys are deployment-ID aware, and the derived ID changes with the app&apos;s client and server code, so a redeploy of changed code automatically invalidates stale entries. Data read at runtime (files, a database, <code>.env</code> values) is not part of the ID: purge after changing it. See <a href="/docs/caching-layers">Caching layers</a>.</div>
 
       <h2 id="on-demand-revalidation">On-demand revalidation</h2>
       <p>

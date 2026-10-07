@@ -93,8 +93,8 @@ impl FromStr for IpNet {
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         let invalid = || {
             format!(
-                "invalid trusted_proxies entry {raw:?}: expected an IP address or CIDR block \
-                 such as \"10.0.0.1\", \"10.0.0.0/8\" or \"fd00::/8\""
+                "{raw:?}: expected an IP address or CIDR block such as \"10.0.0.1\", \
+                 \"10.0.0.0/8\" or \"fd00::/8\""
             )
         };
         let (addr, prefix) = match raw.trim().split_once('/') {
@@ -156,13 +156,42 @@ impl TrustedProxies {
 
 impl<'de> Deserialize<'de> for TrustedProxies {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = Vec::<String>::deserialize(deserializer)?;
-        raw.iter()
-            .map(|entry| entry.parse::<IpNet>())
-            .collect::<Result<Vec<_>, _>>()
-            .map(Self)
-            .map_err(serde::de::Error::custom)
+        deserialize_ip_nets(deserializer, "trusted_proxies").map(Self)
     }
+}
+
+/// `[metrics] ip_allowlist`, parsed at load time like `TrustedProxies`: a
+/// malformed entry is a configuration error, never an entry that silently
+/// matches nobody (which would lock every scraper out with a 403).
+#[derive(Debug, Clone, Default)]
+pub struct IpAllowlist(Vec<IpNet>);
+
+impl IpAllowlist {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        self.0.iter().any(|net| net.contains(ip))
+    }
+}
+
+impl<'de> Deserialize<'de> for IpAllowlist {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_ip_nets(deserializer, "ip_allowlist").map(Self)
+    }
+}
+
+/// A list of IPs or CIDR blocks; the error names the setting and the entry.
+fn deserialize_ip_nets<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    setting: &str,
+) -> Result<Vec<IpNet>, D::Error> {
+    Vec::<String>::deserialize(deserializer)?
+        .iter()
+        .map(|entry| entry.parse::<IpNet>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| serde::de::Error::custom(format!("invalid {setting} entry {error}")))
 }
 
 /// `[server] proxy_headers`: which forwarding header family a trusted proxy
@@ -770,7 +799,24 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(err.contains("invalid trusted_proxies entry"), "{err}");
+        assert!(err.contains("invalid trusted_proxies entry \"10.0.0.0/40\""), "{err}");
+    }
+
+    #[test]
+    fn metrics_ip_allowlist_deserializes_strictly() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            ip_allowlist: IpAllowlist,
+        }
+        let ok: Wrapper = toml::from_str(r#"ip_allowlist = ["10.0.0.0/8", "::1"]"#).unwrap();
+        assert!(ok.ip_allowlist.contains("10.1.2.3".parse().unwrap()));
+        assert!(ok.ip_allowlist.contains("::1".parse().unwrap()));
+        assert!(!ok.ip_allowlist.contains("192.0.2.1".parse().unwrap()));
+        let err = toml::from_str::<Wrapper>(r#"ip_allowlist = ["10.0.0.0/8", "10.0.0.0/33"]"#)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("invalid ip_allowlist entry \"10.0.0.0/33\""), "{err}");
     }
 
     // ── X-Forwarded-For ───────────────────────────────────────────────────────

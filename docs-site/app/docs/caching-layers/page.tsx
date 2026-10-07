@@ -37,11 +37,21 @@ disk_max_bytes = 536870912          # L2 cap; 0 = unbounded`} />
       </p>
       <p>
         Persisted entries survive a restart only while the deployment ID stays the same. The
-        derived ID covers the build and the gio.toml settings pages render with
-        (<code>[images]</code> decides every <code>GioImage</code> srcset), so changing
-        those settings starts with an empty cache instead of serving pages built for the
-        old ones. A pinned <code>GIO_DEPLOYMENT_ID</code> is used as given: change it
-        whenever you deploy a gio.toml change.
+        derived ID covers the client build the server produces at startup (every chunk and
+        stylesheet name is a content hash) and the app&apos;s server-side sources: every file
+        under <code>app/</code> - the root layout, <code>metadata</code> and{' '}
+        <code>revalidate</code> exports, <code>getServerSideProps</code>, route handlers -
+        plus <code>middleware.ts</code>, <code>gio.config.ts</code>, the project modules they
+        import, the tsconfig and the lockfile. So a restart after a code or CSS change starts
+        with an empty cache instead of serving pages the previous code rendered (or that link
+        its deleted files), and a restart of the same code keeps the cache. Data your pages
+        read at runtime (files, a database, <code>.env</code> values) is not part of the ID:
+        after changing it, purge with <code>revalidatePath()</code> or{' '}
+        <code>POST /_gio/revalidate</code>. It also covers the
+        gio.toml settings pages are rendered with (<code>[images]</code> decides every{' '}
+        <code>GioImage</code> srcset, plus the served <code>[[fonts]]</code> and the i18n
+        default locale), so changing those settings drops persisted pages too. A pinned{' '}
+        <code>GIO_DEPLOYMENT_ID</code> is used as given: change it with every deploy.
       </p>
       <h2>Observing the cache: X-Gio-Cache</h2>
       <p>

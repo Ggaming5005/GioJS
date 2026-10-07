@@ -37,7 +37,9 @@ first.
   never did anything are rejected with what to do instead: `[cache] memory_mb`
   (use `memory_max_entries`), `[cache.redis]` (no Redis backend yet),
   `[css] engine` and `[prefetch] strategy` (set per `<GioLink prefetch>`).
-  Tables for other tools must be named `[x-...]`.
+  Tables for other tools must be named `[x-...]`. A malformed
+  `[metrics] ip_allowlist` entry stops startup like a malformed
+  `trusted_proxies` one (it used to match nobody, so every scrape got `403`).
   `giojs-server --check-config` lists every problem at once.
 - **`gio.config.ts` is validated at boot:** unknown keys and plugins without a
   `name` are errors.
@@ -400,9 +402,28 @@ first.
   bundle fails or imports server-only code are exported as HTML only and
   listed, pages that call `notFound()` are skipped, and failed pages are
   listed with their error reference.
-- Changing `[images]` and restarting now drops persisted pages (the derived
-  deployment ID covers it). A pinned `GIO_DEPLOYMENT_ID` should change with
-  every deploy.
+- **The derived deployment ID covers the build.** The first worker reports a
+  content hash of the client build it produced and of the app's server-side
+  sources (`buildHash` in READY), so a restart after any change to the app's
+  client code, CSS or `GIO_PUBLIC_*` values gets a new ID: pages persisted
+  by the previous build, which link chunks and stylesheets the new one
+  deleted, are dropped, and tabs still on it reload in full. Server-only code
+  counts too - the root layout, `metadata`, `revalidate` and
+  `getServerSideProps` exports, route handlers, `middleware.ts`,
+  `gio.config.ts`, the project-local modules they import (found with an
+  esbuild pass at startup, every project source file if that pass fails),
+  the tsconfig and the lockfile - so persisted pages never outlive the code
+  that rendered them, even with `revalidate = false`. A standalone build's
+  `.gio/manifest.json` records a hash of its `worker.js` for the same
+  reason. Data read at runtime (files, databases, `.env` values) is not
+  covered: purge with `revalidatePath()` or `POST /_gio/revalidate`. A
+  restart of the same code keeps the ID and the disk cache. Before, only `gio build standalone` output changed the ID, so after
+  a `gio start` deploy cached pages served for up to ten times their
+  `revalidate` with broken stylesheet and chunk links. The ID also covers
+  `[images]`, the served `[[fonts]]` files and the i18n default locale, and a
+  standalone build's `.gio/manifest.json` is now read from the project root
+  instead of the working directory. A pinned `GIO_DEPLOYMENT_ID` still wins
+  and should change with every deploy.
 
 ### Metadata and SEO
 
@@ -613,12 +634,15 @@ first.
   `gio.config.ts`.
 - **`giojs-server --check-config`** loads the `.env` files and `gio.toml`
   exactly as startup does, runs startup's validation (gio.toml, cache
-  placement, `[security]`, the revalidation token, TLS) and prints a JSON
+  placement, `[security]`, the revalidation token, local `[[fonts]]` files,
+  TLS) and prints a JSON
   report: the listen address, errors, rules startup would skip, and guard and
   proxy settings. It exits 1 when the server would refuse to start, never
   binds a port and never prints secrets, so it works as a CI step.
 - Startup reports every configuration refusal at once and checks the TLS
-  certificate and key before starting the worker. A `gio.toml` syntax error is
+  certificate and key, and fetches the `[[fonts]]`, before starting the
+  worker: a missing local font file (`[[fonts]] <family>: <path> not found`)
+  no longer fails startup only after the build. A `gio.toml` syntax error is
   reported as `file:line:column` with the reason, without quoting the line (it
   may hold a token).
 
@@ -826,6 +850,10 @@ first.
   `--out .` deleted the whole project. It now refuses the project directory,
   an ancestor of it, anything under `app/`, and a non-empty directory that is
   not a previous standalone build.
+- Every production start warned that `/_gio/metrics` is unauthenticated, even
+  with metrics off (no `[metrics]` section, or `enabled = false`), where the
+  endpoint answers `404`. The warning now appears only when metrics are
+  enabled without a `token` or `ip_allowlist`.
 
 ### Known limitations
 

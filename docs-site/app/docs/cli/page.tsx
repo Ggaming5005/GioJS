@@ -338,7 +338,9 @@ gio add --help         # the features this create-giojs offers`} />
         or starting the worker. It runs the same validation as startup:{' '}
         <code>gio.toml</code> itself, the page cache directory&apos;s placement, <code>[security]</code> (headers,
         CSP, CSRF origins and exemptions), the revalidation token (<code>[revalidate]
-        token</code> or <code>GIO_REVALIDATE_TOKEN</code>) and the TLS certificate and key.
+        token</code> or <code>GIO_REVALIDATE_TOKEN</code>), the local <code>[[fonts]]</code>{' '}
+        files (each must be a readable file under <code>public/</code>) and the TLS
+        certificate and key.
         Useful as a CI step; <code>gio doctor</code>, <code>gio dev</code> and{' '}
         <code>gio start</code> use it. Secrets are reported only as <code>unset</code> /{' '}
         <code>valid</code> / <code>invalid</code>, and a <code>gio.toml</code> syntax error is

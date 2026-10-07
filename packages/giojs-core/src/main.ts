@@ -33,6 +33,7 @@ import { discoverRouteModules } from './ws-router.ts';
 import { loadGioConfig } from './config-loader.ts';
 import { loadMiddlewareRules } from './middleware-loader.ts';
 import { writeRouteTypes } from './typed-routes.ts';
+import { serverSourceHash } from './server-source-hash.ts';
 import { installProcessGuards, startPluginRegistry, startIpcServers } from './worker-boot.ts';
 import { logger } from './logger.ts';
 import { isDevMode } from './mode.ts';
@@ -125,6 +126,12 @@ export async function runServer(): Promise<void> {
     },
   });
 
+  // Only the builder's READY sets the deployment ID (the Rust server hands
+  // it to every other worker), so only the builder hashes the server-side
+  // sources: the client build hash never sees the root layout, metadata
+  // exports, route handlers and other server-only code.
+  const sourceHash = reuseBuild ? undefined : await serverSourceHash({ projectRoot, appDir });
+
   startIpcServers({
     routes,
     layouts,
@@ -137,5 +144,6 @@ export async function runServer(): Promise<void> {
     stylesheets,
     middlewareRules,
     pluginRegistry: nodePluginRegistry,
+    ...(sourceHash !== undefined ? { serverSourceHash: sourceHash } : {}),
   });
 }

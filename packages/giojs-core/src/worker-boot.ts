@@ -41,6 +41,12 @@ export interface WorkerComponents {
   stylesheets?: StyleManifest;
   middlewareRules: WireMiddlewareRules;
   pluginRegistry: NodePluginRegistry;
+  /**
+   * Content hash of the app's server-side sources (server-source-hash.ts),
+   * computed by the builder; folded into the READY `buildHash` so a
+   * server-only change gets a new deployment ID.
+   */
+  serverSourceHash?: string;
 }
 
 /** Upper bound on plugin shutdown hooks before the worker exits anyway. */
@@ -143,6 +149,7 @@ export function startIpcServers(components: WorkerComponents): void {
       ...(components.stylesheets !== undefined ? { stylesheets: components.stylesheets } : {}),
     },
     components.middlewareRules,
+    components.serverSourceHash,
   );
   activeIpcServers.push(httpServer, createWsIpcServer(components.wsHandlers));
 }
