@@ -28,9 +28,9 @@ export default function Page(): React.JSX.Element {
       <ul>
         <li>
           <strong>A standalone folder</strong> (recommended for containers and platforms).{' '}
-          <code>gio build standalone</code> packages the server binary, your whole Node side
+          <a href="/docs/cli/build-standalone"><code>gio build standalone</code></a> packages the server binary, your whole Node side
           bundled into one <code>worker.js</code>, the prebuilt client chunks and{' '}
-          <code>public/</code> into <code>./standalone</code>. It runs with{' '}
+          <a href="/docs/file-conventions/public-folder"><code>public/</code></a> into <code>./standalone</code>. It runs with{' '}
           <code>node run.mjs</code> - no <code>node_modules</code>, no{' '}
           <code>npm install</code> on the host. See <a href="/docs/standalone">Standalone Deploys</a>.
         </li>
@@ -68,8 +68,8 @@ export default function Page(): React.JSX.Element {
         </li>
         <li>
           <strong>Behind a proxy</strong> (every platform here has one), set{' '}
-          <code>[server] trusted_proxies</code> so rate limits and <code>req.ip</code> see
-          real visitors, and <code>[security] hsts = true</code> once the site is HTTPS-only.
+          <a href="/docs/configuration/server"><code>[server] trusted_proxies</code></a> so rate limits and <code>req.ip</code> see
+          real visitors, and <a href="/docs/configuration/security"><code>[security] hsts = true</code></a> once the site is HTTPS-only.
           See <a href="#platform-proxies">Trusting the platform&apos;s proxy</a>.
         </li>
       </ul>
@@ -275,7 +275,7 @@ fly deploy`} />
       <p>
         On every platform above, connections reach GioJS from the platform&apos;s router, not
         from visitors. Until you trust that router, all visitors share one{' '}
-        <code>[[rate_limits]]</code> bucket and <code>req.ip</code> is the router&apos;s
+        <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a> bucket and <code>req.ip</code> is the router&apos;s
         address. The routers append the visitor to <code>X-Forwarded-For</code> and set{' '}
         <code>X-Forwarded-Proto</code>, but they do not all document the address they connect
         from - so look once. With <code>trusted_proxies</code> empty, <code>req.ip</code> is
@@ -421,7 +421,7 @@ sudo nginx -t && sudo systemctl reload nginx`} />
         </li>
         <li>
           GioJS already compresses responses; leave nginx&apos;s <code>gzip</code> off for
-          this location (or turn off <code>[compression]</code> in <code>gio.toml</code>{' '}
+          this location (or turn off <a href="/docs/configuration/compression"><code>[compression]</code></a> in <code>gio.toml</code>{' '}
           instead - not both).
         </li>
         <li>
@@ -452,7 +452,7 @@ example.com {
       <p>
         To run from source instead, copy the project (without <code>node_modules</code>),
         install production dependencies on the server and point the unit at the{' '}
-        <code>giojs-server</code> launcher:
+        <a href="/docs/cli/giojs-server"><code>giojs-server</code></a> launcher:
       </p>
       <CodeBlock lang="bash" code={`cd /srv/my-app && npm ci --omit=dev`} />
       <CodeBlock lang="ini" code={`ExecStart=/srv/my-app/node_modules/.bin/giojs-server`} />

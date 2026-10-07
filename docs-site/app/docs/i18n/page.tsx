@@ -93,7 +93,7 @@ detect_from = ["path", "accept-language", "cookie"]   # the default order`} />
           <tr><th>Where</th><th>How</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>getServerSideProps</code>, <code>generateMetadata</code></td><td><code>ctx.locale</code></td></tr>
+          <tr><td><a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>, <a href="/docs/page-exports/generate-metadata"><code>generateMetadata</code></a></td><td><code>ctx.locale</code></td></tr>
           <tr><td>Page actions and route handlers</td><td><code>req.locale</code></td></tr>
           <tr><td>Components (server render and browser)</td><td><a href="/docs/hooks/use-locale"><code>useLocale()</code></a> from <code>@gio.js/react</code></td></tr>
         </tbody>
@@ -163,7 +163,7 @@ export async function action(req: ActionArgs) {
 location: /de/greeting
 set-cookie: gio_locale=de; Max-Age=31536000; Path=/; HttpOnly; Secure; SameSite=Lax`} />
       <p>
-        <code>serializeCookie</code> adds <code>Secure</code> in production only, so the cookie
+        <a href="/docs/functions/cookies"><code>serializeCookie</code></a> adds <code>Secure</code> in production only, so the cookie
         also works on <code>http://localhost</code> in development.
       </p>
 

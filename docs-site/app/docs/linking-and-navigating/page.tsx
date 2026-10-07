@@ -34,7 +34,7 @@ export default function Page(): React.JSX.Element {
         layout inside a dynamic segment when that segment&apos;s value changes:{' '}
         <code>app/teams/[team]/layout.tsx</code> mounts fresh from <code>/teams/a</code> to{' '}
         <code>/teams/b</code>, and keeps its state between the pages of one team. An error a
-        folder&apos;s <code>error.tsx</code> boundary caught is cleared by the next
+        folder&apos;s <a href="/docs/file-conventions/error"><code>error.tsx</code></a> boundary caught is cleared by the next
         navigation, also one that only changes the query (<code>?q=bad</code> to{' '}
         <code>?q=good</code>).
       </p>
@@ -53,7 +53,7 @@ export default function Page(): React.JSX.Element {
         keep navigating softly.
       </p>
       <div className="callout">
-        The root layout (<code>app/layout.tsx</code>) is server-only HTML: a soft navigation
+        The root layout (<a href="/docs/file-conventions/layout"><code>app/layout.tsx</code></a>) is server-only HTML: a soft navigation
         does not re-render it, so anything it derives from the URL (an active nav link) keeps
         the value of the page that was loaded in full. Put URL-dependent UI in a component
         below it - for a layout shared by every page, use a route group such as{' '}
@@ -78,29 +78,29 @@ export default function PostPage() {
 }`} />
       <ul>
         <li>
-          <code>usePathname()</code> is the path the page was rendered for, without query or
+          <a href="/docs/hooks/use-pathname"><code>usePathname()</code></a> is the path the page was rendered for, without query or
           hash. With i18n the locale prefix is not part of it (<code>/fr/about</code> gives{' '}
-          <code>/about</code>; combine it with <code>useLocale()</code>), and after a{' '}
-          <code>[[rewrites]]</code> rule it is the rewritten path.
+          <code>/about</code>; combine it with <a href="/docs/hooks/use-locale"><code>useLocale()</code></a>), and after a{' '}
+          <a href="/docs/configuration/rewrites"><code>[[rewrites]]</code></a> rule it is the rewritten path.
         </li>
         <li>
-          <code>useParams()</code> returns the dynamic segment values. Pass a route pattern
+          <a href="/docs/hooks/use-params"><code>useParams()</code></a> returns the dynamic segment values. Pass a route pattern
           (<code>{"useParams<'/posts/:id'>()"}</code>) for typed params from the generated
           typed routes, or a shape (<code>{'useParams<{ id: string }>()'}</code>). In a{' '}
-          <code>not-found.tsx</code> or <code>error.tsx</code> page and its layouts it
+          <a href="/docs/file-conventions/not-found"><code>not-found.tsx</code></a> or <code>error.tsx</code> page and its layouts it
           returns the params of the route that was not found or failed - the ones their{' '}
-          <code>generateMetadata</code> gets - and <code>{'{}'}</code> for a URL no route
+          <a href="/docs/page-exports/generate-metadata"><code>generateMetadata</code></a> gets - and <code>{'{}'}</code> for a URL no route
           matches.
         </li>
         <li>
-          <code>useSearchParams()</code> returns the query as a read-only{' '}
+          <a href="/docs/hooks/use-search-params"><code>useSearchParams()</code></a> returns the query as a read-only{' '}
           <code>URLSearchParams</code>: <code>set</code>, <code>append</code>,{' '}
           <code>delete</code> and <code>sort</code> throw. To change the query, navigate. A
           query key that appears more than once keeps one value (the last).
         </li>
         <li>
           <code>useLocale()</code> returns the request locale, during server rendering too, so{' '}
-          <code>&lt;LocaleLink&gt;</code> renders its prefixed href in the server HTML.
+          <a href="/docs/components/locale-link"><code>&lt;LocaleLink&gt;</code></a> renders its prefixed href in the server HTML.
         </li>
       </ul>
 
@@ -126,11 +126,11 @@ function SaveButton({ id }: { id: string }) {
         </tbody>
       </table>
       <p>
-        <code>useRouter()</code> returns the same object on every render, so it is safe in
-        effect dependencies; outside components, <code>navigate(href, {'{ replace, scroll }'})</code>{' '}
+        <a href="/docs/hooks/use-router"><code>useRouter()</code></a> returns the same object on every render, so it is safe in
+        effect dependencies; outside components, <a href="/docs/functions/navigate"><code>navigate(href, {'{ replace, scroll }'})</code></a>{' '}
         does the same as <code>push</code>/<code>replace</code>. All of them return a promise
         that settles once the new page is on screen, accept any same-origin href (build typed
-        ones with <code>href()</code>), turn other origins into full page loads, refuse{' '}
+        ones with <a href="/docs/functions/href"><code>href()</code></a>), turn other origins into full page loads, refuse{' '}
         <code>javascript:</code> URLs, and do nothing during server rendering.
       </p>
 
@@ -229,7 +229,7 @@ href('/shop/*path?', { path: 'a/b' }); // '/shop/a/b'`} />
         <code>[id]</code> is <code>:id</code>, <code>[...slug]</code> is <code>*slug</code>, and{' '}
         <code>[[...slug]]</code> is <code>*slug?</code>. Param values are URL-encoded per
         segment (a catch-all value keeps its <code>/</code> separators); an empty or omitted
-        optional catch-all drops its segment entirely. Projects scaffolded by <code>create-giojs</code>{' '}
+        optional catch-all drops its segment entirely. Projects scaffolded by <a href="/docs/create-giojs"><code>create-giojs</code></a>{' '}
         already include the generated file in their tsconfig; in an existing project,
         add <code>&quot;.gio/routes.d.ts&quot;</code> to the <code>include</code> array
         of <code>tsconfig.json</code>.</p>

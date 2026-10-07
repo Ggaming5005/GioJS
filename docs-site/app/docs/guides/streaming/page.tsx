@@ -177,7 +177,7 @@ function Activity({ items }: { items: Promise<string[]> }): React.JSX.Element {
         <li>
           A page that throws, or calls <a href="/docs/functions/not-found"><code>notFound()</code></a>,
           before it suspends still answers <code>500</code> or <code>404</code> with the nearest{' '}
-          <code>error.tsx</code> or <code>not-found.tsx</code>.
+          <a href="/docs/file-conventions/error"><code>error.tsx</code></a> or <a href="/docs/file-conventions/not-found"><code>not-found.tsx</code></a>.
         </li>
         <li>
           After it has suspended the <code>200</code> is on its way. A later error is handled

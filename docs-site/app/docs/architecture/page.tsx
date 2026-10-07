@@ -31,11 +31,11 @@ export default function Page(): React.JSX.Element {
         <li><strong>Path hygiene</strong> - the path is made canonical; dot segments, a raw <code>\</code> or a broken <code>%</code> escape get <code>400</code>, and unknown <code>/_gio/</code> paths <code>404</code>.</li>
         <li><strong>Locale</strong> - with <a href="/docs/i18n"><code>[i18n]</code></a>, the locale is detected and its prefix removed from the path.</li>
         <li><strong>Deployment skew</strong> - a client navigation from another deployment gets <code>409</code> and reloads in full.</li>
-        <li><strong>Rate limits</strong> - <code>[[rate_limits]]</code> rules answer <code>429</code> past their budget.</li>
+        <li><strong>Rate limits</strong> - <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a> rules answer <code>429</code> past their budget.</li>
         <li><strong>CSRF</strong> - a cross-site <code>POST</code>, <code>PUT</code>, <code>PATCH</code> or <code>DELETE</code> gets <code>403</code>, before its body is read.</li>
-        <li><strong>Rules</strong> - guards, redirects and rewrites from <code>gio.toml</code> and <code>middleware.ts</code>.</li>
+        <li><strong>Rules</strong> - guards, redirects and rewrites from <code>gio.toml</code> and <a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a>.</li>
         <li><strong>Prefetch budget</strong> - prefetch requests past the per-client budget get <code>429</code>.</li>
-        <li><strong>Routing</strong> - built-in <code>/_gio</code> endpoints, build assets, fonts and <code>public/</code> files are served from Rust; a page or route handler goes to the page cache, and only on a miss (or for anything personal) to a Node worker.</li>
+        <li><strong>Routing</strong> - built-in <code>/_gio</code> endpoints, build assets, fonts and <a href="/docs/file-conventions/public-folder"><code>public/</code></a> files are served from Rust; a page or route handler goes to the page cache, and only on a miss (or for anything personal) to a Node worker.</li>
       </ol>
       <p>
         On the way out, the response gets its security headers (and CSP nonces), its{' '}
@@ -50,7 +50,7 @@ export default function Page(): React.JSX.Element {
       <ul>
         <li><strong>Dispatch</strong> - each request goes to the ready worker with the fewest requests in flight (open streams included), ties taken in turn. A worker that is respawning is skipped. Everything a request starts - a streamed body, an SSE stream, a Partial Prerendering hole render - stays on its worker.</li>
         <li><strong>One build</strong> - the first worker bundles the client code and records the result in <code>.gio/build/manifest.json</code>; the rest start once it is ready and load that manifest, so they never race on the same files. A worker that cannot load it fails its boot and is retried; it never rebuilds under the workers serving.</li>
-        <li><strong>WebSockets</strong> - each connection is pinned to one worker, which runs its handler. Rooms live in the Rust server, so <code>broadcast(room, ...)</code> from any worker reaches sockets on all of them.</li>
+        <li><strong>WebSockets</strong> - each connection is pinned to one worker, which runs its handler. Rooms live in the Rust server, so <a href="/docs/functions/broadcast"><code>broadcast(room, ...)</code></a> from any worker reaches sockets on all of them.</li>
         <li><strong>Shared server state</strong> - the page cache, revalidation, middleware rules and rate limits live in Rust, so they behave the same whichever worker handles a request. Module-level state in your app is per worker, and Node plugins&apos; <code>onStartup</code> / <code>onShutdown</code> hooks run in every worker.</li>
       </ul>
       <p>See <a href="/docs/configuration/server">[server]</a> for the setting and <a href="/docs/deployment">Deployment</a> for sizing a pool.</p>

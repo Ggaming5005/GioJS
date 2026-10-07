@@ -45,16 +45,16 @@ disk_max_bytes = 536870912          # L2 cap; 0 = unbounded`} />
         derived ID covers the client build the server produces at startup (every chunk and
         stylesheet name is a content hash) and the app&apos;s server-side sources: every file
         under <code>app/</code> - the root layout, <code>metadata</code> and{' '}
-        <code>revalidate</code> exports, <code>getServerSideProps</code>, route handlers -
-        plus <code>middleware.ts</code>, <code>gio.config.ts</code>, the project modules they
+        <code>revalidate</code> exports, <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>, route handlers -
+        plus <a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a>, <a href="/docs/gio-config"><code>gio.config.ts</code></a>, the project modules they
         import, the tsconfig and the lockfile. So a restart after a code or CSS change starts
         with an empty cache instead of serving pages the previous code rendered (or that link
         its deleted files), and a restart of the same code keeps the cache. Data your pages
         read at runtime (files, a database, <code>.env</code> values) is not part of the ID:
-        after changing it, purge with <code>revalidatePath()</code> or{' '}
+        after changing it, purge with <a href="/docs/functions/revalidate-path"><code>revalidatePath()</code></a> or{' '}
         <code>POST /_gio/revalidate</code>. It also covers the
-        gio.toml settings pages are rendered with (<code>[images]</code> decides every{' '}
-        <code>GioImage</code> srcset, plus the served <code>[[fonts]]</code> and the i18n
+        gio.toml settings pages are rendered with (<a href="/docs/configuration/images"><code>[images]</code></a> decides every{' '}
+        <a href="/docs/components/gio-image"><code>GioImage</code></a> srcset, plus the served <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a> and the i18n
         default locale), so changing those settings drops persisted pages too. A pinned{' '}
         <code>GIO_DEPLOYMENT_ID</code> is used as given: change it with every deploy.
       </p>
@@ -66,7 +66,7 @@ disk_max_bytes = 536870912          # L2 cap; 0 = unbounded`} />
       </p>
       <ul>
         <li><code>hit; ttl=&lt;secs&gt;</code> - served from the Rust page cache without touching Node; <code>ttl</code> is the seconds until the entry goes stale</li>
-        <li><code>stale; age=&lt;secs&gt;; revalidating</code> - served instantly from the cache past its TTL while one background render refreshes the entry; <code>age</code> is seconds since it was rendered. A refresh that answers 404 (the page called <code>notFound()</code>) evicts the entry instead</li>
+        <li><code>stale; age=&lt;secs&gt;; revalidating</code> - served instantly from the cache past its TTL while one background render refreshes the entry; <code>age</code> is seconds since it was rendered. A refresh that answers 404 (the page called <a href="/docs/functions/not-found"><code>notFound()</code></a>) evicts the entry instead</li>
         <li><code>miss; stored</code> - rendered by the Node worker and stored; the next request for this key is a hit</li>
         <li><code>bypass</code> - rendered (or redirected) but not cached: the page cache is off (<code>[cache] enabled = false</code>), the page did not declare <code>revalidate</code>, the request was not GET/HEAD, the response varies per user, it set per-request headers, or its <code>getServerSideProps</code> read the visitor&apos;s cookies, authorization header, IP (<code>ctx.ip</code>) or the host it asked for (<code>ctx.host</code>, <code>ctx.scheme</code>)</li>
         <li><code>static</code> - served by the Rust static file layer (public/ assets at the site root or under /public/*, hashed chunks, fonts); never touches the cache or Node</li>
@@ -94,7 +94,7 @@ GET http://localhost:3000/posts/1
         and streams into the same response behind the shell.
       </p>
       <p>
-        Opt in by exporting <code>shell = 'cache'</code> next to <code>revalidate</code> on a
+        Opt in by exporting <a href="/docs/page-exports/shell"><code>shell = 'cache'</code></a> next to <code>revalidate</code> on a
         page with Suspense boundaries:
       </p>
       <CodeBlock lang="tsx" code={`import React, { Suspense, use } from 'react';
@@ -157,12 +157,12 @@ export async function getServerSideProps(ctx: GsspContext) {
         first visitor&apos;s values would be cached in the shell.
       </p>
       <p>
-        A <code>loading.tsx</code> is a Suspense boundary too, around everything below its
+        A <a href="/docs/file-conventions/loading"><code>loading.tsx</code></a> is a Suspense boundary too, around everything below its
         folder. On a PPR page whose content suspends, the cached shell therefore ends there:
         it holds the layouts above the <code>loading.tsx</code> and its loading UI, and the
         page itself streams per request as a hole. A page that renders without suspending is
         part of the shell, and the contract applies to it. A page that throws before it
-        suspends is answered with its <code>error.tsx</code> and a 500 - a broken render is
+        suspends is answered with its <a href="/docs/file-conventions/error"><code>error.tsx</code></a> and a 500 - a broken render is
         never stored as a shell. Neither is a shell holding a boundary React gave up on (an
         error inside any Suspense boundary before the shell was sent): that response still
         streams, but nothing is cached, and the next request renders again.

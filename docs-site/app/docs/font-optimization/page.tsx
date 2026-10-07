@@ -24,8 +24,8 @@ export default function Page(): React.JSX.Element {
 
       <h2 id="declare-fonts-in-giotoml">Declare fonts in gio.toml</h2>
       <p>
-        Add one <code>[[fonts]]</code> entry per <code>.woff2</code> file - one weight and style
-        of one family. Projects created with <code>create-giojs</code> ship their fonts in{' '}
+        Add one <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a> entry per <code>.woff2</code> file - one weight and style
+        of one family. Projects created with <a href="/docs/create-giojs"><code>create-giojs</code></a> ship their fonts in{' '}
         <code>public/fonts/</code> and declare them like this:
       </p>
       <CodeBlock lang="toml" code={`[[fonts]]
@@ -54,7 +54,7 @@ weight = 600                # default 400`} />
       <p>A <code>url</code> takes one of two forms:</p>
       <ul>
         <li>
-          A <code>url</code> without a scheme names a file in <code>public/</code>, written the
+          A <code>url</code> without a scheme names a file in <a href="/docs/file-conventions/public-folder"><code>public/</code></a>, written the
           way it is served: <code>/public/fonts/a.woff2</code> and <code>/fonts/a.woff2</code>{' '}
           are both <code>public/fonts/a.woff2</code>. It is read at every start, so the server
           needs no network, and served under a name with a hash of its content (
@@ -80,7 +80,7 @@ weight = 600                # default 400`} />
       <div className="callout">Self-hosted fonts are served from /_gio/fonts, eliminating a render-blocking round-trip to an external host. Every page gets a <code>&lt;link rel=&quot;preload&quot;&gt;</code> per font (except entries with <code>preload = false</code>, for fonts only used below the fold) and the generated <code>/_gio/fonts/fonts.css</code> with its <code>@font-face</code> rules (<code>font-display: swap</code>). The .woff2 files are cached as immutable (a URL never gets new content); fonts.css is rewritten from gio.toml on every start under the same URL, so it is served with <code>Cache-Control: public, max-age=0, must-revalidate</code> and revalidated via Last-Modified.</div>
       <h2 id="static-export">Static export</h2>
       <p>
-        <code>[[fonts]]</code> is applied by the Rust server, so <code>gio export</code> does not
+        <code>[[fonts]]</code> is applied by the Rust server, so <a href="/docs/cli/export"><code>gio export</code></a> does not
         see it. A static site declares its fonts with <code>@font-face</code> in an imported
         stylesheet instead; the <a href="/docs/css">CSS pipeline</a> bundles the files its{' '}
         <code>url()</code>s name with hashed names:

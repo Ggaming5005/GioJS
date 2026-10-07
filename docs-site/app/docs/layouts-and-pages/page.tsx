@@ -43,15 +43,15 @@ export default function SiteLayout({ children }) {
         Layouts follow the folder tree, not the URL: a page gets every layout.tsx in its own
         folder and each folder above it, outermost first. That includes layouts inside dynamic
         folders (<code>app/posts/[id]/layout.tsx</code> wraps every post) and inside route
-        groups. The root <code>app/layout.tsx</code> is server-only HTML; the layouts nested
+        groups. The root <a href="/docs/file-conventions/layout"><code>app/layout.tsx</code></a> is server-only HTML; the layouts nested
         under it render inside the hydrated region and ship in the page&apos;s client bundle.
-        A <code>not-found.tsx</code> or <code>error.tsx</code> gets the layouts of its own
+        A <a href="/docs/file-conventions/not-found"><code>not-found.tsx</code></a> or <a href="/docs/file-conventions/error"><code>error.tsx</code></a> gets the layouts of its own
         folder and the folders above it - never those of the page below it that failed (see{' '}
         <a href="/docs/error-handling">Error Handling</a>).
       </p>
       <h2 id="loading-ui">Loading UI</h2>
       <p>
-        A <code>loading.tsx</code> wraps everything below its folder - the page and the layouts
+        A <a href="/docs/file-conventions/loading"><code>loading.tsx</code></a> wraps everything below its folder - the page and the layouts
         of deeper folders - in a <code>&lt;Suspense&gt;</code> boundary with its default export
         as the fallback. When the page suspends while rendering (React&apos;s{' '}
         <code>use()</code> on a promise, a lazy component), a streamed response sends the
@@ -61,7 +61,7 @@ export default function SiteLayout({ children }) {
   return <p>Loading dashboard…</p>;
 }`} />
       <p>
-        <code>getServerSideProps</code> runs before rendering starts, so the loading UI does
+        <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> runs before rendering starts, so the loading UI does
         not cover it - it shows only for content that suspends during the render. Per folder,
         the boundary sits inside the folder&apos;s layout and its <code>error.tsx</code>{' '}
         boundary:
@@ -77,7 +77,7 @@ export default function SiteLayout({ children }) {
           completely and cached.
         </li>
         <li>
-          If the page throws or calls <code>notFound()</code> before it suspends, the response
+          If the page throws or calls <a href="/docs/functions/not-found"><code>notFound()</code></a> before it suspends, the response
           is still the error or not-found page, as without the <code>loading.tsx</code>. After
           it has suspended, the 200 and the loading UI are already on their way, so errors are
           handled like in any Suspense boundary (see{' '}
@@ -86,7 +86,7 @@ export default function SiteLayout({ children }) {
           rendered completely (a cacheable page), the answer is the same.
         </li>
         <li>
-          With partial prerendering (<code>shell = &apos;cache&apos;</code>) the boundary is a
+          With partial prerendering (<a href="/docs/page-exports/shell"><code>shell = &apos;cache&apos;</code></a>) the boundary is a
           shell edge like any <code>&lt;Suspense&gt;</code>: when the page suspends, the cached
           shell holds the layouts above it plus the loading UI, and the page streams per
           request as a hole (see <a href="/docs/caching-layers">Caching Layers</a>).
@@ -99,6 +99,11 @@ export default function SiteLayout({ children }) {
           only if the new page suspends in the browser.
         </li>
       </ul>
+      <p>
+        Which pages stream, granular <code>&lt;Suspense&gt;</code> boundaries and the data a
+        suspending component may read are covered in{' '}
+        <a href="/docs/guides/streaming">Streaming</a>.
+      </p>
       <h2 id="dynamic-routes">Dynamic routes</h2>
       <p>Wrap a folder name in brackets to capture URL segments. Params reach{' '}
         <code>ctx.params</code> in getServerSideProps (and the <code>params</code> prop when

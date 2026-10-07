@@ -23,7 +23,7 @@ export default function Page(): React.JSX.Element {
 
       <h2 id="when-you-create-an-app">When you create an app</h2>
       <p>
-        <code>create-giojs</code> asks which features to add (space toggles, enter confirms).
+        <a href="/docs/create-giojs"><code>create-giojs</code></a> asks which features to add (space toggles, enter confirms).
         Flags skip the question:
       </p>
       <PmTabs command={`npm create giojs@latest my-app -- --tailwind --auth --db
@@ -64,12 +64,12 @@ npx create-giojs add --ci --features db  # create's flag spellings work too`} />
           up: your edits to them (the login page, say) are kept and listed, and nothing else
           changes - so <code>add auth db</code> after customizing auth just adds the database.
           Additions merge into what is there: <code>gio.toml</code> keys go into the existing
-          table, <code>[[guards]]</code> entries are added once per path, and{' '}
+          table, <a href="/docs/configuration/guards"><code>[[guards]]</code></a> entries are added once per path, and{' '}
           <code>.env.example</code> / <code>.gitignore</code> lines are added only when missing.
         </li>
         <li>
           The language, the build target and the package manager are read from the project
-          (<code>tsconfig.json</code>, a <code>gio export</code> build script, the lockfile).
+          (<code>tsconfig.json</code>, a <a href="/docs/cli/export"><code>gio export</code></a> build script, the lockfile).
           Install the new dependencies afterwards - the command prints the exact command.
         </li>
       </ul>
@@ -85,7 +85,7 @@ npx create-giojs add --ci --features db  # create's flag spellings work too`} />
             <td>
               Tailwind CSS v4 through its CLI: <code>app/tailwind.css</code> builds into{' '}
               <code>app/tailwind.out.css</code>, which the root layout imports.{' '}
-              <code>npm run dev</code> runs the watcher next to the server (<code>gio dev</code>{' '}
+              <code>npm run dev</code> runs the watcher next to the server (<a href="/docs/cli/dev"><code>gio dev</code></a>{' '}
               starts only the server, so the git-ignored output is missing in a fresh clone);
               build and start build the stylesheet first. See <a href="/docs/guides/tailwind">the Tailwind guide</a>.
             </td>
@@ -95,7 +95,7 @@ npx create-giojs add --ci --features db  # create's flag spellings work too`} />
             <td>
               <code>app/api/guestbook/route.ts</code> (GET/POST JSON with <code>req.json()</code>{' '}
               validation: 201, 400, 415, 422) and <code>app/(site)/guestbook/page.tsx</code>, a page
-              action rendered with <code>&lt;GioForm&gt;</code>: it works without JavaScript,
+              action rendered with <a href="/docs/components/gio-form"><code>&lt;GioForm&gt;</code></a>: it works without JavaScript,
               answers invalid input with 422 and <code>actionData</code>, and redirects after
               success. See <a href="/docs/forms">Forms</a> and{' '}
               <a href="/docs/route-handlers">Route Handlers</a>.
@@ -123,7 +123,7 @@ npx create-giojs add --ci --features db  # create's flag spellings work too`} />
           <tr>
             <td><code>docker</code></td>
             <td>
-              A multi-stage <code>Dockerfile</code> built with <code>gio build standalone</code>{' '}
+              A multi-stage <code>Dockerfile</code> built with <a href="/docs/cli/build-standalone"><code>gio build standalone</code></a>{' '}
               (a slim, non-root runtime image with a health check), <code>.dockerignore</code>{' '}
               and <code>docker-compose.yml</code>. See{' '}
               <a href="/docs/guides/docker">Deploying with Docker</a>.

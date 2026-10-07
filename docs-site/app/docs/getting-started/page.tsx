@@ -35,7 +35,7 @@ export default function IntroductionPage(): React.JSX.Element {
       <p>The framework is two cooperating layers:</p>
       <ul>
         <li><strong>Rust</strong> owns the hot path - HTTP/2 &amp; TLS, routing, brotli/gzip compression, image optimization, the ISR page cache, static files, and middleware.</li>
-        <li><strong>Node</strong> renders React via <code>renderToReadableStream</code>, runs <code>getServerSideProps</code>, and gives you the full npm ecosystem.</li>
+        <li><strong>Node</strong> renders React via <code>renderToReadableStream</code>, runs <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>, and gives you the full npm ecosystem.</li>
       </ul>
       <p>
         A request only crosses into Node when it is a dynamic render that missed the cache.
@@ -44,8 +44,8 @@ export default function IntroductionPage(): React.JSX.Element {
 
       <h2 id="what-you-get">What you get</h2>
       <ul>
-        <li><strong>Routing</strong> - file-based <code>app/</code> routes with layouts, dynamic and catch-all segments, route groups, per-folder loading/error/not-found UI, and typed <code>href()</code>s.</li>
-        <li><strong>Data</strong> - <code>getServerSideProps</code>, page actions with progressively enhanced <code>&lt;GioForm&gt;</code>, <code>route.ts</code> API handlers, SSE and WebSockets with rooms.</li>
+        <li><strong>Routing</strong> - file-based <code>app/</code> routes with layouts, dynamic and catch-all segments, route groups, per-folder loading/error/not-found UI, and typed <a href="/docs/functions/href"><code>href()</code></a>s.</li>
+        <li><strong>Data</strong> - <code>getServerSideProps</code>, page actions with progressively enhanced <a href="/docs/components/gio-form"><code>&lt;GioForm&gt;</code></a>, <a href="/docs/file-conventions/route"><code>route.ts</code></a> API handlers, SSE and WebSockets with rooms.</li>
         <li><strong>Caching</strong> - an ISR page cache in Rust with stale-while-revalidate, partial prerendering, and on-demand purges by tag or path.</li>
         <li><strong>Security by default</strong> - security headers, CSRF and WebSocket origin checks, CSP nonces in one line, encrypted cookie sessions with guards verified in Rust, rate limits.</li>
         <li><strong>Assets</strong> - CSS imports and CSS Modules, image optimization, self-hosted fonts, metadata, sitemaps and robots.txt.</li>

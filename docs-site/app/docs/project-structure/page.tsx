@@ -42,7 +42,7 @@ export default function Page(): React.JSX.Element {
 
       <h2 id="the-root-layout">The root layout</h2>
       <p>
-        <code>app/layout.tsx</code> renders the <code>&lt;html&gt;</code> document every
+        <a href="/docs/file-conventions/layout"><code>app/layout.tsx</code></a> renders the <code>&lt;html&gt;</code> document every
         page shares. It imports the global stylesheet and exports the site&apos;s default{' '}
         <a href="/docs/metadata">metadata</a> - a title template that each page&apos;s own{' '}
         <code>metadata</code> fills in:
@@ -70,7 +70,7 @@ export default function RootLayout({ children }: LayoutProps) {
         The root layout is server-rendered HTML that never hydrates: put interactive
         components and context providers in a nested layout or the pages. That is why the
         starter&apos;s navigation lives in <code>app/(site)/layout.tsx</code>: a{' '}
-        <code>GioLink</code> there prefetches and soft-navigates, while in the root layout it
+        <a href="/docs/components/gio-link"><code>GioLink</code></a> there prefetches and soft-navigates, while in the root layout it
         would be a plain link. The 404 and error pages sit outside the group and render the
         same <code>SiteShell</code> themselves. CSS can be
         imported from any page, layout or component, including CSS Modules - see{' '}
@@ -81,7 +81,7 @@ export default function RootLayout({ children }: LayoutProps) {
       <p>
         Server configuration, read once at startup. Every key is optional and an unknown key
         stops the server with a hint, so typos never go unnoticed. The starter self-hosts its
-        fonts through <code>[[fonts]]</code>: the <code>.woff2</code> files ship in{' '}
+        fonts through <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a>: the <code>.woff2</code> files ship in{' '}
         <code>public/fonts/</code>, are copied into <code>.gio/fonts/</code> at every start
         (no network needed) and are served from <code>/_gio/fonts</code> with preload links,
         instead of loading from a third-party CDN on every visit:
@@ -134,21 +134,21 @@ weight = 600`} />
       </p>
 
       <h2 id="public">public/</h2>
-      <p>Files in public/ are served directly by the Rust layer - images, stylesheets, fonts. Static files never touch Node. Files answer at the site root as well as under /public/*: public/robots.txt is both /robots.txt and /public/robots.txt, so favicon.ico, manifest.json, apple-touch-icon.png, and .well-known/ files land where browsers and crawlers look for them. <code>gio export</code> writes public/ to both places in out/ too.</p>
+      <p>Files in public/ are served directly by the Rust layer - images, stylesheets, fonts. Static files never touch Node. Files answer at the site root as well as under /public/*: public/robots.txt is both /robots.txt and /public/robots.txt, so favicon.ico, manifest.json, apple-touch-icon.png, and .well-known/ files land where browsers and crawlers look for them. <a href="/docs/cli/export"><code>gio export</code></a> writes public/ to both places in out/ too.</p>
       <ul>
         <li>A public file wins over a page with the same path (the Next.js precedence). In a static export, where a public file and a rendered page would need the same output file (public/index.html and app/page.tsx), the page is kept and the export lists the file as skipped.</li>
         <li>Not served at the root: dotfiles (except under .well-known/), symlinks, and a top-level public/_gio/ (the server&apos;s internal namespace). These stay reachable under /public/* only. Directory listings are never served.</li>
-        <li>Guards, header rules, and <code>[[rate_limits]]</code> written for a file&apos;s /public/... URL also apply at its root URL, so protecting /public/members/* protects /members/* too, and /_gio/image serves the file only to visitors those guards admit. Redirects and rewrites match only the URL requested - see <a href="/docs/middleware">Middleware</a>.</li>
+        <li>Guards, header rules, and <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a> written for a file&apos;s /public/... URL also apply at its root URL, so protecting /public/members/* protects /members/* too, and /_gio/image serves the file only to visitors those guards admit. Redirects and rewrites match only the URL requested - see <a href="/docs/middleware">Middleware</a>.</li>
         <li>Root-served files use <code>Cache-Control: public, max-age=0, must-revalidate</code> with Last-Modified, so browsers revalidate instead of keeping an old copy after a deploy.</li>
         <li>The set of root-served files is indexed at startup, so the request path never pays a filesystem lookup. In development, edits to public/ refresh the index; in production, files added after startup need a restart.</li>
       </ul>
 
       <h2 id="optional-files">Optional files</h2>
       <ul>
-        <li><code>middleware.ts</code> - redirects, rewrites, headers and guards in TypeScript (<a href="/docs/middleware">Middleware</a>)</li>
-        <li><code>gio.config.ts</code> - Node plugins (<a href="/docs/configuration">Configuration</a>)</li>
-        <li><code>app/sitemap.ts</code>, <code>app/robots.ts</code>, <code>app/manifest.ts</code> - generated SEO files (<a href="/docs/metadata">Metadata &amp; SEO</a>)</li>
-        <li><code>route.ts</code> in any folder - an API endpoint (<a href="/docs/route-handlers">Route Handlers</a>)</li>
+        <li><a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a> - redirects, rewrites, headers and guards in TypeScript (<a href="/docs/middleware">Middleware</a>)</li>
+        <li><a href="/docs/gio-config"><code>gio.config.ts</code></a> - Node plugins (<a href="/docs/configuration">Configuration</a>)</li>
+        <li><a href="/docs/file-conventions/sitemap"><code>app/sitemap.ts</code></a>, <a href="/docs/file-conventions/robots"><code>app/robots.ts</code></a>, <a href="/docs/file-conventions/manifest"><code>app/manifest.ts</code></a> - generated SEO files (<a href="/docs/metadata">Metadata &amp; SEO</a>)</li>
+        <li><a href="/docs/file-conventions/route"><code>route.ts</code></a> in any folder - an API endpoint (<a href="/docs/route-handlers">Route Handlers</a>)</li>
       </ul>
     </>
   );

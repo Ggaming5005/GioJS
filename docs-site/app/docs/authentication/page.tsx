@@ -25,8 +25,8 @@ export default function Page(): React.JSX.Element {
           sessions stored in an encrypted, signed cookie. No session database to run.
         </li>
         <li>
-          <strong><code>require_session</code> guards</strong> - <code>[[guards]]</code> in{' '}
-          <code>gio.toml</code> or <code>middleware.ts</code> that verify the session&apos;s
+          <strong><code>require_session</code> guards</strong> - <a href="/docs/configuration/guards"><code>[[guards]]</code></a> in{' '}
+          <code>gio.toml</code> or <a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a> that verify the session&apos;s
           signature and expiry in the Rust HTTP layer, before any Node code runs.
         </li>
         <li>
@@ -55,11 +55,11 @@ export default function Page(): React.JSX.Element {
       </p>
       <ul>
         <li>
-          <strong>Production</strong> without a secret: <code>createSessionStorage()</code>{' '}
+          <strong>Production</strong> without a secret: <a href="/docs/functions/create-session-storage"><code>createSessionStorage()</code></a>{' '}
           throws with the command above, and every <code>require_session</code> guard denies
           all requests (fail closed) with an error in the server log. Called at module scope
           (as in <code>lib/session.server.ts</code>), the throw happens when a module imports
-          it: each page and <code>route.ts</code> that does answers 500 with an error digest,
+          it: each page and <a href="/docs/file-conventions/route"><code>route.ts</code></a> that does answers 500 with an error digest,
           and the log line under that digest names the file and the missing secret.
         </li>
         <li>
@@ -91,7 +91,7 @@ export const sessions = createSessionStorage<UserSession>({
 });`} />
       <p>
         Name the module <code>*.server.ts</code>: it is then guaranteed never to reach a client
-        bundle - a page that used it outside <code>getServerSideProps</code> would fail its
+        bundle - a page that used it outside <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> would fail its
         client build instead of shipping your session code to the browser.
       </p>
       <p>
@@ -175,7 +175,7 @@ export async function getServerSideProps(ctx) {
         <code>route.ts</code> <code>GioRequest</code>, a plugin&apos;s request, a web{' '}
         <code>Request</code>, or a raw <code>Cookie</code> header. On a page it reads{' '}
         <code>ctx.cookies</code>, which marks the render personalized: it is never cached and
-        served to another visitor, even with <code>export const revalidate</code>. A guard
+        served to another visitor, even with <a href="/docs/page-exports/revalidate"><code>export const revalidate</code></a>. A guard
         proves the session is authentic; checks on what is inside it (roles, a disabled
         account) belong here, in the page: a plugin&apos;s <code>onRequest</code> does not run
         when the Rust cache answers, and a page that exports <code>revalidate</code> without
@@ -251,7 +251,7 @@ export function POST() {
 
       <h2 id="cookies">Cookies</h2>
       <p>
-        <code>serializeCookie(name, value, options?)</code> builds one <code>Set-Cookie</code>{' '}
+        <a href="/docs/functions/cookies"><code>serializeCookie(name, value, options?)</code></a> builds one <code>Set-Cookie</code>{' '}
         value. Its defaults are the secure ones:
       </p>
       <table>

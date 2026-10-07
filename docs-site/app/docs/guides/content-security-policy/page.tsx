@@ -184,7 +184,7 @@ content-security-policy: default-src 'self'; script-src 'self' 'nonce-SqGohrjsp6
       <p>
         Keep <code>style-src &apos;self&apos; &apos;unsafe-inline&apos;</code>. React renders{' '}
         <code>style</code> props as <code>style=&quot;...&quot;</code> attributes, which no
-        nonce can cover, and <code>&lt;Animate&gt;</code> and link view transitions add inline
+        nonce can cover, and <a href="/docs/components/animate"><code>&lt;Animate&gt;</code></a> and link view transitions add inline
         styles too. Adding a nonce or a hash to <code>style-src</code> makes browsers ignore{' '}
         <code>&apos;unsafe-inline&apos;</code> and blocks all of them. Script injection is the
         threat a nonce stops; inline styles are a much smaller one.
@@ -222,7 +222,7 @@ csp = "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; fr
           <code>[security.headers]</code> refuses <code>content-security-policy</code> at startup
           (<code>use [security] csp instead</code>). A page or route handler that sets its own{' '}
           <code>Content-Security-Policy</code> header keeps it, and an empty value in a{' '}
-          <code>[[headers]]</code> rule removes the policy for those paths.
+          <a href="/docs/configuration/headers"><code>[[headers]]</code></a> rule removes the policy for those paths.
         </li>
         <li>
           Inline event handler attributes (<code>onclick=&quot;...&quot;</code>) and{' '}
@@ -238,7 +238,7 @@ csp = "script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; fr
           policy without nonces at your static host.
         </li>
         <li>
-          JSON-LD needs no nonce: <code>&lt;JsonLd&gt;</code> renders a non-executable{' '}
+          JSON-LD needs no nonce: <a href="/docs/components/json-ld"><code>&lt;JsonLd&gt;</code></a> renders a non-executable{' '}
           <code>application/ld+json</code> block.
         </li>
       </ul>

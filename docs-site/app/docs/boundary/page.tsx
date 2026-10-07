@@ -34,7 +34,7 @@ export default function Page(): React.JSX.Element {
           <tr><th>Request</th><th>Answered by</th></tr>
         </thead>
         <tbody>
-          <tr><td>A page cache hit, a static file, a <code>public/</code> file, a font, an optimized image</td><td>Rust alone</td></tr>
+          <tr><td>A page cache hit, a static file, a <a href="/docs/file-conventions/public-folder"><code>public/</code></a> file, a font, an optimized image</td><td>Rust alone</td></tr>
           <tr><td>A guard, redirect, rewrite or header rule; CSRF, rate-limit and path checks; <code>/_gio/health</code>, <code>/_gio/metrics</code>, <code>/_gio/revalidate</code></td><td>Rust alone</td></tr>
           <tr><td>A cache miss, a personalized page, a page action, a route handler</td><td>A Node worker, over the render connection</td></tr>
           <tr><td>A WebSocket message</td><td>The worker that accepted the socket, over a second connection</td></tr>
@@ -53,7 +53,7 @@ export default function Page(): React.JSX.Element {
       <ul>
         <li>the protocol version - a server and a <code>@gio.js/core</code> that speak different versions refuse to work together, with an error that says to update both;</li>
         <li>the route manifest, which Rust loads into its router;</li>
-        <li>the rules from <code>middleware.ts</code>, which Rust compiles and enforces;</li>
+        <li>the rules from <a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a>, which Rust compiles and enforces;</li>
         <li>a hash of the client build and the app&apos;s server sources, which becomes the deployment ID.</li>
       </ul>
       <p>
@@ -79,14 +79,14 @@ export default function Page(): React.JSX.Element {
           <tr><td><code>sse_chunk</code>, <code>sse_done</code></td><td>Node → Rust</td><td>Server-Sent Events</td></tr>
           <tr><td><code>flow</code></td><td>Rust → Node</td><td>Pause and resume a streamed body (backpressure)</td></tr>
           <tr><td><code>cancel</code>, <code>sse_close</code></td><td>Rust → Node</td><td>The client went away or the deadline passed: stop the work</td></tr>
-          <tr><td><code>revalidate</code>, <code>revalidate_ack</code></td><td>Both</td><td><code>revalidateTag()</code> and <code>revalidatePath()</code> purges, confirmed by Rust</td></tr>
+          <tr><td><code>revalidate</code>, <code>revalidate_ack</code></td><td>Both</td><td><a href="/docs/functions/revalidate-tag"><code>revalidateTag()</code></a> and <a href="/docs/functions/revalidate-path"><code>revalidatePath()</code></a> purges, confirmed by Rust</td></tr>
         </tbody>
       </table>
 
       <h2 id="deadlines-and-limits">Deadlines and limits</h2>
       <ul>
         <li>
-          A worker must answer within <code>[server] render_timeout_secs</code> (30 seconds by
+          A worker must answer within <a href="/docs/configuration/server"><code>[server] render_timeout_secs</code></a> (30 seconds by
           default): the whole buffered response, the head of a streamed one, and every gap
           between page chunks. Past it the client gets <code>504</code> and the worker a{' '}
           <code>cancel</code>. Route-handler streams and event streams have no idle limit.

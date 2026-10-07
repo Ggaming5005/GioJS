@@ -40,19 +40,19 @@ export default function KnownLimitationsPage(): React.JSX.Element {
         <li>
           <strong>No Server Actions.</strong> Mutations are{' '}
           <a href="/docs/forms">page actions</a> (<code>export async function action</code>)
-          posted by plain forms or <code>&lt;GioForm&gt;</code>, or{' '}
-          <code>route.ts</code> handlers called with <code>fetch()</code>.
+          posted by plain forms or <a href="/docs/components/gio-form"><code>&lt;GioForm&gt;</code></a>, or{' '}
+          <a href="/docs/file-conventions/route"><code>route.ts</code></a> handlers called with <code>fetch()</code>.
         </li>
         <li>
-          <strong>The root layout never hydrates.</strong> <code>app/layout.tsx</code> is
+          <strong>The root layout never hydrates.</strong> <a href="/docs/file-conventions/layout"><code>app/layout.tsx</code></a> is
           server-only HTML. Context providers, state and event handlers go in a nested
           layout or the pages; links in the root layout are plain anchors (full-page
-          navigation). Inline scripts there need <code>cspNonce()</code> under a CSP.
+          navigation). Inline scripts there need <a href="/docs/functions/csp-nonce"><code>cspNonce()</code></a> under a CSP.
         </li>
         <li>
           <strong>No data cache.</strong> Caching is per page, in the Rust server (
-          <code>export const revalidate</code>, tags, <code>revalidatePath</code> /{' '}
-          <code>revalidateTag</code>). There is no <code>fetch()</code> cache,{' '}
+          <a href="/docs/page-exports/revalidate"><code>export const revalidate</code></a>, tags, <a href="/docs/functions/revalidate-path"><code>revalidatePath</code></a> /{' '}
+          <a href="/docs/functions/revalidate-tag"><code>revalidateTag</code></a>). There is no <code>fetch()</code> cache,{' '}
           <code>unstable_cache</code> or <code>&apos;use cache&apos;</code>; cache data
           yourself where a page cache is too coarse.
         </li>
@@ -81,11 +81,11 @@ export default function KnownLimitationsPage(): React.JSX.Element {
           <a href="/docs/layouts-and-pages">Layouts &amp; Pages</a>.
         </li>
         <li>
-          <strong>Middleware is declarative.</strong> <code>middleware.ts</code> and{' '}
+          <strong>Middleware is declarative.</strong> <a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a> and{' '}
           <code>gio.toml</code> define redirects, rewrites, headers and guards that the Rust
           server evaluates before routing; no JavaScript runs there per request. Per-request
-          logic belongs in <code>getServerSideProps</code>, a route handler, or a Node plugin&apos;s{' '}
-          <code>onRequest</code> hook in <code>gio.config.ts</code>. See{' '}
+          logic belongs in <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>, a route handler, or a Node plugin&apos;s{' '}
+          <code>onRequest</code> hook in <a href="/docs/gio-config"><code>gio.config.ts</code></a>. See{' '}
           <a href="/docs/middleware">Middleware</a>.
         </li>
         <li>
@@ -102,11 +102,11 @@ export default function KnownLimitationsPage(): React.JSX.Element {
           <strong>No generated Open Graph images.</strong> There is no{' '}
           <code>opengraph-image.tsx</code> / <code>twitter-image.tsx</code> convention that
           renders JSX to PNG. Point <code>openGraph.images</code> at a file in{' '}
-          <code>public/</code> or at an image a <code>route.ts</code> handler produces.
+          <a href="/docs/file-conventions/public-folder"><code>public/</code></a> or at an image a <code>route.ts</code> handler produces.
         </li>
         <li>
           <strong>No file-based icons</strong> (<code>app/icon.png</code>), no separate{' '}
-          <code>viewport</code> export, and only one sitemap (<code>app/sitemap.ts</code>; no{' '}
+          <code>viewport</code> export, and only one sitemap (<a href="/docs/file-conventions/sitemap"><code>app/sitemap.ts</code></a>; no{' '}
           <code>generateSitemaps</code>). Put icons in <code>public/</code> and link them
           from <code>metadata.icons</code>. See <a href="/docs/metadata">Metadata &amp; SEO</a>.
         </li>
@@ -125,11 +125,11 @@ export default function KnownLimitationsPage(): React.JSX.Element {
           every instance. See <a href="/docs/caching#on-demand-revalidation">On-demand revalidation</a>.
         </li>
         <li>
-          <strong>Rate limits are per instance.</strong> <code>[[rate_limits]]</code> buckets are
+          <strong>Rate limits are per instance.</strong> <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a> buckets are
           kept in memory, so N instances allow up to N times the configured rate.
         </li>
         <li>
-          <strong>WebSocket rooms are per instance.</strong> <code>broadcast(room, ...)</code>{' '}
+          <strong>WebSocket rooms are per instance.</strong> <a href="/docs/functions/broadcast"><code>broadcast(room, ...)</code></a>{' '}
           reaches sockets on every worker of one server, but not on other servers - fan out
           through your own pub/sub for a multi-instance chat.
         </li>
@@ -141,8 +141,8 @@ export default function KnownLimitationsPage(): React.JSX.Element {
 
       <h2 id="static-export">Static export</h2>
       <p>
-        <code>gio export</code> produces HTML plus hydration - pages are interactive and{' '}
-        <code>GioLink</code> navigation works - but there is no server behind it. These need
+        <a href="/docs/cli/export"><code>gio export</code></a> produces HTML plus hydration - pages are interactive and{' '}
+        <a href="/docs/components/gio-link"><code>GioLink</code></a> navigation works - but there is no server behind it. These need
         the GioJS server and are skipped or inert in an export:
       </p>
       <ul>
@@ -152,8 +152,8 @@ export default function KnownLimitationsPage(): React.JSX.Element {
         </li>
         <li>
           per-request <code>getServerSideProps</code> (it runs once, at export time), redirects
-          it returns, <code>notFound()</code> pages, and dynamic routes without{' '}
-          <code>getStaticPaths</code>
+          it returns, <a href="/docs/functions/not-found"><code>notFound()</code></a> pages, and dynamic routes without{' '}
+          <a href="/docs/page-exports/get-static-paths"><code>getStaticPaths</code></a>
         </li>
         <li>
           caching and revalidation, <code>gio.toml</code> and <code>middleware.ts</code> rules
@@ -163,7 +163,7 @@ export default function KnownLimitationsPage(): React.JSX.Element {
           security headers, CSP nonces and CSRF checks - configure headers on the static host
           instead
         </li>
-        <li>image optimization: <code>GioImage</code> renders its plain <code>src</code></li>
+        <li>image optimization: <a href="/docs/components/gio-image"><code>GioImage</code></a> renders its plain <code>src</code></li>
       </ul>
       <p>See <a href="/docs/static-export">Static Export</a>.</p>
 
@@ -196,7 +196,7 @@ export default function KnownLimitationsPage(): React.JSX.Element {
           (Graviton, Ampere, Raspberry Pi) is not published yet: build the server from source
           (<code>cargo build --release --locked -p giojs-server</code>, with the Rust version{' '}
           from <code>rust-version</code> in <code>Cargo.toml</code> or newer) and hand it to{' '}
-          <code>gio build standalone</code> with <code>GIO_STANDALONE_SERVER_BIN</code>, or
+          <a href="/docs/cli/build-standalone"><code>gio build standalone</code></a> with <code>GIO_STANDALONE_SERVER_BIN</code>, or
           build <code>linux/amd64</code> container images. Windows on ARM and FreeBSD have no
           binary either.
         </li>
@@ -212,7 +212,7 @@ export default function KnownLimitationsPage(): React.JSX.Element {
       <ul>
         <li>
           <strong>Request bodies are buffered.</strong> Uploads are read whole into memory,
-          capped by <code>[server] max_body_bytes</code> (2 MiB by default) and, because the
+          capped by <a href="/docs/configuration/server"><code>[server] max_body_bytes</code></a> (2 MiB by default) and, because the
           body crosses to the worker in one piece, at roughly 48 MiB whatever the setting -{' '}
           <code>0</code> included, which means no limit of its own.
           Upload large files straight to object storage with presigned URLs. See{' '}

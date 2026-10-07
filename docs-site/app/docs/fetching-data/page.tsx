@@ -32,7 +32,7 @@ export async function getServerSideProps(ctx) {
         <code>tsc</code>; a params shape (<code>{'{ id: string }'}</code>) works too. The
         result must be one the server accepts: <code>{'{ props }'}</code> (optionally with{' '}
         <code>headers</code> and <code>tags</code>), a <code>redirect</code>,{' '}
-        <code>{'{ notFound: true }'}</code> or <code>redirect()</code>.
+        <code>{'{ notFound: true }'}</code> or <a href="/docs/functions/redirect"><code>redirect()</code></a>.
       </p>
       <CodeBlock lang="tsx" code={`import type { GetServerSideProps } from '@gio.js/core';
 
@@ -52,7 +52,7 @@ export default function PostPage({ post }: Props) {
       <p>
         The component receives exactly the returned props - not the params.{' '}
         <code>{'InferPageProps<typeof getServerSideProps>'}</code> reads them off an
-        unannotated loader. A page <em>without</em> <code>getServerSideProps</code> receives{' '}
+        unannotated loader. A page <em>without</em> <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> receives{' '}
         <code>{'{ params, searchParams }'}</code> instead: type it as{' '}
         <code>{"PageProps<'/posts/:id'>"}</code>. In JavaScript the same types work through
         JSDoc, as in the <code>default-js</code> starter:{' '}
@@ -98,9 +98,9 @@ export async function getServerSideProps(ctx) {
 }`} />
       <h2 id="not-found">Not found</h2>
       <p>
-        When the data does not exist, call <code>notFound()</code> - or return{' '}
+        When the data does not exist, call <a href="/docs/functions/not-found"><code>notFound()</code></a> - or return{' '}
         <code>{'{ notFound: true }'}</code>. The page answers 404 with the nearest{' '}
-        <code>not-found.tsx</code> at or above its folder (see{' '}
+        <a href="/docs/file-conventions/not-found"><code>not-found.tsx</code></a> at or above its folder (see{' '}
         <a href="/docs/error-handling">Error Handling</a>).
       </p>
       <CodeBlock lang="tsx" code={`import { notFound } from '@gio.js/core';
@@ -113,7 +113,7 @@ export async function getServerSideProps(ctx) {
       <p>
         <code>notFound()</code> works by throwing, so a <code>try</code>/<code>catch</code>{' '}
         around it swallows it - call it outside the <code>try</code>, or rethrow. It works
-        while rendering too, and in <code>route.ts</code> handlers (a JSON 404). A 404 is
+        while rendering too, and in <a href="/docs/file-conventions/route"><code>route.ts</code></a> handlers (a JSON 404). A 404 is
         never cached, even with <code>revalidate</code> set.
       </p>
       <h2 id="response-headers-and-cookies">Response headers and cookies</h2>
@@ -150,7 +150,7 @@ export async function getServerSideProps() {
       <h2 id="cache-tags">Cache tags</h2>
       <p>
         On a cached page, return <code>tags</code> next to <code>props</code> to name the data
-        this render used; <code>revalidateTag()</code> then purges exactly the pages that
+        this render used; <a href="/docs/functions/revalidate-tag"><code>revalidateTag()</code></a> then purges exactly the pages that
         showed it - see <a href="/docs/caching">Caching</a>.
       </p>
       <CodeBlock lang="tsx" code={`export const revalidate = 3600;
@@ -170,7 +170,7 @@ export async function getServerSideProps(ctx) {
       </p>
       <p>
         <code>ctx.ip</code> is the visitor&apos;s IP address (proxy-aware: behind a reverse
-        proxy it needs <code>[server] trusted_proxies</code>, see{' '}
+        proxy it needs <a href="/docs/configuration/server"><code>[server] trusted_proxies</code></a>, see{' '}
         <a href="/docs/configuration">Configuration</a>). Reading it marks the render as
         personalized exactly like reading a cookie - a page that varies by IP (geo, an
         allowlist) must never be cached and served to everyone - and so does reading the raw{' '}

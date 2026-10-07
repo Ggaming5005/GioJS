@@ -48,7 +48,7 @@ export const sessions = createSessionStorage<UserSession>();`} />
 
       <h2 id="logging-in">Logging in</h2>
       <p>
-        <code>app/(site)/login/page.tsx</code> renders a <code>&lt;GioForm&gt;</code> and handles its
+        <code>app/(site)/login/page.tsx</code> renders a <a href="/docs/components/gio-form"><code>&lt;GioForm&gt;</code></a> and handles its
         POST in a page action. Wrong credentials re-render the page with a 422 and the typed
         email; the right ones commit the session and redirect:
       </p>
@@ -95,7 +95,7 @@ burst = 5`} />
         <code>/dashboard</code> or anything below it without a valid, unexpired session is
         redirected to <code>/login</code>. The rate limit answers password guessing with{' '}
         <code>429</code>, also in Rust. <code>app/(site)/dashboard/page.tsx</code> reads the session in{' '}
-        <code>getServerSideProps</code>, which also marks the render personal, so it is never
+        <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>, which also marks the render personal, so it is never
         cached and served to someone else.
       </p>
 

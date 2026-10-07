@@ -19,7 +19,7 @@ export default function Page(): React.JSX.Element {
       <p>
         A page can handle its own form posts. Export an async <code>action</code> from{' '}
         <code>page.tsx</code>: a <code>POST</code> to the page&apos;s URL runs it. Render the form
-        with <code>&lt;GioForm&gt;</code> from <code>@gio.js/react</code> - a real{' '}
+        with <a href="/docs/components/gio-form"><code>&lt;GioForm&gt;</code></a> from <code>@gio.js/react</code> - a real{' '}
         <code>&lt;form method=&quot;post&quot;&gt;</code>, so it works before (or without) any
         JavaScript, and submits through the client router once the page has hydrated.
       </p>
@@ -97,7 +97,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
       <p>What the action returns decides the answer:</p>
       <ul>
         <li>
-          <code>redirect(url)</code> - a <code>303 See Other</code>. Pass a status (301, 302,
+          <a href="/docs/functions/redirect"><code>redirect(url)</code></a> - a <code>303 See Other</code>. Pass a status (301, 302,
           303, 307, 308) or <code>{'{ status, headers }'}</code> as the second argument.{' '}
           <code>redirect()</code> may also be thrown, from the action or anything it calls.
         </li>
@@ -116,9 +116,9 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         </li>
       </ul>
       <p>
-        <code>notFound()</code> answers 404 with the nearest <code>not-found.tsx</code>, and a
-        thrown error answers 500 with the nearest <code>error.tsx</code>, exactly as during a
-        render. <code>getServerSideProps</code> still runs for a re-render and sees the result
+        <a href="/docs/functions/not-found"><code>notFound()</code></a> answers 404 with the nearest <a href="/docs/file-conventions/not-found"><code>not-found.tsx</code></a>, and a
+        thrown error answers 500 with the nearest <a href="/docs/file-conventions/error"><code>error.tsx</code></a>, exactly as during a
+        render. <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> still runs for a re-render and sees the result
         as <code>ctx.actionData</code> (<code>ctx.method</code> is <code>&apos;POST&apos;</code>);
         if it returns an <code>actionData</code> prop itself, that one wins.
       </p>
@@ -126,7 +126,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         Only <code>POST</code> runs an action - it is all an HTML form sends besides{' '}
         <code>GET</code>. <code>PUT</code>/<code>PATCH</code>/<code>DELETE</code> to a page answer{' '}
         <code>405</code> (with <code>Allow: GET, HEAD, POST</code>); give those their own{' '}
-        <code>route.ts</code>. A page without an <code>action</code> answers every mutation with{' '}
+        <a href="/docs/file-conventions/route"><code>route.ts</code></a>. A page without an <code>action</code> answers every mutation with{' '}
         <code>405</code>. A <code>route.ts</code> in the same folder that exports{' '}
         <code>POST</code> takes the POST; one that does not passes it on to the action (and a
         405 from that folder lists both files&apos; methods).
@@ -161,7 +161,9 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
 </GioForm>`} />
       <p>
         A URL from user input (a <code>?next=</code> parameter) must be checked before you
-        redirect to it - otherwise the action is an open redirect.
+        redirect to it - otherwise the action is an open redirect. The{' '}
+        <a href="/docs/guides/redirecting#good-to-know">Redirecting</a> guide has a check you
+        can copy, and every other way to redirect.
       </p>
       <p>
         Redirects to other sites - a payment page, an identity provider - work from{' '}
@@ -206,7 +208,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         <li>children may be a function of the state: <code>{'{({ pending }) => ...}'}</code>.</li>
       </ul>
       <p>
-        <code>useGioFormState()</code>, called anywhere inside the form, returns{' '}
+        <a href="/docs/hooks/use-gio-form-state"><code>useGioFormState()</code></a>, called anywhere inside the form, returns{' '}
         <code>{'{ pending, lastResult }'}</code>. <code>lastResult</code> (also what the
         callbacks receive) has <code>ok</code>, <code>status</code>, <code>url</code>,{' '}
         <code>redirected</code>, the rendered page&apos;s <code>data</code> (its{' '}
@@ -273,7 +275,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
 </GioForm>`} />
       <p>
         The whole request body is limited by <code>max_body_bytes</code> in{' '}
-        <code>gio.toml</code>&apos;s <code>[server]</code> section (default 2 MiB): the Rust
+        <code>gio.toml</code>&apos;s <a href="/docs/configuration/server"><code>[server]</code></a> section (default 2 MiB): the Rust
         server answers <code>413 Payload Too Large</code> before the action runs. Raise it for
         larger uploads - the body is buffered in memory and handed to the worker in one piece
         (binary bodies base64-encoded, so above roughly 48 MiB a body is a 413 whatever the
@@ -289,7 +291,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
           action runs (CSRF protection, on by default - see{' '}
           <a href="/docs/security">Security</a>). Same-origin posts, with or without JavaScript,
           pass. An endpoint other sites post to on purpose (an OAuth <code>form_post</code>{' '}
-          callback) goes in <code>[security.csrf] exempt</code>.
+          callback) goes in <a href="/docs/configuration/security-csrf"><code>[security.csrf] exempt</code></a>.
         </li>
         <li>
           Action answers and the pages they re-render are never cached, even on a page that
@@ -337,7 +339,7 @@ export default function Login({ actionData }: WithActionData<typeof action>) {
         <code>GioForm</code> drops the router&apos;s prefetched pages when it posts, and the page
         it shows next is fetched fresh. Pages cached in the Rust server (<code>revalidate</code>)
         keep serving their cached copy until it expires: purge them from the action with{' '}
-        <code>revalidatePath()</code> / <code>revalidateTag()</code> from{' '}
+        <a href="/docs/functions/revalidate-path"><code>revalidatePath()</code></a> / <a href="/docs/functions/revalidate-tag"><code>revalidateTag()</code></a> from{' '}
         <code>@gio.js/core</code> (on-demand revalidation - see{' '}
         <a href="/docs/caching">Caching</a>) before redirecting.
       </p>
@@ -351,13 +353,13 @@ export async function action(req: ActionArgs) {
 
       <h2 id="static-export">Static export</h2>
       <p>
-        Actions run in the server. A site deployed with <code>gio export</code> to a static host
+        Actions run in the server. A site deployed with <a href="/docs/cli/export"><code>gio export</code></a> to a static host
         has no server to post to - point such forms at an external endpoint instead.
       </p>
 
       <h2 id="testing">Testing</h2>
       <p>
-        <code>callRoute</code> from <code>@gio.js/core/testing</code> posts to pages too: a{' '}
+        <a href="/docs/functions/call-route"><code>callRoute</code></a> from <code>@gio.js/core/testing</code> posts to pages too: a{' '}
         <code>URLSearchParams</code> body is sent as a form.
       </p>
       <CodeBlock lang="ts" code={`import { callRoute } from '@gio.js/core/testing';

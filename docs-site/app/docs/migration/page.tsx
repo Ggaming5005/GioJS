@@ -65,8 +65,8 @@ npm run dev`} />
           <tr><td><code>pages/index.tsx</code></td><td><code>app/page.tsx</code></td></tr>
           <tr><td><code>pages/about.tsx</code>, <code>pages/about/index.tsx</code></td><td><code>app/about/page.tsx</code></td></tr>
           <tr><td><code>pages/[id].tsx</code>, <code>pages/[...slug].tsx</code></td><td><code>app/[id]/page.tsx</code>, <code>app/[...slug]/page.tsx</code></td></tr>
-          <tr><td><code>pages/_app.tsx</code> + <code>pages/_document.tsx</code></td><td><code>app/layout.tsx</code> - the document's <code>&lt;Html&gt;</code>, <code>&lt;Head&gt;</code> and <code>&lt;body&gt;</code> markup carried over, global CSS linked, originals kept as a comment</td></tr>
-          <tr><td><code>pages/404.tsx</code> / <code>pages/500.tsx</code></td><td><code>app/not-found.tsx</code> / <code>app/error.tsx</code></td></tr>
+          <tr><td><code>pages/_app.tsx</code> + <code>pages/_document.tsx</code></td><td><a href="/docs/file-conventions/layout"><code>app/layout.tsx</code></a> - the document's <code>&lt;Html&gt;</code>, <code>&lt;Head&gt;</code> and <code>&lt;body&gt;</code> markup carried over, global CSS linked, originals kept as a comment</td></tr>
+          <tr><td><code>pages/404.tsx</code> / <code>pages/500.tsx</code></td><td><a href="/docs/file-conventions/not-found"><code>app/not-found.tsx</code></a> / <a href="/docs/file-conventions/error"><code>app/error.tsx</code></a></td></tr>
           <tr><td><code>pages/api/x.ts</code></td><td><code>app/api/x/route.ts</code>, with a TODO sketching the <code>GET</code>/<code>POST</code> exports that replace the <code>(req, res)</code> handler</td></tr>
         </tbody>
       </table>
@@ -85,8 +85,8 @@ npm run dev`} />
       <p>
         Catch-all params differ in shape: Next passes <code>[...slug]</code> as an array
         (<code>['a', 'b']</code>), GioJS as the <code>'/'</code>-joined string
-        (<code>'a/b'</code>) - in page props, <code>getServerSideProps</code>'s
-        <code> params</code>, <code>useParams()</code> and route handlers alike. Code in a
+        (<code>'a/b'</code>) - in page props, <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>'s
+        <code> params</code>, <a href="/docs/hooks/use-params"><code>useParams()</code></a> and route handlers alike. Code in a
         catch-all route that reads them gets a TODO to use <code>.split('/')</code>.
       </p>
 
@@ -102,25 +102,25 @@ npm run dev`} />
         <tbody>
           <tr>
             <td><code>next/link</code> (default, named or aliased import)</td>
-            <td><code>GioLink</code>; <code>legacyBehavior</code>/<code>passHref</code> removed (a child <code>&lt;a&gt;</code> is unwrapped onto the link), <code>as</code> becomes <code>href</code>, <code>prefetch</code> becomes <code>prefetch="viewport"</code>; object hrefs, <code>shallow</code>, <code>locale</code> and unsupported props get a TODO</td>
+            <td><a href="/docs/components/gio-link"><code>GioLink</code></a>; <code>legacyBehavior</code>/<code>passHref</code> removed (a child <code>&lt;a&gt;</code> is unwrapped onto the link), <code>as</code> becomes <code>href</code>, <code>prefetch</code> becomes <code>prefetch="viewport"</code>; object hrefs, <code>shallow</code>, <code>locale</code> and unsupported props get a TODO</td>
           </tr>
           <tr>
             <td><code>next/image</code>, <code>next/legacy/image</code></td>
-            <td><code>GioImage</code>; <code>fill</code>, <code>priority</code>, <code>sizes</code>, <code>quality</code>, <code>placeholder</code> kept, legacy <code>layout</code> mapped; static image imports, loaders and missing width/height get a TODO</td>
+            <td><a href="/docs/components/gio-image"><code>GioImage</code></a>; <code>fill</code>, <code>priority</code>, <code>sizes</code>, <code>quality</code>, <code>placeholder</code> kept, legacy <code>layout</code> mapped; static image imports, loaders and missing width/height get a TODO</td>
           </tr>
           <tr>
             <td><code>next/router</code> <code>useRouter()</code></td>
-            <td><code>useRouter</code> from <code>@gio.js/react</code> (<code>push</code>, <code>replace</code>, <code>back</code>, <code>forward</code>, <code>prefetch</code>, <code>refresh</code>); <code>router.query</code> → <code>useSearchParams()</code> + <code>useParams()</code> merged in a <code>useMemo</code> (it keeps its identity until the URL changes, like <code>router.query</code>, so effects that depend on it don't re-run every render), <code>pathname</code>/<code>asPath</code> → <code>usePathname()</code>, <code>reload()</code> → <code>window.location.reload()</code>; <code>router.events</code> and other unsupported APIs get a TODO</td>
+            <td><a href="/docs/hooks/use-router"><code>useRouter</code></a> from <code>@gio.js/react</code> (<code>push</code>, <code>replace</code>, <code>back</code>, <code>forward</code>, <code>prefetch</code>, <code>refresh</code>); <code>router.query</code> → <a href="/docs/hooks/use-search-params"><code>useSearchParams()</code></a> + <code>useParams()</code> merged in a <code>useMemo</code> (it keeps its identity until the URL changes, like <code>router.query</code>, so effects that depend on it don't re-run every render), <code>pathname</code>/<code>asPath</code> → <a href="/docs/hooks/use-pathname"><code>usePathname()</code></a>, <code>reload()</code> → <code>window.location.reload()</code>; <code>router.events</code> and other unsupported APIs get a TODO</td>
           </tr>
           <tr>
             <td><code>next/navigation</code></td>
             <td>
-              The hooks move to <code>@gio.js/react</code> unchanged, <code>notFound</code> to{' '}
+              The hooks move to <code>@gio.js/react</code> unchanged, <a href="/docs/functions/not-found"><code>notFound</code></a> to{' '}
               <code>@gio.js/core</code>. <code>redirect()</code>/<code>permanentRedirect()</code> become{' '}
               <code>redirect</code> from <code>@gio.js/core</code>, which returns the redirect instead of
               throwing it: <code>redirect(url)</code> as a statement becomes{' '}
-              <code>throw redirect(url)</code> (<code>redirect(url, 308)</code> for a permanent one) -
-              what <code>getServerSideProps</code>, <code>generateMetadata</code>, page actions and the
+              <a href="/docs/functions/redirect"><code>throw redirect(url)</code></a> (<code>redirect(url, 308)</code> for a permanent one) -
+              what <code>getServerSideProps</code>, <a href="/docs/page-exports/generate-metadata"><code>generateMetadata</code></a>, page actions and the
               helpers they call may throw. <code>return redirect(url)</code> becomes{' '}
               <code>throw redirect(url)</code> too, except directly in{' '}
               <code>getServerSideProps</code> or a page action, the only places that read a returned
@@ -128,7 +128,7 @@ npm run dev`} />
               <code>generateMetadata</code> would merge it as metadata). Directly in a route handler
               it becomes a 307/308 <code>Response</code>; while rendering a component or in a hook
               it gets a TODO (redirect from{' '}
-              <code>getServerSideProps</code>, or <code>navigate()</code> in the browser)
+              <code>getServerSideProps</code>, or <a href="/docs/functions/navigate"><code>navigate()</code></a> in the browser)
             </td>
           </tr>
           <tr>
@@ -145,11 +145,11 @@ npm run dev`} />
           </tr>
           <tr>
             <td><code>next/font</code></td>
-            <td>A same-shape stand-in object plus a <code>[[fonts]]</code> snippet for <code>gio.toml</code> in the report</td>
+            <td>A same-shape stand-in object plus a <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a> snippet for <code>gio.toml</code> in the report</td>
           </tr>
           <tr>
             <td><code>getStaticProps</code></td>
-            <td><code>getServerSideProps</code> plus <code>export const revalidate</code> (its <code>revalidate</code> value, or <code>false</code> - cache until the next deploy); <code>getStaticPaths</code> is kept for <code>gio export</code>, and <code>generateStaticParams</code> gets a <code>getStaticPaths</code> next to it</td>
+            <td><code>getServerSideProps</code> plus <a href="/docs/page-exports/revalidate"><code>export const revalidate</code></a> (its <code>revalidate</code> value, or <code>false</code> - cache until the next deploy); <a href="/docs/page-exports/get-static-paths"><code>getStaticPaths</code></a> is kept for <a href="/docs/cli/export"><code>gio export</code></a>, and <code>generateStaticParams</code> gets a <code>getStaticPaths</code> next to it</td>
           </tr>
           <tr>
             <td><code>export const metadata</code> / <code>generateMetadata</code></td>
@@ -173,10 +173,10 @@ npm run dev`} />
             <td><code>'use client'</code> / <code>'use server'</code></td>
             <td>
               Removed - every GioJS page hydrates. <code>&lt;form action={'{serverAction}'}&gt;</code>{' '}
-              becomes <code>&lt;GioForm&gt;</code>, which posts to the page&apos;s own URL, and each
+              becomes <a href="/docs/components/gio-form"><code>&lt;GioForm&gt;</code></a>, which posts to the page&apos;s own URL, and each
               Server Action gets a TODO to move into that page&apos;s{' '}
               <code>export async function action(req)</code> (a non-form one into a{' '}
-              <code>route.ts</code> handler); the report sketches the result. A button&apos;s{' '}
+              <a href="/docs/file-conventions/route"><code>route.ts</code></a> handler); the report sketches the result. A button&apos;s{' '}
               <code>formAction={'{serverAction}'}</code> becomes{' '}
               <code>name="intent" value="serverAction"</code> for the page&apos;s action to branch on,
               and its <code>&lt;form&gt;</code> becomes a <code>&lt;GioForm&gt;</code> as well. A client
@@ -186,7 +186,7 @@ npm run dev`} />
           <tr>
             <td><code>next/cache</code></td>
             <td>
-              <code>revalidatePath</code>/<code>revalidateTag</code> from <code>@gio.js/core</code>{' '}
+              <a href="/docs/functions/revalidate-path"><code>revalidatePath</code></a>/<code>revalidateTag</code> from <code>@gio.js/core</code>{' '}
               (<code>'layout'</code> becomes <code>{"{ type: 'prefix' }"}</code>, a route pattern such
               as <code>/posts/[id]</code> gets a TODO, and so does each <code>revalidateTag</code>: it
               purges the pages that declare the tag with <code>export const tags</code>).{' '}
@@ -203,7 +203,7 @@ npm run dev`} />
           <tr>
             <td>Metadata files</td>
             <td>
-              <code>app/sitemap.ts</code>, <code>app/robots.ts</code> and <code>app/manifest.ts</code>{' '}
+              <a href="/docs/file-conventions/sitemap"><code>app/sitemap.ts</code></a>, <a href="/docs/file-conventions/robots"><code>app/robots.ts</code></a> and <a href="/docs/file-conventions/manifest"><code>app/manifest.ts</code></a>{' '}
               are kept: GioJS serves them at the same URLs from the same return shapes (sitemap{' '}
               <code>images</code>/<code>videos</code> and <code>generateSitemaps</code> get a TODO).
               Next linked the manifest from every page on its own; GioJS renders that{' '}
@@ -213,7 +213,7 @@ npm run dev`} />
               The static files Next serves from <code>app/</code> - <code>favicon.ico</code>,{' '}
               <code>robots.txt</code>, <code>sitemap.xml</code>, <code>manifest.json</code>,{' '}
               <code>icon.png</code>, <code>opengraph-image.png</code>, ... - move to{' '}
-              <code>public/</code>; images and the manifest get a TODO to reference them from{' '}
+              <a href="/docs/file-conventions/public-folder"><code>public/</code></a>; images and the manifest get a TODO to reference them from{' '}
               <code>metadata</code> (<code>icons</code>, <code>openGraph.images</code>,{' '}
               <code>manifest</code>), which Next did implicitly
             </td>
@@ -264,8 +264,8 @@ status = 308          # permanent: true → 308, false → 307 (statusCode is ke
 path = "/*path"
 headers = { "X-Frame-Options" = "DENY" }`} />
       <ul>
-        <li><code>images.remotePatterns</code>/<code>domains</code> → <code>[[images.remote_patterns]]</code>, <code>deviceSizes</code>/<code>imageSizes</code> → <code>[images] allowed_widths</code></li>
-        <li><code>i18n</code> → <code>[i18n]</code> (<code>localeDetection: false</code> → path detection only)</li>
+        <li><code>images.remotePatterns</code>/<code>domains</code> → <code>[[images.remote_patterns]]</code>, <code>deviceSizes</code>/<code>imageSizes</code> → <a href="/docs/configuration/images"><code>[images] allowed_widths</code></a></li>
+        <li><code>i18n</code> → <a href="/docs/configuration/i18n"><code>[i18n]</code></a> (<code>localeDetection: false</code> → path detection only)</li>
         <li><code>output: 'export'</code> → the build script runs <code>gio export</code>; <code>env</code> → a <code>.env</code> hint</li>
         <li>
           A rule GioJS would match differently is skipped with a TODO instead of approximated:
@@ -283,9 +283,9 @@ headers = { "X-Frame-Options" = "DENY" }`} />
         </li>
         <li>
           <code>experimental.serverActions</code> points at page actions (<code>bodySizeLimit</code>{' '}
-          → <code>[server] max_body_bytes</code>, <code>allowedOrigins</code> →{' '}
-          <code>[security.csrf] trusted_origins</code>), <code>experimental.ppr</code> at{' '}
-          <code>export const shell = 'cache'</code>; typed routes need no flag
+          → <a href="/docs/configuration/server"><code>[server] max_body_bytes</code></a>, <code>allowedOrigins</code> →{' '}
+          <a href="/docs/configuration/security-csrf"><code>[security.csrf] trusted_origins</code></a>), <code>experimental.ppr</code> at{' '}
+          <a href="/docs/page-exports/shell"><code>export const shell = 'cache'</code></a>; typed routes need no flag
         </li>
         <li><code>basePath</code>, <code>trailingSlash</code>, <code>webpack</code>, other <code>experimental</code> flags and the rest are listed in the report - GioJS compiles with esbuild, so webpack and SWC options don't apply</li>
       </ul>
@@ -331,7 +331,7 @@ export default function NewPost({ actionData }: WithActionData<typeof action>) {
   );
 }`} />
       <p>
-        <code>useFormStatus()</code> becomes <code>useGioFormState()</code>, values passed with{' '}
+        <code>useFormStatus()</code> becomes <a href="/docs/hooks/use-gio-form-state"><code>useGioFormState()</code></a>, values passed with{' '}
         <code>.bind()</code> become hidden inputs, and <code>useActionState</code>&apos;s result is
         the page&apos;s <code>actionData</code> prop. The migration flags each of these.
       </p>
@@ -358,7 +358,7 @@ export default function NewPost({ actionData }: WithActionData<typeof action>) {
         </li>
         <li>
           <strong>Middleware</strong> - declarative redirects, rewrites, headers, and session or
-          cookie guards move to <code>middleware.ts</code> (<code>defineMiddleware</code> from{' '}
+          cookie guards move to <a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a> (<a href="/docs/functions/define-middleware"><code>defineMiddleware</code></a> from{' '}
           <code>@gio.js/core</code>) or <code>gio.toml</code>, and run in the Rust layer before
           routing. Imperative request interception belongs in a Node plugin
           (<code>GioNodePlugin</code> with an <code>onRequest</code> hook)
@@ -374,7 +374,7 @@ export default function NewPost({ actionData }: WithActionData<typeof action>) {
         <li>
           <strong>Data caching</strong> - <code>unstable_cache</code>, <code>'use cache'</code> and{' '}
           <code>fetch()</code> cache options become page caching: <code>export const revalidate</code>{' '}
-          plus <code>export const tags</code> for the pages <code>revalidateTag()</code> should purge
+          plus <code>export const tags</code> for the pages <a href="/docs/functions/revalidate-tag"><code>revalidateTag()</code></a> should purge
         </li>
       </ul>
 

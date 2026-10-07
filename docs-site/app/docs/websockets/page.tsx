@@ -15,7 +15,7 @@ export default function Page(): React.JSX.Element {
       <h1>WebSockets</h1>
       <p className="page-subtitle">Routed, authenticated, full-duplex connections with rooms.</p>
       <p>
-        Export a <code>wsHandler</code> from a <code>route.ts</code> to accept WebSocket
+        Export a <a href="/docs/page-exports/ws-handler"><code>wsHandler</code></a> from a <a href="/docs/file-conventions/route"><code>route.ts</code></a> to accept WebSocket
         connections at that path. Patterns follow the same rules as pages - dynamic{' '}
         <code>[segments]</code>, <code>[...catchAll]</code>, <code>[[...optional]]</code> and{' '}
         <code>(groups)</code> - and the matched segments arrive in <code>socket.params</code>.
@@ -42,7 +42,7 @@ export function wsHandler(socket: GioSocket) {
           <tr><td><code>path</code>, <code>params</code>, <code>query</code></td><td>The URL the client connected to, its dynamic segments, and its query string.</td></tr>
           <tr><td><code>headers</code></td><td>A fixed subset of the upgrade request&apos;s headers, lowercase: <code>cookie</code>, <code>authorization</code>, <code>user-agent</code>, <code>accept-language</code>, <code>origin</code> and <code>x-request-id</code>.</td></tr>
           <tr><td><code>cookies</code></td><td>The <code>Cookie</code> header, parsed.</td></tr>
-          <tr><td><code>ip</code></td><td>The client&apos;s address - behind a proxy only when it is listed in <code>[server] trusted_proxies</code>, like <code>req.ip</code>.</td></tr>
+          <tr><td><code>ip</code></td><td>The client&apos;s address - behind a proxy only when it is listed in <a href="/docs/configuration/server"><code>[server] trusted_proxies</code></a>, like <code>req.ip</code>.</td></tr>
           <tr><td><code>requestId</code></td><td>The upgrade request&apos;s <code>X-Request-Id</code>, on every log line.</td></tr>
           <tr><td><code>send(data)</code></td><td>A string sends a text frame, a <code>Buffer</code> a binary frame.</td></tr>
           <tr><td><code>close(code?, reason?)</code></td><td>Close the connection (default 1000).</td></tr>
@@ -131,7 +131,7 @@ export async function wsHandler(socket: GioSocket) {
       <h2 id="rooms">Rooms</h2>
       <p>
         <code>socket.join(room)</code> adds a socket to a named room; it leaves with{' '}
-        <code>socket.leave(room)</code> or when it disconnects. <code>broadcast(room, data)</code>{' '}
+        <code>socket.leave(room)</code> or when it disconnects. <a href="/docs/functions/broadcast"><code>broadcast(room, data)</code></a>{' '}
         sends to every member - from a <code>wsHandler</code>, or from any route handler, so an
         HTTP request can publish to WebSocket clients:
       </p>
@@ -174,14 +174,14 @@ socket.on('message', (msg) => broadcast(room, msg, { except: socket.id }));`} />
           <tr><td><code>1001</code></td><td>The server is shutting down, or the worker restarted (its sockets&apos; state is gone): reconnect.</td></tr>
           <tr><td><code>1008</code></td><td>Too many messages (256, or 1 MiB) before the handler listened or accepted the connection.</td></tr>
           <tr><td><code>1011</code></td><td>The <code>wsHandler</code> threw, or the <code>route.ts</code> for this path threw while it was imported: the reason is <code>internal error (digest ...)</code> and the server log has the file and the error under that digest.</td></tr>
-          <tr><td><code>1013</code></td><td><code>[websocket] max_connections</code> reached: try again later.</td></tr>
+          <tr><td><code>1013</code></td><td><a href="/docs/configuration/websocket"><code>[websocket] max_connections</code></a> reached: try again later.</td></tr>
           <tr><td><code>4401</code></td><td>The handler rejected the connection (returned <code>false</code>).</td></tr>
           <tr><td><code>4404</code></td><td>No <code>route.ts</code> exports a <code>wsHandler</code> for this path.</td></tr>
         </tbody>
       </table>
       <p>
         Use 4000-4499 for refusals that retrying will not fix (like HTTP 4xx) and 4500-4999
-        for transient ones: <code>useWebSocket</code> reconnects on the latter only.
+        for transient ones: <a href="/docs/hooks/use-web-socket"><code>useWebSocket</code></a> reconnects on the latter only.
       </p>
 
       <h2 id="on-the-client-usewebsocket">On the client: useWebSocket</h2>
@@ -230,7 +230,7 @@ export function Chat({ room }: { room: string }) {
         Browsers let any website open a WebSocket to your server with your users&apos; cookies
         attached. GioJS refuses upgrade requests whose <code>Origin</code> is another site
         (403, before the upgrade); same-origin pages, origins listed in{' '}
-        <code>[security.csrf] trusted_origins</code>, and clients that send no{' '}
+        <a href="/docs/configuration/security-csrf"><code>[security.csrf] trusted_origins</code></a>, and clients that send no{' '}
         <code>Origin</code> connect normally. The check stays on when{' '}
         <code>[security.csrf] enabled = false</code>; <code>[security.websocket] check_origin</code>{' '}
         switches it. See <a href="/docs/security">Security</a>.

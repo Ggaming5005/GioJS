@@ -29,6 +29,12 @@ export default function Page(): React.JSX.Element {
         <code>[security]</code> section of <code>gio.toml</code>; a misspelled key there
         stops the server at startup instead of silently leaving a protection off.
       </p>
+      <p>
+        Every protection here can be turned off or loosened, and startup warns when one is:{' '}
+        <a href="/docs/guides/security-switches">Turning Protections On and Off</a> lists them
+        all. To roll out a policy step by step, follow the{' '}
+        <a href="/docs/guides/content-security-policy">Content Security Policy</a> guide.
+      </p>
 
       <h2 id="default-security-headers">Default security headers</h2>
       <p>Every response - pages, cache hits, route handlers, static and public/ files, redirects, errors and <code>/_gio</code> endpoints - carries:</p>
@@ -40,7 +46,7 @@ export default function Page(): React.JSX.Element {
           <tr><td><code>X-Content-Type-Options</code></td><td><code>nosniff</code></td><td>Browsers never guess a script or stylesheet out of an upload served as text or an image.</td></tr>
           <tr><td><code>X-Frame-Options</code></td><td><code>SAMEORIGIN</code></td><td>Other sites cannot frame your pages (clickjacking).</td></tr>
           <tr><td><code>Referrer-Policy</code></td><td><code>strict-origin-when-cross-origin</code></td><td>Full URLs (with their query strings) are only sent to your own origin.</td></tr>
-          <tr><td><code>Strict-Transport-Security</code></td><td><code>max-age=31536000</code></td><td>Only when <code>[server.tls]</code> is enabled - see <a href="#hsts">HSTS</a>.</td></tr>
+          <tr><td><code>Strict-Transport-Security</code></td><td><code>max-age=31536000</code></td><td>Only when <a href="/docs/configuration/server-tls"><code>[server.tls]</code></a> is enabled - see <a href="#hsts">HSTS</a>.</td></tr>
         </tbody>
       </table>
       <p>
@@ -49,7 +55,7 @@ export default function Page(): React.JSX.Element {
         immediately.
       </p>
       <p>
-        Change, remove or add default headers in <code>[security.headers]</code>. An empty
+        Change, remove or add default headers in <a href="/docs/configuration/security"><code>[security.headers]</code></a>. An empty
         value removes a default. Headers that can break an app - <code>Permissions-Policy</code>,{' '}
         <code>Cross-Origin-Opener-Policy</code>, <code>Cross-Origin-Resource-Policy</code> - are
         not sent unless you add them here:
@@ -76,8 +82,8 @@ x-content-type-options = "nosniff"       # but keep this one`} />
       <p>
         A default never replaces a header the response already has. Headers set by your
         app - a route handler&apos;s <code>Response</code> headers, headers returned from{' '}
-        <code>getServerSideProps</code> - and by <code>[[headers]]</code> or{' '}
-        <code>middleware.ts</code> header rules win. A rule with an empty value removes the
+        <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> - and by <a href="/docs/configuration/headers"><code>[[headers]]</code></a> or{' '}
+        <a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a> header rules win. A rule with an empty value removes the
         default for its paths only, for example to let partners frame one section:
       </p>
       <CodeBlock lang="toml" code={`[[headers]]
@@ -140,10 +146,10 @@ csp = """
       <p>
         The replacement covers the headers and body of every dynamic response - pages, route
         handlers and SSE streams, whatever their content type (HTML, JSON, JavaScript, CSS,
-        XML, ...) - so even a route handler that echoes <code>cspNonce()</code> sends the
+        XML, ...) - so even a route handler that echoes <a href="/docs/functions/csp-nonce"><code>cspNonce()</code></a> sends the
         response&apos;s nonce, not the placeholder. The nonce is exactly as long as the
         placeholder, so <code>Content-Length</code> and byte ranges stay valid. Only{' '}
-        <code>public/</code> and build assets are served untouched. A dynamic response that sets
+        <a href="/docs/file-conventions/public-folder"><code>public/</code></a> and build assets are served untouched. A dynamic response that sets
         its own <code>Content-Encoding</code> (a body your handler compressed itself) cannot be
         searched, so while nonces are on it is refused with a <code>500</code> and an error in
         the server log: drop the header and let GioJS compress the response.
@@ -202,7 +208,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           Styles: keep <code>style-src &apos;self&apos; &apos;unsafe-inline&apos;</code>, without
           a nonce. React renders <code>style</code> props as <code>style=&quot;...&quot;</code>{' '}
           attributes, which only <code>&apos;unsafe-inline&apos;</code> allows, and{' '}
-          <code>&lt;Animate&gt;</code> and <code>&lt;Link&gt;</code> view transitions add
+          <a href="/docs/components/animate"><code>&lt;Animate&gt;</code></a> and <code>&lt;Link&gt;</code> view transitions add
           inline <code>&lt;style&gt;</code> elements that React hoists into the head without a
           nonce (<code>&lt;Animate&gt;</code> sets a <code>style</code> attribute as well). Adding{' '}
           <code>&apos;nonce-{'{nonce}'}&apos;</code> or a hash to <code>style-src</code> makes
@@ -213,7 +219,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <code>&lt;Link&gt;</code> transitions.
         </li>
         <li>
-          Static export (<code>gio export</code>) has no server to set the header or the
+          Static export (<a href="/docs/cli/export"><code>gio export</code></a>) has no server to set the header or the
           nonces; <code>cspNonce()</code> returns <code>undefined</code> there.
         </li>
       </ul>
@@ -294,7 +300,7 @@ exempt = [                                           # same patterns as [[redire
         with <code>Content-Type: application/json</code> (or <code>application/*+json</code>).
         Anything else - including the <code>text/plain</code> and form bodies an HTML form on
         another site can send without a CORS preflight - makes it throw{' '}
-        <code>UnsupportedMediaTypeError</code>, answered with <code>415</code> unless you catch
+        <a href="/docs/functions/request-errors"><code>UnsupportedMediaTypeError</code></a>, answered with <code>415</code> unless you catch
         it. <code>req.body</code> always has the raw body.
       </p>
 
@@ -303,7 +309,7 @@ exempt = [                                           # same patterns as [[redire
         Browsers let any website open a WebSocket to your server and send your users&apos;
         cookies with it (cross-site WebSocket hijacking). Upgrade requests get the same check
         as unsafe methods: an <code>Origin</code> from your own host or from{' '}
-        <code>[security.csrf] trusted_origins</code> is accepted, as is a client that sends no{' '}
+        <a href="/docs/configuration/security-csrf"><code>[security.csrf] trusted_origins</code></a> is accepted, as is a client that sends no{' '}
         <code>Origin</code> (not a browser); anything else is refused with <code>403</code>{' '}
         before the connection is upgraded. <code>[security.csrf] exempt</code> paths are
         skipped here too - exempt a public WebSocket API meant to be used from any site.

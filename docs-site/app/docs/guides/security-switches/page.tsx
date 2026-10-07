@@ -48,7 +48,7 @@ export default function Page(): React.JSX.Element {
         <li>
           <strong>Never silent.</strong> Turning a protection off or loosening a limit to{' '}
           <code>0</code> logs one <code>warn</code> line at startup that names the key and
-          what it costs. <code>giojs-server --check-config</code> and{' '}
+          what it costs. <a href="/docs/cli/giojs-server"><code>giojs-server --check-config</code></a> and{' '}
           <a href="/docs/cli/doctor"><code>gio doctor</code></a> report the same text under{' '}
           <code>warnings</code>, so CI can catch it before a deploy.
         </li>
@@ -103,7 +103,7 @@ npx giojs-server --check-config`} />
           </tr>
           <tr>
             <td id="hsts">HSTS (<code>Strict-Transport-Security</code>)</td>
-            <td><code>[security] hsts</code> unset: sent only when <code>[server.tls]</code> is on</td>
+            <td><code>[security] hsts</code> unset: sent only when <a href="/docs/configuration/server-tls"><code>[server.tls]</code></a> is on</td>
             <td><code>false</code> or <code>&quot;&quot;</code> never sends it; <code>true</code>, a string or a table sends it behind a TLS proxy</td>
             <td>Browsers may reach the site over plain HTTP first.</td>
             <td>no</td>
@@ -259,7 +259,7 @@ x-frame-options = ""                               # let partners frame one sect
             <td><code>/_gio/health</code></td>
             <td><code>[health] enabled = true</code>, <code>details = true</code></td>
             <td><code>enabled = false</code> answers <code>404</code>; <code>details = false</code> answers only <code>{'{"status":"ok","nodeReady":...}'}</code></td>
-            <td>Load balancers lose the endpoint; <code>gio dev</code>, <code>gio start</code> and the testing kit then treat any answer as ready.</td>
+            <td>Load balancers lose the endpoint; <a href="/docs/cli/dev"><code>gio dev</code></a>, <a href="/docs/cli/start"><code>gio start</code></a> and the testing kit then treat any answer as ready.</td>
             <td>no</td>
           </tr>
           <tr>
@@ -345,7 +345,7 @@ x-frame-options = ""                               # let partners frame one sect
             <td>Image optimizer (<code>/_gio/image</code>)</td>
             <td><a href="/docs/configuration/images"><code>[images] enabled = true</code></a></td>
             <td><code>false</code></td>
-            <td><code>/_gio/image</code> answers <code>404</code>; <code>&lt;GioImage&gt;</code> renders its plain <code>src</code> without a <code>srcset</code>.</td>
+            <td><code>/_gio/image</code> answers <code>404</code>; <a href="/docs/components/gio-image"><code>&lt;GioImage&gt;</code></a> renders its plain <code>src</code> without a <code>srcset</code>.</td>
           </tr>
           <tr>
             <td>Image optimizer limits</td>

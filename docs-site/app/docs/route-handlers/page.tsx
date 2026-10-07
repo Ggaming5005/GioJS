@@ -16,7 +16,7 @@ export default function Page(): React.JSX.Element {
       <p className="page-subtitle">API endpoints, Server-Sent Events, and WebSockets with route.ts files.</p>
 
       <p>
-        A <code>route.ts</code> (or <code>route.js</code>) file turns its folder into a
+        A <a href="/docs/file-conventions/route"><code>route.ts</code></a> (or <code>route.js</code>) file turns its folder into a
         server endpoint. Export a function per HTTP method - <code>GET</code>,{' '}
         <code>POST</code>, <code>PUT</code>, <code>PATCH</code>, <code>DELETE</code>:
       </p>
@@ -59,7 +59,7 @@ export const GET: RouteHandler<'/api/notes/:id'> = async (req) => {
         <code>host</code> are what the client used, and <code>requestId</code> is the
         request&apos;s <code>X-Request-Id</code>, also on every log line for the request.
         Behind a reverse proxy these describe the visitor only when the proxy is listed in{' '}
-        <code>[server] trusted_proxies</code> - otherwise <code>ip</code> is the proxy&apos;s
+        <a href="/docs/configuration/server"><code>[server] trusted_proxies</code></a> - otherwise <code>ip</code> is the proxy&apos;s
         address (see <a href="/docs/configuration">Configuration</a>). Use{' '}
         <code>req.ip</code>, never the <code>x-forwarded-for</code> header: any client can
         send that header, while <code>req.ip</code> only honors it from trusted proxies.{' '}
@@ -75,7 +75,7 @@ export async function POST(req: GioRequest) {
       <p>
         <code>json()</code> parses only bodies sent with{' '}
         <code>Content-Type: application/json</code> (or <code>application/*+json</code>). For
-        anything else it throws <code>UnsupportedMediaTypeError</code>, which becomes a{' '}
+        anything else it throws <a href="/docs/functions/request-errors"><code>UnsupportedMediaTypeError</code></a>, which becomes a{' '}
         <code>415 Unsupported Media Type</code> response unless you catch it - a form on
         another site can send <code>text/plain</code> without a CORS preflight, so a handler
         must not treat it as JSON. <code>req.body</code> always holds the raw body:
@@ -106,7 +106,7 @@ export function POST(req: GioRequest) {
         <li>Any JSON-serializable value - sent as <code>application/json</code> with status 200.</li>
         <li>A web-standard <code>Response</code> - its status, headers, and body pass through. Binary bodies (images, files) are supported, and a <code>ReadableStream</code> body streams (see below).</li>
         <li><code>null</code> / <code>undefined</code> - 204 No Content.</li>
-        <li>A <code>GioEventStream</code> (GET only) - switches the connection to SSE.</li>
+        <li>A <a href="/docs/functions/gio-event-stream"><code>GioEventStream</code></a> (GET only) - switches the connection to SSE.</li>
       </ul>
       <CodeBlock lang="ts" code={`export function DELETE() {
   return new Response('gone', { status: 202, headers: { 'X-Reason': 'cleanup' } });
@@ -132,7 +132,7 @@ export async function POST(req: GioRequest) {
   return new Response(null, { status: 303, headers });
 }`} />
       <p>
-        <code>serializeCookie</code> applies secure defaults (<code>HttpOnly</code>,{' '}
+        <a href="/docs/functions/cookies"><code>serializeCookie</code></a> applies secure defaults (<code>HttpOnly</code>,{' '}
         <code>SameSite=Lax</code>, <code>Secure</code> in production) and refuses values that
         could inject attributes; sessions are covered in{' '}
         <a href="/docs/authentication">Authentication</a>.
@@ -234,7 +234,9 @@ export function GET() {
       </ul>
       <p>
         <code>GioEventStream</code> (above) remains the shortest way to write SSE: it frames
-        events for you and runs your cleanup on disconnect.
+        events for you and runs your cleanup on disconnect. The{' '}
+        <a href="/docs/guides/streaming">Streaming</a> guide covers streamed pages and what
+        happens to open streams at shutdown.
       </p>
 
       <h2 id="rules">Rules</h2>
@@ -264,7 +266,7 @@ export function GET() {
           missing <code>GIO_SESSION_SECRET</code>) answers that JSON 500 for every method
           (<code>OPTIONS</code> included), and its URL stays its own - no sibling page or 404
           takes it over. A WebSocket connection to it is closed with <code>1011</code>, not the{' '}
-          <code>4404</code> of a path with no <code>wsHandler</code>. The log names the file
+          <code>4404</code> of a path with no <a href="/docs/page-exports/ws-handler"><code>wsHandler</code></a>. The log names the file
           and the error, once at startup and per request under the response&apos;s{' '}
           <code>digest</code>; in development the response carries the error too.
         </li>
@@ -273,12 +275,12 @@ export function GET() {
           requests are refused with 403 before your handler runs (CSRF protection). Endpoints
           other sites post to on purpose - OAuth/OIDC <code>form_post</code> and SAML
           callbacks, payment (3-D Secure) returns, webhooks that send an <code>Origin</code> - go
-          in <code>[security.csrf] exempt</code> - see <a href="/docs/security">Security</a>.
+          in <a href="/docs/configuration/security-csrf"><code>[security.csrf] exempt</code></a> - see <a href="/docs/security">Security</a>.
         </li>
         <li>
           Export <code>wsHandler</code> from the same file for WebSockets (with the same
           dynamic segments), and publish to WebSocket rooms from any handler with{' '}
-          <code>broadcast(room, data)</code> - see <a href="/docs/websockets">WebSockets</a>.
+          <a href="/docs/functions/broadcast"><code>broadcast(room, data)</code></a> - see <a href="/docs/websockets">WebSockets</a>.
         </li>
       </ul>
     </>

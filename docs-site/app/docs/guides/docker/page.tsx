@@ -17,7 +17,7 @@ export default function Page(): React.JSX.Element {
     <>
       <h1>Deploying with Docker</h1>
       <p className="page-subtitle">
-        A small production image built from <code>gio build standalone</code>: only Node and
+        A small production image built from <a href="/docs/cli/build-standalone"><code>gio build standalone</code></a>: only Node and
         one folder, running as an unprivileged user with a health check.
       </p>
 
@@ -32,7 +32,7 @@ docker compose up --build                      # → http://localhost:3000`} />
         typecheck, plus the Tailwind build when that feature is on) and packs the app with{' '}
         <a href="/docs/standalone"><code>gio build standalone</code></a>: the Rust server, the
         whole Node side bundled into <code>worker.js</code>, prebuilt client assets,{' '}
-        <code>public/</code> and <code>gio.toml</code>. The runtime stage copies only that
+        <a href="/docs/file-conventions/public-folder"><code>public/</code></a> and <code>gio.toml</code>. The runtime stage copies only that
         folder into a slim Node image - no <code>node_modules</code>, no build tools.
       </p>
       <CodeBlock lang="dockerfile" code={`ARG NODE_VERSION=22
@@ -133,7 +133,7 @@ volumes:
       <CodeBlock lang="bash" code={`docker build -t my-app .
 docker run -p 3000:3000 --env-file .env.production.local -v my-app-data:/app/data my-app`} />
       <p>
-        Behind a reverse proxy or load balancer, list it in <code>[server] trusted_proxies</code>{' '}
+        Behind a reverse proxy or load balancer, list it in <a href="/docs/configuration/server"><code>[server] trusted_proxies</code></a>{' '}
         so client IPs and rate limits see the real visitor (see{' '}
         <a href="/docs/deployment">Deployment</a>).
       </p>

@@ -26,8 +26,8 @@ export default function Page(): React.JSX.Element {
           <tr><td><code>crates/giojs-*</code></td><td>Focused crates the server uses: router, cache, image, CSS, fonts, i18n, rate limiter, prefetch budget, assets, plugins.</td></tr>
           <tr><td><code>packages/giojs-core</code></td><td><code>@gio.js/core</code>: the Node worker (SSR, route handlers, actions, the client build) and the server-side API.</td></tr>
           <tr><td><code>packages/giojs-react</code></td><td><code>@gio.js/react</code>: components and hooks that run in the browser.</td></tr>
-          <tr><td><code>packages/giojs</code></td><td><code>@gio.js/server</code>: the <code>gio</code> CLI and the <code>giojs-server</code> launcher.</td></tr>
-          <tr><td><code>packages/giojs-cli</code></td><td><code>create-giojs</code>: the scaffolder, its templates, <code>add</code> and <code>migrate</code>.</td></tr>
+          <tr><td><code>packages/giojs</code></td><td><code>@gio.js/server</code>: the <code>gio</code> CLI and the <a href="/docs/cli/giojs-server"><code>giojs-server</code></a> launcher.</td></tr>
+          <tr><td><code>packages/giojs-cli</code></td><td><a href="/docs/create-giojs"><code>create-giojs</code></a>: the scaffolder, its templates, <code>add</code> and <code>migrate</code>.</td></tr>
           <tr><td><code>tests/integration</code></td><td>End-to-end tests against the real server binary and worker.</td></tr>
           <tr><td><code>docs-site</code></td><td>This site, a GioJS app exported to static HTML.</td></tr>
         </tbody>

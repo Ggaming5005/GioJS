@@ -36,7 +36,7 @@ export default function Page(): React.JSX.Element {
       <p>
         Install the new versions together: the server binary and <code>@gio.js/core</code>{' '}
         check each other&apos;s protocol version when the worker starts, and{' '}
-        <code>gio doctor</code> reports <code>@gio.js/*</code> packages that are not in
+        <a href="/docs/cli/doctor"><code>gio doctor</code></a> reports <code>@gio.js/*</code> packages that are not in
         lockstep. Add{' '}
         <code>@gio.js/core</code> if it is not a direct dependency yet (types and server
         helpers are imported from it), and move <code>cross-env</code> to{' '}
@@ -74,8 +74,8 @@ export default function Page(): React.JSX.Element {
       <p>
         <strong>What changed:</strong> an unknown section or key anywhere in{' '}
         <code>gio.toml</code> now stops startup with the file, the line and the closest valid
-        key. <code>gio.config.ts</code> is validated too (unknown keys, plugins without a{' '}
-        <code>name</code>), and a <code>[[guards]]</code> entry with a misspelled key, no
+        key. <a href="/docs/gio-config"><code>gio.config.ts</code></a> is validated too (unknown keys, plugins without a{' '}
+        <code>name</code>), and a <a href="/docs/configuration/guards"><code>[[guards]]</code></a> entry with a misspelled key, no
         requirement or an invalid path fails startup instead of being skipped. Run the check
         before you deploy - it lists every problem at once, and never binds a port:
       </p>
@@ -127,9 +127,9 @@ npx gio doctor                       # the same check, plus Node, versions, tsco
           like a malformed <code>trusted_proxies</code> entry.
         </li>
         <li>
-          <strong>The page cache directory</strong> (<code>[cache] disk_path</code> or{' '}
+          <strong>The page cache directory</strong> (<a href="/docs/configuration/cache"><code>[cache] disk_path</code></a> or{' '}
           <code>GIO_CACHE_DIR</code>) may no longer be, contain or sit inside{' '}
-          <code>app/</code> or <code>public/</code>.
+          <code>app/</code> or <a href="/docs/file-conventions/public-folder"><code>public/</code></a>.
         </li>
       </ul>
       <p>
@@ -196,10 +196,10 @@ files = false        # or GIO_ENV_FILES=0 in the environment`} />
         <li>
           <code>*rest</code> in guards, redirects, rewrites and header rules now also matches
           zero segments: <code>/admin/*rest</code> covers <code>/admin</code>, and a{' '}
-          <code>[[rate_limits]]</code> path <code>/api/*</code> covers <code>/api</code>.
+          <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a> path <code>/api/*</code> covers <code>/api</code>.
         </li>
         <li>
-          A <code>route.ts</code> that throws while it is imported now answers <code>500</code>{' '}
+          A <a href="/docs/file-conventions/route"><code>route.ts</code></a> that throws while it is imported now answers <code>500</code>{' '}
           instead of <code>404</code>.
         </li>
       </ul>
@@ -219,7 +219,7 @@ exempt = ["/auth/callback/apple", "/saml/acs", "/api/webhooks/*rest"]
 trusted_origins = ["https://admin.example.com"]   # your other origins (also for WebSockets)`} />
       <p>
         Behind nginx, keep <code>proxy_set_header Host $host</code> (or list the proxy in{' '}
-        <code>[server] trusted_proxies</code> so <code>X-Forwarded-Host</code> counts): the check
+        <a href="/docs/configuration/server"><code>[server] trusted_proxies</code></a> so <code>X-Forwarded-Host</code> counts): the check
         compares <code>Origin</code> with the host. See{' '}
         <a href="/docs/security#csrf">Security: CSRF protection</a>.
       </p>
@@ -229,7 +229,7 @@ trusted_origins = ["https://admin.example.com"]   # your other origins (also for
         <strong>What changed:</strong> every response carries{' '}
         <code>X-Content-Type-Options: nosniff</code>, <code>X-Frame-Options: SAMEORIGIN</code>{' '}
         and <code>Referrer-Policy: strict-origin-when-cross-origin</code> (plus HSTS with{' '}
-        <code>[server.tls]</code>), and <code>X-Powered-By</code> is removed. If other sites
+        <a href="/docs/configuration/server-tls"><code>[server.tls]</code></a>), and <code>X-Powered-By</code> is removed. If other sites
         embed your pages in an <code>&lt;iframe&gt;</code>, lift the frame header for those
         paths:
       </p>
@@ -259,7 +259,7 @@ x-frame-options = ""          # "" removes the default for these paths`} />
       <h2 id="9-check-cached-pages-that-read-cookies">9. Check cached pages that read cookies</h2>
       <p>
         <strong>What changed:</strong> a page that exports <code>revalidate</code> but whose{' '}
-        <code>getServerSideProps</code> reads <code>ctx.cookies</code>, the{' '}
+        <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> reads <code>ctx.cookies</code>, the{' '}
         <code>cookie</code> or <code>authorization</code> header, <code>ctx.ip</code>,{' '}
         <code>ctx.host</code> or <code>ctx.scheme</code> now renders per request and is never
         stored - beta.7 cached it and served the first visitor&apos;s page to everyone. Neither
@@ -273,14 +273,14 @@ x-frame-options = ""          # "" removes the default for these paths`} />
         Cached pages also send{' '}
         <code>Cache-Control: public, max-age=0, s-maxage=&lt;revalidate&gt;, stale-while-revalidate=...</code>{' '}
         now, so a CDN in front caches them - and an on-demand purge does not reach the CDN. Set
-        your own <code>Cache-Control</code> with a <code>[[headers]]</code> rule where that is
+        your own <code>Cache-Control</code> with a <a href="/docs/configuration/headers"><code>[[headers]]</code></a> rule where that is
         not wanted. See <a href="/docs/caching#browser-and-cdn-caching">Caching</a>.
       </p>
 
       <h2 id="10-update-error-tsx">10. Update error.tsx</h2>
       <p>
         <strong>What changed:</strong> in production a failed render shows only a digest - a
-        short reference the real error is logged under - and <code>error.tsx</code> receives{' '}
+        short reference the real error is logged under - and <a href="/docs/file-conventions/error"><code>error.tsx</code></a> receives{' '}
         <code>{'{ error: { message, digest }, reset }'}</code>, where <code>message</code> is{' '}
         <code>Internal Server Error</code>. <code>error.tsx</code> is also a client error
         boundary now, bundled into every page below its folder, so it must not import
@@ -305,7 +305,7 @@ x-frame-options = ""          # "" removes the default for these paths`} />
       </p>
 
       <h2 id="11-websockets">11. WebSockets</h2>
-      <p>If you use <code>wsHandler</code> or <code>useWebSocket</code>:</p>
+      <p>If you use <a href="/docs/page-exports/ws-handler"><code>wsHandler</code></a> or <a href="/docs/hooks/use-web-socket"><code>useWebSocket</code></a>:</p>
       <ul>
         <li>
           <code>useWebSocket</code> reconnects by default, with backoff. Pass{' '}
@@ -340,8 +340,8 @@ x-frame-options = ""          # "" removes the default for these paths`} />
 
       <h2 id="13-typed-routes">13. Typed routes</h2>
       <p>
-        <code>.gio/routes.d.ts</code> now fills a global registry that <code>href()</code>,{' '}
-        <code>useParams()</code> and the <code>@gio.js/core</code> types all read. Routes you
+        <code>.gio/routes.d.ts</code> now fills a global registry that <a href="/docs/functions/href"><code>href()</code></a>,{' '}
+        <a href="/docs/hooks/use-params"><code>useParams()</code></a> and the <code>@gio.js/core</code> types all read. Routes you
         added by hand to <code>@gio.js/react</code>&apos;s <code>GioRegisteredRoutes</code> still
         type <code>href()</code>; move them so the core types see them too:
       </p>
@@ -384,7 +384,7 @@ allowed_hosts = ["myvm.local", "192.168.1.20", "*.tunnel.example"]`} />
           <code>header_read_timeout_secs</code> and <code>idle_timeout_secs</code> above it.
         </li>
         <li>
-          <strong>Metrics.</strong> A <code>[metrics]</code> section with neither{' '}
+          <strong>Metrics.</strong> A <a href="/docs/configuration/metrics"><code>[metrics]</code></a> section with neither{' '}
           <code>token</code> nor <code>ip_allowlist</code> answers only this machine now. Give
           your scraper a token or an allowlist:
           <CodeBlock lang="toml" title="gio.toml" code={`[metrics]
@@ -394,7 +394,7 @@ ip_allowlist = ["10.0.0.0/8"]          # your Prometheus network
           <code>[server] trusted_proxies</code>, or every client looks local.
         </li>
         <li>
-          <strong>Static export.</strong> <code>gio export</code> now ships client bundles and
+          <strong>Static export.</strong> <a href="/docs/cli/export"><code>gio export</code></a> now ships client bundles and
           each page&apos;s <code>getServerSideProps</code> props as JSON: never return secrets
           from it. <code>public/</code> is copied to the root of <code>out/</code>.
         </li>

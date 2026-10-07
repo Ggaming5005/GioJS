@@ -20,7 +20,7 @@ export default function Page(): React.JSX.Element {
       <p className="page-subtitle">
         Every way to send a visitor to another URL in GioJS - from a page action,{' '}
         <code>getServerSideProps</code>, a route handler, <code>gio.toml</code> rules,{' '}
-        <code>middleware.ts</code> and guards - and which status code each one sends.
+        <a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a> and guards - and which status code each one sends.
       </p>
 
       <p>
