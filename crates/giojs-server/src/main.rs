@@ -19,6 +19,7 @@
 
 mod client_identity;
 mod config;
+mod config_check;
 mod config_diagnostics;
 mod conn;
 mod css_assets;
@@ -469,7 +470,11 @@ fn main() -> anyhow::Result<()> {
     // .env files load before the tokio runtime exists: mutating the process
     // environment is only sound while no other thread can be reading it. A
     // file that exists but cannot be parsed is a config error, like gio.toml.
-    let env_files = match env_files::load_for_startup() {
+    let loaded = env_files::load_for_startup();
+    if config_check::requested() {
+        std::process::exit(config_check::run(loaded.as_ref()));
+    }
+    let env_files = match loaded {
         Ok(loaded) => loaded,
         Err(error) => {
             eprintln!("giojs-server: configuration error: {error}");

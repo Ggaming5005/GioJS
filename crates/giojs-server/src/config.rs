@@ -1202,31 +1202,37 @@ impl Default for ServerConfig {
 
 impl GioConfig {
     pub fn load() -> Self {
-        // GIO_APP_DIR is the `app/` subdirectory; gio.toml lives one level up.
-        // Fall back to gio.toml in the process CWD if that path doesn't exist.
-        let path = std::env::var("GIO_APP_DIR")
-            .ok()
-            .and_then(|app_dir| {
-                let p = std::path::Path::new(&app_dir).parent()?.join("gio.toml");
-                p.exists().then_some(p)
-            })
-            .unwrap_or_else(|| std::path::PathBuf::from("gio.toml"));
-
-        let loaded = Self::load_from_path(&path).and_then(|mut config| {
-            config.apply_listen_overrides(
-                std::env::var("GIO_HOST").ok().as_deref(),
-                std::env::var("GIO_PORT").ok().as_deref(),
-                std::env::var("PORT").ok().as_deref(),
-            )?;
-            Ok(config)
-        });
-        match loaded {
+        match Self::try_load() {
             Ok(config) => config,
             Err(error) => {
                 eprintln!("giojs-server: configuration error: {error}");
                 std::process::exit(1);
             }
         }
+    }
+
+    /// `load` without the exit: the config, or why startup would refuse it.
+    pub fn try_load() -> Result<Self, ConfigError> {
+        let mut config = Self::load_from_path(&Self::path())?;
+        config.apply_listen_overrides(
+            std::env::var("GIO_HOST").ok().as_deref(),
+            std::env::var("GIO_PORT").ok().as_deref(),
+            std::env::var("PORT").ok().as_deref(),
+        )?;
+        Ok(config)
+    }
+
+    /// Where gio.toml is read from. GIO_APP_DIR is the `app/` subdirectory
+    /// and gio.toml lives one level up; fall back to gio.toml in the process
+    /// CWD if that path doesn't exist.
+    pub fn path() -> std::path::PathBuf {
+        std::env::var("GIO_APP_DIR")
+            .ok()
+            .and_then(|app_dir| {
+                let p = std::path::Path::new(&app_dir).parent()?.join("gio.toml");
+                p.exists().then_some(p)
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from("gio.toml"))
     }
 
     fn load_from_path(path: &std::path::Path) -> Result<Self, ConfigError> {
@@ -1244,7 +1250,7 @@ impl GioConfig {
     }
 
     /// Parse gio.toml's contents; `file` names it in errors.
-    fn parse(raw: &str, file: &str) -> Result<Self, ConfigError> {
+    pub(crate) fn parse(raw: &str, file: &str) -> Result<Self, ConfigError> {
         let parsed = toml::from_str::<Self>(raw);
         // A syntax error leaves no document: toml's own error (line,
         // snippet) is then the best there is.

@@ -518,6 +518,28 @@ impl RuleSet {
         compiled
     }
 
+    /// The entries `compile` would skip, one message each, for
+    /// `--check-config`: the warnings it logs scroll past at startup.
+    pub fn skipped_rules(raw: &MiddlewareRules) -> Vec<String> {
+        let guards = raw.guards.iter().filter_map(|rule| {
+            let error = CompiledGuard::compile(rule).err()?;
+            Some(format!("[[guards]] {}: {error}", rule.path))
+        });
+        let redirects = raw.redirects.iter().filter_map(|rule| {
+            let error = CompiledRedirect::compile(rule).err()?;
+            Some(format!("[[redirects]] {}: {error}", rule.from))
+        });
+        let rewrites = raw.rewrites.iter().filter_map(|rule| {
+            let error = CompiledRewrite::compile(rule).err()?;
+            Some(format!("[[rewrites]] {}: {error}", rule.from))
+        });
+        let headers = raw.headers.iter().filter_map(|rule| {
+            let error = CompiledHeaderRule::compile(rule).err()?;
+            Some(format!("[[headers]] {}: {error}", rule.path))
+        });
+        guards.chain(redirects).chain(rewrites).chain(headers).collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.guards.is_empty()
             && self.redirects.is_empty()
@@ -730,6 +752,31 @@ mod tests {
             require_session: false,
             redirect_to: redirect_to.to_string(),
         }
+    }
+
+    #[test]
+    fn skipped_rules_lists_exactly_what_compile_skips() {
+        let raw = MiddlewareRules {
+            redirects: vec![redirect("/old", "/new", 301), redirect("/a", "/b", 200)],
+            rewrites: vec![RewriteRule {
+                from: "no-slash".to_string(),
+                to: "/x".to_string(),
+            }],
+            headers: vec![HeaderRule {
+                path: "/*rest".to_string(),
+                headers: [("bad header".to_string(), "v".to_string())].into(),
+            }],
+            guards: vec![guard("/admin", "session", "/login")],
+        };
+        let skipped = RuleSet::skipped_rules(&raw);
+        assert_eq!(skipped.len(), 3, "{skipped:?}");
+        assert!(skipped[0].starts_with("[[redirects]] /a: "), "{skipped:?}");
+        assert!(skipped[1].starts_with("[[rewrites]] no-slash: "), "{skipped:?}");
+        assert!(skipped[2].starts_with("[[headers]] /*rest: "), "{skipped:?}");
+        let compiled = RuleSet::compile(&raw);
+        assert_eq!(compiled.redirects.len(), 1);
+        assert!(compiled.rewrites.is_empty() && compiled.headers.is_empty());
+        assert_eq!(compiled.guards.len(), 1);
     }
 
     // ── pattern matching ─────────────────────────────────────────────────────

@@ -4605,6 +4605,18 @@ async function strictConfigPhase() {
         assert.match(run.stderr, expected);
         assert.ok(run.stderr.includes(join(projectDir, 'gio.toml')), `names the file:\n${run.stderr}`);
       });
+      await test(`--check-config reports gio.toml with ${label} as JSON, exit 1`, async () => {
+        const check = spawnSync(binary, ['--check-config'], {
+          cwd: projectDir,
+          env: { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production' },
+          encoding: 'utf8',
+          timeout: 30_000,
+        });
+        assert.equal(check.status, 1, `exit status ${check.status}, stderr:\n${check.stderr}`);
+        const report = JSON.parse(check.stdout);
+        assert.equal(report.ok, false);
+        assert.match(report.errors[0], expected);
+      });
     }
     await writeFile(join(projectDir, 'gio.toml'), server + '[cache]\ndisk_path = "public/_cache"\n');
     await test('a page cache directory inside public/ stops startup before it is created', async () => {
@@ -4620,6 +4632,15 @@ async function strictConfigPhase() {
         /configuration error: \[cache\] disk_path: the page cache directory \S*public\/_cache is inside the public\/ directory/,
       );
       assert.equal(existsSync(join(projectDir, 'public', '_cache')), false, 'nothing was created');
+      const check = spawnSync(binary, ['--check-config'], {
+        cwd: projectDir,
+        env: { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production' },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      assert.equal(check.status, 1);
+      assert.match(JSON.parse(check.stdout).errors[0], /^\[cache\] disk_path: .*inside the public\/ directory/);
+      assert.equal(existsSync(join(projectDir, 'public', '_cache')), false, '--check-config creates nothing');
     });
   } catch (err) {
     console.error(`\nintegration (strict gio.toml): FAILED\n${err?.stack ?? err}`);
