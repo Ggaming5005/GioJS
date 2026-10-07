@@ -695,6 +695,22 @@ h3:hover > .heading-anchor,
 .docs-prose .ref-table td:nth-child(2) code { overflow-wrap: anywhere; }
 .ref-table__required { color: var(--muted); font-size: 0.78rem; }
 .docs-prose .ref-table--versions td:first-child { width: 1%; }
+/* gio.toml key tables (components/ConfigKeyTable.tsx): the type under the
+   key, the `0` meaning and env override under the description. */
+.docs-prose .config-key-table td:last-child { min-width: 16rem; }
+.docs-prose .config-key-table td:nth-child(2) code { overflow-wrap: normal; }
+.config-key-table__type {
+  display: block;
+  margin-top: 0.3rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  white-space: normal;
+}
+.config-key-table__meta { display: block; margin-top: 0.45rem; font-size: 0.85rem; }
+.config-key-table__meta strong { font-weight: 600; }
+.docs-prose .config-warnings td:first-child { min-width: 10rem; }
+.docs-prose .config-switches td:nth-child(2) code { overflow-wrap: normal; }
 
 /* ── Benchmarks ─────────────────────────────────── */
 .bench-table td:nth-child(2),

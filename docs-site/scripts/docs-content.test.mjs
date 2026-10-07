@@ -366,3 +366,135 @@ test('the shell and getServerSideProps references match the PPR path and query p
   assert.match(main, /fn parse_query\(query_str: &str\) -> HashMap<String, String> \{[\s\S]{0,400}?\.collect\(\)/);
   assert.match(docsPage('page-exports/get-server-side-props'), /the last one when a name repeats/);
 });
+
+// ── gio.toml reference (/docs/configuration/<section>) ──────────────────────
+
+/**
+ * Where each config struct of packages/giojs/gio.schema.json is documented:
+ * its section page, the table header it has in the overview's "Full
+ * reference" block, and the keys documented elsewhere (sub-tables with their
+ * own header or page, camelCase aliases). `prefix` is how the page names its
+ * keys (`hsts.max_age`).
+ */
+const CONFIG_DOCS = {
+  AppConfig: { page: 'app', block: '[app]' },
+  ServerConfig: { page: 'server', block: '[server]', skip: ['tls'] },
+  TlsConfig: { page: 'server-tls', block: '[server.tls]' },
+  SecurityConfig: { page: 'security', block: '[security]', skip: ['csrf', 'websocket'], blockSkip: ['headers'] },
+  HstsPolicy: { page: 'security', block: '[security]', prefix: 'hsts.' },
+  CsrfConfig: { page: 'security-csrf', block: '[security.csrf]' },
+  WebSocketSecurityConfig: { page: 'security-websocket', block: '[security.websocket]' },
+  CacheConfig: { page: 'cache', block: '[cache]' },
+  CompressionConfig: { page: 'compression', block: '[compression]' },
+  PrefetchConfig: { page: 'prefetch', block: '[prefetch]' },
+  FontEntry: { page: 'fonts', block: '[[fonts]]' },
+  ImageConfig: { page: 'images', block: '[images]', blockSkip: ['remote_patterns'] },
+  RemotePattern: { page: 'images', block: '[[images.remote_patterns]]' },
+  CssConfig: { page: 'css', block: '[css]' },
+  WebsocketConfig: { page: 'websocket', block: '[websocket]' },
+  RateLimitEntry: { page: 'rate-limits', block: '[[rate_limits]]' },
+  RedirectRule: { page: 'redirects', block: '[[redirects]]' },
+  RewriteRule: { page: 'rewrites', block: '[[rewrites]]' },
+  HeaderRule: { page: 'headers', block: '[[headers]]', blockSkip: ['headers'] },
+  GuardRule: { page: 'guards', block: '[[guards]]', skip: ['requireCookie', 'requireSession', 'redirectTo'] },
+  I18nConfig: { page: 'i18n', block: '[i18n]' },
+  MetricsConfig: { page: 'metrics', block: '[metrics]' },
+  HealthConfig: { page: 'health', block: '[health]' },
+  EnvConfig: { page: 'env', block: '[env]' },
+  LoggingConfig: { page: 'logging', block: '[logging]' },
+  RevalidateConfig: { page: 'revalidate', block: '[revalidate]' },
+  DevConfig: { page: 'dev', block: '[dev]' },
+};
+
+const configSchema = () => JSON.parse(read('packages/giojs/gio.schema.json'));
+
+/** The `ConfigKeyTable` rows of a page: key -> default literal (or undefined). */
+function configKeyRows(source) {
+  const rows = new Map();
+  for (const m of source.matchAll(/\{ key: '([^']+)', type: '[^']*'(?:, default: '([^']*)')?/g)) {
+    rows.set(m[1], m[2]);
+  }
+  return rows;
+}
+
+/** The overview's "Full reference" TOML block, split by table header. */
+function fullReferenceTables() {
+  const page = docsPage('configuration');
+  const block = /<h2 id="full-reference">[\s\S]*?<CodeBlock lang="toml" code=\{`([\s\S]*?)`\}/.exec(page);
+  assert.ok(block, 'the Full reference block is missing from /docs/configuration');
+  const tables = new Map();
+  let current = '';
+  for (const line of block[1].split('\n')) {
+    const header = /^(\[\[?[^\]]+\]\]?)/.exec(line);
+    if (header) current = header[1];
+    tables.set(current, `${tables.get(current) ?? ''}${line}\n`);
+  }
+  return tables;
+}
+
+test('every top-level gio.toml section has a reference page in the gio.toml nav', () => {
+  const sections = [...read('crates/giojs-server/src/config.rs').matchAll(/^\s*\("([a-z0-9_]+)", (?:true|false)\),$/gm)]
+    .map((m) => m[1]);
+  assert.ok(sections.length > 20, `SECTIONS not found in config.rs (${sections.length}) - update this test`);
+  const nav = read('docs-site/components/nav/api-gio-toml.ts');
+  for (const section of sections) {
+    const route = section.replace(/_/g, '-');
+    assert.ok(existsSync(join(siteDir, 'app', 'docs', 'configuration', route, 'page.tsx')), `no page for [${section}]`);
+    assert.ok(nav.includes(`'/docs/configuration/${route}'`), `[${section}] is not in nav/api-gio-toml.ts`);
+  }
+});
+
+test('every gio.toml key is documented on its section page with the default the server uses', () => {
+  const { definitions } = configSchema();
+  for (const [name, doc] of Object.entries(CONFIG_DOCS)) {
+    const definition = definitions[name];
+    assert.ok(definition?.properties, `${name} is not in gio.schema.json - update CONFIG_DOCS`);
+    const rows = configKeyRows(docsPage(`configuration/${doc.page}`));
+    for (const [key, property] of Object.entries(definition.properties)) {
+      if (doc.skip?.includes(key)) continue;
+      const rowKey = `${doc.prefix ?? ''}${key}`;
+      assert.ok(rows.has(rowKey), `/docs/configuration/${doc.page} has no row for ${rowKey} (${name})`);
+      // No default, or unset by default (`csp`): the page shows none.
+      if (property.default === undefined || property.default === null) continue;
+      const shown = rows.get(rowKey);
+      assert.ok(shown !== undefined, `/docs/configuration/${doc.page}: ${rowKey} shows no default (${JSON.stringify(property.default)})`);
+      assert.deepEqual(JSON.parse(shown), property.default, `/docs/configuration/${doc.page}: default of ${rowKey}`);
+    }
+  }
+});
+
+test('the Full reference block names every gio.toml key under its table', () => {
+  const { definitions } = configSchema();
+  const tables = fullReferenceTables();
+  for (const [name, doc] of Object.entries(CONFIG_DOCS)) {
+    const text = tables.get(doc.block);
+    assert.ok(text, `the Full reference block has no ${doc.block} table`);
+    for (const key of Object.keys(definitions[name].properties)) {
+      if (doc.skip?.includes(key) || doc.blockSkip?.includes(key)) continue;
+      assert.match(text, new RegExp(`(^|[\\s{#,])${key}\\b`, 'm'), `${doc.block} in the Full reference block lacks ${key}`);
+    }
+  }
+});
+
+test('the startup warnings the gio.toml pages quote are the ones the server logs', () => {
+  const source = read('crates/giojs-server/src/config_check.rs');
+  const body = source.slice(source.indexOf('pub fn protections_off_warnings'), source.indexOf('fn local_font_errors'));
+  // Rust string literals, `\`-newline continuations joined, placeholders as wildcards.
+  const formats = [...body.matchAll(/"((?:[^"\\]|\\.)*)"/gs)]
+    .map((m) => m[1].replace(/\\\n\s*/g, '').replace(/\\"/g, '"'))
+    .filter((literal) => literal.includes(': ') || literal.includes(' - '));
+  const patterns = formats.map((format) => new RegExp(
+    `^${format.split(/\{[^}]*\}/).map((part) => part.replace(/[.*+?^$()|[\]\\]/g, '\\$&')).join('.+?')}$`,
+  ));
+  let quoted = 0;
+  for (const file of pageFiles(join(siteDir, 'app', 'docs', 'configuration'))) {
+    const block = /<StartupWarnings rows=\{\[([\s\S]*?)\]\} \/>/.exec(readFileSync(file, 'utf8'));
+    if (!block) continue;
+    for (const m of block[1].matchAll(/text: (?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")/g)) {
+      const text = (m[1] ?? m[2]).replace(/\\'/g, "'");
+      quoted += 1;
+      assert.ok(patterns.some((pattern) => pattern.test(text)), `${file}: no such warning in config_check.rs:\n${text}`);
+    }
+  }
+  assert.ok(quoted >= 15, `only ${quoted} warnings quoted - update this test`);
+});

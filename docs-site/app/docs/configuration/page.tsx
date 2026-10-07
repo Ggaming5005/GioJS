@@ -2,6 +2,79 @@ import React from 'react';
 import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
 
+/** Every gio.toml section, with its reference page. */
+const SECTIONS: { href: string; name: string; what: string }[] = [
+  { href: '/docs/configuration/app', name: '[app]', what: 'Informational name and router; never read.' },
+  { href: '/docs/configuration/server', name: '[server]', what: 'Listen address, connection limits and timeouts, body limit, proxies, request ids, workers, skew protection.' },
+  { href: '/docs/configuration/server-tls', name: '[server.tls]', what: 'Terminate TLS in GioJS from a PEM certificate and key.' },
+  { href: '/docs/configuration/security', name: '[security]', what: 'Default security headers, HSTS, Content-Security-Policy with nonces.' },
+  { href: '/docs/configuration/security-csrf', name: '[security.csrf]', what: 'Cross-site request protection, trusted origins and exempt paths.' },
+  { href: '/docs/configuration/security-websocket', name: '[security.websocket]', what: 'The Origin check on WebSocket upgrades.' },
+  { href: '/docs/configuration/cache', name: '[cache]', what: 'The page cache: memory and disk tiers, ETags, stale-while-revalidate.' },
+  { href: '/docs/configuration/compression', name: '[compression]', what: 'Brotli and gzip.' },
+  { href: '/docs/configuration/prefetch', name: '[prefetch]', what: 'Per-client prefetch budgets and the prefetch switch.' },
+  { href: '/docs/configuration/images', name: '[images]', what: 'The /_gio/image optimizer: widths, quality, formats, remote sources, limits.' },
+  { href: '/docs/configuration/fonts', name: '[[fonts]]', what: 'Self-hosted WOFF2 fonts and their preload links.' },
+  { href: '/docs/configuration/css', name: '[css]', what: 'Path-served stylesheets, minification, critical CSS.' },
+  { href: '/docs/configuration/websocket', name: '[websocket]', what: 'WebSocket routes: switch, connection cap, pings.' },
+  { href: '/docs/configuration/rate-limits', name: '[[rate_limits]]', what: 'Token-bucket budgets per client and path.' },
+  { href: '/docs/configuration/redirects', name: '[[redirects]]', what: 'Redirect rules evaluated before routing.' },
+  { href: '/docs/configuration/rewrites', name: '[[rewrites]]', what: 'Serve another route under the requested URL.' },
+  { href: '/docs/configuration/headers', name: '[[headers]]', what: 'Response headers for matching paths.' },
+  { href: '/docs/configuration/guards', name: '[[guards]]', what: 'Session and cookie gates.' },
+  { href: '/docs/configuration/i18n', name: '[i18n]', what: 'Locales and how the request locale is detected.' },
+  { href: '/docs/configuration/metrics', name: '[metrics]', what: 'The Prometheus endpoint and who may scrape it.' },
+  { href: '/docs/configuration/health', name: '[health]', what: 'The /_gio/health endpoint and its details.' },
+  { href: '/docs/configuration/revalidate', name: '[revalidate]', what: 'The token for POST /_gio/revalidate.' },
+  { href: '/docs/configuration/logging', name: '[logging]', what: 'Text or JSON server logs.' },
+  { href: '/docs/configuration/env', name: '[env]', what: 'Whether .env files are loaded.' },
+  { href: '/docs/configuration/dev', name: '[dev]', what: 'Dev-only: allowed hosts, devtools, the file watcher.' },
+];
+
+/**
+ * Every protection and feature that is on by default, with the value that
+ * turns it off or loosens it. `warns`: startup logs a warning naming the key
+ * (config_check::protections_off_warnings).
+ */
+const SWITCHES: { what: string; key: string; href: string; on: string; off: string; lose: string; warns: boolean }[] = [
+  { what: 'CSRF protection', key: '[security.csrf] enabled', href: '/docs/configuration/security-csrf', on: 'true', off: 'false', lose: 'Other websites can send form posts and other unsafe requests with the cookies of your visitors.', warns: true },
+  { what: 'WebSocket origin check', key: '[security.websocket] check_origin', href: '/docs/configuration/security-websocket', on: 'true', off: 'false', lose: 'Other websites can open WebSockets with the cookies of your visitors.', warns: true },
+  { what: 'Default security headers', key: '[security] default_headers', href: '/docs/configuration/security', on: 'true', off: 'false', lose: 'MIME sniffing, framing by other sites and full-URL referrers come back.', warns: true },
+  { what: 'HSTS while TLS is on', key: '[security] hsts', href: '/docs/configuration/security', on: 'unset', off: 'false', lose: 'Browsers may connect over plain HTTP.', warns: false },
+  { what: 'Request body limit', key: '[server] max_body_bytes', href: '/docs/configuration/server', on: '2097152', off: '0', lose: 'Each body is buffered up to the 64 MiB worker message cap.', warns: true },
+  { what: 'Connection cap', key: '[server] max_connections', href: '/docs/configuration/server', on: '10000', off: '0', lose: 'A connection flood can exhaust file descriptors and memory.', warns: true },
+  { what: 'Connection timeouts', key: '[server] *_timeout_secs', href: '/docs/configuration/server', on: '10 to 60', off: '0', lose: 'Slow or idle clients can hold connections open.', warns: false },
+  { what: 'Render timeout', key: '[server] render_timeout_secs', href: '/docs/configuration/server', on: '30', off: '0', lose: 'A render that never answers holds its connection and a worker.', warns: true },
+  { what: 'HTTP/2', key: '[server] http2', href: '/docs/configuration/server', on: 'true', off: 'false', lose: 'Clients speak HTTP/1.1 only (keep it on with TLS: a known issue).', warns: false },
+  { what: 'Skew protection', key: '[server] skew_protection', href: '/docs/configuration/server', on: 'true', off: 'false', lose: 'Old clients keep navigating softly against a new deployment.', warns: true },
+  { what: 'Trusting no proxy', key: '[server] trusted_proxies', href: '/docs/configuration/server', on: '[]', off: '["0.0.0.0/0"]', lose: 'Any client can pick its own IP, rate-limit bucket and request id.', warns: true },
+  { what: 'Rate-limit memory cap', key: '[server] rate_limit_max_buckets', href: '/docs/configuration/server', on: '100000', off: '0', lose: 'Clients rotating addresses grow memory without bound.', warns: true },
+  { what: 'Per-client key cap', key: '[[rate_limits]] max_keys_per_client', href: '/docs/configuration/rate-limits', on: '64', off: '0', lose: 'One client can mint a fresh budget per key_header value.', warns: true },
+  { what: 'Page cache', key: '[cache] enabled', href: '/docs/configuration/cache', on: 'true', off: 'false', lose: 'Every request renders.', warns: false },
+  { what: 'Disk cache tier', key: '[cache] disk_enabled', href: '/docs/configuration/cache', on: 'true', off: 'false', lose: 'The cache is memory only and starts empty after a restart.', warns: false },
+  { what: 'Page ETags', key: '[cache] etag', href: '/docs/configuration/cache', on: 'true', off: 'false', lose: 'No 304 responses for pages.', warns: false },
+  { what: 'Stale-while-revalidate', key: '[cache] swr_multiplier', href: '/docs/configuration/cache', on: '10', off: '0', lose: 'A stale page renders before it is served.', warns: false },
+  { what: 'Compression', key: '[compression] enabled', href: '/docs/configuration/compression', on: 'true', off: 'false', lose: 'Bigger responses.', warns: false },
+  { what: 'Prefetching', key: '[prefetch] enabled', href: '/docs/configuration/prefetch', on: 'true', off: 'false', lose: 'Links load on click, not ahead of it.', warns: false },
+  { what: 'Prefetch budgets', key: '[prefetch] max_concurrent, max_per_second', href: '/docs/configuration/prefetch', on: '5, 20', off: '0', lose: 'The prefetches of one client are unbounded.', warns: false },
+  { what: 'Image optimizer', key: '[images] enabled', href: '/docs/configuration/images', on: 'true', off: 'false', lose: 'Images are served at full size without a srcset.', warns: false },
+  { what: 'Image limits', key: '[images] max_remote_bytes, remote_timeout_secs, max_source_dimension, max_decode_bytes', href: '/docs/configuration/images', on: '20 MiB, 30, 10000, 256 MiB', off: '0', lose: 'One image can cost unbounded memory, CPU or time.', warns: true },
+  { what: 'Path-served CSS', key: '[css] enabled', href: '/docs/configuration/css', on: 'true', off: 'false', lose: 'app/*.css is not served by path, and no critical CSS.', warns: false },
+  { what: 'CSS minification', key: '[css] minify', href: '/docs/configuration/css', on: 'true', off: 'false', lose: 'Bigger production stylesheets.', warns: false },
+  { what: 'Critical CSS', key: '[css] critical_extraction', href: '/docs/configuration/css', on: 'true', off: 'false', lose: 'No inlined first-paint CSS.', warns: false },
+  { what: 'Font preload', key: '[[fonts]] preload', href: '/docs/configuration/fonts', on: 'true', off: 'false', lose: 'The font loads when text needs it.', warns: false },
+  { what: 'WebSockets', key: '[websocket] enabled', href: '/docs/configuration/websocket', on: 'true', off: 'false', lose: 'No WebSocket connections: upgrades get 501.', warns: false },
+  { what: 'WebSocket cap', key: '[websocket] max_connections', href: '/docs/configuration/websocket', on: '1000', off: '0', lose: 'Open sockets are unbounded.', warns: true },
+  { what: 'WebSocket pings', key: '[websocket] ping_interval_secs', href: '/docs/configuration/websocket', on: '30', off: '0', lose: 'Vanished peers are noticed later.', warns: false },
+  { what: 'Metrics for this machine only', key: '[metrics] ip_allowlist', href: '/docs/configuration/metrics', on: '[]', off: '["0.0.0.0/0", "::/0"]', lose: 'Anyone can scrape /_gio/metrics.', warns: true },
+  { what: 'Health endpoint', key: '[health] enabled', href: '/docs/configuration/health', on: 'true', off: 'false', lose: '/_gio/health answers 404.', warns: false },
+  { what: 'Health details', key: '[health] details', href: '/docs/configuration/health', on: 'true', off: 'false', lose: 'No deployment id or worker topology in the answer.', warns: false },
+  { what: '.env files', key: '[env] files', href: '/docs/configuration/env', on: 'true', off: 'false', lose: 'Only the process environment counts.', warns: false },
+  { what: 'Dev host check', key: '[dev] allowed_hosts', href: '/docs/configuration/dev', on: '[]', off: '["*"]', lose: 'DNS rebinding can read the dev endpoints and error details.', warns: true },
+  { what: 'Devtools', key: '[dev] devtools', href: '/docs/configuration/dev', on: 'true', off: 'false', lose: 'No dashboard, codeframes, editor links or live reload.', warns: false },
+  { what: 'Dev watcher', key: '[dev] watch', href: '/docs/configuration/dev', on: 'true', off: 'false', lose: 'No restart on source changes.', warns: false },
+];
+
 export const metadata: Metadata = {
   title: 'Configuration',
   description:
@@ -20,6 +93,32 @@ export default function ConfigurationPage(): React.JSX.Element {
         All GioJS configuration lives in <code>gio.toml</code> at the project root.
         Every field is optional - defaults are production-ready - and an unknown key stops
         the server with a hint instead of being ignored.
+      </p>
+
+      <p>
+        Every protection and feature is on by default, and each one can be turned off or loosened
+        here. Doing so is never silent: the protections log a warning at startup that names the key
+        (see <a href="#turning-things-off">Turning things off</a>).
+      </p>
+
+      <h2 id="sections">Sections</h2>
+      <p>Each section has its own reference page, with every key, its default, what <code>0</code> or <code>false</code> means and what it costs to turn off:</p>
+      <table>
+        <thead>
+          <tr><th>Section</th><th>What it configures</th></tr>
+        </thead>
+        <tbody>
+          {SECTIONS.map((section) => (
+            <tr key={section.href}>
+              <td><a href={section.href}><code>{section.name}</code></a></td>
+              <td>{section.what}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p>
+        <code>gio.config.ts</code> holds what only JavaScript can express (Node plugins); see{' '}
+        <a href="#gioconfigts">gio.config.ts</a> below and <a href="/docs/gio-config">its reference</a>.
       </p>
 
       <h2 id="full-reference">Full reference</h2>
@@ -142,11 +241,12 @@ redirect_to = "/login"
 
 [security]              # see Security
 default_headers = true  # false drops nosniff, X-Frame-Options and Referrer-Policy
-csp = ""                # Content-Security-Policy; "{nonce}" = fresh nonce per response
+csp = ""                # Content-Security-Policy (unset or "" = none); "{nonce}" = fresh nonce per response
 csp_report_only = ""    # same syntax, sent as Content-Security-Policy-Report-Only
-hsts = true             # unset: only with [server.tls]; true | false | "raw" | { max_age, include_subdomains, preload }
+# hsts                  # unset: max-age=31536000 only with [server.tls]
+#                       # true | false | "raw value" | { max_age = 31536000, include_subdomains = false, preload = false }
 
-[security.headers]      # override ("value"), remove (""), or add default headers
+[security.headers]      # empty by default: override ("value"), remove (""), or add headers
 x-frame-options = "SAMEORIGIN"
 permissions-policy = "camera=()"
 
@@ -163,8 +263,8 @@ locales = ["en", "de"]  # empty = i18n disabled
 default_locale = "en"
 detect_from = ["path", "accept-language", "cookie"]
 
-[metrics]
-enabled = false         # expose /_gio/metrics (Prometheus); off when this section is absent
+[metrics]               # /_gio/metrics (Prometheus) is off while this section is absent
+enabled = true          # with the section present; false = 404
 token = ""              # require "Authorization: Bearer <token>" when set
 ip_allowlist = []       # client IPs or CIDRs, e.g. ["10.0.0.5", "10.1.0.0/16"]; with no token
                         # either, loopback clients only; ["0.0.0.0/0", "::/0"] = everyone
@@ -199,9 +299,13 @@ anything = "goes"`} />
         instead of being silently ignored while the default you meant to change stays in
         effect:
       </p>
-      <CodeBlock lang="text" code={`giojs-server: configuration error: ./gio.toml:12: unknown key [image] - did you mean [images]?
-giojs-server: configuration error: ./gio.toml:14: unknown key \`images.allowed_width\` - did you mean \`images.allowed_widths\`?
-giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: invalid type: string "http", expected u16`} />
+      <CodeBlock lang="text" code={`giojs-server: configuration error: gio.toml:12: unknown key [image] - did you mean [images]?
+giojs-server: configuration error: gio.toml:14: unknown key \`images.allowed_width\` - did you mean \`images.allowed_widths\`?
+giojs-server: configuration error: gio.toml:21: invalid \`server.port\`: invalid type: string "http", expected u16`} />
+      <p>
+        The file is named as the server found it: <code>gio.toml</code> in the directory it runs
+        in, or the path next to <code>GIO_APP_DIR</code> when that variable is set.
+      </p>
       <ul>
         <li>
           Wrong values fail the same way: a malformed <code>trusted_proxies</code> entry, a{' '}
@@ -210,19 +314,74 @@ giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: inval
           directory inside <code>app/</code> or <code>public/</code>.
         </li>
         <li>
-          Top-level tables named <code>x-...</code> (<code>[x-deploy]</code>) are never read,
-          so other tools can keep their settings in the same file. Anywhere else an{' '}
-          <code>x-</code> key is unknown like any other.
+          Startup reports every refusal at once - the TLS certificate, <code>[security]</code>,
+          the revalidation token and local <code>[[fonts]]</code> files included - before the
+          worker starts.
         </li>
         <li>
-          Keys earlier versions documented but never acted on are rejected with what to do
-          instead: <code>[cache] memory_mb</code> (use <code>memory_max_entries</code>),{' '}
-          <code>[cache.redis]</code> (there is no Redis backend yet - each instance keeps its
-          own cache), <code>[css] engine</code> (Lightning CSS is the only engine) and{' '}
-          <code>[prefetch] strategy</code> (chosen per link with{' '}
-          <code>{'<GioLink prefetch="hover" | "viewport" | {false}>'}</code>).
+          A <code>[[redirects]]</code>, <code>[[rewrites]]</code> or <code>[[headers]]</code> rule
+          that cannot be compiled is skipped with a warning instead: the server starts without it.
         </li>
       </ul>
+      <p>
+        Strictness itself has no switch: a setting silently ignored is worse than a server that
+        refuses to start. <code>[x-*]</code> tables are the escape hatch.
+      </p>
+
+      <h3 id="x-tables">[x-*] tables</h3>
+      <p>
+        Top-level tables named <code>x-...</code> (<code>[x-deploy]</code>) are never read, so
+        other tools can keep their settings in the same file. Anywhere else an <code>x-</code> key
+        is unknown like any other, and a top-level table with another unknown name is refused with
+        a hint: <code>unknown key [mytool] - tables for other tools must be named x-... ([x-mytool])</code>.
+      </p>
+      <CodeBlock lang="toml" title="gio.toml" code={`[x-deploy]
+region = "eu-west-1"
+replicas = 3`} />
+
+      <h3 id="retired-keys">Retired keys</h3>
+      <p>Keys earlier versions documented but never acted on are refused with what to do instead:</p>
+      <table>
+        <thead>
+          <tr><th>Key</th><th>Instead</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>[cache] memory_mb</code></td><td>The memory cache is bounded by entry count: use <a href="/docs/configuration/cache"><code>memory_max_entries</code></a> (default 1000).</td></tr>
+          <tr><td><code>[cache.redis]</code></td><td>There is no Redis cache backend yet: each instance keeps its own memory and disk cache. Remove the table.</td></tr>
+          <tr><td><code>[css] engine</code></td><td>Lightning CSS is the only CSS engine. Remove the key.</td></tr>
+          <tr><td><code>[prefetch] strategy</code></td><td>Chosen per link: <code>{'<GioLink prefetch="hover" | "viewport" | {false}>'}</code> (default <code>&quot;hover&quot;</code>). Remove the key.</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="check-config">Checking a configuration</h3>
+      <p>
+        <code>giojs-server --check-config</code> loads the <code>.env</code> files and{' '}
+        <code>gio.toml</code> exactly as startup does, runs startup&apos;s checks, prints one JSON
+        report and exits - <code>0</code> when the server would start, <code>1</code> when it would
+        refuse - without binding a port. It never prints a secret, so it works as a CI step.{' '}
+        <code>gio doctor</code> runs it for you.
+      </p>
+      <CodeBlock lang="bash" code={`npx giojs-server --check-config`} />
+      <p>The report is one line of JSON; formatted, with one loosened limit:</p>
+      <CodeBlock lang="json" code={`{
+  "cacheDir": "/srv/my-app/.gio/cache/pages",
+  "configFile": "gio.toml",
+  "envFiles": [".env"],
+  "envFilesDisabledBy": null,
+  "errors": [],
+  "listen": { "host": "0.0.0.0", "port": 3000, "portSource": "default", "tls": false },
+  "mode": "production",
+  "ok": true,
+  "proxyHeaders": "x-forwarded",
+  "rateLimitRules": 0,
+  "sessionGuards": 0,
+  "sessionSecret": "unset",
+  "sessionSecretError": null,
+  "trustedProxies": 0,
+  "warnings": [
+    "[server] max_connections = 0: concurrent connections are unlimited - a connection flood can exhaust file descriptors and memory"
+  ]
+}`} />
 
       <h2 id="editor-autocomplete">Editor autocomplete</h2>
       <p>
@@ -277,6 +436,11 @@ giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: inval
       </p>
 
       <h2 id="page-cache-compression-prefetch">Page cache, compression &amp; prefetch</h2>
+      <p>
+        In short; <a href="/docs/configuration/cache"><code>[cache]</code></a>,{' '}
+        <a href="/docs/configuration/compression"><code>[compression]</code></a> and{' '}
+        <a href="/docs/configuration/prefetch"><code>[prefetch]</code></a> have the details.
+      </p>
       <table>
         <thead>
           <tr><th>Key</th><th>Default</th><th>Description</th></tr>
@@ -308,7 +472,8 @@ giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: inval
         <code>db.json</code>) would, after every write. List such files in{' '}
         <code>[dev] watch_ignore</code>, or set <code>[dev] watch = false</code> to run
         without the watcher at all (a huge monorepo, a network filesystem, a container out
-        of inotify watches) and restart the server yourself after a change:
+        of inotify watches) and restart the server yourself after a change (see{' '}
+        <a href="/docs/configuration/dev"><code>[dev]</code></a>):
       </p>
       <CodeBlock lang="toml" code={`[dev]
 watch_ignore = ["data/**", "*.db.json", "public/uploads"]`} />
@@ -361,8 +526,9 @@ export default defineConfig({
       <h2 id="connection-limits">Connection limits</h2>
       <p>
         The Rust server bounds what a single client can hold open, so slow or idle
-        connections cannot exhaust it. Every field lives in <code>[server]</code>, and
-        setting any of them to <code>0</code> disables that limit.
+        connections cannot exhaust it. Every field lives in{' '}
+        <a href="/docs/configuration/server"><code>[server]</code></a>, and setting any of them
+        to <code>0</code> disables that limit.
       </p>
       <table>
         <thead>
@@ -545,8 +711,11 @@ accept_request_id = false   # ignore incoming X-Request-Id, even from trusted pr
 
       <h2 id="health-and-metrics">Health &amp; metrics</h2>
       <p>
-        GioJS serves two built-in observability endpoints directly from the Rust
-        layer - no Node round-trip, so they stay responsive even under load:
+        GioJS serves its built-in endpoints directly from the Rust layer - no Node
+        round-trip, so they stay responsive even under load. They are configured in{' '}
+        <a href="/docs/configuration/health"><code>[health]</code></a>,{' '}
+        <a href="/docs/configuration/metrics"><code>[metrics]</code></a> and{' '}
+        <a href="/docs/configuration/revalidate"><code>[revalidate]</code></a>:
       </p>
       <table>
         <thead>
@@ -616,7 +785,8 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
         drives live reload), error-overlay codeframes that return project
         source, and open-in-editor. Because the starter binds{' '}
         <code>0.0.0.0</code>, they are locked down against browser-based
-        attacks:
+        attacks (every key is on the <a href="/docs/configuration/dev"><code>[dev]</code></a>{' '}
+        page):
       </p>
       <ul>
         <li>
@@ -710,25 +880,67 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         <a href="/docs/security">Security</a> for every option.
       </p>
       <p>
-        Every protection you turn off or loosen in <code>gio.toml</code> -{' '}
-        <code>[security.csrf] enabled = false</code>,{' '}
-        <code>[security.websocket] check_origin = false</code>,{' '}
-        <code>default_headers = false</code>, <code>[dev] allowed_hosts = [&quot;*&quot;]</code>,{' '}
-        <code>[server] max_body_bytes = 0</code> or <code>max_connections = 0</code>,
-        metrics open to every client, a <code>/0</code> in <code>trusted_proxies</code>,{' '}
-        <code>skew_protection = false</code> - logs one warning at startup naming the key,
-        and <code>giojs-server --check-config</code> (and <code>gio doctor</code>) reports
-        the same text under <code>warnings</code>.
+        Every protection you turn off or loosen in <code>gio.toml</code> logs one warning at
+        startup naming the key, and <code>giojs-server --check-config</code> (and{' '}
+        <code>gio doctor</code>) reports the same text under <code>warnings</code>. The table in{' '}
+        <a href="#turning-things-off">Turning things off</a> lists them all.
       </p>
+
+      <h2 id="turning-things-off">Turning things off</h2>
+      <p>
+        Every protection and feature below is on by default. The &quot;Warns&quot; column marks
+        the ones whose off value logs a startup warning; each section page quotes the exact text.
+        The <a href="/docs/guides/security-switches">Turning Protections On and Off</a> guide walks
+        through when each switch makes sense.
+      </p>
+      <table className="config-switches">
+        <thead>
+          <tr><th>Protection or feature</th><th>Key</th><th>Default</th><th>Off value</th><th>What you lose</th><th>Warns</th></tr>
+        </thead>
+        <tbody>
+          {SWITCHES.map((row) => (
+            <tr key={row.key}>
+              <td>{row.what}</td>
+              <td><a href={row.href}><code>{row.key}</code></a></td>
+              <td><code>{row.on}</code></td>
+              <td><code>{row.off}</code></td>
+              <td>{row.lose}</td>
+              <td>{row.warns ? 'yes' : 'no'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p>
+        <code>[security] csp</code> is the one protection that is off by default: a policy only you
+        can write, and nonces make every page private, so CDN caching and ETags are lost while it is
+        on. See <a href="/docs/guides/content-security-policy">Content Security Policy</a>.
+      </p>
+      <p>Some behavior has no switch at all, on purpose:</p>
+      <ul>
+        <li>Path canonicalization and its <code>400</code>s, and the closed <code>/_gio</code> namespace (<a href="/docs/configuration/server#not-configurable"><code>[server]</code></a>).</li>
+        <li>Hiding error details in production: the digest is kept, the message and stack go to the log (<a href="/docs/configuration/security#not-configurable"><code>[security]</code></a>).</li>
+        <li>The cache bypass for personalized renders: use PPR holes instead (<a href="/docs/configuration/cache#not-configurable"><code>[cache]</code></a>).</li>
+        <li>The server-only import guard, which each module opts into (<a href="#server-only">below</a>).</li>
+        <li>Strict unknown-key errors (<a href="#x-tables"><code>[x-*]</code> tables</a> are the escape hatch) and the <code>GIO_PUBLIC_</code> prefix.</li>
+        <li>
+          Parts of switchable features: the same-origin check on open-in-editor (
+          <a href="/docs/configuration/dev#not-configurable"><code>[dev]</code></a>), the image
+          optimizer&apos;s path-traversal checks, redirect blocking and guard enforcement (
+          <a href="/docs/configuration/images#not-configurable"><code>[images]</code></a>), request id
+          validation, and the 32-byte minimum for the revalidation token (
+          <a href="/docs/configuration/revalidate#not-configurable"><code>[revalidate]</code></a>).
+        </li>
+      </ul>
 
       <h2 id="rate-limits">Rate limits</h2>
       <p>
-        Each <code>[[rate_limits]]</code> rule is a token bucket per client:
+        Each <code>[[rate_limits]]</code> rule is a token bucket per client:{' '}
         <code>per_ip</code> requests per <code>window_seconds</code>, plus{' '}
         <code>burst</code> on top. When several rules match, the one with the
         longest literal prefix wins. Limits run in Rust before routing, so a
         rejected request (<code>429</code> with <code>Retry-After</code>) never
-        reaches Node.
+        reaches Node. Every key is on the{' '}
+        <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a> page.
       </p>
       <ul>
         <li>
@@ -788,8 +1000,10 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
           <tr><td><code>PORT</code></td><td>The port hosting platforms assign (Heroku, Render, Railway, Fly.io, Cloud Run): overrides <code>[server] port</code>; <code>GIO_PORT</code> wins over it</td><td>unset</td></tr>
           <tr><td><code>GIO_CACHE_DIR</code></td><td>Page cache directory, overriding <code>[cache] disk_path</code>; may be absolute</td><td><code>.gio/cache/pages</code></td></tr>
           <tr><td><code>GIO_ENV_FILES</code></td><td><code>0</code> skips the <a href="#env-files">.env files</a>, <code>1</code> loads them, whatever <code>[env] files</code> says (for platforms that inject the environment and should ignore stray files). Any other value stops startup</td><td>unset (<code>[env] files</code> decides)</td></tr>
-          <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the client build the server produced at startup, the app&apos;s server-side sources, the gio.toml <code>[images]</code> settings, the served <code>[[fonts]]</code> files and the i18n default locale). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
+          <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the client build the server produced at startup, the app&apos;s server-side sources, the gio.toml <code>[images]</code> settings and <code>[css] minify</code>, the served <code>[[fonts]]</code> files, the i18n default locale and, in a standalone build, its <code>.gio/manifest.json</code>). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
           <tr><td><code>GIO_SOCKET_PATH</code></td><td>Rust-to-Node IPC path; the server passes the resolved value to the Node worker (in a <a href="#render-workers">worker pool</a>, the other workers get it with a <code>-w&lt;N&gt;</code> suffix)</td><td>per-instance <code>.gio/ipc-&lt;pid&gt;-&lt;rand&gt;.sock</code> (Unix), unique named pipe (Windows)</td></tr>
+          <tr><td><code>GIO_IMAGE_CACHE_DIR</code></td><td>Directory of the optimized-image disk cache (see <a href="/docs/configuration/images"><code>[images]</code></a>)</td><td><code>.gio/cache/images</code></td></tr>
+          <tr><td><code>GIO_FONTS_DIR</code></td><td>Directory the <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a> files are fetched into and served from</td><td><code>.gio/fonts</code></td></tr>
           <tr><td><code>GIO_PUBLIC_DIR</code></td><td>Directory served at the site root and under <code>/public/*</code></td><td><code>public/</code> next to <code>app/</code></td></tr>
           <tr><td><code>GIO_REVALIDATE_TOKEN</code></td><td>Bearer token that enables <code>POST /_gio/revalidate</code> (<a href="/docs/caching">on-demand revalidation</a>); at least 32 bytes, or the server refuses to start. Overrides <code>[revalidate] token</code></td><td>unset (endpoint disabled)</td></tr>
           <tr><td><code>GIO_SESSION_SECRET</code></td><td>Key material for <a href="/docs/authentication">sessions</a> and <code>require_session</code> guards: at least 32 bytes, comma-separated to rotate (the first signs, all verify). Required in production once sessions are used</td><td>unset (development: an ephemeral secret per server start)</td></tr>
