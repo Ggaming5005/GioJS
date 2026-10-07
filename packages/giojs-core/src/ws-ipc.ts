@@ -36,10 +36,25 @@ export const WS_REJECTED_CODE = 4401;
 /** Close code for a path no route.ts wsHandler matches. */
 export const WS_NO_HANDLER_CODE = 4404;
 /**
- * Messages held while an async wsHandler is still deciding. A client that
- * floods a socket nobody accepted yet is closed (1008) instead of buffered.
+ * Messages held while an async wsHandler is still deciding and has not
+ * registered a 'message' listener yet. A client that floods a socket nobody
+ * listens to yet is closed (1008) instead of buffered.
  */
 export const MAX_HELD_MESSAGES = 256;
+/** The same bound in bytes (UTF-8 for text): one socket's held messages. */
+export const MAX_HELD_BYTES = 1024 * 1024;
+/**
+ * Held bytes across every socket of the worker, so max_connections pending
+ * sockets cannot add up to max_connections × MAX_HELD_BYTES.
+ */
+export const MAX_HELD_BYTES_TOTAL = 32 * 1024 * 1024;
+/**
+ * How long messages wait for a handler that neither listens nor settles.
+ * Then they are dropped, and later ones are delivered as for an accepted
+ * socket: a handler that keeps running for the connection's lifetime does
+ * not hold its client's messages forever.
+ */
+export const HOLD_TIMEOUT_MS = 10_000;
 
 type MessageHandler = (data: string | Buffer) => void;
 type CloseHandler = (code: number, reason: string) => void;
@@ -134,14 +149,27 @@ function isStringRecord(value: unknown): value is Record<string, string> {
   return Object.values(value as Record<string, unknown>).every(v => typeof v === 'string');
 }
 
+/** Held-message bytes shared by every socket of one dispatcher. */
+export interface HeldBudget {
+  bytes: number;
+}
+
 export class GioSocketImpl implements GioSocket {
   private readonly messageHandlers: MessageHandler[] = [];
   private readonly closeHandlers: CloseHandler[] = [];
   private readonly joined = new Set<string>();
   /** Set by close() or the disconnect: nothing more goes out or comes in. */
   private closed = false;
-  /** Messages held while an async wsHandler decides; null once accepted. */
+  /** Set once the wsHandler accepted (and Rust was told, see _accept). */
+  private accepted = false;
+  /**
+   * Messages held for an async wsHandler that has not registered a
+   * 'message' listener yet; null while messages are delivered directly.
+   */
   private held: Array<string | Buffer> | null = null;
+  private heldBytes = 0;
+  private holdTimer: ReturnType<typeof setTimeout> | null = null;
+  private releaseScheduled = false;
 
   readonly path: string;
   readonly params: Record<string, string>;
@@ -156,6 +184,7 @@ export class GioSocketImpl implements GioSocket {
     public readonly routeId: string,
     private readonly writeFn: (msg: WsOutbound) => void,
     context: Partial<WsConnectionContext> = {},
+    private readonly heldBudget: HeldBudget = { bytes: 0 },
   ) {
     this.path = context.path ?? routeId;
     this.params = context.params ?? {};
@@ -187,7 +216,7 @@ export class GioSocketImpl implements GioSocket {
   close(code: number = 1000, reason: string = ''): void {
     if (this.closed) return;
     this.closed = true;
-    this.held = null;
+    this.stopHolding();
     this.writeFn({ type: 'ws_close', connId: this.id, code, reason });
   }
 
@@ -210,19 +239,26 @@ export class GioSocketImpl implements GioSocket {
     this.writeFn({ type: 'ws_leave', connId: this.id, room });
   }
 
-  /** The wsHandler is async: hold messages until it accepts. */
+  /**
+   * The wsHandler is async and still deciding. Messages that arrive before
+   * it registers a 'message' listener are held for that listener; once one
+   * exists they are delivered as they come - a handler that awaits its first
+   * message (token auth) waits on exactly that.
+   */
   _hold(): void {
-    if (!this.closed) this.held = [];
+    if (!this.closed && this.messageHandlers.length === 0) this.held = [];
   }
 
-  /** The wsHandler accepted: deliver what arrived meanwhile, in order. */
+  /**
+   * The wsHandler accepted: tell Rust - until then the connection gets no
+   * route or room broadcasts, so a socket about to be rejected never sees
+   * one - and deliver what was held, in order.
+   */
   _accept(): void {
-    const held = this.held;
-    this.held = null;
-    for (const data of held ?? []) {
-      if (this.closed) return;
-      this._dispatchMessage(data);
-    }
+    if (this.closed || this.accepted) return;
+    this.accepted = true;
+    this.writeFn({ type: 'ws_accept', connId: this.id });
+    this.releaseHeld();
   }
 
   on(event: 'message', handler: MessageHandler): void;
@@ -230,6 +266,12 @@ export class GioSocketImpl implements GioSocket {
   on(event: 'message' | 'close', handler: MessageHandler | CloseHandler): void {
     if (event === 'message') {
       this.messageHandlers.push(handler as MessageHandler);
+      // The held messages go to the first listener on a microtask, not from
+      // inside on(): the handler finishes the statement that registered it.
+      if (this.held !== null && !this.releaseScheduled) {
+        this.releaseScheduled = true;
+        queueMicrotask(() => this.releaseHeld());
+      }
     } else {
       this.closeHandlers.push(handler as CloseHandler);
     }
@@ -240,11 +282,7 @@ export class GioSocketImpl implements GioSocket {
   _dispatchMessage(data: string | Buffer): void {
     if (this.closed) return;
     if (this.held !== null) {
-      if (this.held.length >= MAX_HELD_MESSAGES) {
-        this.close(1008, 'too many messages before the connection was accepted');
-        return;
-      }
-      this.held.push(data);
+      this.holdMessage(data);
       return;
     }
     for (const h of this.messageHandlers) {
@@ -256,10 +294,64 @@ export class GioSocketImpl implements GioSocket {
     }
   }
 
+  private holdMessage(data: string | Buffer): void {
+    const held = this.held;
+    if (held === null) return;
+    const bytes = typeof data === 'string' ? Buffer.byteLength(data) : data.byteLength;
+    if (
+      held.length >= MAX_HELD_MESSAGES ||
+      this.heldBytes + bytes > MAX_HELD_BYTES ||
+      this.heldBudget.bytes + bytes > MAX_HELD_BYTES_TOTAL
+    ) {
+      this.close(1008, 'too many messages before the connection was accepted');
+      return;
+    }
+    held.push(data);
+    this.heldBytes += bytes;
+    this.heldBudget.bytes += bytes;
+    if (this.holdTimer === null) {
+      this.holdTimer = setTimeout(() => this.holdTimedOut(), HOLD_TIMEOUT_MS);
+      this.holdTimer.unref?.();
+    }
+  }
+
+  /** Stop holding and deliver the held messages, in order, to the listeners registered now. */
+  private releaseHeld(): void {
+    this.releaseScheduled = false;
+    const held = this.held;
+    this.stopHolding();
+    for (const data of held ?? []) {
+      if (this.closed) return;
+      this._dispatchMessage(data);
+    }
+  }
+
+  private holdTimedOut(): void {
+    this.holdTimer = null;
+    if (this.held === null) return;
+    logger.warn('wsHandler neither listened nor settled in time - dropping held messages', {
+      path: this.path,
+      connId: this.id,
+      dropped: this.held.length,
+      timeoutMs: HOLD_TIMEOUT_MS,
+    });
+    this.stopHolding();
+  }
+
+  private stopHolding(): void {
+    this.heldBudget.bytes -= this.heldBytes;
+    this.heldBytes = 0;
+    this.held = null;
+    if (this.holdTimer !== null) {
+      clearTimeout(this.holdTimer);
+      this.holdTimer = null;
+    }
+  }
+
   _dispatchClose(code: number, reason: string): void {
     // Rust's registry drops the memberships with the connection.
     this.closed = true;
-    this.held = null;
+    this.stopHolding();
     this.joined.clear();
     for (const h of this.closeHandlers) {
       try {
@@ -285,7 +377,10 @@ function wsSocketPath(): string {
  * The first frame on every WS IPC connection must pass this gate (when a
  * token is configured) before any other message is processed.
  */
-/** Payload frames may be dropped under backpressure; ws_close never is. */
+/**
+ * Payload frames may be dropped under backpressure; control frames
+ * (ws_close, ws_accept, ws_join, ws_leave) never are.
+ */
 export function isDroppableWsFrame(msg: WsOutbound): boolean {
   return msg.type === 'ws_send' || msg.type === 'ws_broadcast' || msg.type === 'ws_room_broadcast';
 }
@@ -307,8 +402,8 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
 /**
  * Run a connection's wsHandler and apply the accept/reject contract:
  * `false` (returned or resolved) closes with WS_REJECTED_CODE, a throw or
- * rejection closes with 1011, anything else accepts. An async handler's
- * messages are held until it settles.
+ * rejection closes with 1011, anything else accepts. While an async handler
+ * decides, messages wait for its first 'message' listener (see _hold).
  */
 function runWsHandler(handler: WsHandlerFn, socket: GioSocketImpl): void {
   const fail = (cause: unknown): void => {
@@ -357,18 +452,25 @@ export function createWsDispatcher(
   writeOutbound: (msg: WsOutbound) => void,
 ): WsDispatcher {
   const activeSockets = new Map<string, GioSocketImpl>();
+  const heldBudget: HeldBudget = { bytes: 0 };
 
   function connect(msg: WsConnectMsg): void {
     const path = msg.path ?? msg.routeId;
     const match = matchWsHandler(path, wsHandlers);
-    const gioSocket = new GioSocketImpl(msg.connId, msg.routeId, writeOutbound, {
-      path,
-      params: match?.params ?? {},
-      query: msg.query ?? {},
-      headers: msg.headers ?? {},
-      ...(msg.ip !== undefined ? { ip: msg.ip } : {}),
-      ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
-    });
+    const gioSocket = new GioSocketImpl(
+      msg.connId,
+      msg.routeId,
+      writeOutbound,
+      {
+        path,
+        params: match?.params ?? {},
+        query: msg.query ?? {},
+        headers: msg.headers ?? {},
+        ...(msg.ip !== undefined ? { ip: msg.ip } : {}),
+        ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
+      },
+      heldBudget,
+    );
     activeSockets.set(msg.connId, gioSocket);
     if (match === null) {
       logger.debug('ws connection to a path without a wsHandler', { path, connId: msg.connId });

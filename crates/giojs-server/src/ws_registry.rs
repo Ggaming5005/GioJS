@@ -5,6 +5,12 @@
 //! by routeId for broadcast operations, and by the rooms the worker joined
 //! them to (`socket.join(room)`), so a room broadcast crosses the WS IPC
 //! pipe as one frame however many members it fans out to.
+//!
+//! A connection is pending from the upgrade until its `wsHandler` accepts it
+//! (the worker's `ws_accept` frame). Direct sends reach a pending connection,
+//! so a handler may talk to the client while it authenticates, but route and
+//! room broadcasts skip it: a socket that is about to be rejected never sees
+//! traffic meant for accepted members.
 
 use axum::extract::ws::Message;
 use dashmap::{DashMap, DashSet};
@@ -19,6 +25,8 @@ pub struct WsRegistry {
     rooms: DashMap<String, Arc<DashSet<String>>>,
     /// connId → the rooms it joined, for cleanup on deregister.
     conn_rooms: DashMap<String, Arc<DashSet<String>>>,
+    /// Registered connections the worker has not accepted yet.
+    pending: DashSet<String>,
 }
 
 impl WsRegistry {
@@ -28,10 +36,13 @@ impl WsRegistry {
             by_route: DashMap::new(),
             rooms: DashMap::new(),
             conn_rooms: DashMap::new(),
+            pending: DashSet::new(),
         }
     }
 
+    /// Register a new connection, pending until [`Self::accept`].
     pub fn register(&self, conn_id: &str, route_id: &str, sender: mpsc::UnboundedSender<Message>) {
+        self.pending.insert(conn_id.to_string());
         self.senders.insert(conn_id.to_string(), sender);
         self.by_route
             .entry(route_id.to_string())
@@ -39,8 +50,19 @@ impl WsRegistry {
             .insert(conn_id.to_string());
     }
 
+    /// The worker accepted the connection: broadcasts reach it from now on.
+    /// An unknown connId (it already disconnected) is a no-op.
+    pub fn accept(&self, conn_id: &str) {
+        self.pending.remove(conn_id);
+    }
+
+    fn is_pending(&self, conn_id: &str) -> bool {
+        self.pending.contains(conn_id)
+    }
+
     pub fn deregister(&self, conn_id: &str, route_id: &str) {
         self.senders.remove(conn_id);
+        self.pending.remove(conn_id);
         if let Some(set) = self.by_route.get(route_id) {
             set.remove(conn_id);
         }
@@ -89,14 +111,14 @@ impl WsRegistry {
         self.rooms.remove_if(room, |_, members| members.is_empty());
     }
 
-    /// Send `msg` to every member of `room` except `except` (the sender, for
-    /// "everyone else" messages).
+    /// Send `msg` to every accepted member of `room` except `except` (the
+    /// sender, for "everyone else" messages).
     pub fn broadcast_room(&self, room: &str, msg: Message, except: Option<&str>) {
         let Some(members) = self.rooms.get(room).map(|m| Arc::clone(m.value())) else {
             return;
         };
         for conn_id in members.iter() {
-            if except == Some(conn_id.as_str()) {
+            if except == Some(conn_id.as_str()) || self.is_pending(conn_id.as_str()) {
                 continue;
             }
             if let Some(tx) = self.senders.get(conn_id.as_str()) {
@@ -118,12 +140,14 @@ impl WsRegistry {
         }
     }
 
+    /// Send `msg` to every accepted connection on `route_id`.
     pub fn broadcast(&self, route_id: &str, msg: Message) {
         let Some(set) = self.by_route.get(route_id) else {
             return;
         };
         let dead: Vec<String> = set
             .iter()
+            .filter(|conn_id| !self.is_pending(conn_id.as_str()))
             .filter_map(|conn_id| match self.senders.get(conn_id.as_str()) {
                 Some(tx) => {
                     if tx.send(msg.clone()).is_err() {
@@ -163,6 +187,7 @@ impl WsRegistry {
         self.by_route.clear();
         self.rooms.clear();
         self.conn_rooms.clear();
+        self.pending.clear();
     }
 }
 
@@ -207,6 +232,8 @@ mod tests {
         let (tx2, mut rx2) = make_conn();
         reg.register("conn1", "/chat", tx1);
         reg.register("conn2", "/chat", tx2);
+        reg.accept("conn1");
+        reg.accept("conn2");
         reg.broadcast("/chat", Message::Text("hi everyone".into()));
         assert_eq!(rx1.try_recv().unwrap(), Message::Text("hi everyone".into()));
         assert_eq!(rx2.try_recv().unwrap(), Message::Text("hi everyone".into()));
@@ -221,6 +248,9 @@ mod tests {
         reg.register("conn1", "/chat/a", tx1);
         reg.register("conn2", "/chat/a", tx2);
         reg.register("conn3", "/chat/b", tx3);
+        for conn in ["conn1", "conn2", "conn3"] {
+            reg.accept(conn);
+        }
         assert!(reg.join("conn1", "a"));
         assert!(reg.join("conn2", "a"));
         assert!(reg.join("conn3", "b"));
@@ -238,6 +268,52 @@ mod tests {
         reg.broadcast_room("a", Message::Text("after leave".into()), None);
         assert!(rx2.try_recv().is_err());
         assert_eq!(rx1.try_recv().unwrap(), Message::Text("after leave".into()));
+    }
+
+    #[test]
+    fn pending_connections_get_direct_sends_but_no_broadcasts() {
+        let reg = WsRegistry::new();
+        let (tx_member, mut rx_member) = make_conn();
+        let (tx_pending, mut rx_pending) = make_conn();
+        reg.register("member", "/feed", tx_member);
+        reg.accept("member");
+        reg.register("pending", "/feed", tx_pending);
+        assert!(reg.join("member", "news"));
+        assert!(reg.join("pending", "news"), "a pending socket may join");
+
+        reg.broadcast("/feed", Message::Text("route".into()));
+        reg.broadcast_room("news", Message::Text("room".into()), None);
+        assert_eq!(rx_member.try_recv().unwrap(), Message::Text("route".into()));
+        assert_eq!(rx_member.try_recv().unwrap(), Message::Text("room".into()));
+        assert!(
+            rx_pending.try_recv().is_err(),
+            "a socket its handler has not accepted sees no broadcast"
+        );
+
+        assert!(reg.send("pending", Message::Text("challenge".into())));
+        let challenge = rx_pending.try_recv().unwrap();
+        assert_eq!(challenge, Message::Text("challenge".into()));
+
+        reg.accept("pending");
+        reg.broadcast("/feed", Message::Text("after accept".into()));
+        let after = rx_pending.try_recv().unwrap();
+        assert_eq!(after, Message::Text("after accept".into()));
+        assert_eq!(
+            reg.active_count(),
+            2,
+            "a pending connection is never mistaken for a dead one"
+        );
+    }
+
+    #[test]
+    fn accept_after_disconnect_records_nothing() {
+        let reg = WsRegistry::new();
+        let (tx, _rx) = make_conn();
+        reg.register("conn1", "/chat", tx);
+        reg.deregister("conn1", "/chat");
+        reg.accept("conn1");
+        assert!(reg.pending.is_empty());
+        assert_eq!(reg.active_count(), 0);
     }
 
     #[test]

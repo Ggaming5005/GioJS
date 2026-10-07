@@ -415,6 +415,12 @@ pub struct IpcResponse {
     /// is empty and chunk frames follow, terminated by chunk_end.
     #[serde(default)]
     pub streaming: bool,
+    /// With `streaming`: the body is a route.ts Response body the handler
+    /// paces (an event stream, LLM output), not a page render, so it gets no
+    /// idle-gap cutoff whatever its content type. Additive (protocol stays
+    /// v3): older workers omit it.
+    #[serde(rename = "routeStream", default)]
+    pub route_stream: bool,
     /// PPR: this streamed render marks its shell boundary with a shell_end
     /// frame; everything before it is the cacheable static shell.
     #[serde(rename = "pprShell", default)]
@@ -1364,6 +1370,7 @@ fn error_frame_response(id: &str, val: &serde_json::Value, dev_mode: bool) -> Ip
         vary: Vec::new(),
         cache_tags: Vec::new(),
         streaming: false,
+        route_stream: false,
         ppr_shell: false,
         worker_error: true,
         set_cookies: Vec::new(),
@@ -1384,6 +1391,7 @@ fn unavailable_response(id: &str) -> IpcResponse {
         cache_tags: Vec::new(),
         body_base64: false,
         streaming: false,
+        route_stream: false,
         ppr_shell: false,
         worker_error: false,
         set_cookies: Vec::new(),

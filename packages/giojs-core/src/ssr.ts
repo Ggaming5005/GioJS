@@ -1170,7 +1170,7 @@ async function routeResponseToIpc(
     if (!eventStream || req.method === 'HEAD') return { ...base, headers, body: '', ...cookies };
     return {
       type: 'route-stream',
-      head: { ...base, headers, body: '', streaming: true, ...cookies },
+      head: { ...base, headers, body: '', streaming: true, routeStream: true, ...cookies },
       prelude: [],
       rest: null,
     };
@@ -1188,7 +1188,7 @@ async function routeResponseToIpc(
   }
   return {
     type: 'route-stream',
-    head: { ...base, headers, body: '', streaming: true, ...cookies },
+    head: { ...base, headers, body: '', streaming: true, routeStream: true, ...cookies },
     prelude: ahead.chunks,
     rest: ahead.complete ? null : { reader: ahead.reader, pending: ahead.pending },
   };

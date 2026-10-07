@@ -2410,16 +2410,13 @@ fn respond_stream(
         lang,
     });
 
-    // The idle-gap budget guards renders (a stalled React stream is a hung
-    // render). Other bodies are route.ts streams the handler paces itself -
-    // an event stream waiting for events, an LLM thinking before its first
-    // token - and end when the handler or the client says so.
     let stream = RenderBodyStream {
         inner: body_rx,
         req_id: response.id.clone(),
         ipc: state.ipc.clone(),
         injector,
-        idle: is_html.then(|| Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT))),
+        idle: has_render_idle_gap(&response)
+            .then(|| Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT))),
         done: false,
         shell_capture,
     };
@@ -3244,6 +3241,15 @@ fn is_html_content_type(headers: &std::collections::HashMap<String, String>) -> 
         .get("content-type")
         .map(|ct| ct.starts_with("text/html"))
         .unwrap_or(false)
+}
+
+/// Whether a streamed body gets the idle-gap cutoff. It guards page renders
+/// (a stalled React stream is a hung render). route.ts bodies - flagged
+/// `routeStream` by the worker, HTML or not - are paced by their handler: an
+/// event stream waiting for events, an LLM thinking before its first token.
+/// They end when the handler or the client says so.
+fn has_render_idle_gap(response: &ipc::IpcResponse) -> bool {
+    !response.route_stream && is_html_content_type(&response.headers)
 }
 
 fn is_event_stream_content_type(headers: &std::collections::HashMap<String, String>) -> bool {
@@ -4915,6 +4921,7 @@ mod tests {
             cache_tags: Vec::new(),
             body_base64: false,
             streaming: false,
+            route_stream: false,
             ppr_shell: false,
             worker_error: false,
             set_cookies: Vec::new(),
@@ -4927,6 +4934,32 @@ mod tests {
         assert!(!render_is_shareable(&ipc_response(true, 0)));
         assert!(!render_is_shareable(&ipc_response(false, 60)));
         assert!(!render_is_shareable(&ipc_response(false, 0)));
+    }
+
+    #[test]
+    fn only_page_renders_get_the_streaming_idle_gap() {
+        let head = |content_type: &str, route_stream: bool| {
+            let mut resp = ipc_response(false, 0);
+            resp.streaming = true;
+            resp.route_stream = route_stream;
+            resp.headers
+                .insert("content-type".into(), content_type.into());
+            resp
+        };
+        let html = "text/html; charset=utf-8";
+        assert!(has_render_idle_gap(&head(html, false)));
+        // A route.ts body streaming HTML (htmx, an LLM writing markup) is
+        // paced by its handler, like any other route stream.
+        assert!(!has_render_idle_gap(&head(html, true)));
+        assert!(!has_render_idle_gap(&head("text/event-stream", true)));
+        assert!(!has_render_idle_gap(&head("text/plain", false)));
+
+        let parsed: ipc::IpcResponse = serde_json::from_value(serde_json::json!({
+            "id": "r", "status": 200, "headers": {"content-type": "text/html"},
+            "body": "", "cacheable": false, "streaming": true, "routeStream": true,
+        }))
+        .unwrap();
+        assert!(parsed.route_stream);
     }
 
     #[test]

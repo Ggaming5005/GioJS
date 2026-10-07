@@ -52,11 +52,31 @@ export function wsHandler(socket: GioSocket) {
         The handler runs once per connection and decides whether to keep it. Return{' '}
         <code>false</code> (or resolve to <code>false</code>) to reject: the connection closes
         with code <code>4401</code> and reason <code>unauthorized</code>. Call{' '}
-        <code>socket.close(code, reason)</code> to reject with your own code. The handler may be
-        async - messages that arrive before it settles are held and delivered, in order, once
-        it accepts (a client that sends more than 256 messages before that is closed with{' '}
-        <code>1008</code>). A handler that throws closes the connection with <code>1011</code>.
+        <code>socket.close(code, reason)</code> to reject with your own code. A handler that
+        throws closes the connection with <code>1011</code>. Anything else accepts it - for an
+        async handler, when its promise resolves.
       </p>
+      <ul>
+        <li>
+          Until the handler accepts, the socket receives nothing from{' '}
+          <code>socket.broadcast()</code> or room broadcasts (even rooms it already joined),
+          so a client you are about to reject never sees other members&apos; traffic. Your own{' '}
+          <code>socket.send()</code> reaches it, e.g. to ask for a token.
+        </li>
+        <li>
+          Messages that arrive before the handler registers a <code>&apos;message&apos;</code>{' '}
+          listener are held and delivered to it, in order. Once a listener exists, messages
+          reach it as they arrive - even while an async handler is still deciding - so
+          register yours after the check unless it is the check (below). A client that sends
+          more than 256 messages or 1 MiB before anyone listens is closed with{' '}
+          <code>1008</code>; messages held for 10 seconds by a handler that neither listens nor
+          finishes are dropped.
+        </li>
+        <li>
+          Keep an async handler to the decision: start long-lived work (a feed loop) without
+          awaiting it, since a handler that never resolves never accepts.
+        </li>
+      </ul>
       <CodeBlock lang="ts" code={`// app/live/route.ts
 import type { GioSocket } from '@gio.js/core';
 import { sessions } from '../../lib/session.server.ts';
@@ -75,8 +95,28 @@ export async function wsHandler(socket: GioSocket) {
       <p>
         Browsers send the page&apos;s cookies with the upgrade request but cannot set other
         headers on a WebSocket, so a session cookie is the natural credential. Other clients
-        can send <code>Authorization</code>. If you must pass a token in the URL
-        (<code>socket.query.token</code>), make it short-lived: URLs end up in logs.
+        can send <code>Authorization</code>. Without a cookie, have the client send a token as
+        its first message and await it - give the wait a deadline, or a client that never
+        sends one keeps its socket open:
+      </p>
+      <CodeBlock lang="ts" code={`// app/feed/route.ts  - the client sends its token first
+import type { GioSocket } from '@gio.js/core';
+
+export async function wsHandler(socket: GioSocket) {
+  const token = await new Promise<string | null>((resolve) => {
+    socket.on('message', (data) => resolve(String(data)));
+    setTimeout(() => resolve(null), 5_000);
+  });
+  const user = token === null ? null : await verifyToken(token);
+  if (user === null) return false;                    // → close 4401
+
+  socket.join(\`user:\${user.id}\`);
+  socket.on('message', (msg) => handle(user, msg));   // later messages
+}`} />
+      <p>
+        That first listener stays registered and sees later messages too (resolving an
+        already-resolved promise does nothing). Avoid tokens in the URL
+        (<code>socket.query.token</code>) unless they are short-lived: URLs end up in logs.
       </p>
       <p>
         The upgrade itself always completes before your handler runs, so a rejected client
@@ -129,7 +169,7 @@ socket.on('message', (msg) => broadcast(room, msg, { except: socket.id }));`} />
         <tbody>
           <tr><td><code>1000</code></td><td>Normal close (<code>socket.close()</code>).</td></tr>
           <tr><td><code>1001</code></td><td>The server is shutting down, or the worker restarted (its sockets&apos; state is gone): reconnect.</td></tr>
-          <tr><td><code>1008</code></td><td>Too many messages before the handler accepted the connection.</td></tr>
+          <tr><td><code>1008</code></td><td>Too many messages (256, or 1 MiB) before the handler listened or accepted the connection.</td></tr>
           <tr><td><code>1011</code></td><td>The <code>wsHandler</code> threw.</td></tr>
           <tr><td><code>1013</code></td><td><code>[websocket] max_connections</code> reached: try again later.</td></tr>
           <tr><td><code>4401</code></td><td>The handler rejected the connection (returned <code>false</code>).</td></tr>
@@ -162,7 +202,11 @@ export function Chat({ room }: { room: string }) {
         <li>Relative URLs resolve against the page (<code>ws:</code> or <code>wss:</code> to match). Binary frames arrive as <code>ArrayBuffer</code>.</li>
         <li>
           After an unintended close it reconnects with exponential backoff and jitter (on by
-          default; <code>reconnect: false</code> turns it off). It does not reconnect after{' '}
+          default; <code>reconnect: false</code> turns it off). The backoff starts over only
+          after a connection stays open for <code>minUptimeMs</code> (default 5 s): the server
+          refuses after the upgrade (<code>1013</code> at <code>max_connections</code>,{' '}
+          <code>1011</code>), so a socket that opens and is closed right away keeps backing off
+          and counts toward <code>maxAttempts</code>. It does not reconnect after{' '}
           <code>1000</code> or a 4000-4499 close, after <code>close()</code>, or once unmounted;{' '}
           <code>shouldReconnect(event)</code> replaces that policy, and{' '}
           <code>reconnect()</code> opens a fresh connection.

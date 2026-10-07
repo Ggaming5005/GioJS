@@ -302,6 +302,16 @@ fn dispatch_node_message(msg: serde_json::Value, registry: &WsRegistry) {
                 })),
             );
         }
+        // The wsHandler accepted: broadcasts reach the connection from now on.
+        // Until then it is pending, so a socket about to be rejected never
+        // sees route or room traffic.
+        Some("ws_accept") => {
+            let Some(conn_id) = msg["connId"].as_str() else {
+                warn!("WS IPC accept frame without a connId");
+                return;
+            };
+            registry.accept(conn_id);
+        }
         Some("ws_broadcast") => {
             let route_id = msg["routeId"].as_str().unwrap_or("");
             let data = msg["data"].as_str().unwrap_or("");
@@ -563,6 +573,8 @@ mod tests {
         let (tx2, mut rx2) = mpsc::unbounded_channel();
         registry.register("c1", "/chat/a", tx1);
         registry.register("c2", "/chat/b", tx2);
+        dispatch_node_message(json!({"type": "ws_accept", "connId": "c1"}), &registry);
+        dispatch_node_message(json!({"type": "ws_accept", "connId": "c2"}), &registry);
         dispatch_node_message(json!({"type": "ws_join", "connId": "c1", "room": "a"}), &registry);
         dispatch_node_message(json!({"type": "ws_join", "connId": "c2", "room": "b"}), &registry);
         dispatch_node_message(
@@ -580,6 +592,28 @@ mod tests {
 
         dispatch_node_message(json!({"type": "ws_leave", "connId": "c1", "room": "a"}), &registry);
         assert_eq!(registry.room_count(), 1);
+    }
+
+    #[test]
+    fn broadcasts_skip_a_connection_until_the_worker_accepts_it() {
+        let registry = WsRegistry::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        registry.register("c1", "/feed", tx);
+        let join = json!({"type": "ws_join", "connId": "c1", "room": "news"});
+        dispatch_node_message(join, &registry);
+        let route = json!({"type": "ws_broadcast", "routeId": "/feed", "data": "route"});
+        let room =
+            json!({"type": "ws_room_broadcast", "room": "news", "data": "room", "isBinary": false});
+        dispatch_node_message(route.clone(), &registry);
+        dispatch_node_message(room.clone(), &registry);
+        assert!(rx.try_recv().is_err(), "pending: still deciding");
+
+        dispatch_node_message(json!({"type": "ws_accept"}), &registry); // malformed: ignored
+        dispatch_node_message(json!({"type": "ws_accept", "connId": "c1"}), &registry);
+        dispatch_node_message(route, &registry);
+        dispatch_node_message(room, &registry);
+        assert_eq!(rx.try_recv().unwrap(), Message::Text("route".into()));
+        assert_eq!(rx.try_recv().unwrap(), Message::Text("room".into()));
     }
 
     #[tokio::test]

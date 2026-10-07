@@ -11,7 +11,9 @@
  * the conversation) and 4000-4499 (the application refused, like an HTTP
  * 4xx - e.g. 4401 from a wsHandler rejecting the session). 1001 (server
  * shutdown or restart), 1006 (network loss), 1011/1012/1013 and 4500-4999
- * retry.
+ * retry. The backoff starts over only once a connection has stayed open
+ * for minUptimeMs: a server refuses after the upgrade (1013 over capacity,
+ * 1011 a throwing handler), so "it opened" alone proves nothing.
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
 
@@ -19,12 +21,21 @@ export type WebSocketData = string | ArrayBuffer;
 export type WebSocketSendData = string | ArrayBufferLike | ArrayBufferView | Blob;
 
 export interface ReconnectOptions {
-  /** Attempts after a drop before giving up. Default: Infinity. */
+  /**
+   * Consecutive attempts before giving up - ones that fail, and ones that
+   * open but close within minUptimeMs. Default: Infinity.
+   */
   maxAttempts?: number;
   /** Backoff before the first retry. Default: 500 ms. */
   initialDelayMs?: number;
   /** Backoff cap. Default: 30 s. */
   maxDelayMs?: number;
+  /**
+   * How long a connection must stay open before the backoff starts over.
+   * A server that accepts the upgrade and closes right away (1013 at
+   * max_connections) keeps being backed off from. Default: 5 s.
+   */
+  minUptimeMs?: number;
 }
 
 export interface UseWebSocketOptions {
@@ -54,7 +65,10 @@ export interface UseWebSocketResult {
   lastMessage: WebSocketData | null;
   /** WebSocket.readyState of the current socket; -1 before one exists (SSR). */
   readyState: number;
-  /** Consecutive failed attempts since the last open; 0 while connected. */
+  /**
+   * Retries since a connection last stayed open minUptimeMs; 0 while
+   * connected.
+   */
   reconnectAttempts: number;
   /** True while waiting to retry after a drop. */
   isReconnecting: boolean;
@@ -67,6 +81,7 @@ export interface UseWebSocketResult {
 const DEFAULT_MAX_QUEUED = 100;
 const DEFAULT_INITIAL_DELAY_MS = 500;
 const DEFAULT_MAX_DELAY_MS = 30_000;
+const DEFAULT_MIN_UPTIME_MS = 5_000;
 const NOT_CREATED = -1;
 const CONNECTING = 0;
 const OPEN = 1;
@@ -110,6 +125,7 @@ function reconnectSettings(reconnect: UseWebSocketOptions['reconnect']): Require
     maxAttempts: custom.maxAttempts ?? Infinity,
     initialDelayMs: custom.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS,
     maxDelayMs: custom.maxDelayMs ?? DEFAULT_MAX_DELAY_MS,
+    minUptimeMs: custom.minUptimeMs ?? DEFAULT_MIN_UPTIME_MS,
   };
 }
 
@@ -134,8 +150,11 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
   useEffect(() => {
     if (isServer) return;
     let disposed = false;
+    // Consecutive attempts that failed or did not stay up: the backoff exponent.
     let attempt = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // Resets `attempt` once the open connection has proven itself.
+    let uptimeTimer: ReturnType<typeof setTimeout> | undefined;
     stoppedRef.current = false;
 
     const connect = (): void => {
@@ -147,7 +166,13 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
 
       ws.onopen = (event): void => {
         if (wsRef.current !== ws) return;
-        attempt = 0;
+        const minUptimeMs =
+          reconnectSettings(optionsRef.current.reconnect)?.minUptimeMs ?? DEFAULT_MIN_UPTIME_MS;
+        const stayedUp = (): void => {
+          attempt = 0;
+        };
+        if (minUptimeMs <= 0) stayedUp();
+        else uptimeTimer = setTimeout(stayedUp, minUptimeMs);
         setReconnectAttempts(0);
         setIsReconnecting(false);
         setReadyState(OPEN);
@@ -164,6 +189,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
       // A failed connection fires error, then close: close decides.
       ws.onclose = (event): void => {
         if (wsRef.current !== ws) return;
+        clearTimeout(uptimeTimer);
         setReadyState(CLOSED);
         optionsRef.current.onClose?.(event);
         const settings = reconnectSettings(optionsRef.current.reconnect);
@@ -191,6 +217,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
       disposed = true;
       stoppedRef.current = true;
       clearTimeout(timer);
+      clearTimeout(uptimeTimer);
       queueRef.current = [];
       setIsReconnecting(false);
       const ws = wsRef.current;
@@ -207,6 +234,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
       disposed = true;
       stoppedRef.current = true;
       clearTimeout(timer);
+      clearTimeout(uptimeTimer);
       const ws = wsRef.current;
       wsRef.current = null;
       if (ws !== null) {

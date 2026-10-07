@@ -839,6 +839,38 @@ async function main() {
       await member.closed;
     });
 
+    await test('a socket its handler has not accepted yet sees no route or room broadcast', async () => {
+      const pub = wsClient('/ws/members?role=pub');
+      await pub.opened;
+      assert.equal(await pub.next(), 'ready');
+      const anon = wsClient('/ws/members');
+      await anon.opened;
+      await new Promise((resolve) => setTimeout(resolve, 100)); // its handler is deciding (500ms)
+      pub.ws.send('members-only secret');
+      assert.equal(await pub.next(), 'members-only secret', 'the route broadcast went out');
+      const published = await fetch(`${BASE}/api/rooms/members-feed`, { method: 'POST', body: 'room secret' });
+      assert.deepEqual(await published.json(), { delivered: true });
+      assert.equal(await pub.next(), 'server:room secret', 'the room broadcast went out');
+      assert.deepEqual(await anon.closed, { code: 4401, reason: 'unauthorized' });
+      assert.deepEqual(anon.inbox, [], 'the rejected socket never saw a broadcast');
+      pub.ws.close();
+      await pub.closed;
+    });
+
+    await test('an async wsHandler can authenticate with the first message', async () => {
+      const member = wsClient('/ws/token');
+      await member.opened;
+      member.ws.send('let-me-in');
+      assert.equal(await member.next(), 'welcome');
+      member.ws.close();
+      await member.closed;
+
+      const forger = wsClient('/ws/token');
+      await forger.opened;
+      forger.ws.send('forged');
+      assert.deepEqual(await forger.closed, { code: 4401, reason: 'unauthorized' });
+    });
+
     await test('rejected and unrouted WebSocket connections close with 4401 / 4404', async () => {
       const denied = wsClient('/ws/rooms/x?deny=1');
       await denied.opened;

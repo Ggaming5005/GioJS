@@ -147,6 +147,7 @@ describe('route.ts Response: buffer or stream', () => {
       status: 201,
       body: '',
       streaming: true,
+      routeStream: true,
       cacheable: false,
       headers: { 'content-type': 'text/plain', 'x-model': 'm1' },
       setCookies: ['a=1; Path=/', 'b=2; Path=/; HttpOnly'],
@@ -179,6 +180,7 @@ describe('route.ts Response: buffer or stream', () => {
   it('streams an empty event stream too, so it ends instead of waiting for SSE frames', async () => {
     const result = await route(() => new Response(null, { headers: { 'content-type': 'text/event-stream' } }));
     expect(isRouteStream(result)).toBe(true);
+    expect((result as RouteStreamResult).head.routeStream).toBe(true);
     const socket = new FakeSocket();
     await pumpRouteStream(socket, 'req-1', result as RouteStreamResult, new StreamFlowGate(), new AbortController().signal);
     expect(socket.frames()).toEqual([{ type: 'chunk_end', id: 'req-1' }]);

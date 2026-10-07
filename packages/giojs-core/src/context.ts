@@ -63,6 +63,12 @@ export interface IPCResponse {
    */
   streaming?: boolean;
   /**
+   * With `streaming`: the body is a route.ts Response body, not a page
+   * render, so it is paced by its handler - Rust applies no idle-gap cutoff
+   * to it, whatever its content type (additive, protocol stays v3).
+   */
+  routeStream?: boolean;
+  /**
    * PPR (shell='cache'): this streamed render marks its shell boundary with a
    * shell_end frame; Rust caches everything before it as the static shell.
    */
@@ -188,8 +194,10 @@ export interface GioSocket {
 /**
  * A route.ts `wsHandler`: runs once per connection. Returning (or resolving
  * to) `false` rejects the connection - it closes with 4401 'unauthorized'.
- * Messages that arrive while an async handler is still running are held and
- * delivered once it accepts. A throw closes the connection with 1011.
+ * A throw closes the connection with 1011. Messages that arrive while an
+ * async handler is still running wait for its first 'message' listener (it
+ * may await the first message, e.g. a token), or are delivered once it
+ * accepts. The socket receives route and room broadcasts only once accepted.
  */
 export type WsHandler = (
   socket: GioSocket,
@@ -218,6 +226,11 @@ export type WsInbound = WsConnectMsg | WsMessageMsg | WsDisconnectMsg;
 // WS IPC messages: Node → Rust (over giojs-ws pipe)
 export interface WsSendMsg      { type: 'ws_send';      connId: string; data: string; isBinary: boolean; }
 export interface WsCloseMsg     { type: 'ws_close';     connId: string; code: number; reason: string; }
+/**
+ * The wsHandler accepted the connection: from now on Rust includes it in
+ * route (ws_broadcast) and room broadcasts.
+ */
+export interface WsAcceptMsg    { type: 'ws_accept';    connId: string; }
 export interface WsBroadcastMsg { type: 'ws_broadcast'; routeId: string; data: string; }
 /** Room membership lives in Rust's registry so a room broadcast is one frame. */
 export interface WsJoinMsg      { type: 'ws_join';      connId: string; room: string; }
@@ -233,6 +246,7 @@ export interface WsRoomBroadcastMsg {
 export type WsOutbound =
   | WsSendMsg
   | WsCloseMsg
+  | WsAcceptMsg
   | WsBroadcastMsg
   | WsJoinMsg
   | WsLeaveMsg

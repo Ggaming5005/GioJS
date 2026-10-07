@@ -173,6 +173,52 @@ describe('useWebSocket', () => {
     expect(result.readyState).toBe(1);
   });
 
+  it('keeps backing off when the server opens the socket and then refuses it (1013)', () => {
+    // Every server-side refusal (1013 over max_connections, 1011 handler
+    // threw, 1008) comes after the upgrade, so the browser fires open first.
+    mount('ws://example.test/ws', { reconnect: { maxAttempts: 4, initialDelayMs: 100, maxDelayMs: 10_000 } });
+    for (const [i, delay] of [75, 150, 300, 600].entries()) {
+      act(() => latest().serverOpen());
+      expect(result.reconnectAttempts).toBe(0);
+      act(() => latest().serverClose(1013, 'too many connections'));
+      expect(result.reconnectAttempts).toBe(i + 1);
+      act(() => vi.advanceTimersByTime(delay - 1));
+      expect(FakeWebSocket.instances).toHaveLength(i + 1);
+      act(() => vi.advanceTimersByTime(1));
+      expect(FakeWebSocket.instances).toHaveLength(i + 2);
+    }
+    act(() => latest().serverOpen());
+    act(() => latest().serverClose(1013));
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(5); // maxAttempts reached
+    expect(result.isReconnecting).toBe(false);
+  });
+
+  it('starts the backoff over once a connection stays open for minUptimeMs', () => {
+    mount('ws://example.test/ws', { reconnect: { initialDelayMs: 100, minUptimeMs: 2000 } });
+    act(() => latest().serverClose(1006));
+    act(() => vi.advanceTimersByTime(75));
+    act(() => latest().serverClose(1006));
+    act(() => vi.advanceTimersByTime(150));
+    expect(FakeWebSocket.instances).toHaveLength(3);
+
+    act(() => latest().serverOpen());
+    act(() => vi.advanceTimersByTime(1999));
+    act(() => latest().serverClose(1006)); // not stable yet: attempt 2 → 300ms
+    expect(result.reconnectAttempts).toBe(3);
+    act(() => vi.advanceTimersByTime(300));
+    expect(FakeWebSocket.instances).toHaveLength(4);
+
+    act(() => latest().serverOpen());
+    act(() => vi.advanceTimersByTime(2000));
+    act(() => latest().serverClose(1006)); // stayed up: back to the first delay
+    expect(result.reconnectAttempts).toBe(1);
+    act(() => vi.advanceTimersByTime(74));
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    act(() => vi.advanceTimersByTime(1));
+    expect(FakeWebSocket.instances).toHaveLength(5);
+  });
+
   it('gives up after maxAttempts', () => {
     mount('ws://example.test/ws', { reconnect: { maxAttempts: 2, initialDelayMs: 10, maxDelayMs: 10 } });
     for (let i = 0; i < 2; i++) {

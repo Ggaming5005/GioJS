@@ -81,6 +81,8 @@ async fn run_connection(
     let conn_id = Uuid::new_v4().to_string();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Message>();
 
+    // Pending until the worker's ws_accept: its wsHandler may still reject
+    // it, so only direct sends reach it, never broadcasts.
     ws_registry.register(&conn_id, &route_id, outbound_tx);
     ws_ipc.send_ws_connect(&conn_id, &info, &addr);
     debug!(conn_id = %conn_id, route = %route_id, addr = %addr, "WebSocket connected");
