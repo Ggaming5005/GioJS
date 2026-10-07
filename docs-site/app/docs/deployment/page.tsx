@@ -324,6 +324,13 @@ workers = "auto"   # one per CPU core, at most 8 - or an exact count`}</code>
           visitor can land on different workers, so keep shared state outside the process.
         </li>
         <li>
+          <strong>Plugin hooks.</strong> A Node plugin&apos;s <code>onStartup</code> runs in
+          every worker - N times at once - and again in each respawned worker. Move
+          one-time jobs (migrations, schedulers, queue consumers) out of the server, or
+          run them only where <code>GIO_WORKER_INDEX</code> is <code>&quot;0&quot;</code>{' '}
+          and make them idempotent (and take a lock when several instances run).
+        </li>
+        <li>
           <strong>Many small instances or one big one.</strong> A pool shares one page
           cache, one image cache and one set of WebSocket rooms; separate instances each
           keep their own. Prefer a pool per machine and scale out with instances beyond it.
@@ -332,7 +339,12 @@ workers = "auto"   # one per CPU core, at most 8 - or an exact count`}</code>
       <p>
         <code>/_gio/metrics</code> shows each worker&apos;s requests in flight and restart
         count (<code>gio_worker_in_flight</code>, <code>gio_worker_restarts_total</code>),
-        which tells you whether a pool is saturated or a worker keeps crashing.
+        which tells you whether a pool is saturated or a worker keeps crashing. It does
+        not show worker memory: <code>gio_memory_bytes</code> is the Rust server process
+        alone. Measure a worker&apos;s RSS with your process tools (<code>ps</code> or{' '}
+        <code>top</code> on the <code>node</code> processes under the server) once it has
+        served real traffic for a while, and size the limit from the container&apos;s
+        total memory under load.
       </p>
 
       <h2>Multi-instance deployments</h2>

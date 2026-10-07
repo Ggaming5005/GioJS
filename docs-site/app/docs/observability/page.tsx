@@ -37,9 +37,24 @@ token = "a-long-random-secret"   # secure it for production`} />
           <tr><td><code>gio_prefetch_rejected_total</code></td><td>counter</td><td>-</td></tr>
           <tr><td><code>gio_image_processed_total</code></td><td>counter</td><td><code>format</code></td></tr>
           <tr><td><code>gio_ratelimit_checked_total</code>, <code>gio_ratelimit_rejected_total</code></td><td>counter</td><td><code>path</code> (and <code>rule</code>)</td></tr>
-          <tr><td><code>gio_memory_bytes</code></td><td>gauge</td><td><code>type="rss"</code></td></tr>
+          <tr><td><code>gio_memory_bytes</code></td><td>gauge (Rust server process only)</td><td><code>type="rss"</code></td></tr>
+          <tr><td><code>gio_workers</code></td><td>gauge (Node render workers configured)</td><td>-</td></tr>
+          <tr><td><code>gio_worker_ready</code></td><td>gauge (1 while the worker is connected)</td><td><code>worker</code></td></tr>
+          <tr><td><code>gio_worker_in_flight</code></td><td>gauge (requests, streaming renders and SSE streams)</td><td><code>worker</code></td></tr>
+          <tr><td><code>gio_worker_restarts_total</code></td><td>counter</td><td><code>worker</code></td></tr>
         </tbody>
       </table>
+      <p>
+        The <code>gio_worker_*</code> series carry one value per Node worker, labeled by its
+        index in the pool (<code>worker=&quot;0&quot;</code> to{' '}
+        <code>worker=&quot;N-1&quot;</code>, see{' '}
+        <a href="/docs/configuration#render-workers">Render workers</a>): a worker whose{' '}
+        <code>gio_worker_in_flight</code> stays high while the others idle is busy with
+        long renders or streams, and a climbing <code>gio_worker_restarts_total</code> is a
+        worker that keeps crashing. <code>gio_memory_bytes</code> measures the Rust server
+        alone - each Node worker is a separate process, so watch worker memory with your
+        process or container tools.
+      </p>
       <p>
         Besides patterns - and the fixed paths of <code>app/sitemap.ts</code>,{' '}
         <code>app/robots.ts</code> and <code>app/manifest.ts</code> (<code>/sitemap.xml</code>,

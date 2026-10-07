@@ -422,7 +422,9 @@ impl Metrics {
         }
 
         // ── gio_memory_bytes ──────────────────────────────────────────────────
-        out.push_str("# HELP gio_memory_bytes Process memory usage in bytes\n");
+        out.push_str(
+            "# HELP gio_memory_bytes Rust server process memory usage in bytes (Node workers not included)\n",
+        );
         out.push_str("# TYPE gio_memory_bytes gauge\n");
         out.push_str(&format!(
             "gio_memory_bytes{{type=\"rss\"}} {}\n",
@@ -456,7 +458,7 @@ pub fn format_worker_metrics(workers: &[crate::ipc::WorkerStatus]) -> String {
     series(
         "gio_worker_in_flight",
         "gauge",
-        "Requests and streaming renders in flight on the worker",
+        "Requests, streaming renders and SSE streams in flight on the worker",
         &|w| w.in_flight as u64,
     );
     series(

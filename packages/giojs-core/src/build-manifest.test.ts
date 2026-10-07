@@ -3,10 +3,12 @@
  *
  * In a worker pool only the builder bundles: it records its build for this
  * server run, and a worker told to reuse it loads exactly that - never a
- * manifest from another run or a malformed one, falling back to building
- * rather than serving pages without their scripts.
+ * manifest from another run or a malformed one. A pool worker never builds
+ * under the workers serving from `.gio/build` (it fails its boot instead);
+ * a lone worker falls back to building rather than serving pages without
+ * their scripts.
  */
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,6 +17,7 @@ import {
   loadClientBuild,
   readBuildManifest,
   reuseBuildRequested,
+  sharedBuildDirectory,
   writeBuildManifest,
   type ClientBuild,
 } from './build-manifest.ts';
@@ -47,6 +50,16 @@ describe('reuseBuildRequested', () => {
     expect(reuseBuildRequested({ GIO_REUSE_BUILD: '1' })).toBe(true);
     expect(reuseBuildRequested({ GIO_REUSE_BUILD: '0' })).toBe(false);
     expect(reuseBuildRequested({})).toBe(false);
+  });
+});
+
+describe('sharedBuildDirectory', () => {
+  it('is on only in a pool of more than one worker', () => {
+    expect(sharedBuildDirectory({ GIO_WORKER_COUNT: '2' })).toBe(true);
+    expect(sharedBuildDirectory({ GIO_WORKER_COUNT: '8' })).toBe(true);
+    expect(sharedBuildDirectory({ GIO_WORKER_COUNT: '1' })).toBe(false);
+    expect(sharedBuildDirectory({ GIO_WORKER_COUNT: 'auto' })).toBe(false);
+    expect(sharedBuildDirectory({})).toBe(false);
   });
 });
 
@@ -92,9 +105,22 @@ describe('build manifest', () => {
 });
 
 describe('loadClientBuild', () => {
-  it('builds and records the build when it is the builder', async () => {
+  function freshBuild(): ClientBuild {
+    return {
+      clientScripts: new Map([['/', '/_next/static/chunks/route-index-NEW.js']]),
+      stylesheets: { routes: new Map(), segmentPages: new Map() },
+    };
+  }
+
+  /** Make `.gio/build` a file: recording the manifest then fails. */
+  async function blockManifestWrites(): Promise<void> {
+    await mkdir(join(projectRoot, '.gio'), { recursive: true });
+    await writeFile(join(projectRoot, '.gio', 'build'), 'not a directory');
+  }
+
+  it.each([false, true])('builds and records the build when it is the builder (shared: %s)', async shared => {
     const build = vi.fn(async () => sampleBuild());
-    const loaded = await loadClientBuild({ projectRoot, reuse: false, buildId: 'run-1', build });
+    const loaded = await loadClientBuild({ projectRoot, reuse: false, shared, buildId: 'run-1', build });
     expect(build).toHaveBeenCalledTimes(1);
     expect(loaded).toEqual(sampleBuild());
     const recorded = JSON.parse(await readFile(buildManifestPath(projectRoot), 'utf8'));
@@ -106,21 +132,60 @@ describe('loadClientBuild', () => {
     const build = vi.fn(async (): Promise<ClientBuild> => {
       throw new Error('a reusing worker must not build');
     });
-    const loaded = await loadClientBuild({ projectRoot, reuse: true, buildId: 'run-1', build });
+    const loaded = await loadClientBuild({ projectRoot, reuse: true, shared: true, buildId: 'run-1', build });
     expect(build).not.toHaveBeenCalled();
     expect(loaded).toEqual(sampleBuild());
   });
 
-  it('builds after all when the recorded build is unusable', async () => {
+  it('a pool worker fails its boot instead of rebuilding under the workers serving', async () => {
+    // What the serving workers' pages link: a build would empty its directory.
+    const chunk = join(projectRoot, '.gio', 'build', 'static', 'chunks', 'route-index-AAA.js');
+    await mkdir(join(chunk, '..'), { recursive: true });
+    await writeFile(chunk, 'hydrate()');
+    const build = vi.fn(async () => {
+      await rm(join(projectRoot, '.gio', 'build', 'static'), { recursive: true, force: true });
+      return freshBuild();
+    });
+    // A manifest another run wrote, then none at all.
     await writeBuildManifest(projectRoot, sampleBuild(), 'old-run');
-    const fresh: ClientBuild = {
-      clientScripts: new Map([['/', '/_next/static/chunks/route-index-NEW.js']]),
-      stylesheets: { routes: new Map(), segmentPages: new Map() },
-    };
-    const build = vi.fn(async () => fresh);
-    const loaded = await loadClientBuild({ projectRoot, reuse: true, buildId: 'run-2', build });
+    await expect(
+      loadClientBuild({ projectRoot, reuse: true, shared: true, buildId: 'run-2', build }),
+    ).rejects.toThrow(/client build manifest unusable \(.*another server run\) - a pool worker never rebuilds/);
+    await rm(buildManifestPath(projectRoot));
+    await expect(
+      loadClientBuild({ projectRoot, reuse: true, shared: true, buildId: 'run-2', build }),
+    ).rejects.toThrow(/client build manifest unusable/);
+    expect(build).not.toHaveBeenCalled();
+    expect((await stat(chunk)).isFile()).toBe(true);
+  });
+
+  it('a lone worker builds after all when the recorded build is unusable', async () => {
+    await writeBuildManifest(projectRoot, sampleBuild(), 'old-run');
+    const build = vi.fn(async () => freshBuild());
+    const loaded = await loadClientBuild({ projectRoot, reuse: true, shared: false, buildId: 'run-2', build });
     expect(build).toHaveBeenCalledTimes(1);
-    expect(loaded).toEqual(fresh);
-    expect(await readBuildManifest(projectRoot, 'run-2')).toEqual({ build: fresh });
+    expect(loaded).toEqual(freshBuild());
+    expect(await readBuildManifest(projectRoot, 'run-2')).toEqual({ build: freshBuild() });
+  });
+
+  it('the builder of a pool fails its boot when it cannot record its build', async () => {
+    await blockManifestWrites();
+    const build = vi.fn(async () => sampleBuild());
+    await expect(
+      loadClientBuild({ projectRoot, reuse: false, shared: true, buildId: 'run-1', build }),
+    ).rejects.toThrow(/client build manifest not written \(.+\) - the other workers of the pool/);
+    await rm(join(projectRoot, '.gio'), { recursive: true });
+    await expect(
+      loadClientBuild({ projectRoot, reuse: false, shared: true, buildId: undefined, build }),
+    ).rejects.toThrow(/GIO_BUILD_ID is not set/);
+  });
+
+  it('a lone builder serves its build even when it cannot record it', async () => {
+    await blockManifestWrites();
+    const build = vi.fn(async () => sampleBuild());
+    const loaded = await loadClientBuild({ projectRoot, reuse: false, shared: false, buildId: 'run-1', build });
+    expect(loaded).toEqual(sampleBuild());
+    const unstarted = await loadClientBuild({ projectRoot, reuse: false, shared: false, buildId: undefined, build });
+    expect(unstarted).toEqual(sampleBuild());
   });
 });

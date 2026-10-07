@@ -104,6 +104,16 @@ pub const REUSE_BUILD_ENV: &str = "GIO_REUSE_BUILD";
 /// builder and required back by every worker that reuses it: a manifest a
 /// previous run left behind never passes for this run's build.
 pub const BUILD_ID_ENV: &str = "GIO_BUILD_ID";
+/// The worker's position in the pool ("0" for the builder), set on every
+/// spawn and respawn: app code (a plugin's `onStartup`, say) can keep
+/// one-time work to a single worker.
+pub const WORKER_INDEX_ENV: &str = "GIO_WORKER_INDEX";
+/// The pool size. Above 1, other workers serve from the builder's
+/// `.gio/build` while a worker boots, so no worker may bundle into it then:
+/// one told to reuse the build fails its boot when the manifest is unusable
+/// (the supervisor retries it) instead of emptying the shared directory,
+/// and the builder fails its boot when it cannot write the manifest.
+pub const WORKER_COUNT_ENV: &str = "GIO_WORKER_COUNT";
 
 /// Per-instance IPC endpoint paths. On Windows the pipe namespace is global,
 /// so the names carry a per-process random suffix to avoid collisions between
@@ -388,9 +398,18 @@ struct RenderStreamTx {
     _load: InFlight,
 }
 
+/// A registered SSE stream (a GioEventStream head). Counts toward its
+/// worker's load until it is unregistered (sse_done, sse_close, drain): the
+/// worker keeps a producer running for it long after its request returned.
+struct SseStreamTx {
+    tx: mpsc::UnboundedSender<Option<Bytes>>,
+    _load: InFlight,
+}
+
 /// One unit of a worker's dispatch load, released on drop - so a request
 /// counts from dispatch until its future ends however it ends (answer,
-/// timeout, client disconnect), and a stream until it is unregistered.
+/// timeout, client disconnect), and a stream (streaming render or SSE)
+/// until it is unregistered.
 struct InFlight(Arc<AtomicUsize>);
 
 impl InFlight {
@@ -657,7 +676,7 @@ struct WorkerInner {
     index: usize,
     pending: DashMap<String, oneshot::Sender<IpcSendResult>>,
     /// Channels for active SSE streams: req_id → sender of Option<Bytes> chunks
-    sse_streams: DashMap<String, mpsc::UnboundedSender<Option<Bytes>>>,
+    sse_streams: DashMap<String, SseStreamTx>,
     /// Channels for active streaming SSR bodies: req_id → frame sender.
     /// RenderFrame::End terminates the stream (chunk_end, clean or aborted).
     render_streams: DashMap<String, RenderStreamTx>,
@@ -686,8 +705,8 @@ struct WorkerInner {
     /// `revalidate` frames from the worker, executed by main.rs (which owns
     /// the cache) and answered with `send_revalidate_ack`.
     revalidate_tx: mpsc::Sender<WorkerRevalidation>,
-    /// Requests awaiting their answer plus streaming bodies still rendering:
-    /// the load dispatch balances on (see InFlight).
+    /// Requests awaiting their answer, streaming bodies still rendering and
+    /// open SSE streams: the load dispatch balances on (see InFlight).
     in_flight: Arc<AtomicUsize>,
     /// Times the supervisor respawned this worker's process.
     restarts: AtomicU64,
@@ -772,6 +791,8 @@ struct NodeWorker {
     dev_mode: bool,
     /// Load the builder's client build instead of bundling (REUSE_BUILD_ENV).
     reuse_build: bool,
+    /// Workers in the pool (WORKER_COUNT_ENV).
+    pool_size: usize,
     /// Server settings the worker renders with (e.g. GIO_IMAGE_CONFIG),
     /// handed to every respawn too. Those named in
     /// `config::WORKER_RENDER_SETTINGS_ENV` also feed the deployment ID.
@@ -804,12 +825,22 @@ impl WorkerProcess {
 }
 
 impl NodeWorker {
-    fn spawn(&self) -> anyhow::Result<WorkerProcess> {
+    /// The environment of this (re)spawn: the server settings plus where the
+    /// worker stands in the pool and whether it builds. All set either way,
+    /// so an inherited value never leaks in.
+    fn env(&self) -> Vec<(String, String)> {
         let mut env = self.extra_env.clone();
         env.push((
             REUSE_BUILD_ENV.to_string(),
             if self.reuse_build { "1" } else { "0" }.to_string(),
         ));
+        env.push((WORKER_INDEX_ENV.to_string(), self.index.to_string()));
+        env.push((WORKER_COUNT_ENV.to_string(), self.pool_size.to_string()));
+        env
+    }
+
+    fn spawn(&self) -> anyhow::Result<WorkerProcess> {
+        let env = self.env();
         let mut child = spawn_node_tsx(
             &self.script,
             &self.ipc_path,
@@ -915,6 +946,7 @@ impl IpcClient {
                     token,
                     dev_mode,
                     reuse_build: index > 0,
+                    pool_size: workers,
                     extra_env: extra_env.clone(),
                 },
                 inner: Arc::new(WorkerInner::new(
@@ -1770,15 +1802,23 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<WorkerInner>) {
                             Some("sse_chunk") => {
                                 let id = val["id"].as_str().unwrap_or("");
                                 let data = val["data"].as_str().unwrap_or("");
-                                if let Some(tx) = inner.sse_streams.get(id) {
-                                    let _ = tx.send(Some(Bytes::from(data.to_owned())));
+                                let delivered = inner.sse_streams.get(id).map(|stream| {
+                                    stream.tx.send(Some(Bytes::from(data.to_owned()))).is_ok()
+                                });
+                                if delivered == Some(false) {
+                                    // Its reader is gone without an sse_close
+                                    // (dropped before it was ever read): stop
+                                    // the producer, and the stream stops
+                                    // counting as this worker's load.
+                                    inner.sse_streams.remove(id);
+                                    send_sse_close_frame(&inner, id);
                                 }
                                 continue;
                             }
                             Some("sse_done") => {
                                 let id = val["id"].as_str().unwrap_or("").to_string();
-                                if let Some((_, tx)) = inner.sse_streams.remove(&id) {
-                                    let _ = tx.send(None);
+                                if let Some((_, stream)) = inner.sse_streams.remove(&id) {
+                                    let _ = stream.tx.send(None);
                                 }
                                 continue;
                             }
@@ -1868,7 +1908,13 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<WorkerInner>) {
 
                         let result = if is_sse {
                             let (tx, rx) = mpsc::unbounded_channel::<Option<Bytes>>();
-                            inner.sse_streams.insert(resp_id.clone(), tx);
+                            inner.sse_streams.insert(
+                                resp_id.clone(),
+                                SseStreamTx {
+                                    tx,
+                                    _load: InFlight::new(&inner.in_flight),
+                                },
+                            );
                             IpcSendResult::SseStream {
                                 response: resp,
                                 body_rx: rx,
@@ -2043,8 +2089,8 @@ fn drain_pending_with_503(inner: &WorkerInner) {
 fn drain_sse_streams(inner: &WorkerInner) {
     let ids: Vec<String> = inner.sse_streams.iter().map(|e| e.key().clone()).collect();
     for id in ids {
-        if let Some((_, tx)) = inner.sse_streams.remove(&id) {
-            let _ = tx.send(None);
+        if let Some((_, stream)) = inner.sse_streams.remove(&id) {
+            let _ = stream.tx.send(None);
         }
     }
 }
@@ -3663,11 +3709,24 @@ mod tests {
         assert_eq!(owner.status().in_flight, 0, "unregistered, unloaded");
 
         let (tx, _rx) = mpsc::unbounded_channel::<Option<Bytes>>();
-        client.worker(1).sse_streams.insert("req-e".into(), tx);
+        let sse_owner = client.worker(1);
+        sse_owner.sse_streams.insert(
+            "req-e".into(),
+            SseStreamTx {
+                tx,
+                _load: InFlight::new(&sse_owner.in_flight),
+            },
+        );
         assert_eq!(client.sse_stream_count(), 1);
+        assert_eq!(
+            sse_owner.status().in_flight,
+            1,
+            "an open SSE stream is load"
+        );
         client.send_sse_close("req-e");
         let (worker, frame) = next_frame_from(&mut write_rxs).await;
         assert_eq!((worker, frame["type"].as_str()), (1, Some("sse_close")));
+        assert_eq!(sse_owner.status().in_flight, 0, "closed, unloaded");
 
         // Owned streams told nobody else.
         assert!(write_rxs.iter_mut().all(|rx| rx.try_recv().is_err()));
@@ -3677,6 +3736,120 @@ mod tests {
             let frame: serde_json::Value = serde_json::from_slice(&rx.try_recv().unwrap()).unwrap();
             assert_eq!(frame["id"], "req-unknown");
         }
+    }
+
+    /// Feed a GioEventStream head for `id` through the reader loop and
+    /// return the SSE body it opens.
+    async fn open_sse<W: AsyncWrite + Unpin>(
+        node_writer: &mut W,
+        worker: &WorkerInner,
+        id: &str,
+    ) -> mpsc::UnboundedReceiver<Option<Bytes>> {
+        let (tx, rx) = oneshot::channel();
+        worker.pending.insert(id.into(), tx);
+        let head = serde_json::json!({
+            "id": id, "status": 200,
+            "headers": {"content-type": "text/event-stream"},
+            "body": "", "cacheable": false, "cacheMaxAge": 0,
+        });
+        write_frame(node_writer, &serde_json::to_vec(&head).unwrap())
+            .await
+            .unwrap();
+        match rx.await.unwrap() {
+            IpcSendResult::SseStream { body_rx, .. } => body_rx,
+            _ => panic!("an empty event-stream head opens an SSE stream"),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_sse_streams_count_as_their_workers_load() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client, mut write_rxs) = test_pool(2, false);
+        let worker = client.worker(0).clone();
+        let (read_half, _keep_write_open) = tokio::io::split(server_io);
+        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), worker.clone()));
+        let (_r, mut node_writer) = tokio::io::split(client_io);
+
+        // The head answered its request, but the worker keeps a producer
+        // running for the stream: still load, and dispatch looks elsewhere.
+        let mut body = open_sse(&mut node_writer, &worker, "sse-done").await;
+        assert_eq!(worker.status().in_flight, 1);
+        for _ in 0..2 {
+            assert_eq!(
+                client.pick().index,
+                1,
+                "the worker holding the stream is busier"
+            );
+        }
+        write_frame(&mut node_writer, br#"{"type":"sse_done","id":"sse-done"}"#)
+            .await
+            .unwrap();
+        assert_eq!(body.recv().await, Some(None));
+        assert_eq!(worker.status().in_flight, 0, "sse_done releases it");
+
+        let _body = open_sse(&mut node_writer, &worker, "sse-closed").await;
+        assert_eq!(worker.status().in_flight, 1);
+        client.send_sse_close("sse-closed");
+        assert_eq!(
+            worker.status().in_flight,
+            0,
+            "the client's sse_close releases it"
+        );
+        let (owner, frame) = next_frame_from(&mut write_rxs).await;
+        assert_eq!((owner, frame["id"].as_str()), (0, Some("sse-closed")));
+
+        // A stream whose reader went away without an sse_close: its next
+        // chunk unregisters it and stops the producer.
+        drop(open_sse(&mut node_writer, &worker, "sse-orphan").await);
+        assert_eq!(worker.status().in_flight, 1);
+        write_frame(
+            &mut node_writer,
+            br#"{"type":"sse_chunk","id":"sse-orphan","data":"data: x\n\n"}"#,
+        )
+        .await
+        .unwrap();
+        let (owner, frame) = next_frame_from(&mut write_rxs).await;
+        assert_eq!(owner, 0);
+        assert_eq!(frame["type"], "sse_close");
+        assert_eq!(frame["id"], "sse-orphan");
+        assert!(worker.sse_streams.is_empty());
+        assert_eq!(worker.status().in_flight, 0);
+
+        // A lost connection drains the rest.
+        let mut body = open_sse(&mut node_writer, &worker, "sse-drained").await;
+        assert_eq!(worker.status().in_flight, 1);
+        drain_sse_streams(&worker);
+        assert_eq!(body.recv().await, Some(None));
+        assert_eq!(worker.status().in_flight, 0, "drained, unloaded");
+        reader_task.abort();
+    }
+
+    #[test]
+    fn every_spawn_tells_the_worker_its_place_in_the_pool() {
+        let mut node = NodeWorker {
+            index: 2,
+            script: "unused.js".into(),
+            ipc_path: String::new(),
+            ws_path: String::new(),
+            token: String::new(),
+            dev_mode: false,
+            reuse_build: true,
+            pool_size: 3,
+            extra_env: vec![("GIO_IMAGE_CONFIG".into(), "{}".into())],
+        };
+        let env: HashMap<String, String> = node.env().into_iter().collect();
+        assert_eq!(env[WORKER_INDEX_ENV], "2");
+        assert_eq!(env[WORKER_COUNT_ENV], "3");
+        assert_eq!(env[REUSE_BUILD_ENV], "1");
+        assert_eq!(env["GIO_IMAGE_CONFIG"], "{}", "server settings ride along");
+
+        node.index = 0;
+        node.reuse_build = false;
+        node.pool_size = 1;
+        let env: HashMap<String, String> = node.env().into_iter().collect();
+        assert_eq!(env[WORKER_INDEX_ENV], "0");
+        assert_eq!(env[WORKER_COUNT_ENV], "1");
+        assert_eq!(env[REUSE_BUILD_ENV], "0");
     }
 
     #[tokio::test]
@@ -3793,6 +3966,7 @@ mod tests {
             token: String::new(),
             dev_mode: false,
             reuse_build: false,
+            pool_size: 1,
             extra_env: Vec::new(),
         };
         let supervisor = tokio::spawn(ipc_supervisor(

@@ -13,7 +13,14 @@ export interface GioNodePlugin {
   version: string;
   onRequest?: (req: IPCRequest) => Promise<IPCRequest | IPCResponse>;
   onResponse?: (req: IPCRequest, res: IPCResponse) => Promise<IPCResponse>;
+  /**
+   * Runs when a Node worker process starts: in every worker of a pool
+   * (`[server] workers`), and again each time a worker is respawned. Keep
+   * one-time jobs outside the server, or guard them (`GIO_WORKER_INDEX` is
+   * "0" in one worker per server).
+   */
   onStartup?: () => Promise<void>;
+  /** Runs when a Node worker process shuts down - in every worker of a pool. */
   onShutdown?: () => Promise<void>;
 }
 

@@ -2798,9 +2798,13 @@ async function opsPhase() {
  * Phase 1e (worker pool): `[server] workers = 2` renders on two Node
  * processes. Requests spread across both and so do WebSockets, while a room
  * broadcast from either worker reaches sockets on both; only the first
- * worker bundles the client code (the other loads its manifest); a killed
- * worker takes down only itself and comes back without a rebuild; purges
- * and middleware rules work from either worker; shutdown reaps them all.
+ * worker bundles the client code (the other loads its manifest); killing
+ * either worker - the builder, then the other - takes down only that one,
+ * which comes back without a rebuild (and a respawn that cannot load the
+ * build fails its boot and is retried, never rebuilding under the other
+ * worker); purges and middleware rules work from
+ * either worker; plugin startup hooks run once per worker process (each
+ * knows its GIO_WORKER_INDEX); shutdown reaps them all.
  */
 async function workersPhase() {
   const binary = findServerBinary();
@@ -2823,7 +2827,7 @@ async function workersPhase() {
       `import type { GioRequest } from ${publicApi};\n` +
       'export async function GET(req: GioRequest): Promise<unknown> {\n' +
       "  await new Promise((resolve) => setTimeout(resolve, Number(req.query['ms'] ?? 0)));\n" +
-      '  return { pid: process.pid };\n}\n',
+      '  return { pid: process.pid, worker: Number(process.env.GIO_WORKER_INDEX) };\n}\n',
     'app/api/purge/route.ts':
       `import { revalidatePath } from ${publicApi};\n` +
       'export async function POST(): Promise<unknown> {\n' +
@@ -2840,6 +2844,20 @@ async function workersPhase() {
     'middleware.ts':
       `import { defineMiddleware } from ${publicApi};\n` +
       "export default defineMiddleware({ redirects: [{ from: '/old-home', to: '/' }] });\n",
+    // Logs each startup hook run with its worker, and holds a respawned
+    // worker back for a while: the kill tests then see the outage for sure.
+    'gio.config.ts':
+      "import { existsSync, writeFileSync } from 'node:fs';\n" +
+      "import { join } from 'node:path';\n" +
+      'export default {\n  plugins: [{\n' +
+      "    name: 'workers-probe',\n    version: '0.0.0',\n" +
+      '    async onStartup(): Promise<void> {\n' +
+      "      const worker = process.env.GIO_WORKER_INDEX ?? 'unset';\n" +
+      '      console.log(`WORKERS_PLUGIN_STARTUP worker=${worker}`);\n' +
+      "      const marker = join(process.env.GIO_APP_DIR ?? '.', '..', `.started-${worker}`);\n" +
+      '      if (existsSync(marker)) await new Promise((resolve) => setTimeout(resolve, 2500));\n' +
+      "      else writeFileSync(marker, '');\n" +
+      '    },\n  }],\n};\n',
     'gio.toml':
       '[server]\nhost = "127.0.0.1"\nport = 39517\nhttp2 = false\nworkers = 2\n\n[metrics]\nenabled = true\n',
     'package.json': JSON.stringify({ private: true, type: 'module' }),
@@ -2868,15 +2886,27 @@ async function workersPhase() {
     server.on('exit', () => { serverGone = true; r(); }),
   );
   const health = async () => (await fetch(`${BASE}/_gio/health`)).json();
-  const pidOf = async (path) => {
+  /** `{ pid, worker }` of the process that answered `path`. */
+  const whoAnswered = async (path) => {
     const res = await fetch(`${BASE}${path}`);
     assert.equal(res.status, 200, `${path} answered ${res.status}`);
-    return (await res.json()).pid;
+    return res.json();
   };
-  /** The workers that answer concurrent slow requests (distinct URLs: never coalesced). */
-  const bothPids = async () => {
-    const pids = await Promise.all(Array.from({ length: 6 }, (_, n) => pidOf(`/api/pid?ms=150&n=${n}`)));
-    return [...new Set(pids)];
+  const pidOf = async (path) => (await whoAnswered(path)).pid;
+  /**
+   * Pool index -> pid of the workers that answer concurrent slow requests
+   * (distinct URLs: never coalesced).
+   */
+  const workerPids = async () => {
+    const answers = await Promise.all(
+      Array.from({ length: 6 }, (_, n) => whoAnswered(`/api/pid?ms=150&n=${n}`)),
+    );
+    const byWorker = new Map();
+    for (const { worker, pid } of answers) {
+      assert.ok(!byWorker.has(worker) || byWorker.get(worker) === pid, `one process per worker index: ${JSON.stringify(answers)}`);
+      byWorker.set(worker, pid);
+    }
+    return byWorker;
   };
   const workerMetric = async (name, worker) => {
     const text = await (await fetch(`${BASE}/_gio/metrics`)).text();
@@ -2891,11 +2921,19 @@ async function workersPhase() {
       return body.nodeReady === true && body.workers.ready === 2;
     }, 60_000);
 
-    let pids = [];
+    /** Pool index -> pid, kept current across the kill tests. */
+    let workers = new Map();
     await test('workers: health reports the pool, concurrent requests reach both workers', async () => {
       assert.deepEqual((await health()).workers, { configured: 2, ready: 2 });
-      pids = await bothPids();
-      assert.equal(pids.length, 2, `requests spread over two processes: ${pids}`);
+      workers = await workerPids();
+      assert.deepEqual([...workers.keys()].sort(), [0, 1], 'requests spread over both workers');
+      assert.notEqual(workers.get(0), workers.get(1), 'two processes');
+    });
+
+    await test('workers: plugin startup hooks run once in every worker', async () => {
+      assert.equal(countLines('WORKERS_PLUGIN_STARTUP worker=0'), 1);
+      assert.equal(countLines('WORKERS_PLUGIN_STARTUP worker=1'), 1);
+      assert.equal(countLines('WORKERS_PLUGIN_STARTUP worker=unset'), 0);
     });
 
     await test('workers: metrics show each worker\'s load', async () => {
@@ -2983,38 +3021,78 @@ async function workersPhase() {
       for (const { ws } of clients) ws.close();
     });
 
-    await test('workers: a killed worker takes only itself down and respawns from the build', async () => {
-      const [victim, survivor] = pids;
-      const restarts = async () =>
-        (await workerMetric('gio_worker_restarts_total', 0)) +
-        (await workerMetric('gio_worker_restarts_total', 1));
-      assert.equal(await restarts(), 0);
+    // The builder first: its production respawn must switch to reusing the
+    // build, and while it is down the middleware rules (read from the first
+    // ready worker) must come from the other one. Then the other worker.
+    for (const [victimIndex, role] of [[0, 'the builder'], [1, 'the other worker']]) {
+      await test(`workers: killing ${role} takes only it down; it respawns from the build`, async () => {
+        const survivorIndex = 1 - victimIndex;
+        const victim = workers.get(victimIndex);
+        const survivor = workers.get(survivorIndex);
+        const restartsBefore = await workerMetric('gio_worker_restarts_total', victimIndex);
+        const survivorRestarts = await workerMetric('gio_worker_restarts_total', survivorIndex);
+        const reusedBefore = countLines('client build reused');
+        process.kill(victim, 'SIGKILL');
+        // Counted when the supervisor respawns it; the fixture plugin holds
+        // the respawn back for 2.5s, so the outage below is certain.
+        await waitFor(`the supervisor respawning worker ${victimIndex}`, async () =>
+          (await workerMetric('gio_worker_restarts_total', victimIndex)) === restartsBefore + 1, 10_000);
+        const during = await health();
+        assert.equal(during.workers.ready, 1, 'the victim is out of the pool while it reboots');
+        assert.equal(during.nodeReady, true, 'one ready worker keeps the server ready');
+        assert.equal(await workerMetric('gio_worker_ready', victimIndex), 0);
+        // The site stays up on the surviving worker alone.
+        for (let i = 0; i < 6; i++) {
+          assert.deepEqual(await whoAnswered('/api/pid'), { pid: survivor, worker: survivorIndex });
+        }
+        const redirect = await fetch(`${BASE}/old-home`, { redirect: 'manual' });
+        assert.equal(redirect.status, 302, 'rules survive the worker they came from');
+        assert.equal(redirect.headers.get('location'), '/');
+        await waitFor('the pool back at two', async () => (await health()).workers.ready === 2, 30_000);
+        const respawned = await waitFor('the respawned worker answering', async () => {
+          const now = await workerPids();
+          return now.size === 2 && now.get(victimIndex) !== victim ? now : undefined;
+        }, 15_000);
+        assert.equal(respawned.get(survivorIndex), survivor, 'the survivor kept serving throughout');
+        assert.equal(await workerMetric('gio_worker_restarts_total', survivorIndex), survivorRestarts);
+        assert.equal(countLines('client bundles built'), 1, 'the respawn reused the build');
+        assert.equal(countLines('client build reused'), reusedBefore + 1);
+        assert.equal(countLines(`WORKERS_PLUGIN_STARTUP worker=${victimIndex}`), 2, 'startup hooks run again on a respawn');
+        workers = respawned;
+      });
+    }
+
+    await test('workers: a respawn without a usable build fails its boot instead of rebuilding under the other worker', async () => {
+      const manifestPath = join(workDir, '.gio', 'build', 'manifest.json');
+      const manifest = await readFile(manifestPath, 'utf8');
+      const victim = workers.get(1);
+      const survivor = workers.get(0);
+      const html = await (await fetch(`${BASE}/`)).text();
+      const chunkUrl = html.match(/\/_next\/static\/chunks\/route-index-[A-Z0-9]+\.js/)?.[0];
+      assert.ok(chunkUrl, 'the page links its hydration entry');
+      await rm(manifestPath);
       process.kill(victim, 'SIGKILL');
-      // Counted when the supervisor respawns it - the victim's slot is out
-      // of dispatch from then until its READY.
-      await waitFor('the supervisor respawning the victim', async () => (await restarts()) === 1, 10_000);
-      // The site stays up on the surviving worker while the victim reboots.
-      for (let i = 0; i < 6; i++) {
-        const pid = await pidOf('/api/pid');
-        assert.notEqual(pid, victim, 'never answered by the dead worker');
-      }
-      const redirect = await fetch(`${BASE}/old-home`, { redirect: 'manual' });
-      assert.equal(redirect.status, 302, 'rules survive the worker they came from');
-      await waitFor('the pool back at two', async () => (await health()).workers.ready === 2, 30_000);
-      const respawned = await waitFor('the respawned worker answering', async () => {
-        const now = await bothPids();
-        return now.length === 2 && !now.includes(victim) ? now : undefined;
+      await waitFor('the respawned worker refusing to rebuild', () =>
+        Promise.resolve(countLines('client build manifest unusable') > 0), 20_000);
+      assert.equal(countLines('client bundles built'), 1, 'nothing bundled into the shared directory');
+      assert.equal((await health()).workers.ready, 1);
+      // The survivor's pages still find their chunks.
+      assert.deepEqual(await whoAnswered('/api/pid'), { pid: survivor, worker: 0 });
+      assert.equal((await fetch(`${BASE}${chunkUrl}`)).status, 200);
+      // The supervisor keeps retrying; with the build back, the worker joins.
+      await writeFile(manifestPath, manifest);
+      await waitFor('the retried worker back in the pool', async () => (await health()).workers.ready === 2, 45_000);
+      workers = await waitFor('the retried worker answering', async () => {
+        const now = await workerPids();
+        return now.size === 2 && now.get(1) !== victim ? now : undefined;
       }, 15_000);
-      assert.ok(respawned.includes(survivor), 'the survivor kept serving throughout');
-      assert.equal(countLines('client bundles built'), 1, 'the respawn reused the build');
-      assert.equal(countLines('client build reused'), 2);
-      pids = respawned;
+      assert.equal(countLines('client bundles built'), 1, 'it came back from the build, not a rebuild');
     });
 
     if (process.platform !== 'win32') {
       await test('workers: shutdown leaves no worker process behind', async () => {
         const tree = descendantPids(server.pid);
-        for (const pid of pids) assert.ok(tree.includes(pid), `worker ${pid} runs under the server`);
+        for (const pid of workers.values()) assert.ok(tree.includes(pid), `worker ${pid} runs under the server`);
         server.kill('SIGTERM');
         await waitFor('server exit', () => Promise.resolve(serverGone), 15_000);
         await waitFor('every worker gone', () => Promise.resolve(!tree.some(processRunning)), 5_000);

@@ -7,7 +7,9 @@
  * hydration entry and stylesheets - in `.gio/build/manifest.json`, and every
  * other worker, started once the builder is READY with GIO_REUSE_BUILD=1,
  * loads that instead of bundling. N workers never race on the same files,
- * and in production a respawned worker comes back without a rebuild.
+ * and in production a respawned worker comes back without a rebuild. Nor
+ * does a pool worker fall back to building when the manifest is unusable:
+ * it fails its boot instead (loadClientBuild).
  *
  * The manifest names the server process that wrote it (GIO_BUILD_ID, set
  * by Rust per process): a file a previous run left behind never passes for
@@ -28,6 +30,8 @@ import {
 export const REUSE_BUILD_ENV = 'GIO_REUSE_BUILD';
 /** Per-server-process build identity (giojs-server/src/ipc.rs BUILD_ID_ENV). */
 export const BUILD_ID_ENV = 'GIO_BUILD_ID';
+/** The pool size (giojs-server/src/ipc.rs WORKER_COUNT_ENV). */
+export const WORKER_COUNT_ENV = 'GIO_WORKER_COUNT';
 
 const MANIFEST_VERSION = 1;
 
@@ -51,6 +55,17 @@ export function buildManifestPath(projectRoot: string): string {
 /** True when this worker was told to load the builder's build. */
 export function reuseBuildRequested(env: NodeJS.ProcessEnv): boolean {
   return env[REUSE_BUILD_ENV] === '1';
+}
+
+/**
+ * True when this worker belongs to a pool of more than one: while it boots,
+ * the other workers serve pages that link the chunks and stylesheets in
+ * `.gio/build`, so it must never bundle into that directory (a build
+ * empties it first).
+ */
+export function sharedBuildDirectory(env: NodeJS.ProcessEnv): boolean {
+  const workers = Number(env[WORKER_COUNT_ENV]);
+  return Number.isInteger(workers) && workers > 1;
 }
 
 /**
@@ -150,6 +165,8 @@ export interface LoadClientBuildOptions {
   projectRoot: string;
   /** Load the builder's manifest (reuseBuildRequested). */
   reuse: boolean;
+  /** Other workers serve from `.gio/build` (sharedBuildDirectory). */
+  shared: boolean;
   /** This server process's build id (BUILD_ID_ENV). */
   buildId: string | undefined;
   /** Run the stylesheet and hydration builds; never throws. */
@@ -159,9 +176,15 @@ export interface LoadClientBuildOptions {
 /**
  * This worker's client build: the builder's manifest when it was told to
  * reuse it, otherwise a fresh build - recorded for the workers that reuse
- * it. A reusing worker whose manifest is unusable builds after all, with a
- * warning: pages without their scripts would be worse than a redundant
- * build.
+ * it.
+ *
+ * In a pool (`shared`) nobody may build while other workers serve: a build
+ * empties the chunk and stylesheet directories their pages link. So a
+ * reusing worker whose manifest is unusable fails its boot - the server
+ * retries it with backoff while the others keep serving - and so does a
+ * builder that cannot record its build for the workers that will need it.
+ * A lone worker (a production respawn) has nobody to disturb: it builds
+ * after all, with a warning, rather than serve pages without their scripts.
  */
 export async function loadClientBuild(options: LoadClientBuildOptions): Promise<ClientBuild> {
   if (options.reuse) {
@@ -170,18 +193,37 @@ export async function loadClientBuild(options: LoadClientBuildOptions): Promise<
       logger.info('client build reused', { routes: reused.build.clientScripts.size });
       return reused.build;
     }
+    if (options.shared) {
+      throw new Error(
+        `client build manifest unusable (${reused.problem}) - a pool worker never rebuilds ` +
+          '.gio/build under the workers serving from it; the server retries this worker',
+      );
+    }
     logger.warn('client build manifest unusable - building in this worker', {
       problem: reused.problem,
     });
   }
   const build = await options.build();
+  let recorded: boolean;
   try {
-    await writeBuildManifest(options.projectRoot, build, options.buildId);
+    recorded = await writeBuildManifest(options.projectRoot, build, options.buildId);
   } catch (manifestError: unknown) {
-    // Only the other workers need it, and they fall back to building.
-    logger.warn('client build manifest not written', {
-      error: manifestError instanceof Error ? manifestError.message : String(manifestError),
-    });
+    const message = manifestError instanceof Error ? manifestError.message : String(manifestError);
+    if (options.shared) {
+      throw new Error(
+        `client build manifest not written (${message}) - the other workers of the pool ` +
+          'load the build from it',
+      );
+    }
+    // A lone worker's respawn falls back to building without it.
+    logger.warn('client build manifest not written', { error: message });
+    return build;
+  }
+  if (!recorded && options.shared) {
+    throw new Error(
+      `client build manifest not written (${BUILD_ID_ENV} is not set) - the other workers ` +
+        'of the pool load the build from it',
+    );
   }
   return build;
 }

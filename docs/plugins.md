@@ -27,10 +27,11 @@ export interface GioNodePlugin {
   // Called after SSR completes. Modify or replace the response.
   onResponse?: (req: IPCRequest, res: IPCResponse) => Promise<IPCResponse>;
 
-  // Called once at Node process startup.
+  // Called when a Node worker process starts - in every worker of a pool,
+  // and again after a respawn (see "Worker pools" below).
   onStartup?: () => Promise<void>;
 
-  // Called on SIGTERM before Node exits.
+  // Called when a Node worker shuts down (SIGTERM, server shutdown) - in every worker.
   onShutdown?: () => Promise<void>;
 }
 ```
@@ -45,10 +46,21 @@ parameters and return types are inferred.
 |---|---|---|
 | `onRequest` | Before route matching and SSR | Yes - return `IPCResponse` to skip SSR |
 | `onResponse` | After SSR, before sending to Rust | No - must return modified response |
-| `onStartup` | Once at Node process startup | - |
-| `onShutdown` | On `SIGTERM` | - |
+| `onStartup` | When each Node worker process starts (every worker of a pool, and again after a respawn) | - |
+| `onShutdown` | When each Node worker shuts down (`SIGTERM`, server shutdown) | - |
 
 Plugins run in **registration order** for `onRequest`/`onResponse`/`onStartup`. `onShutdown` runs in **reverse** registration order (last-in, first-out).
+
+**Worker pools:** Node plugins run inside the render worker, and with `[server] workers = N`
+every worker is its own Node process with its own plugin instances. `onStartup` therefore runs in
+each of the N workers at once, and again in a worker the server respawns after a crash; `onShutdown`
+runs in each worker as it stops. A hook that must happen once - a database migration, a scheduler
+or cron job, a queue consumer - does not belong in `onStartup` as is: run it outside the server
+(a release step, a separate process), or guard it. Each worker gets `GIO_WORKER_INDEX` (`"0"` for
+the first worker - the only one by default) and `GIO_WORKER_COUNT` (the pool size), so
+`process.env.GIO_WORKER_INDEX === '0'` keeps a job to one worker per server - still make it
+idempotent, since worker 0 can be respawned, and take a lock (in the database, say) when several
+server instances run.
 
 **Cookies:** `IPCResponse.headers` holds one value per header name, so set cookies through the
 optional `setCookies: string[]` field instead - each entry is sent as its own `Set-Cookie` header.

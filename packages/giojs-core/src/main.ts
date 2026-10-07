@@ -23,7 +23,12 @@ import {
 } from './router.ts';
 import { buildClientBundles } from './client-build.ts';
 import { buildRouteStylesheets } from './css-build.ts';
-import { BUILD_ID_ENV, loadClientBuild, reuseBuildRequested } from './build-manifest.ts';
+import {
+  BUILD_ID_ENV,
+  loadClientBuild,
+  reuseBuildRequested,
+  sharedBuildDirectory,
+} from './build-manifest.ts';
 import { discoverRouteModules } from './ws-router.ts';
 import { loadGioConfig } from './config-loader.ts';
 import { loadMiddlewareRules } from './middleware-loader.ts';
@@ -94,6 +99,7 @@ export async function runServer(): Promise<void> {
   const { clientScripts, stylesheets } = await loadClientBuild({
     projectRoot,
     reuse: reuseBuild,
+    shared: sharedBuildDirectory(process.env),
     buildId: process.env[BUILD_ID_ENV],
     // Stylesheets first: each hydration entry renders its route's links.
     // Both builds run before accepting requests and never throw - a route

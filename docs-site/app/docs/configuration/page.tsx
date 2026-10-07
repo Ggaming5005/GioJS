@@ -181,7 +181,8 @@ allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer t
 workers = 4        # or "auto": one per CPU core, at most 8`} />
       <ul>
         <li>
-          Each request goes to the ready worker with the fewest requests in flight. A
+          Each request goes to the ready worker with the fewest requests in flight (an
+          open SSE stream or a streaming response counts until it ends). A
           streaming response, an SSE stream or a Partial Prerendering hole render stays
           on the worker that started it, and each WebSocket stays on one worker for its
           lifetime. Room broadcasts (<code>broadcast(room, ...)</code>) reach sockets on
@@ -195,7 +196,9 @@ workers = 4        # or "auto": one per CPU core, at most 8`} />
           Only the first worker bundles the client code into <code>.gio/build</code> and
           writes <code>.gio/routes.d.ts</code>; the others start once it is ready and
           load its build, so a pool costs no extra build time. In production a respawned
-          worker reuses that build too.
+          worker reuses that build too. No worker rebuilds while others serve from{' '}
+          <code>.gio/build</code>: one that cannot load the build fails its boot and is
+          retried, and a first worker that cannot record its build stops startup.
         </li>
         <li>
           Every worker loads the same app, and the middleware rules of{' '}
@@ -207,6 +210,16 @@ workers = 4        # or "auto": one per CPU core, at most 8`} />
           Module-level state is per worker. A counter or an in-memory store kept in a
           module variable exists once per worker, so it is not shared - keep shared state
           in a database, a cache server or the session cookie.
+        </li>
+        <li>
+          Node plugin hooks (<code>plugins</code> in <code>gio.config.ts</code>) run per
+          worker too: <code>onStartup</code> runs in every worker, and again when a
+          worker is respawned, and <code>onShutdown</code> in every worker as it stops.
+          One-time work (a migration, a scheduler, a queue consumer) belongs outside the
+          server or behind a guard: each worker gets <code>GIO_WORKER_INDEX</code>{' '}
+          (<code>&quot;0&quot;</code> for the first) and <code>GIO_WORKER_COUNT</code>, so{' '}
+          <code>process.env.GIO_WORKER_INDEX === &apos;0&apos;</code> limits a job to one
+          worker per server - keep it idempotent, as that worker can be respawned too.
         </li>
       </ul>
       <p>
@@ -495,6 +508,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
           <tr><td><code>RUST_LOG</code></td><td>Rust log filter (info/debug/trace)</td><td>info</td></tr>
           <tr><td><code>GIO_LOG_FORMAT</code></td><td><code>json</code> or <code>text</code>: the server&apos;s log format, overriding <code>[logging] format</code> (see <a href="/docs/observability">Observability</a>)</td><td>text</td></tr>
           <tr><td><code>GIO_EXIT_ON_STDIN_EOF</code></td><td><code>1</code>: shut down gracefully when stdin reaches end-of-file. Set by launchers that start the server with a piped stdin they hold open (<code>gio</code>, a standalone <code>run.mjs</code>), so a launcher killed outright never leaves the server behind; ignored when stdin is not a pipe (see <a href="/docs/deployment">Deployment</a>)</td><td>unset</td></tr>
+          <tr><td><code>GIO_WORKER_INDEX</code> / <code>GIO_WORKER_COUNT</code></td><td>Set by the server in each Node worker, for your code to read: the worker&apos;s index in the pool (<code>0</code> for the first) and the pool size (see <a href="#render-workers">Render workers</a>). Any value you set is replaced</td><td>set per worker</td></tr>
           <tr><td><code>GIO_PUBLIC_*</code></td><td>Inlined into client bundles at build time (see below); every other variable is server-only</td><td>-</td></tr>
         </tbody>
       </table>

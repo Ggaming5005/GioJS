@@ -52,7 +52,7 @@ A server renders on one Node worker by default. When uncached renders are the bo
 workers = 4
 ```
 
-Requests go to the ready worker with the fewest in flight, a crashed worker fails only its own in-flight requests while the others serve, and only the first worker builds the client bundles. Each worker is a full Node process with its own copy of the app, so budget one worker's RSS (often 100-200 MB) per worker and size container memory limits for the whole pool; `"auto"` counts CPUs, not memory. Module-level state is per worker. Dev mode always runs one worker. `/_gio/metrics` exposes `gio_worker_in_flight` and `gio_worker_restarts_total` per worker.
+Requests go to the ready worker with the fewest in flight (open SSE streams and streaming responses count until they end), a crashed worker fails only its own in-flight requests while the others serve, and only the first worker builds the client bundles - a worker that cannot load that build fails its boot and is retried rather than rebuilding under the others. Each worker is a full Node process with its own copy of the app, so budget one worker's RSS (often 100-200 MB) per worker and size container memory limits for the whole pool; `"auto"` counts CPUs, not memory. Module-level state is per worker, and so are Node plugin hooks: `onStartup` runs in every worker and again on each respawn, so keep one-time jobs (migrations, schedulers, queue consumers) out of it or run them only where `GIO_WORKER_INDEX` is `"0"`, idempotently. Dev mode always runs one worker. `/_gio/metrics` exposes `gio_worker_in_flight` and `gio_worker_restarts_total` per worker; `gio_memory_bytes` is the Rust process only, so read worker RSS from `ps`/`top` or your container metrics.
 
 ## Multi-instance deployments
 
