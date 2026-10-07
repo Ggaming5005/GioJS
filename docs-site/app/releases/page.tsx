@@ -18,6 +18,61 @@ interface Release {
 
 const RELEASES: Release[] = [
   {
+    version: '0.1.0-beta.8',
+    date: 'Unreleased',
+    tag: 'next',
+    summary:
+      'The production release: security on by default, sessions and forms, a worker pool, on-demand revalidation, a metadata API, CSS Modules, a testing kit, a Next.js migration tool - and documentation for all of it.',
+    groups: [
+      {
+        title: 'Security',
+        items: [
+          'Every response carries default security headers; a Content-Security-Policy with fresh per-response nonces is one line of gio.toml - cache hits, PPR shells and streamed responses included. Cross-site POST/PUT/PATCH/DELETE requests and WebSocket upgrades are refused in Rust before Node sees them.',
+          'Encrypted, signed cookie sessions (createSessionStorage), cookie and signing helpers, and require_session guards that verify the session in the Rust layer before any Node code runs.',
+          'Trusted proxies: real client IPs for rate limits, metrics and req.ip, plus request ids on every response and log line in both processes.',
+          'Production mode is anything but NODE_ENV=development: error responses carry only a digest that matches the log line. Connection caps and slowloris/TLS/body timeouts, Host- and Origin-gated dev endpoints, a closed /_gio namespace, and supply-chain hardening (committed Cargo.lock, cargo-deny, pinned CI actions, SECURITY.md).',
+        ],
+      },
+      {
+        title: 'Routing, data and rendering',
+        items: [
+          'Catch-all and optional catch-all segments, route groups, private folders, layouts by folder ancestry, and per-folder not-found, error and loading files with notFound(). Router hooks (usePathname, useParams, useSearchParams, useRouter) and a persistent client root that keeps shared layout state across soft navigations.',
+          'Page actions and <GioForm>: forms that post to the page, work without JavaScript, and upgrade to client-side submissions with validation errors and Post/Redirect/Get.',
+          'On-demand revalidation: tag pages, purge with revalidateTag() / revalidatePath(), or call POST /_gio/revalidate from a CMS webhook. HTML responses get Cache-Control and ETags.',
+          'WebSocket route params, rooms and connection auth; streamed route handler responses; every Set-Cookie header survives the Rust-Node boundary.',
+          '.env files, GIO_PUBLIC_* variables in client code, and a server-only guard that turns a leaked server import into a build error.',
+        ],
+      },
+      {
+        title: 'Styling, assets and SEO',
+        items: [
+          'CSS imports from any component and CSS Modules, bundled and minified by the CSS pipeline; public/ served at the site root; CSS that revalidates instead of going stale.',
+          'A metadata API (metadata / generateMetadata with title templates), app/sitemap.ts, robots.ts and manifest.ts, and a <JsonLd> component. GioImage srcsets follow the [images] widths in gio.toml.',
+          'Static export hydrates: exported pages are interactive and navigate client-side on any static host.',
+        ],
+      },
+      {
+        title: 'Operations and developer experience',
+        items: [
+          'A supervised pool of Node render workers ([server] workers = N or "auto"), workers that can never be orphaned, JSON logs, and Prometheus metrics labeled by route pattern.',
+          'gio.toml is strict - an unknown key stops startup with the closest valid one - and ships a JSON Schema for editor autocomplete; PORT and GIO_HOST/GIO_PORT are honored.',
+          '@gio.js/core/testing (renderPage, callRoute, createTestServer), typed app conventions (PageProps, LayoutProps, Metadata...), whole-project dev watch, and create-giojs migrate for Next.js projects.',
+          'New guides - environment variables, deploying to Docker, Fly.io, Railway, Render and a Linux server, a production checklist - and a list of known limitations.',
+        ],
+      },
+      {
+        title: 'Upgrading from beta.7',
+        items: [
+          'Unknown or never-implemented gio.toml keys ([cache] memory_mb, [cache.redis], ...) now stop the server with a hint - fix or remove them.',
+          'Cross-site form posts are refused by default: list OAuth form_post, SAML and payment-provider callbacks in [security.csrf] exempt, and other origins of yours in trusted_origins.',
+          'Behind a reverse proxy, set [server] trusted_proxies so rate limits and req.ip see visitors, and [security] hsts = true when the proxy terminates TLS.',
+          'The Node worker follows the server\'s mode: an unset NODE_ENV is production on both sides (production React build, no error details in responses). Run the dev server with NODE_ENV=development, as npm run dev does.',
+          'A page with revalidate that reads ctx.cookies or the cookie/authorization header is no longer cached - it used to be stored and served to everyone. Drop revalidate, or cache the shell with shell = \'cache\' and personalize inside Suspense holes.',
+        ],
+      },
+    ],
+  },
+  {
     version: '0.1.0-beta.7',
     date: 'September 6, 2026',
     tag: 'latest',
