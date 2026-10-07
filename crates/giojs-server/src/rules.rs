@@ -104,7 +104,8 @@ pub struct HeaderRule {
         description = "A gate on matching paths: a request without the credential is \
         redirected (302) and never reaches Node. require_cookie alone asks for a non-empty \
         cookie of that name; require_session = true asks for a valid, unexpired gio_session \
-        token (in the cookie require_cookie names). A guard that names neither stops startup."
+        token (in the cookie require_cookie names). A guard that names neither stops startup.",
+        transform = guard_rule_schema_aliases
     )
 )]
 pub struct GuardRule {
@@ -115,6 +116,19 @@ pub struct GuardRule {
     pub require_session: bool,
     #[serde(alias = "redirectTo")]
     pub redirect_to: String,
+}
+
+/// The camelCase spellings middleware.ts uses load from gio.toml too.
+#[cfg(test)]
+fn guard_rule_schema_aliases(schema: &mut schemars::Schema) {
+    crate::config::add_schema_field_aliases(
+        schema,
+        &[
+            ("require_cookie", "requireCookie"),
+            ("require_session", "requireSession"),
+            ("redirect_to", "redirectTo"),
+        ],
+    );
 }
 
 impl GuardRule {

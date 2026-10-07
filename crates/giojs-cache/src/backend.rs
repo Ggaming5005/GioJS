@@ -306,12 +306,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("giojs-backend-evict-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let backend = LocalBackend::new(NonZeroUsize::new(1).unwrap(), dir.clone(), 1);
+        // Eviction only manages files named by cache-key digests.
+        let (old, new) = (
+            crate::build_cache_key("GET", "/old", ""),
+            crate::build_cache_key("GET", "/new", ""),
+        );
 
-        backend.put("old", entry("t-old", 2048)).await.unwrap();
-        wait_for_file(&dir, "old").await;
-        backend.put("new", entry("t-new", 16)).await.unwrap(); // evicts "old" from memory
-        wait_for_file(&dir, "new").await;
-        assert_eq!(backend.index().tagged_keys("t-old"), vec!["old"]);
+        backend.put(&old, entry("t-old", 2048)).await.unwrap();
+        wait_for_file(&dir, &old).await;
+        backend.put(&new, entry("t-new", 16)).await.unwrap(); // evicts "old" from memory
+        wait_for_file(&dir, &new).await;
+        assert_eq!(backend.index().tagged_keys("t-old"), vec![old.clone()]);
 
         // A 1-byte budget evicts both files; only "new" is still in memory.
         backend.evict_disk().await;
@@ -321,7 +326,7 @@ mod tests {
         );
         assert_eq!(
             backend.index().tagged_keys("t-new"),
-            vec!["new"],
+            vec![new],
             "a key still in memory stays purgeable"
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;

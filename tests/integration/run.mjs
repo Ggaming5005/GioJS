@@ -26,6 +26,12 @@ const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const fixtureDir = join(repoRoot, 'tests', 'integration', 'fixture');
 const BASE = 'http://127.0.0.1:39517';
 const EXT = process.platform === 'win32' ? '.exe' : '';
+// Every server spawned here inherits process.env and must listen where its
+// gio.toml (or its phase) says: an ambient PORT or GIO_PORT - exported by
+// Replit, Codespaces-style containers, `heroku local` - would override that
+// and leave the harness waiting on BASE. Phases that test them set them.
+delete process.env.PORT;
+delete process.env.GIO_PORT;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -3370,6 +3376,88 @@ async function devWatchPhase() {
 }
 
 /**
+ * Phase 2b (dev mode, a visible [cache] disk_path shared with app data):
+ * the cache's own writes are not source changes - they used to restart the
+ * worker and clear the cache after every miss, so the cache never hit - and
+ * clearing the cache deletes only its own files, never the app's data.
+ */
+async function devCacheDirPhase() {
+  const binary = findServerBinary();
+  const devDir = await copyFixtureForDev('.dev-cache-fixture');
+  const dataDir = join(devDir, 'data');
+  const dbFile = join(dataDir, 'db.json');
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(dbFile, '{"todos":[]}\n');
+  await writeFile(
+    join(devDir, 'gio.toml'),
+    (await readFile(join(devDir, 'gio.toml'), 'utf8')) + '\n[cache]\ndisk_path = "data"\n',
+  );
+  const env = {
+    ...process.env,
+    GIO_APP_DIR: join(devDir, 'app'),
+    RUST_LOG: 'info',
+    NODE_ENV: 'development',
+  };
+  delete env.GIO_CACHE_DIR;
+
+  let log = '';
+  const server = spawn(binary, [], { cwd: repoRoot, env });
+  server.stdout.on('data', (d) => { log += d.toString(); });
+  server.stderr.on('data', (d) => { log += d.toString(); });
+  let serverGone = false;
+  const serverExited = new Promise((r) =>
+    server.on('exit', () => { serverGone = true; r(); }),
+  );
+  const entryFiles = async () =>
+    (await readdir(dataDir)).filter((name) => /^[0-9a-f]{64}\.json$/.test(name));
+  const changeCount = () => (log.match(/dev watch: change detected/g) ?? []).length;
+
+  try {
+    await waitFor('dev server health (visible cache dir)', async () => {
+      const res = await fetch(`${BASE}/_gio/health`);
+      return res.ok && (await res.json()).nodeReady === true;
+    }, 30_000);
+
+    await test('dev: a visible [cache] disk_path hits without restarting the worker', async () => {
+      const statuses = [];
+      for (let i = 0; i < 3; i += 1) {
+        const res = await fetch(`${BASE}/cached`);
+        assert.match(await res.text(), /INTEGRATION_FIXTURE_CACHED/);
+        statuses.push((res.headers.get('x-gio-cache') ?? '').split(';')[0]);
+        await waitFor('the entry file', async () => (await entryFiles()).length > 0, 10_000);
+        // Past the watcher's 300 ms batching window: a restart would have begun.
+        await sleep(1_000);
+      }
+      assert.deepEqual(statuses, ['miss', 'hit', 'hit']);
+      assert.equal(changeCount(), 0, 'cache writes are no source change');
+    });
+
+    await test('dev: clearing a shared cache directory keeps the app data in it', async () => {
+      // A source edit restarts the worker, which clears the cache.
+      const banner = join(devDir, 'components', 'Banner.tsx');
+      await editAndWait(
+        'an edit to restart the worker',
+        banner,
+        (src) => src + '\n// restart\n',
+        async () => /dev watch: worker restarted/.test(log),
+      );
+      await waitFor('the cache entries to be cleared', async () => (await entryFiles()).length === 0, 10_000);
+      assert.equal(await readFile(dbFile, 'utf8'), '{"todos":[]}\n');
+    });
+  } catch (err) {
+    console.error('\nintegration (dev, visible cache dir): FAILED');
+    console.error(err);
+    console.error('\n── dev server log tail ──');
+    console.error(significantLogTail(log));
+    process.exitCode = 1;
+  } finally {
+    if (!serverGone) server.kill();
+    await serverExited;
+    await rm(devDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Phase 3 (standalone): `gio build standalone` against a minimal generated
  * app, then boot the output dir with NO node_modules present and prove pages,
  * prebuilt hydration chunks, and API routes all serve - and that tearing the
@@ -4166,6 +4254,21 @@ async function strictConfigPhase() {
         assert.ok(run.stderr.includes(join(projectDir, 'gio.toml')), `names the file:\n${run.stderr}`);
       });
     }
+    await writeFile(join(projectDir, 'gio.toml'), server + '[cache]\ndisk_path = "public/_cache"\n');
+    await test('a page cache directory inside public/ stops startup before it is created', async () => {
+      const run = spawnSync(binary, [], {
+        cwd: projectDir,
+        env: { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production' },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      assert.equal(run.status, 1, `exit status ${run.status} (signal ${run.signal}), stderr:\n${run.stderr}`);
+      assert.match(
+        run.stderr,
+        /configuration error: \[cache\] disk_path: the page cache directory \S*public\/_cache is inside the public\/ directory/,
+      );
+      assert.equal(existsSync(join(projectDir, 'public', '_cache')), false, 'nothing was created');
+    });
   } catch (err) {
     console.error(`\nintegration (strict gio.toml): FAILED\n${err?.stack ?? err}`);
     process.exitCode = 1;
@@ -4322,6 +4425,9 @@ if (process.exitCode !== 1) {
 }
 if (process.exitCode !== 1) {
   await devWatchPhase();
+}
+if (process.exitCode !== 1) {
+  await devCacheDirPhase();
 }
 if (process.exitCode !== 1) {
   await standalonePhase();

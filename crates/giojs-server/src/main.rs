@@ -535,10 +535,28 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         cfg.images.worker_json(),
     )];
 
-    let cache_dir = cfg.cache.disk_dir(
-        &project_root,
-        std::env::var("GIO_CACHE_DIR").ok().as_deref(),
-    );
+    let app_dir = std::env::var("GIO_APP_DIR").unwrap_or_else(|_| "app".to_string());
+    // public/ sits next to app/ like gio.toml does, so a server started from
+    // another directory (GIO_APP_DIR=path/to/app) still finds it.
+    let public_dir = std::env::var("GIO_PUBLIC_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| project_root.join("public"));
+
+    let cache_dir_env = std::env::var("GIO_CACHE_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty());
+    let cache_dir = cfg.cache.disk_dir(&project_root, cache_dir_env.as_deref());
+    // Before creating it: a directory inside public/ must not even appear.
+    if let Err(error) =
+        config::check_cache_dir_placement(&cache_dir, std::path::Path::new(&app_dir), &public_dir)
+    {
+        let source = match cache_dir_env {
+            Some(_) => "GIO_CACHE_DIR",
+            None => "[cache] disk_path",
+        };
+        eprintln!("giojs-server: configuration error: {source}: {error}");
+        std::process::exit(1);
+    }
     tokio::fs::create_dir_all(&cache_dir).await?;
 
     // Before the worker spawns: it renders with the nonce placeholder.
@@ -604,7 +622,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
 
     let cache = Arc::new(PageCache::new(CacheConfig {
         memory_max_entries: cfg.cache.memory_max_entries,
-        disk_dir: cache_dir,
+        disk_dir: cache_dir.clone(),
         swr_multiplier: CACHE_SWR_MULTIPLIER,
         disk_max_bytes: cfg.cache.disk_max_bytes,
     }));
@@ -674,11 +692,6 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         .unwrap_or_else(|_| project_root.join(".gio/cache/images"));
     tokio::fs::create_dir_all(&image_cache_dir).await?;
 
-    // public/ sits next to app/ like gio.toml does, so a server started from
-    // another directory (GIO_APP_DIR=path/to/app) still finds it.
-    let public_dir = std::env::var("GIO_PUBLIC_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| project_root.join("public"));
     let image_config = giojs_image::ImageConfig {
         allowed_widths: cfg.images.allowed_widths.clone(),
         quality: cfg.images.quality,
@@ -734,7 +747,6 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         }
     }
 
-    let app_dir = std::env::var("GIO_APP_DIR").unwrap_or_else(|_| "app".to_string());
     let css_cache: Arc<css_assets::CssCache> = Arc::new(DashMap::new());
     if cfg.css.enabled {
         load_css_cache(&css_cache, &app_dir, !dev_mode && cfg.css.minify).await;
@@ -880,6 +892,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             state.clone(),
             app_dir.clone(),
             project_root.clone(),
+            &cache_dir,
             cfg.dev.watch_ignore.clone(),
         );
 
@@ -3679,10 +3692,14 @@ async fn image_handler_route(
 /// reload over the devtools SSE stream once the IPC connection is restored.
 /// public/-only changes refresh the root-serving index and reload browsers
 /// without a restart - nothing the worker holds depends on them. Dev only.
+/// The page cache's own files in `page_cache_dir` are never a change (every
+/// cached render writes one). The image cache needs no such rule: it only
+/// writes image files, which never count outside app/.
 fn spawn_dev_watcher(
     state: AppState,
     app_dir: String,
     project_root: PathBuf,
+    page_cache_dir: &std::path::Path,
     watch_ignore: dev_watch::WatchIgnore,
 ) {
     // Classification is prefix-based and event paths come back absolute (on
@@ -3696,8 +3713,15 @@ fn spawn_dev_watcher(
     };
     let app_path = dev_watch::resolve_dir(std::path::Path::new(&app_dir));
     let public_dir = dev_watch::resolve_dir(state.public_files.root());
+    let page_cache_dir = Some(dev_watch::resolve_dir(page_cache_dir));
     let ignores = !watch_ignore.is_empty();
-    let watch = match dev_watch::DevWatch::start(root.clone(), app_path, public_dir, watch_ignore) {
+    let watch = match dev_watch::DevWatch::start(
+        root.clone(),
+        app_path,
+        public_dir,
+        page_cache_dir,
+        watch_ignore,
+    ) {
         Ok(watch) => watch,
         Err(e) => {
             warn!(error = %e, root = %root.display(), "dev watch unavailable");

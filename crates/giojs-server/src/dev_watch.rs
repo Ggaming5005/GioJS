@@ -15,7 +15,10 @@
 //! writes into the project (SQLite databases, logs, uploads) must not, or
 //! every request would restart the worker that served it. Data files with a
 //! source-like extension (a lowdb `db.json`) are excluded with gio.toml's
-//! `[dev] watch_ignore` globs (see `WatchIgnore`).
+//! `[dev] watch_ignore` globs (see `WatchIgnore`). The page cache's own
+//! entry files never count either: a visible `[cache] disk_path` would
+//! otherwise restart the worker - and clear the cache - on every cached
+//! render.
 //!
 //! Threading: the notify callback runs on notify's event thread, which is
 //! also the thread that services `watch()` calls - so it must never block.
@@ -122,11 +125,13 @@ pub struct DevWatch {
 impl DevWatch {
     /// Watch `root` non-recursively, each non-ignored top-level directory
     /// recursively, and `public_dir` too when it lives outside the root.
-    /// All paths are expected in canonical form (see `resolve_dir`).
+    /// The page cache's entry files in `page_cache_dir` never count as a
+    /// change. All paths are expected in canonical form (see `resolve_dir`).
     pub fn start(
         root: PathBuf,
         app_dir: PathBuf,
         public_dir: PathBuf,
+        page_cache_dir: Option<PathBuf>,
         ignore: WatchIgnore,
     ) -> notify::Result<Self> {
         let changes = Arc::new(PendingChanges::default());
@@ -137,8 +142,9 @@ impl DevWatch {
             .into_iter()
             .filter(|dir| !ignore.is_ignored_under(&root, dir))
             .collect();
-        let mut classifier =
-            EventClassifier::new(root.clone(), app_dir, public_dir.clone()).with_ignore(ignore);
+        let mut classifier = EventClassifier::new(root.clone(), app_dir, public_dir.clone())
+            .with_ignore(ignore)
+            .with_page_cache_dir(page_cache_dir);
         let event_changes = Arc::clone(&changes);
         let event_registrations = registrations.clone();
         let mut watcher =
@@ -242,16 +248,32 @@ pub fn watch_dir_recursive(watcher: &mut impl notify::Watcher, dir: &Path) {
 }
 
 /// Canonical form of a directory that may not exist yet (public/ created
-/// after startup): canonicalize the parent and re-attach the name.
+/// after startup): canonicalize the nearest existing ancestor and re-attach
+/// the missing names. A relative path resolves against the CWD; one that
+/// cannot be resolved (a `..` after a missing name) is returned as given.
 pub fn resolve_dir(dir: &Path) -> PathBuf {
-    if let Ok(resolved) = std::fs::canonicalize(dir) {
-        return resolved;
-    }
-    match (dir.parent(), dir.file_name()) {
-        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
-            .map(|parent| parent.join(name))
-            .unwrap_or_else(|_| dir.to_path_buf()),
-        _ => dir.to_path_buf(),
+    let mut missing = Vec::new();
+    let mut current = dir;
+    loop {
+        // `Path::new("app").parent()` is the empty path: the CWD.
+        let probe = if current.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            current
+        };
+        if let Ok(resolved) = std::fs::canonicalize(probe) {
+            return missing
+                .iter()
+                .rev()
+                .fold(resolved, |resolved, name| resolved.join(name));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name);
+                current = parent;
+            }
+            _ => return dir.to_path_buf(),
+        }
     }
 }
 
@@ -365,6 +387,9 @@ pub struct EventClassifier {
     known_dirs: BTreeSet<PathBuf>,
     /// `[dev] watch_ignore`: never a change, wherever in the root it is.
     ignore: WatchIgnore,
+    /// The page cache directory, whose entry files are the server's own
+    /// output (see `with_page_cache_dir`).
+    page_cache_dir: Option<PathBuf>,
 }
 
 impl EventClassifier {
@@ -375,6 +400,7 @@ impl EventClassifier {
             public_dir,
             known_dirs: BTreeSet::new(),
             ignore: WatchIgnore::default(),
+            page_cache_dir: None,
         };
         let root = classifier.root.clone();
         classifier.collect_dirs(&root);
@@ -389,6 +415,24 @@ impl EventClassifier {
             .retain(|dir| !ignore.is_ignored_under(&root, dir));
         self.ignore = ignore;
         self
+    }
+
+    /// Never count the page cache's own files in `dir` (entries and writes
+    /// in progress, `giojs_cache::is_disk_cache_file`): every cached render
+    /// writes one, and a restart clears the cache, so with a visible
+    /// `[cache] disk_path` the cache would never hit. Only those files are
+    /// skipped - anything else in the directory still counts, so a cache
+    /// pointed at a source directory cannot hide edits to it.
+    pub fn with_page_cache_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.page_cache_dir = dir;
+        self
+    }
+
+    fn is_page_cache_file(&self, path: &Path, file_name: &str) -> bool {
+        self.page_cache_dir
+            .as_deref()
+            .is_some_and(|dir| path.parent() == Some(dir))
+            && giojs_cache::is_disk_cache_file(file_name)
     }
 
     /// The most significant change an event carries, if any.
@@ -441,7 +485,7 @@ impl EventClassifier {
 
     fn classify_path(&self, path: &Path, directory_change: bool) -> Option<WatchChange> {
         let file_name = path.file_name()?.to_str()?;
-        if is_editor_temp_file(file_name) {
+        if is_editor_temp_file(file_name) || self.is_page_cache_file(path, file_name) {
             return None;
         }
         // Before the public/ check: an app writing uploads into public/ can
@@ -949,6 +993,49 @@ mod tests {
         );
     }
 
+    /// Regression: with a visible `[cache] disk_path`, every cached render
+    /// wrote a `.json` the watcher took for source, so the worker restarted
+    /// and the cache was cleared after each miss - it never hit.
+    #[test]
+    fn page_cache_entry_files_never_restart() {
+        let key = giojs_cache::build_cache_key("GET", "/cached", "");
+        let entry = format!("/proj/cachedir/pages/{key}.json");
+        let temp = format!("/proj/cachedir/pages/{key}.4242.1700000000000000000.tmp");
+        let cached_render = [
+            event(EventKind::Create(CreateKind::File), &temp),
+            modify(&temp),
+            notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(PathBuf::from(&temp))
+                .add_path(PathBuf::from(&entry)),
+            modify(&entry),
+            event(EventKind::Remove(RemoveKind::File), &entry),
+        ];
+        assert_eq!(
+            classify(&modify(&entry)),
+            Some(WatchChange::Source),
+            "without the cache directory an entry looks like source"
+        );
+        let mut classifier =
+            classifier().with_page_cache_dir(Some(PathBuf::from("/proj/cachedir/pages")));
+        for event in &cached_render {
+            assert_eq!(classifier.classify(event), None, "{event:?}");
+        }
+        // Only the cache's own files: anything else there, and entry-shaped
+        // names anywhere else, still count.
+        for path in [
+            "/proj/cachedir/pages/seed.json".to_string(),
+            format!("/proj/cachedir/pages/nested/{key}.json"),
+            format!("/proj/cachedir/{key}.json"),
+            format!("/proj/lib/{key}.json"),
+        ] {
+            assert_eq!(
+                classifier.classify(&modify(&path)),
+                Some(WatchChange::Source),
+                "{path}"
+            );
+        }
+    }
+
     #[test]
     fn watch_ignored_top_level_directories_are_never_registered() {
         let root = temp_root("ignored_registration");
@@ -1125,8 +1212,15 @@ mod tests {
     fn resolve_dir_handles_not_yet_created_directories() {
         let root = temp_root("resolve");
         assert_eq!(resolve_dir(&root.join("public")), root.join("public"));
+        assert_eq!(resolve_dir(&root.join("a/b/c")), root.join("a/b/c"));
+        assert_eq!(resolve_dir(&root.join("./a/./b")), root.join("a/b"));
         std::fs::create_dir_all(root.join("public")).expect("mkdir");
         assert_eq!(resolve_dir(&root.join("public")), root.join("public"));
+        assert_eq!(
+            resolve_dir(&root.join("public/../public/x")),
+            root.join("public/x"),
+            "`..` through an existing directory"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1246,6 +1340,7 @@ mod tests {
             root.clone(),
             root.join("app"),
             root.join("public"),
+            None,
             WatchIgnore::default(),
         )
         .expect("start watch");

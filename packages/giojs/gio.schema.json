@@ -193,7 +193,7 @@
           "minimum": 0
         },
         "disk_path": {
-          "description": "Page cache directory, relative to the project root. Use a dedicated\ndirectory: GioJS deletes files in it (eviction, dev-mode clears).\nGIO_CACHE_DIR overrides it (and may be absolute).",
+          "description": "Page cache directory, relative to the project root. GioJS only ever\ndeletes its own entry files there (`<sha256>.json`), but a dedicated\ndirectory is clearer; it must not be, contain, or sit inside app/ or\npublic/. GIO_CACHE_DIR overrides it (and may be absolute).",
           "type": "string",
           "default": ".gio/cache/pages"
         },
@@ -335,8 +335,20 @@
         "path": {
           "type": "string"
         },
+        "redirectTo": {
+          "description": "Same as `redirect_to`.",
+          "type": "string"
+        },
         "redirect_to": {
           "type": "string"
+        },
+        "requireCookie": {
+          "description": "Same as `require_cookie`.",
+          "type": "string"
+        },
+        "requireSession": {
+          "description": "Same as `require_session`.",
+          "type": "boolean"
         },
         "require_cookie": {
           "type": "string",
@@ -348,9 +360,40 @@
         }
       },
       "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "require_cookie",
+              "requireCookie"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "require_session",
+              "requireSession"
+            ]
+          }
+        },
+        {
+          "oneOf": [
+            {
+              "required": [
+                "redirect_to"
+              ]
+            },
+            {
+              "required": [
+                "redirectTo"
+              ]
+            }
+          ]
+        }
+      ],
       "required": [
-        "path",
-        "redirect_to"
+        "path"
       ]
     },
     "HeaderRule": {
@@ -516,7 +559,9 @@
       "type": "string",
       "enum": [
         "avif",
-        "webp"
+        "webp",
+        "image/avif",
+        "image/webp"
       ]
     },
     "LogFormat": {
@@ -802,7 +847,7 @@
           "minimum": 0
         },
         "host": {
-          "description": "IP address to bind: \"0.0.0.0\" (every interface) or \"127.0.0.1\"\n(this machine only). Overridden by GIO_HOST.",
+          "description": "IP address to bind: \"0.0.0.0\" (every interface), \"127.0.0.1\" (this\nmachine only), or IPv6 in brackets (\"[::]\", \"[::1]\"). Overridden by\nGIO_HOST.",
           "type": "string",
           "default": "0.0.0.0"
         },

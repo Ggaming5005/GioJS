@@ -164,13 +164,51 @@ pub struct SecurityConfig {
 }
 
 /// `hsts = true | false | "raw value" | { max_age, include_subdomains, preload }`.
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
-#[serde(untagged)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(untagged))]
 pub enum HstsSetting {
     Enabled(bool),
     Raw(String),
     Policy(HstsPolicy),
+}
+
+/// Picked by the value's type instead of `#[serde(untagged)]`, which tries
+/// each variant and reports only "did not match any variant": a table goes
+/// straight to `HstsPolicy`, so a typo inside it (`preloadd`) gets serde's
+/// unknown-field error - key path, line and closest key included.
+impl<'de> Deserialize<'de> for HstsSetting {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct HstsVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for HstsVisitor {
+            type Value = HstsSetting;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "true, false, a header value, or a table of max_age, \
+                     include_subdomains and preload",
+                )
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(HstsSetting::Enabled(value))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(HstsSetting::Raw(value.to_string()))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                HstsPolicy::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(HstsSetting::Policy)
+            }
+        }
+
+        deserializer.deserialize_any(HstsVisitor)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -595,9 +633,10 @@ pub struct CacheConfig {
     /// Pages kept in the in-memory LRU; the disk cache holds the rest.
     #[serde(default = "default_memory_max_entries")]
     pub memory_max_entries: std::num::NonZeroUsize,
-    /// Page cache directory, relative to the project root. Use a dedicated
-    /// directory: GioJS deletes files in it (eviction, dev-mode clears).
-    /// GIO_CACHE_DIR overrides it (and may be absolute).
+    /// Page cache directory, relative to the project root. GioJS only ever
+    /// deletes its own entry files there (`<sha256>.json`), but a dedicated
+    /// directory is clearer; it must not be, contain, or sit inside app/ or
+    /// public/. GIO_CACHE_DIR overrides it (and may be absolute).
     #[serde(
         default = "default_cache_disk_path",
         deserialize_with = "cache_disk_path"
@@ -619,9 +658,14 @@ fn default_cache_disk_max_bytes() -> u64 {
     512 * 1024 * 1024
 }
 
-/// `disk_path` must stay inside the project and name a directory below its
-/// root: the cache deletes entry files in that directory, so `.` (or `..`)
-/// would delete package.json and friends.
+/// `disk_path` must name a directory below the project root. Clearing and
+/// eviction only delete the cache's own entry files
+/// (`giojs_cache::is_disk_cache_file`), so other files in the directory are
+/// safe either way; but `.` would scatter entries across the project root,
+/// and a directory outside the project is what GIO_CACHE_DIR is for.
+/// Overlap with app/ and public/ is refused at startup
+/// (`check_cache_dir_placement`), once GIO_APP_DIR and GIO_PUBLIC_DIR have
+/// placed them.
 fn cache_disk_path<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     let raw = String::deserialize(deserializer)?;
     let path = std::path::Path::new(&raw);
@@ -640,8 +684,8 @@ fn cache_disk_path<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
     }
     if normal == 0 {
         return Err(serde::de::Error::custom(
-            "expected a dedicated directory below the project root (\".gio/cache/pages\"): \
-             the cache deletes files in it",
+            "expected a directory below the project root (\".gio/cache/pages\"), \
+             not the root itself",
         ));
     }
     Ok(raw)
@@ -672,6 +716,40 @@ impl CacheConfig {
     }
 }
 
+/// The page cache directory must keep clear of app/ (the route tree: in dev
+/// every change there restarts the worker) and public/ (served as static
+/// files, so entries would become public URLs): it may not be either one,
+/// sit inside one, or contain one. Checked at startup, before the directory
+/// is created, because GIO_APP_DIR and GIO_PUBLIC_DIR decide where those
+/// are. Paths are compared resolved (symlinks, `..`), the missing tail of a
+/// directory that does not exist yet by name.
+pub fn check_cache_dir_placement(
+    cache_dir: &std::path::Path,
+    app_dir: &std::path::Path,
+    public_dir: &std::path::Path,
+) -> Result<(), String> {
+    let cache = crate::dev_watch::resolve_dir(cache_dir);
+    for (name, dir) in [("app/", app_dir), ("public/", public_dir)] {
+        let dir = crate::dev_watch::resolve_dir(dir);
+        let relation = if cache == dir {
+            "is"
+        } else if cache.starts_with(&dir) {
+            "is inside"
+        } else if dir.starts_with(&cache) {
+            "contains"
+        } else {
+            continue;
+        };
+        return Err(format!(
+            "the page cache directory {} {relation} the {name} directory ({}) - give the \
+             cache a directory of its own, such as .gio/cache/pages",
+            cache_dir.display(),
+            dir.display(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -690,7 +768,11 @@ fn default_protocol() -> String {
 /// A modern format `/_gio/image` may negotiate from the Accept header.
 /// JPEG (PNG for `f=png`) is always the fallback.
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
+#[cfg_attr(
+    test,
+    derive(schemars::JsonSchema, serde::Serialize),
+    schemars(transform = image_format_schema_aliases)
+)]
 pub enum ImageFormat {
     #[serde(rename = "avif", alias = "image/avif")]
     Avif,
@@ -853,8 +935,9 @@ pub enum AppRouter {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ServerConfig {
-    /// IP address to bind: "0.0.0.0" (every interface) or "127.0.0.1"
-    /// (this machine only). Overridden by GIO_HOST.
+    /// IP address to bind: "0.0.0.0" (every interface), "127.0.0.1" (this
+    /// machine only), or IPv6 in brackets ("[::]", "[::1]"). Overridden by
+    /// GIO_HOST.
     #[serde(default = "default_host", deserialize_with = "listen_host")]
     pub host: String,
     /// Overridden by GIO_PORT, then PORT.
@@ -933,8 +1016,8 @@ fn listen_host<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Stri
     }
 }
 
-const LISTEN_HOST_EXPECTED: &str =
-    "expected an IPv4 address such as 0.0.0.0 (every interface) or 127.0.0.1";
+const LISTEN_HOST_EXPECTED: &str = "expected an IP address such as 0.0.0.0 (every interface), \
+     127.0.0.1 (this machine only), or IPv6 in brackets ([::], [::1])";
 
 fn is_listen_host(host: &str) -> bool {
     format!("{host}:0").parse::<std::net::SocketAddr>().is_ok()
@@ -1127,7 +1210,7 @@ impl GioConfig {
                 return Err(ConfigError::InvalidEnv {
                     name: "GIO_HOST",
                     value: host.to_string(),
-                    reason: "expected an IPv4 address such as 127.0.0.1",
+                    reason: LISTEN_HOST_EXPECTED,
                 });
             }
             self.server.host = host.to_string();
@@ -1285,6 +1368,57 @@ fn strip_indexes(path: &str) -> String {
         .map(|segment| segment.split_once('[').map_or(segment, |(name, _)| name))
         .collect::<Vec<_>>()
         .join(".")
+}
+
+/// schemars renders neither serde's field aliases nor its variant aliases,
+/// so the editor schema would flag spellings the parser accepts. These add
+/// them; `schema_accepts_every_spelling_the_parser_does` keeps them in step.
+///
+/// Each `(field, alias)` becomes a property of its own, and the schema
+/// allows at most one spelling of a field (serde rejects both as a duplicate
+/// field) - exactly one when the field is required.
+#[cfg(test)]
+pub(crate) fn add_schema_field_aliases(schema: &mut schemars::Schema, aliases: &[(&str, &str)]) {
+    use serde_json::{json, Value};
+    let object = schema.as_object_mut().expect("an object schema");
+    let required: Vec<Value> = object
+        .get("required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut constraints = Vec::new();
+    let properties = object
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .expect("properties");
+    for (field, alias) in aliases {
+        let mut property = properties[*field].clone();
+        if let Some(property) = property.as_object_mut() {
+            property.remove("default");
+            property.insert("description".into(), format!("Same as `{field}`.").into());
+        }
+        properties.insert(alias.to_string(), property);
+        constraints.push(if required.contains(&json!(field)) {
+            json!({ "oneOf": [{ "required": [field] }, { "required": [alias] }] })
+        } else {
+            json!({ "not": { "required": [field, alias] } })
+        });
+    }
+    if let Some(Value::Array(required)) = object.get_mut("required") {
+        required.retain(|name| !aliases.iter().any(|(field, _)| name == field));
+    }
+    object.insert("allOf".into(), Value::Array(constraints));
+}
+
+/// `ImageFormat` also takes the MIME types (`image/avif`), the spelling
+/// Next.js's `images.formats` uses.
+#[cfg(test)]
+fn image_format_schema_aliases(schema: &mut schemars::Schema) {
+    let values = schema
+        .get_mut("enum")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("an enum schema");
+    values.extend(["image/avif", "image/webp"].map(serde_json::Value::from));
 }
 
 #[cfg(test)]
@@ -1843,6 +1977,15 @@ check_origin = true
                 "gio.toml:3: unknown key `security.cps` - did you mean `security.csp`?",
             ),
             (
+                "[security]\nhsts = { max_age = 1, preloadd = true }\n",
+                "gio.toml:2: unknown key `security.hsts.preloadd` - did you mean `security.hsts.preload`?",
+            ),
+            (
+                "[security.hsts]\nmax_age = 1\n\ninclude_subdomain = true\n",
+                "gio.toml:4: unknown key `security.hsts.include_subdomain` - did you mean \
+                 `security.hsts.include_subdomains`?",
+            ),
+            (
                 "[server]\nport = 3000\n[server.limits]\nmax = 1\n",
                 "gio.toml:3: unknown key [server.limits] - expected one of: host, port,",
             ),
@@ -1908,7 +2051,17 @@ check_origin = true
                 "[logging]\nformat = \"jsno\"\n",
                 "gio.toml:2: invalid `logging.format`: unknown variant `jsno`, expected `text` or `json` - did you mean \"json\"?",
             ),
-            ("[server]\nhost = \"localhost\"\n", "gio.toml:2: invalid `server.host`: expected an IPv4 address"),
+            ("[server]\nhost = \"localhost\"\n", "gio.toml:2: invalid `server.host`: expected an IP address"),
+            (
+                "[server]\nhost = \"::1\"\n",
+                "gio.toml:2: invalid `server.host`: expected an IP address such as 0.0.0.0 \
+                 (every interface), 127.0.0.1 (this machine only), or IPv6 in brackets ([::], [::1])",
+            ),
+            (
+                "[security]\nhsts = 5\n",
+                "gio.toml:2: invalid `security.hsts`: invalid type: integer `5`, expected true, \
+                 false, a header value, or a table",
+            ),
             ("[app]\nrouter = \"pages\"\n", "gio.toml:2: invalid `app.router`: unknown variant `pages`"),
             ("[images]\nformats = [\"gif\"]\n", "gio.toml:2: invalid `images.formats[0]`: unknown variant `gif`"),
             ("[compression]\nmin_size_bytes = 70000\n", "gio.toml:2: invalid `compression.min_size_bytes`"),
@@ -1929,6 +2082,57 @@ check_origin = true
         }
         let config = parse("[cache]\ndisk_path = \"./tmp/pages\"\n").unwrap();
         assert_eq!(config.cache.disk_path, "./tmp/pages");
+    }
+
+    #[test]
+    fn cache_dir_may_not_overlap_app_or_public() {
+        let root = unique_temp_path("cache_placement");
+        std::fs::create_dir_all(root.join("app/blog")).unwrap();
+        std::fs::create_dir_all(root.join("public")).unwrap();
+        let config = |disk_path: &str| {
+            parse(&format!("[cache]\ndisk_path = {disk_path:?}\n"))
+                .unwrap()
+                .cache
+                .disk_dir(&root, None)
+        };
+        let check = |cache_dir: &std::path::Path| {
+            check_cache_dir_placement(cache_dir, &root.join("app"), &root.join("public"))
+        };
+        for (disk_path, relation) in [
+            ("app", "is the app/ directory"),
+            ("app/cache", "is inside the app/ directory"),
+            ("./app/blog/x", "is inside the app/ directory"),
+            ("public", "is the public/ directory"),
+            ("public/_cache/pages", "is inside the public/ directory"),
+        ] {
+            let error = check(&config(disk_path)).unwrap_err();
+            assert!(error.contains(relation), "{disk_path}: {error}");
+            assert!(error.contains(".gio/cache/pages"), "{disk_path}: {error}");
+        }
+        // GIO_CACHE_DIR is held to the same rule, compared resolved; a
+        // parent of app/ contains it.
+        let error = check(&root.join("public/../app/blog/x")).unwrap_err();
+        assert!(error.contains("is inside the app/ directory"), "{error}");
+        let error = check(&root).unwrap_err();
+        assert!(error.contains("contains the app/ directory"), "{error}");
+        // Directories of their own pass, existing or not, hidden or not.
+        for disk_path in [".gio/cache/pages", "cachedir/pages", "data", "application"] {
+            assert_eq!(check(&config(disk_path)), Ok(()), "{disk_path}");
+        }
+        assert_eq!(check(&std::env::temp_dir().join("gio-cache")), Ok(()));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn bracketed_ipv6_hosts_are_accepted() {
+        for host in ["[::]", "[::1]"] {
+            let config = parse(&format!("[server]\nhost = {host:?}\n")).unwrap();
+            assert!(
+                config.bind_addr().parse::<std::net::SocketAddr>().is_ok(),
+                "{}",
+                config.bind_addr()
+            );
+        }
     }
 
     #[test]
@@ -2152,6 +2356,125 @@ check_origin = true
                 "retired key {key} must not be accepted"
             );
         }
+    }
+
+    /// What serde accepts, read off its own error for an unknown key or
+    /// variant ("expected one of `a`, `b`" - aliases included).
+    fn serde_spellings(message: &str) -> std::collections::BTreeSet<String> {
+        let (_, expected) = message
+            .split_once("expected")
+            .unwrap_or_else(|| panic!("no list of expected spellings in: {message}"));
+        expected
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn struct_spellings<T: serde::de::DeserializeOwned + std::fmt::Debug>(
+    ) -> std::collections::BTreeSet<String> {
+        serde_spellings(toml::from_str::<T>("__probe__ = 0").unwrap_err().message())
+    }
+
+    fn enum_spellings<T: serde::de::DeserializeOwned + std::fmt::Debug>(
+    ) -> std::collections::BTreeSet<String> {
+        #[derive(Debug, Deserialize)]
+        struct Probe<T> {
+            #[allow(dead_code)]
+            value: T,
+        }
+        serde_spellings(
+            toml::from_str::<Probe<T>>("value = \"__probe__\"")
+                .unwrap_err()
+                .message(),
+        )
+    }
+
+    /// Editors validate with the schema, so it must accept every key and
+    /// value spelling the parser does - serde aliases included, which
+    /// schemars leaves out (`requireCookie`, `image/webp`) - and no more.
+    #[test]
+    fn schema_accepts_every_spelling_the_parser_does() {
+        use crate::client_identity::ProxyHeaders;
+        use crate::rules::{GuardRule, HeaderRule, RedirectRule, RewriteRule};
+        let schema: serde_json::Value = serde_json::from_str(&render_schema()).unwrap();
+        let definitions = schema["definitions"].as_object().expect("definitions");
+        for (name, definition) in definitions {
+            let parser = match name.as_str() {
+                "AppConfig" => struct_spellings::<AppConfig>(),
+                "CacheConfig" => struct_spellings::<CacheConfig>(),
+                "CompressionConfig" => struct_spellings::<CompressionConfig>(),
+                "CsrfConfig" => struct_spellings::<CsrfConfig>(),
+                "CssConfig" => struct_spellings::<CssConfig>(),
+                "DevConfig" => struct_spellings::<DevConfig>(),
+                "FontEntry" => struct_spellings::<FontEntry>(),
+                "GuardRule" => struct_spellings::<GuardRule>(),
+                "HeaderRule" => struct_spellings::<HeaderRule>(),
+                "HstsPolicy" => struct_spellings::<HstsPolicy>(),
+                "I18nConfig" => struct_spellings::<I18nConfig>(),
+                "ImageConfig" => struct_spellings::<ImageConfig>(),
+                "LoggingConfig" => struct_spellings::<LoggingConfig>(),
+                "MetricsConfig" => struct_spellings::<MetricsConfig>(),
+                "PrefetchConfig" => struct_spellings::<PrefetchConfig>(),
+                "RateLimitEntry" => struct_spellings::<RateLimitEntry>(),
+                "RedirectRule" => struct_spellings::<RedirectRule>(),
+                "RemotePattern" => struct_spellings::<RemotePattern>(),
+                "RevalidateConfig" => struct_spellings::<RevalidateConfig>(),
+                "RewriteRule" => struct_spellings::<RewriteRule>(),
+                "SecurityConfig" => struct_spellings::<SecurityConfig>(),
+                "ServerConfig" => struct_spellings::<ServerConfig>(),
+                "TlsConfig" => struct_spellings::<TlsConfig>(),
+                "WebSocketSecurityConfig" => struct_spellings::<WebSocketSecurityConfig>(),
+                "WebsocketConfig" => struct_spellings::<WebsocketConfig>(),
+                "AppRouter" => enum_spellings::<AppRouter>(),
+                "ImageFormat" => enum_spellings::<ImageFormat>(),
+                "LogFormat" => enum_spellings::<LogFormat>(),
+                "ProxyHeaders" => enum_spellings::<ProxyHeaders>(),
+                // true | false | a string | HstsPolicy, checked above.
+                "HstsSetting" => continue,
+                other => {
+                    panic!("{other}: list it here so its schema is checked against the parser")
+                }
+            };
+            let in_schema: std::collections::BTreeSet<String> =
+                if let Some(properties) = definition["properties"].as_object() {
+                    assert_eq!(definition["additionalProperties"], false, "{name}");
+                    properties.keys().cloned().collect()
+                } else if let Some(values) = definition["enum"].as_array() {
+                    values
+                        .iter()
+                        .map(|v| v.as_str().unwrap().to_string())
+                        .collect()
+                } else {
+                    definition["oneOf"]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("{name}: neither properties nor values"))
+                        .iter()
+                        .map(|variant| variant["const"].as_str().unwrap().to_string())
+                        .collect()
+                };
+            assert_eq!(in_schema, parser, "{name}");
+        }
+        // Both spellings of one key are a duplicate to serde: the schema
+        // takes either, exactly one when the key is required.
+        let guard = &definitions["GuardRule"];
+        assert_eq!(guard["required"], serde_json::json!(["path"]));
+        assert_eq!(
+            guard["allOf"][2]["oneOf"],
+            serde_json::json!([{ "required": ["redirect_to"] }, { "required": ["redirectTo"] }])
+        );
+        for alias_spelled in [
+            "[[guards]]\npath = \"/a/*rest\"\nrequireCookie = \"s\"\nredirectTo = \"/\"\n",
+            "[[guards]]\npath = \"/a/*rest\"\nrequireSession = true\nredirectTo = \"/\"\n",
+            "[images]\nformats = [\"image/webp\", \"image/avif\"]\n",
+        ] {
+            parse(alias_spelled).unwrap_or_else(|error| panic!("{alias_spelled:?}: {error}"));
+        }
+        assert!(error_text(
+            "[[guards]]\npath = \"/a/*rest\"\nrequire_cookie = \"s\"\nredirect_to = \"/\"\nredirectTo = \"/\"\n"
+        )
+        .contains("duplicate field"));
     }
 
     #[test]

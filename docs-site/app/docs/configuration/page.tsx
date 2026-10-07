@@ -171,7 +171,8 @@ giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: inval
         <li>
           Wrong values fail the same way: a malformed <code>trusted_proxies</code> entry, a{' '}
           <code>host</code> that is not an IP address, an unknown <code>[logging] format</code>,
-          a <code>[[guards]]</code> entry that would not protect its path.
+          a <code>[[guards]]</code> entry that would not protect its path, a page cache
+          directory inside <code>app/</code> or <code>public/</code>.
         </li>
         <li>
           Top-level tables named <code>x-...</code> (<code>[x-deploy]</code>) are never read,
@@ -226,6 +227,11 @@ giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: inval
         </tbody>
       </table>
       <p>
+        The host is an IP address: <code>0.0.0.0</code> (every interface),{' '}
+        <code>127.0.0.1</code> (this machine only), or IPv6 in brackets (<code>[::]</code>,{' '}
+        <code>[::1]</code>).
+      </p>
+      <p>
         <code>PORT</code> is the variable Heroku, Render, Railway, Fly.io and Cloud Run set,
         so GioJS binds where the platform expects with no configuration. A plain{' '}
         <code>HOST</code> variable is not read: shells and CI images often set it to the
@@ -242,7 +248,7 @@ giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: inval
         </thead>
         <tbody>
           <tr><td><code>[cache] memory_max_entries</code></td><td>1000</td><td>Pages kept in the in-memory LRU. Pages pushed out of memory are still served from the disk tier.</td></tr>
-          <tr><td><code>[cache] disk_path</code></td><td><code>.gio/cache/pages</code></td><td>The disk tier&apos;s directory, relative to the project root. Use a dedicated directory - GioJS deletes files in it when evicting and when development mode clears the cache - so it must name a directory below the project root (not <code>.</code>, not outside the project). <code>GIO_CACHE_DIR</code> overrides it and may be absolute.</td></tr>
+          <tr><td><code>[cache] disk_path</code></td><td><code>.gio/cache/pages</code></td><td>The disk tier&apos;s directory, relative to the project root: a directory below the root (not <code>.</code>, not outside the project). Eviction and development-mode clears only ever delete the cache&apos;s own entry files (<code>&lt;sha256&gt;.json</code>), so other files in the directory are safe, but a dedicated directory keeps things clear. It must not be, contain or sit inside <code>app/</code> or <code>public/</code> (where entries would be served as static files); startup stops if it does. <code>GIO_CACHE_DIR</code> overrides it, may be absolute, and is held to the same rule.</td></tr>
           <tr><td><code>[cache] disk_max_bytes</code></td><td>536870912 (512 MiB)</td><td>Size cap of the disk tier; the oldest entries are evicted past it. <code>0</code> disables the cap.</td></tr>
           <tr><td><code>[compression] enabled</code></td><td>true</td><td>Compress responses with Brotli or gzip, whichever the client accepts. Images, server-sent events and responses that already carry a <code>Content-Encoding</code> are never compressed. Turn it off when a proxy or CDN in front compresses instead.</td></tr>
           <tr><td><code>[compression] min_size_bytes</code></td><td>1024</td><td>Responses with a known length below this are sent as-is. Streamed responses have no known length and are always compressed. At most 65535.</td></tr>
@@ -283,6 +289,11 @@ watch_ignore = ["data/**", "*.db.json", "public/uploads"]`} />
           <code>.git</code>, <code>.gio</code>) and build output (<code>dist</code>,{' '}
           <code>build</code>, <code>out</code>, ...) are always ignored. A malformed pattern
           (<code>..</code>, a backslash) stops startup.
+        </li>
+        <li>
+          The page cache&apos;s own entry files are never a change, wherever{' '}
+          <code>[cache] disk_path</code> puts them, so a visible cache directory needs no
+          pattern. Other files in that directory still count.
         </li>
       </ul>
 
