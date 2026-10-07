@@ -39,7 +39,9 @@ max_per_second = 20`} />
       <ul>
         <li>
           A request is a prefetch when it carries <code>Purpose: prefetch</code> or{' '}
-          <code>Sec-Purpose: prefetch</code>. Everything else is never counted.
+          <code>Sec-Purpose: prefetch</code>, parameters included: a browser&apos;s
+          speculation-rules prerender sends <code>Sec-Purpose: prefetch;prerender</code>.
+          Everything else is never counted.
         </li>
         <li>
           A client is its IP address after{' '}
@@ -88,7 +90,7 @@ max_per_second = 50`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Introduced as a gio.toml section with <code>enabled</code>, <code>max_concurrent</code> and <code>max_per_second</code>; <code>0</code> means unlimited. <code>strategy</code> is rejected.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Introduced as a gio.toml section with <code>enabled</code>, <code>max_concurrent</code> and <code>max_per_second</code>; <code>0</code> means unlimited. <code>strategy</code> is rejected. <code>Sec-Purpose: prefetch;prerender</code> and other parameterized values count as prefetches.</> },
         { version: 'v0.1.0-beta.1', changes: 'Fixed per-client prefetch budgets (5 in flight, 20 per second).' },
       ]} />
     </>

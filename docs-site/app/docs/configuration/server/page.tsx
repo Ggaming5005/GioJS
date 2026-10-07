@@ -35,7 +35,7 @@ workers = "auto"`} />
       <ConfigKeyTable rows={[
         { key: 'host', type: 'string', default: '"0.0.0.0"', env: 'GIO_HOST', description: <>The IP address to bind: <code>0.0.0.0</code> (every interface), <code>127.0.0.1</code> (this machine only), or IPv6 in brackets (<code>[::]</code>, <code>[::1]</code>). A hostname such as <code>localhost</code> is a startup error. See <a href="/docs/configuration#listen-address">Listen address</a>.</> },
         { key: 'port', type: 'integer', default: '3000', env: 'GIO_PORT, then PORT', description: <>The port to bind, 0 to 65535. <code>GIO_PORT</code> wins, then <code>PORT</code> (set by Heroku, Render, Railway, Fly.io and Cloud Run), then this key. The startup log names where the port came from.</> },
-        { key: 'http2', type: 'boolean', default: 'true', zero: <>HTTP/1.1 only</>, description: <>Serve HTTP/2 as well as HTTP/1.1. Without TLS a client must speak HTTP/2 with prior knowledge (h2c); browsers only use HTTP/2 over TLS.</> },
+        { key: 'http2', type: 'boolean', default: 'true', zero: <>HTTP/1.1 only</>, description: <>Serve HTTP/2 as well as HTTP/1.1. Without TLS a client must speak HTTP/2 with prior knowledge (h2c); browsers only use HTTP/2 over TLS. With <code>[server.tls]</code> on, <code>false</code> also drops <code>h2</code> from the TLS handshake (ALPN), so clients settle on HTTP/1.1.</> },
         { key: 'max_body_bytes', type: 'integer', default: '2097152', zero: <>No limit of its own; the 64 MiB worker message cap (about 48 MiB of binary body) is the ceiling. Warns.</>, description: <>Largest request body, in bytes (2 MiB). A bigger one is answered <code>413 Payload Too Large</code> before any handler runs. Every body is buffered in memory before the worker sees it, so raising this raises memory per request.</> },
         { key: 'max_connections', type: 'integer', default: '10000', zero: <>Unlimited. Warns.</>, description: <>Concurrent TCP connections. At the cap the server stops accepting, and new clients wait in the kernel backlog until a connection closes. Upgraded WebSockets do not count here (<a href="/docs/configuration/websocket"><code>[websocket] max_connections</code></a> caps them). Keep <code>ulimit -n</code> above it.</> },
         { key: 'tls_handshake_timeout_secs', type: 'integer', default: '10', zero: 'No deadline', description: <>Deadline for a TLS handshake when <a href="/docs/configuration/server-tls"><code>[server.tls]</code></a> is on. A client that stalls is disconnected.</> },
@@ -156,11 +156,6 @@ workers = "auto"                   # one Node worker per core, at most 8`} />
           so about 48 MiB is the real ceiling.
         </li>
         <li>
-          Known issue in v0.1.0-beta.8: with <code>[server.tls]</code> on,{' '}
-          <code>http2 = false</code> still offers HTTP/2 in the TLS handshake, and a client that
-          picks it (browsers and curl do) fails to connect. Keep <code>http2 = true</code> with TLS.
-        </li>
-        <li>
           Proxies that pool upstream connections longer than <code>header_read_timeout_secs</code>{' '}
           (nginx <code>keepalive</code>, ingress-nginx and AWS ALB default to 60 seconds) can reuse a
           connection as GioJS closes it and answer <code>502</code>. Keep the proxy&apos;s idle
@@ -202,7 +197,7 @@ workers = "auto"                   # one Node worker per core, at most 8`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <><code>host</code> and <code>port</code> default to <code>0.0.0.0:3000</code> and honor <code>GIO_HOST</code>, <code>GIO_PORT</code> and <code>PORT</code>. Added the connection limits and timeouts, <code>render_timeout_secs</code>, <code>workers</code>, <code>trusted_proxies</code>, <code>proxy_headers</code>, <code>accept_request_id</code>, <code>skew_protection</code> and <code>rate_limit_max_buckets</code>. <code>max_body_bytes = 0</code> means no limit of its own (it used to refuse every body). Loosened limits log a startup warning.</> },
+        { version: 'v0.1.0-beta.8', changes: <><code>host</code> and <code>port</code> default to <code>0.0.0.0:3000</code> and honor <code>GIO_HOST</code>, <code>GIO_PORT</code> and <code>PORT</code>. Added the connection limits and timeouts, <code>render_timeout_secs</code>, <code>workers</code>, <code>trusted_proxies</code>, <code>proxy_headers</code>, <code>accept_request_id</code>, <code>skew_protection</code> and <code>rate_limit_max_buckets</code>. <code>max_body_bytes = 0</code> means no limit of its own (it used to refuse every body). Loosened limits log a startup warning, once. With TLS, <code>http2 = false</code> offers only HTTP/1.1 in ALPN (it used to offer <code>h2</code> too, and clients that picked it could not connect).</> },
         { version: 'v0.1.0-beta.5', changes: <>Added <code>max_body_bytes</code>.</> },
         { version: 'v0.1.0-beta.1', changes: <>Introduced with <code>host</code>, <code>port</code> and <code>http2</code>.</> },
       ]} />
