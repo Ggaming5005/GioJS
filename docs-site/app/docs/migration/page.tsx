@@ -6,6 +6,7 @@ export const revalidate = false;
 export default function MigrationPage(): React.JSX.Element {
   return (
     <>
+      <div className="docs-eyebrow">Migration</div>
       <h1>Migration Guide</h1>
       <p className="page-subtitle">
         Move a Next.js app (pages or app router) to GioJS with one command, then work through a

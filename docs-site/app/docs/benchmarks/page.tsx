@@ -6,6 +6,7 @@ export const revalidate = false;
 export default function BenchmarksPage(): React.JSX.Element {
   return (
     <>
+      <div className="docs-eyebrow">Resources</div>
       <h1>Benchmarks</h1>
       <p className="page-subtitle">
         GioJS keeps memory flat under sustained load because Rust owns the HTTP layer -

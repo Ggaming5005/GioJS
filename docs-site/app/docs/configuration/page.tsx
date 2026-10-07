@@ -6,6 +6,7 @@ export const revalidate = false;
 export default function ConfigurationPage(): React.JSX.Element {
   return (
     <>
+      <div className="docs-eyebrow">Reference</div>
       <h1>Configuration</h1>
       <p className="page-subtitle">
         All GioJS configuration lives in <code>gio.toml</code> at the project root.

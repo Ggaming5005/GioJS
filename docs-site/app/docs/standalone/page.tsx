@@ -99,6 +99,14 @@ gio build standalone --target linux-x64`} />
         platform package must be installed - if it isn't, the build fails with the exact{' '}
         <code>npm i</code> command to run.
       </p>
+      <p>
+        <code>@gio.js/server-linux-arm64</code> is not published yet. For an arm64 Linux host,
+        build the server from a checkout of the repository (
+        <code>cargo build --release -p giojs-server</code>, on the target platform or with a
+        cross toolchain) and point the build at it - <code>GIO_STANDALONE_SERVER_BIN</code>{' '}
+        takes precedence over <code>--target</code>:
+      </p>
+      <CodeBlock lang="bash" code={`GIO_STANDALONE_SERVER_BIN=/path/to/giojs-server gio build standalone`} />
 
       <h2>When to prefer a normal deploy</h2>
       <p>
