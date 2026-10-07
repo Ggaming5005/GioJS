@@ -82,7 +82,8 @@ export default function Loading() {
         <li>
           Client-side navigation keeps the current page on screen until the next page&apos;s
           HTML has arrived (prefetching hides most of that wait), then renders it into the same
-          React tree: layouts the two pages share keep their state, and the loading UI shows
+          React tree: layouts the two pages share keep their state (a layout inside a dynamic
+          segment mounts fresh when that segment&apos;s value changes), and the loading UI shows
           only if the new page suspends in the browser.
         </li>
       </ul>

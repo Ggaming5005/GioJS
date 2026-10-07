@@ -23,9 +23,13 @@ export default function Page(): React.JSX.Element {
         route&apos;s client chunk, and renders the new page into the same React root. Layouts
         the two pages share stay mounted, so their state (an open sidebar, a search box, a
         playing video) survives the navigation; the page itself mounts fresh, also when only
-        a dynamic segment changes (<code>/posts/1</code> to <code>/posts/2</code>). An
-        error a folder&apos;s <code>error.tsx</code> boundary caught is cleared when you
-        navigate away from it.
+        a dynamic segment changes (<code>/posts/1</code> to <code>/posts/2</code>). So does a
+        layout inside a dynamic segment when that segment&apos;s value changes:{' '}
+        <code>app/teams/[team]/layout.tsx</code> mounts fresh from <code>/teams/a</code> to{' '}
+        <code>/teams/b</code>, and keeps its state between the pages of one team. An error a
+        folder&apos;s <code>error.tsx</code> boundary caught is cleared by the next
+        navigation, also one that only changes the query (<code>?q=bad</code> to{' '}
+        <code>?q=good</code>).
       </p>
       <p>
         Only GioJS pages are rendered in place - HTML with the page boundary, including your
@@ -124,14 +128,15 @@ function SaveButton({ id }: { id: string }) {
         </li>
         <li>
           Back and forward restore each page&apos;s scroll position once that page has
-          rendered. The router saves positions per history entry and takes over{' '}
-          <code>history.scrollRestoration</code> while it is active; full page loads and
+          rendered - also for entries a plain <code>&lt;a href=&quot;#note&quot;&gt;</code>{' '}
+          created. The router keeps the position of the current entry as you scroll and takes
+          over <code>history.scrollRestoration</code> while it is active; full page loads and
           reloads keep the browser&apos;s own restoration.
         </li>
         <li>
           Links to a hash on the current page (<code>#comments</code>,{' '}
           <code>/docs#install</code> while on <code>/docs</code>) only scroll: nothing is
-          fetched.
+          fetched. <code>href=&quot;#&quot;</code> scrolls to the top, as in the browser.
         </li>
       </ul>
 
@@ -141,20 +146,29 @@ function SaveButton({ id }: { id: string }) {
         them; an older entry is fetched again when it is used. The cache is cleared by{' '}
         <code>router.refresh()</code> and by any non-GET <code>fetch()</code> to your own
         origin (an API mutation), so a navigation after a change never shows a
-        page prefetched before it. A prefetch that hit a page which cannot be rendered in
-        place is remembered too: hovering the link again does not refetch it, and clicking it
-        goes straight to a full page load.
+        page prefetched before it. Hovering a link again within those 30 seconds never
+        refetches it, whatever the answer was. A link whose prefetch got a page that cannot be
+        rendered in place (JSON, a page without GioJS) goes straight to a full page load when
+        clicked; a prefetch that failed - a network error, or any non-2xx status such as the{' '}
+        <code>429</code> the server answers once a client&apos;s prefetch budget is spent - never
+        decides the click: the navigation fetches the page itself.
       </p>
       <div className="callout">Prefetching is budgeted by the Rust prefetch manager, so a page full of links will not flood your server.</div>
 
       <h2>Focus and announcements</h2>
       <p>
-        After a soft navigation, focus moves to the new page&apos;s <code>&lt;main&gt;</code>{' '}
-        (or the page container when there is none), so keyboard and screen-reader users start
-        at the new content rather than on a link that may be gone - unless the page focused
-        something itself (an <code>autoFocus</code> input). The new page&apos;s title (or its
-        first <code>&lt;h1&gt;</code>) is announced through a visually hidden live region.
-        Give every page a meaningful title.
+        After a soft navigation to another page, focus moves to the new page&apos;s{' '}
+        <code>&lt;main&gt;</code> (or the page container when there is none), so keyboard and
+        screen-reader users start at the new content rather than on a link that may be gone,
+        and the new page&apos;s title (or its first <code>&lt;h1&gt;</code>) is announced
+        through a visually hidden live region. Give every page a meaningful title. Focus stays
+        where it is when the page focused something itself (an <code>autoFocus</code> input),
+        when it is in a text field that is still on the page - so search-as-you-type with{' '}
+        <code>router.replace(&apos;?q=&apos; + value)</code> keeps typing in the field - and
+        when a <code>scroll={'{false}'}</code> navigation (tabs) leaves the focused element in
+        place. A navigation that only changes the query (filters, sorting,{' '}
+        <code>?page=2</code>) announces nothing and moves focus only if the element that had
+        it is gone.
       </p>
 
       <h2>View transitions</h2>
