@@ -1,5 +1,5 @@
 import type { GioRequest } from '@gio.js/core';
-// TODO(gio-migrate): next/headers: read cookies/headers from the getServerSideProps context (ctx.cookies, ctx.headers) or the route handler's GioRequest
+// TODO(gio-migrate): next/headers: read cookies/headers from the getServerSideProps context (ctx.cookies, ctx.headers) or the GioRequest a route handler or page action receives; set cookies through the headers of a getServerSideProps result or redirect() (serializeCookie from @gio.js/core)
 import { cookies } from 'next/headers';
 
 // TODO(gio-migrate): runtime: GioJS renders everything on Node - remove this export

@@ -37,6 +37,11 @@ const cases: Array<{ name: string; ext: string; options: TransformOptions }> = [
     options: { filePath: 'app/layout.tsx', role: 'app-root-layout', cssUrl: spec => (spec === './globals.css' ? '/globals.css' : undefined) },
   },
   { name: 'server-action', ext: 'tsx', options: { filePath: 'app/posts/[slug]/page.tsx', role: 'app-page' } },
+  // metadata/generateMetadata are kept: unsupported fields named, the Next signature converted.
+  { name: 'metadata', ext: 'tsx', options: { filePath: 'app/blog/[slug]/page.tsx', role: 'app-page' } },
+  { name: 'next-cache', ext: 'ts', options: { filePath: 'lib/posts.ts', role: 'source' } },
+  // next/navigation redirect() throws; @gio.js/core's is returned or thrown.
+  { name: 'redirect', ext: 'tsx', options: { filePath: 'app/dashboard/page.tsx', role: 'pages-page', originalPath: 'pages/dashboard.tsx' } },
 ];
 
 for (const { name, ext, options } of cases) {
@@ -139,7 +144,8 @@ test('JavaScript files never get type imports', () => {
 test("'use server' at the top of a file becomes a file-level TODO", () => {
   const source = "'use server';\n\nexport async function save(data: FormData) {\n  return data.get('x');\n}\n";
   const { output, todos, changes } = transformSource(source, { filePath: 'app/actions.ts', role: 'source' });
-  assert.match(output, /^\/\/ TODO\(gio-migrate\): Server Actions have no GioJS equivalent/);
+  assert.match(output, /^\/\/ TODO\(gio-migrate\): Server Action: GioJS has no Server Actions - a form's action becomes the page's export async function action\(req\)/);
+  assert.match(output, /posted by <GioForm> from @gio\.js\/react; a non-form call becomes a route\.ts handler/);
   assert.doesNotMatch(output, /'use server'/);
   assert.equal(todos[0]?.line, 1);
   assert.equal(changes[0]?.line, 2);
@@ -249,22 +255,134 @@ test('a file outside a catch-all route gets no catch-all TODO', () => {
   assert.deepEqual(todos, []);
 });
 
-test('metadata and generateMetadata get a TODO: GioJS would drop their tags silently', () => {
+test('metadata and generateMetadata GioJS renders as they are stay untouched, without a TODO', () => {
   const source = [
-    "export const metadata = { title: 'Posts', description: 'All \"posts\"', openGraph: { title: 'x' } };",
+    "export const metadata = { title: { default: 'Posts', template: '%s | Site' }, description: 'All \"posts\"', openGraph: { title: 'x', images: [{ url: '/og.png', width: 1200 }] }, twitter: { card: 'summary' }, robots: { index: false, googleBot: { index: false } }, icons: { url: '/i.png', sizes: '32x32' }, other: { 'x-y': '1' } };",
     'export async function generateMetadata({ params }) {',
-    '  return { title: params.id };',
+    '  return { title: params.id, alternates: { canonical: `/posts/${params.id}` } };',
     '}',
     'export default function P() { return <p />; }',
     '',
   ].join('\n');
-  const { todos, changes } = transformSource(source, { filePath: 'app/posts/page.jsx', role: 'app-page' });
-  assert.deepEqual(todos.map(t => t.message), [
-    'GioJS does not read the metadata export (the page renders without these tags): render them in the component instead - React 19 hoists <title> and <meta> into <head>: <title>Posts</title> <meta name="description" content={"All \\"posts\\""} /> (port the other fields by hand)',
-    'GioJS does not read generateMetadata: render <title> and <meta> tags in the component instead (React 19 hoists them into <head>), with the data loaded in getServerSideProps',
+  const { output, todos, changes } = transformSource(source, { filePath: 'app/posts/page.jsx', role: 'app-page' });
+  assert.equal(output, source);
+  assert.deepEqual(todos, []);
+  assert.deepEqual(changes.map(c => c.message.replace(/:.*/, '')), ['metadata export kept', 'generateMetadata kept']);
+  // A metadata value that isn't an object literal can't be checked: no TODO either.
+  assert.deepEqual(transformSource('export const metadata = buildMetadata();\n', { filePath: 'app/page.tsx', role: 'app-page' }).todos, []);
+  // Outside a page or layout an export named metadata is just a value.
+  assert.deepEqual(transformSource("export const metadata = { generator: 'x' };\n", { filePath: 'lib/seo.ts', role: 'source' }).todos, []);
+});
+
+test('generateMetadata reading the parent metadata gets a TODO; props.searchParams becomes props.query', () => {
+  const source = [
+    "import type { Metadata, ResolvingMetadata } from 'next';",
+    'export async function generateMetadata(props: { searchParams: { q: string } }, parent: ResolvingMetadata): Promise<Metadata> {',
+    '  const images = (await parent).openGraph?.images ?? [];',
+    '  return { title: props.searchParams.q, openGraph: { images } };',
+    '}',
+    '',
+  ].join('\n');
+  const { output, todos } = transformSource(source, { filePath: 'app/search/page.tsx', role: 'app-page' });
+  assert.match(output, /^\/\/ TODO\(gio-migrate\): types from 'next' \(ResolvingMetadata\) don't exist in GioJS[^\n]+\nimport type \{ ResolvingMetadata \} from 'next';\nimport type \{ MetadataContext, Metadata \} from '@gio\.js\/core';\n/);
+  assert.match(output, /export async function generateMetadata\(props: MetadataContext, parent: ResolvingMetadata\): Promise<Metadata> \{/);
+  assert.match(output, /title: props\.query\.q/);
+  assert.deepEqual(todos.map(t => t.message.slice(0, 60)), [
+    "types from 'next' (ResolvingMetadata) don't exist in GioJS: ",
+    "generateMetadata's second argument is { props } in GioJS (wh",
   ]);
-  assert.ok(!changes.some(c => /metadata/.test(c.message)), 'never reported as converted');
-  // A metadata value that isn't a literal object still gets the TODO, without tags.
-  const dynamic = transformSource('export const metadata = buildMetadata();\n', { filePath: 'app/page.tsx', role: 'app-page' });
-  assert.match(dynamic.todos[0]?.message ?? '', /^GioJS does not read the metadata export \(the page renders without these tags\): render them in the component instead - React 19 hoists <title> and <meta> into <head>$/);
+  assert.match(todos[1]?.message ?? '', /share values like openGraph\.images through a variable instead of reading parent$/);
+});
+
+test('a route handler redirect() becomes a Response; nested deeper it gets a TODO', () => {
+  const source = [
+    "import { redirect } from 'next/navigation';",
+    'export async function GET(req) {',
+    "  if (!req.cookies.session) redirect('/login');",
+    "  const go = () => redirect('/x');",
+    '  return { ok: true };',
+    '}',
+    '',
+  ].join('\n');
+  const { output, todos } = transformSource(source, { filePath: 'app/api/me/route.js', role: 'app-route' });
+  assert.match(output, /^import \{ redirect \} from '@gio\.js\/core';\n/);
+  assert.match(output, /if \(!req\.cookies\.session\) return new Response\(null, \{ status: 307, headers: \{ location: '\/login' \} \}\);/);
+  // A thrown redirect would reach GioJS as a failing handler: flagged.
+  assert.match(output, /\n {2}\/\/ TODO\(gio-migrate\): redirect\(\) in a route handler: [^\n]+\n {2}const go = \(\) => \{ throw redirect\('\/x'\); \};/);
+  assert.equal(todos.length, 1);
+});
+
+test('app/sitemap.ts keeps its shape; generateSitemaps and media entries get TODOs', () => {
+  const source = [
+    "import type { MetadataRoute } from 'next';",
+    'export async function generateSitemaps() { return [{ id: 0 }]; }',
+    'export default function sitemap(): MetadataRoute.Sitemap {',
+    "  return [{ url: 'https://example.com', lastModified: new Date(), images: ['https://example.com/a.png'] }];",
+    '}',
+    '',
+  ].join('\n');
+  const { output, todos } = transformSource(source, { filePath: 'app/sitemap.ts', role: 'app-metadata-route' });
+  assert.match(output, /^import type \{ MetadataRoute \} from '@gio\.js\/core';\n/);
+  assert.match(output, /export default function sitemap\(\): MetadataRoute\.Sitemap \{/);
+  assert.deepEqual(todos.map(t => t.message), [
+    'generateSitemaps (several sitemaps) is not supported: GioJS serves one /sitemap.xml from the default export - return every entry from it',
+    'sitemap images: GioJS writes url, lastModified, changeFrequency, priority and alternates.languages - images are left out of /sitemap.xml',
+  ]);
+  const robots = "import type { MetadataRoute } from 'next';\nexport default function robots(): MetadataRoute.Robots {\n  return { rules: { userAgent: '*', allow: '/' }, sitemap: 'https://example.com/sitemap.xml' };\n}\n";
+  const migrated = transformSource(robots, { filePath: 'app/robots.ts', role: 'app-metadata-route' });
+  assert.equal(migrated.output, robots.replace("from 'next'", "from '@gio.js/core'"));
+  assert.deepEqual(migrated.todos, []);
+});
+
+test('Server Action forms become <GioForm>; client form actions and string URLs stay', () => {
+  const source = [
+    "'use client';",
+    "import { useActionState } from 'react';",
+    "import { useFormStatus } from 'react-dom';",
+    "import { createPost, deletePost } from './actions';",
+    '',
+    'function Submit() {',
+    '  const { pending } = useFormStatus();',
+    '  return <button disabled={pending}>Save</button>;',
+    '}',
+    '',
+    'export function Editor({ id }: { id: string }) {',
+    '  const [state, formAction] = useActionState(createPost, null);',
+    '  const local = (data: FormData) => console.log(data);',
+    '  return (',
+    '    <>',
+    '      <form action={formAction} method="post"><Submit /></form>',
+    '      <form action={deletePost.bind(null, id)}><button formAction={deletePost}>x</button></form>',
+    '      <form action={local} />',
+    '      <form action="/api/search" />',
+    '    </>',
+    '  );',
+    '}',
+    '',
+  ].join('\n');
+  const { output, todos } = transformSource(source, {
+    filePath: 'components/Editor.tsx',
+    role: 'source',
+    serverActionModule: spec => spec === './actions',
+  });
+  assert.match(output, /^import \{ useActionState \} from 'react';\n\/\/ TODO\(gio-migrate\): useFormStatus\(\) tracks React form actions only/);
+  assert.match(output, /import \{ GioForm \} from '@gio\.js\/react';/);
+  assert.match(output, /<GioForm><Submit \/><\/GioForm>/);
+  assert.match(output, /<GioForm><button formAction=\{deletePost\}>x<\/button><\/GioForm>/);
+  assert.match(output, /<form action=\{local\} \/>\n {6}<form action="\/api\/search" \/>/);
+  assert.deepEqual(todos.map(t => t.message.slice(0, 50)), [
+    'useFormStatus() tracks React form actions only: in',
+    'useActionState() with a Server Action: a page acti',
+    '<form action={formAction}> became <GioForm>, which',
+    '<form action={deletePost.bind(null, id)}> became <',
+    'formAction={deletePost} (Server Action): give the ',
+  ]);
+  assert.match(todos[3]?.message ?? '', /the values \.bind\(\) passed become hidden <input name> fields/);
+});
+
+test("'use cache' is removed with a TODO about page caching", () => {
+  const source = "export async function getPosts() {\n  'use cache';\n  return [];\n}\n";
+  const { output, todos } = transformSource(source, { filePath: 'lib/posts.ts', role: 'source' });
+  assert.equal(output, `// TODO(gio-migrate): ${todos[0]?.message}\nexport async function getPosts() {\n  return [];\n}\n`);
+  assert.match(todos[0]?.message ?? '', /^'use cache' has no GioJS equivalent, so this code now runs on every call - GioJS caches whole pages in Rust instead: export const revalidate = N/);
 });

@@ -43,8 +43,10 @@ What it does:
   - moves pages/ to app/ (pages/about.tsx -> app/about/page.tsx,
     pages/api/x.ts -> app/api/x/route.ts, _app/_document -> app/layout.tsx)
   - rewrites next/link, next/image, next/router, next/navigation, next/head,
-    next/script, next/dynamic and next/font code; getStaticProps becomes
-    getServerSideProps + export const revalidate
+    next/script, next/dynamic, next/font and next/cache code; getStaticProps
+    becomes getServerSideProps + export const revalidate
+  - keeps metadata, generateMetadata and app/sitemap|robots|manifest (GioJS
+    reads them) and turns Server Action forms into <GioForm> page actions
   - converts next.config redirects, rewrites, headers, images and i18n to
     gio.toml (merged into an existing gio.toml only when safe, otherwise
     written to gio.migrated.toml)

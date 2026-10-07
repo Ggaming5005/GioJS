@@ -34,6 +34,7 @@ interface Rendered {
   status: number;
   html: string;
   error?: string;
+  redirect?: { destination: string; permanent: boolean };
   cacheable: boolean;
 }
 
@@ -116,14 +117,30 @@ test('a migrated JavaScript app-router project renders: JSX moved to .jsx, Commo
     'package.json': '{"name":"js-app","dependencies":{"next":"14.2.3","react":"18.2.0","react-dom":"18.2.0"}}\n',
     'jsconfig.json': '{ "compilerOptions": { "baseUrl": "." } }\n',
     'postcss.config.js': 'module.exports = { plugins: {} };\n',
-    'src/app/layout.js': "export const metadata = { title: 'JS app' };\n\nexport default function RootLayout({ children }) {\n  return (\n    <html lang=\"en\">\n      <body>{children}</body>\n    </html>\n  );\n}\n",
+    'src/app/layout.js': "export const metadata = { title: { default: 'JS app', template: '%s | JS app' }, applicationName: 'JS app' };\n\nexport default function RootLayout({ children }) {\n  return (\n    <html lang=\"en\">\n      <body>{children}</body>\n    </html>\n  );\n}\n",
+    'src/app/search/page.js': "export async function generateMetadata({ params, searchParams }, parent) {\n  const { q } = await searchParams;\n  return { title: `Search: ${q}`, description: `${Object.keys(await params).length} params` };\n}\n\nexport default function Search() {\n  return <p>search</p>;\n}\n",
+    'src/app/old/page.js': "import { permanentRedirect } from 'next/navigation';\n\nexport async function getServerSideProps() {\n  permanentRedirect('/');\n}\n\nexport default function Old() {\n  return null;\n}\n",
+    'src/app/sitemap.js': "export default function sitemap() {\n  return [{ url: 'https://example.com/', changeFrequency: 'daily' }];\n}\n",
+    'src/app/robots.txt': 'User-agent: *\n',
     'src/app/page.js': "import Link from 'next/link';\nimport { Hello } from '../components/Hello';\nimport site from '../lib/site';\n\nexport default function Home() {\n  return (\n    <main>\n      <Hello name={site.name} />\n      <Link href=\"/blog/a/b\">Blog</Link>\n    </main>\n  );\n}\n",
     'src/app/blog/[...slug]/page.js': "export default function Post({ params }) {\n  return <p>slug={String(params.slug)}</p>;\n}\n",
     'src/components/Hello.js': "'use client';\nimport { usePathname } from 'next/navigation';\n\nexport function Hello({ name }) {\n  return <b>hello {name} at {usePathname()}</b>;\n}\n",
     'src/lib/site.js': "module.exports = { name: 'GioJS' };\n",
-  }, ['/', '/blog/a/b']);
+  }, ['/', '/blog/a/b', '/search?q=gio', '/old', '/sitemap.xml']);
   const home = assertOk(results, '/');
   assert.match(home, /<b>hello (<!-- -->)?GioJS(<!-- -->)? at (<!-- -->)?\/<\/b>/);
   assert.match(home, /<a [^>]*href="\/blog\/a\/b"/);
+  // The kept metadata export renders; the field GioJS lacks is flagged, not rendered.
+  assert.match(home, /<title>JS app<\/title>/);
+  assert.doesNotMatch(home, /application-name/);
   assert.match(assertOk(results, '/blog/a/b'), /slug=(<!-- -->)?a\/b/);
+  // generateMetadata({ params, query: searchParams }) - converted from Next's signature.
+  const search = assertOk(results, '/search?q=gio');
+  assert.match(search, /<title>Search: gio \| JS app<\/title>/);
+  assert.match(search, /<meta name="description" content="0 params"\/>/);
+  // permanentRedirect() → throw redirect(url, 308) from getServerSideProps.
+  assert.equal(results['/old']?.status, 308);
+  assert.deepEqual(results['/old']?.redirect, { destination: '/', permanent: true });
+  // app/sitemap.js is served as it was written.
+  assert.match(assertOk(results, '/sitemap.xml'), /<url>\n<loc>https:\/\/example\.com\/<\/loc>\n<changefreq>daily<\/changefreq>\n<\/url>/);
 });

@@ -6,6 +6,7 @@
  * (TODO lines are read back from the planned output, so they are exact).
  */
 import type { MigrationPlan, PlannedFile } from './migrate.js';
+import { SERVER_ACTION_TODO_PREFIX } from './migrate-transforms.js';
 
 export const REPORT_FILE = 'MIGRATION_REPORT.md';
 export const REPORT_HEADER = '# GioJS migration report';
@@ -124,6 +125,8 @@ export function buildReport(plan: MigrationPlan, date: Date): string {
     lines.push('```', '');
   }
 
+  if (todos.some(t => t.message.startsWith(SERVER_ACTION_TODO_PREFIX))) lines.push(...SERVER_ACTIONS_SECTION);
+
   if (plan.notes.length > 0) {
     lines.push('## Notes', '');
     for (const n of plan.notes) lines.push(`- ${n}`);
@@ -132,7 +135,10 @@ export function buildReport(plan: MigrationPlan, date: Date): string {
   lines.push(
     '## What GioJS does differently',
     '',
-    '- Every page hydrates in the browser: there are no Server Components, `\'use client\'` or Server Actions. Server data comes from `getServerSideProps` (with `export const revalidate = N` to cache the result in Rust).',
+    '- Every page hydrates in the browser: there are no React Server Components or `\'use client\'`. Server data comes from `getServerSideProps` (with `export const revalidate = N` to cache the result in Rust).',
+    '- Forms post to the page\'s own `export async function action(req)` (rendered with `<GioForm>` from `@gio.js/react`) instead of Server Actions; other mutations are `route.ts` handlers.',
+    '- `export const metadata`, `generateMetadata(ctx, { props })`, `app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts` work like in Next.js. Set `GIO_SITE_URL` (or `metadataBase`) so relative URLs become absolute.',
+    '- Caching is per page, in Rust: `export const revalidate` and `export const tags`, purged with `revalidatePath()` / `revalidateTag()` from `@gio.js/core`. `fetch()` has no data cache.',
     '- The root `app/layout` renders `<html>`, `<head>` and `<body>` on the server only - it is never hydrated.',
     '- Redirects, rewrites, headers and auth guards run in the Rust server from `gio.toml` / `middleware.ts`, before any page code.',
     '- Client bundles are built with esbuild; there is no webpack or SWC configuration.',
@@ -140,3 +146,59 @@ export function buildReport(plan: MigrationPlan, date: Date): string {
   );
   return lines.join('\n');
 }
+
+/** How a Server Action becomes a page action; in the report when the code has Server Actions. */
+const SERVER_ACTIONS_SECTION = [
+  '## Server Actions',
+  '',
+  'GioJS has no Server Actions. A form\'s action becomes the page\'s `action` export - a POST to the page runs it - and `<GioForm>` posts to it ' +
+    '(a real `<form method="post">`, so it works without JavaScript too; once hydrated it submits through the client router). ' +
+    'The migration turned every `<form action={serverAction}>` it recognized into `<GioForm>`; move each action\'s body into the page:',
+  '',
+  '```tsx',
+  '// app/posts/new/page.tsx',
+  "import { redirect, revalidatePath, type ActionArgs, type WithActionData } from '@gio.js/core';",
+  "import { GioForm, useGioFormState } from '@gio.js/react';",
+  '',
+  '// Was: async function createPost(formData: FormData) { \'use server\'; ... }',
+  'export async function action(req: ActionArgs) {',
+  '  const form = await req.formData();',
+  "  const title = String(form.get('title') ?? '').trim();",
+  "  if (title === '') return { status: 422, data: { error: 'Title is required' } }; // re-renders the page with actionData",
+  '  await db.posts.create({ title });',
+  "  await revalidatePath('/posts');",
+  "  return redirect('/posts'); // 303 See Other",
+  '}',
+  '',
+  'function Submit() {',
+  '  const { pending } = useGioFormState(); // was useFormStatus()',
+  "  return <button disabled={pending}>{pending ? 'Saving...' : 'Create'}</button>;",
+  '}',
+  '',
+  'export default function NewPost({ actionData }: WithActionData<typeof action>) {',
+  '  return (',
+  '    <GioForm> {/* was <form action={createPost}> */}',
+  '      <input name="title" />',
+  '      {actionData?.error && <p role="alert">{actionData.error}</p>}',
+  '      <Submit />',
+  '    </GioForm>',
+  '  );',
+  '}',
+  '```',
+  '',
+  'Arguments a Server Action got through `.bind(null, id)` become hidden `<input name="id">` fields; several actions on one page become one ' +
+    '`action` that branches on a submit button\'s `name="intent"` value. An action called from code rather than a form becomes a `route.ts` handler:',
+  '',
+  '```ts',
+  '// app/api/posts/route.ts - called with fetch(\'/api/posts\', { method: \'POST\', headers: { \'content-type\': \'application/json\' }, body: JSON.stringify(post) })',
+  "import type { GioRequest } from '@gio.js/core';",
+  '',
+  'export async function POST(req: GioRequest) {',
+  '  const post = req.json<{ title: string }>();',
+  '  return Response.json(await db.posts.create(post), { status: 201 });',
+  '}',
+  '```',
+  '',
+  'Every unsafe request is CSRF-checked by the Rust server (cross-site form posts get a 403), but an action is still a public endpoint: validate every field.',
+  '',
+];
