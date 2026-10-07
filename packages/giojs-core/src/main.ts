@@ -6,6 +6,9 @@
  * route stylesheets and client bundles, then hands the components to
  * worker-boot.ts to start both IPC servers (HTTP bridge + WebSocket bridge)
  * that Rust connects to.
+ *
+ * In a worker pool only the first worker builds (and writes the generated
+ * route types); the others load its build manifest (build-manifest.ts).
  */
 import { dirname, join } from 'node:path';
 import {
@@ -20,6 +23,7 @@ import {
 } from './router.ts';
 import { buildClientBundles } from './client-build.ts';
 import { buildRouteStylesheets } from './css-build.ts';
+import { BUILD_ID_ENV, loadClientBuild, reuseBuildRequested } from './build-manifest.ts';
 import { discoverRouteModules } from './ws-router.ts';
 import { loadGioConfig } from './config-loader.ts';
 import { loadMiddlewareRules } from './middleware-loader.ts';
@@ -63,16 +67,21 @@ export async function runServer(): Promise<void> {
     http: [...handlers.keys()],
   });
 
-  // Best-effort: typed routes improve DX but must never block boot.
-  try {
-    const wrote = await writeRouteTypes(dirname(appDir), [...routes.keys(), ...handlers.keys()]);
-    if (wrote) {
-      logger.info('route types written', { path: '.gio/routes.d.ts' });
+  // The builder's job, like the bundles: in a pool every worker would
+  // write the same file at once.
+  const reuseBuild = reuseBuildRequested(process.env);
+  if (!reuseBuild) {
+    // Best-effort: typed routes improve DX but must never block boot.
+    try {
+      const wrote = await writeRouteTypes(dirname(appDir), [...routes.keys(), ...handlers.keys()]);
+      if (wrote) {
+        logger.info('route types written', { path: '.gio/routes.d.ts' });
+      }
+    } catch (typeGenError: unknown) {
+      logger.warn('route type generation failed', {
+        error: typeGenError instanceof Error ? typeGenError.message : String(typeGenError),
+      });
     }
-  } catch (typeGenError: unknown) {
-    logger.warn('route type generation failed', {
-      error: typeGenError instanceof Error ? typeGenError.message : String(typeGenError),
-    });
   }
 
   const specialPages = await discoverSpecialPages(appDir);
@@ -81,23 +90,33 @@ export async function runServer(): Promise<void> {
   // Rust in the READY frame and enforced there, before routing.
   const middlewareRules = await loadMiddlewareRules(dirname(appDir));
 
-  // Stylesheets first: each hydration entry renders its route's links. Both
-  // builds run before accepting requests and never throw - a route whose CSS
-  // fails renders without it, one whose bundle fails renders server-only.
-  const stylesheets = await buildRouteStylesheets({
-    routes,
-    layouts,
-    segmentFiles,
-    projectRoot: dirname(appDir),
-    dev: isDevMode(),
-  });
-  const clientScripts = await buildClientBundles({
-    routes,
-    layouts,
-    segmentFiles,
-    projectRoot: dirname(appDir),
-    dev: isDevMode(),
-    stylesheets: stylesheets.routes,
+  const projectRoot = dirname(appDir);
+  const { clientScripts, stylesheets } = await loadClientBuild({
+    projectRoot,
+    reuse: reuseBuild,
+    buildId: process.env[BUILD_ID_ENV],
+    // Stylesheets first: each hydration entry renders its route's links.
+    // Both builds run before accepting requests and never throw - a route
+    // whose CSS fails renders without it, one whose bundle fails renders
+    // server-only.
+    async build() {
+      const stylesheets = await buildRouteStylesheets({
+        routes,
+        layouts,
+        segmentFiles,
+        projectRoot,
+        dev: isDevMode(),
+      });
+      const clientScripts = await buildClientBundles({
+        routes,
+        layouts,
+        segmentFiles,
+        projectRoot,
+        dev: isDevMode(),
+        stylesheets: stylesheets.routes,
+      });
+      return { clientScripts, stylesheets };
+    },
   });
 
   startIpcServers({
