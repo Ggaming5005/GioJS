@@ -82,6 +82,7 @@ export default function AboutPage(): React.JSX.Element {
       <h3>Dynamic page with data fetching</h3>
       <CodeBlock lang="typescript" code={`// app/posts/[id]/page.tsx
 import React from 'react';
+import type { GetServerSideProps } from '@gio.js/core';
 
 interface Props {
   post: { title: string; body: string };
@@ -89,13 +90,11 @@ interface Props {
 
 export const revalidate = 3600; // revalidate every hour
 
-export async function getServerSideProps(ctx: {
-  params: Record<string, string>;
-}) {
+export const getServerSideProps: GetServerSideProps<Props, '/posts/:id'> = async (ctx) => {
   const post = await fetch(\`https://api.example.com/posts/\${ctx.params.id}\`)
     .then(r => r.json());
-  return { post };
-}
+  return { props: { post } };
+};
 
 export default function PostPage({ post }: Props): React.JSX.Element {
   return (

@@ -15,8 +15,10 @@ export default function Page(): React.JSX.Element {
         Async data loader, run per request. The context carries the full request:{' '}
         <code>method</code>, <code>path</code>, <code>params</code>, <code>query</code>,
         lowercased <code>headers</code>, parsed <code>cookies</code>, and{' '}
-        <code>locale</code>. Return <code>props</code>, a <code>redirect</code>, or
-        props plus response <code>headers</code>:
+        <code>locale</code>. Return <code>props</code>, a <code>redirect</code>,{' '}
+        <code>{'{ notFound: true }'}</code>, or props plus response <code>headers</code>{' '}
+        (typed: <code>{"GetServerSideProps<Props, '/route/:param'>"}</code>, see{' '}
+        <a href="#types">Types</a>):
       </p>
       <CodeBlock lang="ts" code={`import { sessions } from '../lib/session.server.ts';   // see Authentication
 
@@ -81,7 +83,9 @@ await revalidatePath('/blog', { type: 'prefix' });`} />
       <p>
         On static export, tells <code>gio export</code> which concrete paths to
         pre-render for a dynamic route: return{' '}
-        <code>{'{ paths: [{ params: { id: "1" } }] }'}</code>.
+        <code>{'{ paths: [{ params: { id: "1" } }] }'}</code>. Typed as{' '}
+        <code>{"GetStaticPaths<'/posts/:id'>"}</code>, every entry must carry the
+        route&apos;s params.
       </p>
 
       <h2>Route handler exports</h2>
@@ -136,6 +140,60 @@ await navigate('/login', { replace: true });   // outside components`} />
       <CodeBlock lang="tsx" code={`import { cspNonce } from '@gio.js/core';
 
 <script nonce={cspNonce()} dangerouslySetInnerHTML={{ __html: 'window.dataLayer = []' }} />`} />
+
+      <h2 id="types">Types</h2>
+      <p>
+        <code>@gio.js/core</code> exports a type for every file convention, so app code
+        never restates the shapes inline (<code>import type</code> - nothing ships to the
+        browser). Every runtime export&apos;s parameter and result types are exported too
+        (<code>CookieOptions</code>, <code>SessionStorage</code>, <code>RevalidateResult</code>,{' '}
+        <code>MiddlewareRules</code>, <code>RedirectInit</code>, <code>IPCRequest</code> /{' '}
+        <code>IPCResponse</code> for plugins, ...).
+      </p>
+      <table>
+        <thead><tr><th>Type</th><th>For</th></tr></thead>
+        <tbody>
+          <tr><td><code>{'GetServerSideProps<Props, Route>'}</code></td><td>A page&apos;s loader: types <code>ctx</code> (<code>{'GsspContext<Route>'}</code>) and the result (<code>{'GetServerSidePropsResult<Props>'}</code>: props, redirect, notFound, <code>redirect()</code>).</td></tr>
+          <tr><td><code>{'InferPageProps<typeof getServerSideProps>'}</code></td><td>The props a page with a loader renders with - exactly what it returned.</td></tr>
+          <tr><td><code>{'PageProps<Route>'}</code></td><td>A page <em>without</em> a loader: <code>{'{ params, searchParams }'}</code>.</td></tr>
+          <tr><td><code>LayoutProps</code></td><td><code>{'{ children, path }'}</code> (<code>path</code>: the page&apos;s path, for active links).</td></tr>
+          <tr><td><code>ErrorPageProps</code></td><td><code>error.tsx</code>: <code>{'{ error: { message, digest? }, reset? }'}</code>.</td></tr>
+          <tr><td><code>NotFoundPageProps</code></td><td><code>not-found.tsx</code> (no props).</td></tr>
+          <tr><td><code>{'GetStaticPaths<Route>'}</code></td><td><code>getStaticPaths</code> for <code>gio export</code>.</td></tr>
+          <tr><td><code>{'RouteHandler<Route>'}</code>, <code>{'GioRequest<Route>'}</code></td><td><code>route.ts</code> method handlers and their request.</td></tr>
+          <tr><td><code>{'ActionArgs<Route>'}</code>, <code>{'WithActionData<typeof action, Props>'}</code></td><td>A page <code>action</code>&apos;s request, and page props with its <code>actionData</code> - see <a href="/docs/forms">Forms</a>.</td></tr>
+          <tr><td><code>Metadata</code>, <code>{'GenerateMetadata<Route>'}</code></td><td>Head metadata - see <a href="/docs/metadata">Metadata</a>.</td></tr>
+          <tr><td><code>GioNodePlugin</code>, <code>MiddlewareRules</code>, <code>WsHandler</code> / <code>GioSocket</code></td><td>gio.config.ts plugins, middleware.ts rules, WebSocket handlers.</td></tr>
+        </tbody>
+      </table>
+      <p>
+        <code>Route</code> is a route pattern as the router writes it -{' '}
+        <code>{"'/posts/:id'"}</code>, <code>{"'/docs/*slug'"}</code> (one string with{' '}
+        <code>/</code> separators), <code>{"'/shop/*path?'"}</code> (optional) - or a params
+        shape like <code>{'{ id: string }'}</code>. Once the generated{' '}
+        <code>.gio/routes.d.ts</code> is in your tsconfig <code>include</code> (it is in the
+        starters), a pattern must be one of your app&apos;s routes, so a typo fails{' '}
+        <code>tsc</code> and editors autocomplete it - the same registry{' '}
+        <code>href()</code> and <code>useParams()</code> use. Before the server first runs,
+        any pattern is accepted and its params are read from the pattern itself. Leaving{' '}
+        <code>Route</code> out types params as <code>{'Record<string, string>'}</code>.
+      </p>
+      <CodeBlock lang="tsx" code={`import type { GetStaticPaths, PageProps, RouteHandler } from '@gio.js/core';
+
+// app/docs/[...slug]/page.tsx - no getServerSideProps
+export default function Doc({ params }: PageProps<'/docs/*slug'>) {
+  return <h1>{params.slug.split('/').join(' / ')}</h1>;
+}
+
+export const getStaticPaths: GetStaticPaths<'/docs/*slug'> = () => ({
+  paths: [{ params: { slug: 'intro' } }, { params: { slug: 'guides/setup' } }],
+});
+
+// app/api/posts/[id]/route.ts
+export const DELETE: RouteHandler<'/api/posts/:id'> = async (req) => {
+  await db.posts.delete(req.params.id);
+  return null;                                   // 204
+};`} />
     </>
   );
 }
