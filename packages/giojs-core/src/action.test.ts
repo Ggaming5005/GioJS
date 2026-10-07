@@ -154,7 +154,7 @@ describe('actionOutcome', () => {
   });
 
   it('refuses statuses a re-rendered page cannot carry', () => {
-    for (const status of [100, 204, 301, 303, 304, 600, 200.5, '422']) {
+    for (const status of [100, 204, 205, 301, 303, 304, 600, 200.5, '422']) {
       expect(() => actionOutcome({ status, data: null }), String(status)).toThrow(TypeError);
     }
     for (const status of [200, 201, 400, 409, 422, 500, 503]) {

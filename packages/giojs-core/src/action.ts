@@ -160,18 +160,19 @@ function isDataEnvelope(value: unknown): value is ActionDataResult {
 
 /**
  * The status a re-render may answer with. A 1xx/3xx (a redirect without a
- * Location) or a 204/304 (no body) cannot carry the page.
+ * Location) or a 204/205/304 (no body) cannot carry the page.
  */
 function renderStatus(status: unknown): number {
   if (
     typeof status === 'number' &&
     Number.isInteger(status) &&
-    ((status >= 200 && status <= 299 && status !== 204) || (status >= 400 && status <= 599))
+    ((status >= 200 && status <= 299 && status !== 204 && status !== 205) ||
+      (status >= 400 && status <= 599))
   ) {
     return status;
   }
   throw new TypeError(
-    `action returned status ${String(status)} - a re-render answers 2xx (not 204) or 4xx/5xx; ` +
+    `action returned status ${String(status)} - a re-render answers 2xx (not 204/205) or 4xx/5xx; ` +
       'use redirect() for 3xx, or return a Response',
   );
 }
