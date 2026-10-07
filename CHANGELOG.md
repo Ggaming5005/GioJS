@@ -985,6 +985,16 @@ first.
   them to everyone.
 - `[security.csrf] enabled = false` turned CSRF protection off silently; it
   now logs a warning, like `[security.websocket] check_origin = false`.
+- A locale detected from `Accept-Language` was the header's tag lowercased,
+  not the configured locale: with `locales = ["pt-BR"]`, `Accept-Language:
+  pt-BR` gave `pt-br`, so `useLocale()`, `<html lang>`, the page cache key
+  and `<LocaleLink>` prefixes (`/pt-br/...`, which the path detection never
+  recognized) all differed from a `/pt-BR/` URL. Detection now always
+  returns the configured spelling.
+- `Accept-Language` q-values were ignored: the first supported language as
+  written won, so `en;q=0.1, fr` picked `en`. Languages are now tried from
+  the highest q-value down (written order breaks ties), and one marked
+  `q=0` ("not this one") or with a malformed q is never picked.
 - A standalone build whose app had a module that throws while it is imported
   (a missing `GIO_SESSION_SECRET`) never started: `worker.js` evaluated every
   module at load, the worker died and the server gave up with
