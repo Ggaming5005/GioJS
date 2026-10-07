@@ -6,7 +6,9 @@
  * document (root layout, sibling arrays, useId calls above it), the client
  * hydrates it as a root of its own - and every id inside must still come out
  * the same. Checked against real renders on both sides: renderToString the
- * whole document, hydrateRoot only #__gio.
+ * whole document, hydrateRoot only #__gio, comparing the ids each side's
+ * render produced (hydration keeps the server's attributes in the DOM even
+ * when the client's differ, so the DOM alone would not show a mismatch).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React, { act } from 'react';
@@ -21,6 +23,8 @@ const h = React.createElement;
 
 let consoleError: ReturnType<typeof vi.spyOn>;
 let root: Root | null = null;
+/** The ids Field renders produced, in render order. */
+let rendered: string[] = [];
 
 beforeEach(() => {
   consoleError = vi.spyOn(console, 'error');
@@ -37,6 +41,7 @@ afterEach(() => {
 function Field({ name }: { name: string }): React.ReactElement {
   const id = React.useId();
   const hint = React.useId();
+  rendered.push(id, hint);
   return h(
     'p',
     null,
@@ -64,6 +69,20 @@ function UsesId({ children }: { children?: React.ReactNode }): React.ReactNode {
 }
 
 type Wrap = (children: React.ReactNode) => React.ReactNode;
+
+/**
+ * A layout made of explicit forks, outermost first: [total, index] puts the
+ * children in slot `index` of an array of `total` ([1, 0]: a useId call).
+ */
+function forkLayout(forks: [number, number][]): Wrap {
+  return children =>
+    forks.reduceRight<React.ReactNode>((acc, [total, index]) => {
+      if (total === 1) return h(UsesId, null, acc);
+      const slots: React.ReactNode[] = new Array<React.ReactNode>(total).fill(null);
+      slots[index] = h('section', { key: 'slot' }, acc);
+      return slots;
+    }, children);
+}
 
 /** Deterministic pseudo-random layout shapes around the boundary. */
 function randomLayout(seed: number, minDepth = 1, extraDepth = 7): Wrap {
@@ -99,6 +118,7 @@ function renderAndHydrate(
   layout: Wrap,
   page: React.ReactNode = h(Page),
 ): { server: string[]; client: string[]; treeId: string } {
+  rendered = [];
   const html = renderToString(
     h(
       'html',
@@ -110,12 +130,14 @@ function renderAndHydrate(
       ),
     ),
   );
+  const server = rendered;
+  rendered = [];
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const serverBoundary = doc.getElementById('__gio');
   if (serverBoundary === null) throw new Error('no boundary');
   document.body.innerHTML = serverBoundary.outerHTML;
   const container = document.getElementById('__gio')!;
-  const server = idsIn(container);
+  const htmlIds = idsIn(container);
   const treeId = container.getAttribute(ID_TREE_ATTRIBUTE) ?? '';
   const recoverable: unknown[] = [];
   act(() => {
@@ -124,14 +146,16 @@ function renderAndHydrate(
     });
   });
   expect(recoverable).toEqual([]);
-  return { server, client: idsIn(container), treeId };
+  // What hydration left in the DOM: the server's markup, untouched.
+  expect(idsIn(container)).toEqual(htmlIds);
+  return { server, client: rendered, treeId };
 }
 
 describe('useId across the hydration boundary', () => {
   it('hydrates a page under a root layout with the server ids and no warning', () => {
     const layout: Wrap = children => h('div', null, h('nav', null, 'menu'), h(UsesId, null, h('main', null, children)), h('footer', null));
     const { server, client } = renderAndHydrate(layout);
-    expect(server.length).toBe(9);
+    expect(server.length).toBe(6);
     expect(client).toEqual(server);
     expect(consoleError).not.toHaveBeenCalled();
   });
@@ -164,6 +188,44 @@ describe('useId across the hydration boundary', () => {
     }
     expect(spilled).toBeGreaterThan(10);
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('matches where wide arrays make the client spill at other offsets than the server', () => {
+    // Positions past 30 bits with runs of zero bits (slots in arrays of
+    // 8+): split the plain way, the client's overflow put a zero digit at
+    // the top of a spilled chunk, printed without it ('...b0n6...' on the
+    // server, '...bn6...' on the client).
+    const layouts: [number, number][][] = [
+      [[2, 0], [91, 43], [139, 23], [1, 0], [111, 87], [2, 1], [2, 1], [2, 1], [1, 0], [1, 0], [52, 24], [2, 1], [1, 0], [2, 0], [1, 0], [172, 95], [2, 0], [1, 0], [1, 0], [92, 21], [1, 0], [86, 40]],
+      [[2, 0], [1, 0], [104, 43], [1, 0], [158, 47], [24, 0], [75, 3], [1, 0], [1, 0], [1, 0]],
+      [[187, 78], [1, 0], [1, 0], [2, 1], [2, 1], [1, 0], [193, 8], [90, 39], [2, 0], [2, 1], [152, 3], [2, 0], [2, 1], [32, 29], [149, 138], [2, 1], [2, 1], [67, 3]],
+    ];
+    for (const [i, forks] of layouts.entries()) {
+      const { server, client, treeId } = renderAndHydrate(forkLayout(forks));
+      expect(treeId.length, `layout ${i}`).toBeGreaterThan(6);
+      expect(client, `layout ${i}`).toEqual(server);
+      act(() => root?.unmount());
+      root = null;
+    }
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  // Known limitation (id-tree.ts header): the printed id does not say how
+  // many bits React kept below its overflow at the boundary, so the client
+  // can keep more than the server did. Here the page's first few forks then
+  // spill on the client only, at a zero digit the server keeps inside its
+  // tree id: '_R_t0mcdiv..._' on the server, '_R_tmcdiv..._' on the client.
+  // If this starts passing, the limitation is gone: update the header.
+  it.fails('known limitation: can still differ below a position over 30 bits', () => {
+    consoleError.mockImplementation(() => {});
+    const { server, client } = renderAndHydrate(
+      forkLayout([
+        [1, 0], [168, 150], [2, 0], [1, 0], [1, 0], [2, 1], [2, 1], [21, 20], [81, 39], [168, 36], [2, 1], [2, 1], [166, 155],
+        [186, 80], [118, 116], [22, 11], [148, 106], [1, 0], [17, 15], [1, 0], [81, 28], [119, 97], [170, 146], [7, 3],
+        [1, 0], [1, 0], [173, 46], [1, 0], [78, 12], [109, 50], [49, 0],
+      ]),
+    );
+    expect(client).toEqual(server);
   });
 
   it('marks the boundary with its tree position', () => {
@@ -199,6 +261,29 @@ describe('treeForks', () => {
     expect(treeForks('_x')).toBeNull();
     // A run of 20 zero bits.
     expect(treeForks((2 ** 21 + 2 ** 20).toString(32))).toBeNull();
+    // Thousands of bits of position: refused rather than searched.
+    expect(treeForks('v'.repeat(500))).toBeNull();
+    expect(treeForks('v'.repeat(300))).not.toBeNull();
+  });
+
+  it('groups the bits so that no spill of the client drops a digit', () => {
+    // The plain cut of this position (from the second wide-array layout
+    // above) makes the client spill a chunk starting with a zero digit and
+    // print '2u2j1b5'; the chosen forks print the server's id exactly.
+    const treeId = '2u20j1b5';
+    function ReadsId(): React.ReactElement {
+      return h('b', { id: React.useId() });
+    }
+    // The forks and the boundary's first useId, at a root: the boundary's
+    // second useId reads the id the server stamped.
+    const forks = treeForks(treeId)!;
+    let node: React.ReactNode = h(UsesId, null, h(ReadsId));
+    for (const fork of [...forks].reverse()) {
+      const slots: React.ReactNode[] = new Array<React.ReactNode>(fork.total).fill(null);
+      slots[fork.index] = h(React.Fragment, { key: 'k' }, node);
+      node = slots;
+    }
+    expect(renderToString(h(React.Fragment, null, node))).toBe(`<b id="_R_${treeId}_"></b>`);
   });
 
   it('falls back to the root position when the attribute is missing or bad', () => {

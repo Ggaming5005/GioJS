@@ -26,11 +26,33 @@
  *   in the hydrated tree - including inside Suspense holes streamed later -
  *   produces the server's value.
  *
- * Positions deeper than React's 30-bit tree id spill into an overflow string
- * whose split points are not recoverable from a printed id; React then prints
- * the same bits the same way unless one spilled group starts with a zero
- * digit - a root layout would need ~15 nested multi-child levels around
- * `children` for that, and only then can ids still differ.
+ * Positions longer than React's 30-bit tree id spill their oldest bits into
+ * an overflow string, a chunk of whole base-32 digits at a time, each chunk
+ * printed with toString(32) - so a chunk whose top digit is zero loses that
+ * digit. Where React splits depends on how the bits were grouped into forks
+ * on the way down, and the printed id does not record it, so the client
+ * cannot replay the server's splits: its own forks spill at other offsets.
+ * Grouped the plain way (cut at each set bit), one of the client's chunks
+ * can then start with a zero digit the server printed inside a chunk, and
+ * the client prints one '0' fewer in every id of the tree. That takes a
+ * position over 30 bits and a run of five zero bits, i.e. a slot in an
+ * array of 8+ children - a few levels of wide arrays around `children` get
+ * there (about 1 in 100 random deep layouts with arrays up to 200 wide).
+ * treeForks therefore picks the grouping so that none of the client's
+ * spills drops a digit, and the boundary prints exactly the server's id.
+ *
+ * Known limit: the printed id does not say how many bits the server still
+ * held below its overflow at the boundary either, and the client may hold
+ * a different number. The page's own forks then spill at different points
+ * on the two sides, and an id can still differ when one of those spills
+ * puts a zero digit (from the layout's or the page's wide arrays) at the
+ * top of a chunk. It needs a position over 30 bits at the boundary and
+ * slots in arrays of 8+ in the layout or the page: 1 in 1500 of those
+ * random layouts around a small form page (16 before the grouping search;
+ * id-tree.test.ts keeps one as a known failure), more under deep pages
+ * full of wide lists. Fixing it would take the server reporting that
+ * length. A tree whose arrays all have at most 7 children never forms a
+ * run of five zero bits, so it always matches.
  *
  * Browser-safe: imports only React.
  */
@@ -93,11 +115,41 @@ export function hydrationBoundary(children: React.ReactNode): React.ReactElement
   return React.createElement(TreeMark, null, React.createElement(BoundaryElement, null, children));
 }
 
+/** The widest fork, in tree id bits (an array of MAX_FORK_WIDTH children). */
+const MAX_FORK_BITS = 32 - Math.clz32(MAX_FORK_WIDTH);
+
+/**
+ * The longest position treeForks rebuilds (the search recurses once per
+ * fork). Hundreds of nested forks above the boundary - far past any layout.
+ */
+const MAX_POSITION_BITS = 2048;
+
+/**
+ * React's tree id after pushing a `width`-bit fork (`value` = slot) onto
+ * `low` (the `length` bits not yet spilled into the overflow string), as
+ * pushTreeContext/pushTreeId do it - or null when that push spills a chunk
+ * whose top base-32 digit is zero, which the printed id would drop.
+ */
+function pushBits(
+  low: number,
+  length: number,
+  value: number,
+  width: number,
+): { low: number; length: number } | null {
+  if (length + width <= 30) return { low: low | (value << length), length: length + width };
+  const spilled = length - (length % 5);
+  if (spilled === 0 || ((low >>> (spilled - 5)) & 31) === 0) return null;
+  const kept = length - spilled;
+  return { low: (low >>> spilled) | (value << kept), length: kept + width };
+}
+
 /**
  * The forks that rebuild the position `treeId` (read by the boundary's
  * second useId, below the first one's mark) on a client root, outermost
- * first. Null when it cannot be decoded or would need an array wider than
- * MAX_FORK_WIDTH.
+ * first, chosen so that no overflow spill on the way - the boundary's two
+ * useId calls after them included - drops a digit. Null when it cannot be
+ * decoded, is longer than MAX_POSITION_BITS or would need an array wider
+ * than MAX_FORK_WIDTH.
  */
 export function treeForks(treeId: string): TreeFork[] | null {
   if (!/^[0-9a-v]+$/.test(treeId)) return null;
@@ -107,38 +159,52 @@ export function treeForks(treeId: string): TreeFork[] | null {
   // position of the boundary itself (newest bits highest).
   if (value === 0n) return null;
   const length = value.toString(2).length - 1;
-  const bits = value - (1n << BigInt(length));
-  const bit = (at: number): boolean => ((bits >> BigInt(at)) & 1n) === 1n;
+  if (length > MAX_POSITION_BITS) return null;
+  const bits: number[] = [];
+  for (let at = 0; at < length; at++) bits.push(Number((value >> BigInt(at)) & 1n));
 
   // An array of `total` children puts child `index` at slot index+1, written
-  // in bitLength(total) bits above the bits so far. Any non-zero group of k
-  // bits is such a slot (total between 2^(k-1) and 2^k - 1), so cut the bits
-  // into groups ending at each set bit, low to high.
-  const groups: { width: number; slot: number }[] = [];
-  let at = 0;
-  while (at < length) {
-    let zeros = 0;
-    while (at + zeros < length && !bit(at + zeros)) zeros++;
-    if (at + zeros === length) {
-      // Zero bits above the last set one belong to the newest group (its
-      // slot is written with leading zeros: a smaller slot in a wider array).
-      const last = groups[groups.length - 1];
-      if (last === undefined) return null;
-      last.width += zeros;
-      break;
-    }
-    groups.push({ width: zeros + 1, slot: 2 ** zeros });
-    at += zeros + 1;
-  }
-
+  // in bitLength(total) bits above the bits so far. Any non-zero group of w
+  // bits is such a slot (total between 2^(w-1) and 2^w - 1), so the bits can
+  // be cut into groups in many ways; they all print the same id while it
+  // fits in 30 bits. Past that, the cuts decide where React spills, so search
+  // them depth-first: the plain cut (each group ends at its first set bit)
+  // first, wider groups when a spill would drop a digit. A state is the bits
+  // consumed plus how many of them are still unspilled (that fixes their
+  // value), so dead ends are remembered by that pair.
   const forks: TreeFork[] = [];
-  for (const { width, slot } of groups) {
-    // The narrowest array whose length takes `width` bits and has the slot.
-    const total = Math.max(slot, 2 ** (width - 1));
-    if (total > MAX_FORK_WIDTH) return null;
-    forks.push({ index: slot - 1, total });
-  }
-  return forks;
+  const deadEnds = new Set<number>();
+  const search = (at: number, low: number, unspilled: number): boolean => {
+    if (at === length) {
+      // The boundary's own two useId calls (TreeMark, TreeMark) push a set
+      // bit each.
+      const marked = pushBits(low, unspilled, 1, 1);
+      return marked !== null && pushBits(marked.low, marked.length, 1, 1) !== null;
+    }
+    const key = at * 32 + unspilled;
+    if (deadEnds.has(key)) return false;
+    let zeros = 0;
+    while (at + zeros < length && bits[at + zeros] === 0) zeros++;
+    // Zero bits above the last set one belong to the newest group (its
+    // slot is written with leading zeros: a smaller slot in a wider array).
+    const narrowest = at + zeros === length ? length - at : zeros + 1;
+    let slot = 0;
+    for (let i = 0; i < narrowest - 1; i++) slot |= bits[at + i]! << i;
+    for (let width = narrowest; width <= Math.min(MAX_FORK_BITS, length - at); width++) {
+      slot |= bits[at + width - 1]! << (width - 1);
+      // The narrowest array whose length takes `width` bits and has the slot.
+      const total = Math.max(slot, 2 ** (width - 1));
+      if (slot === 0 || total > MAX_FORK_WIDTH) continue;
+      const next = pushBits(low, unspilled, slot, width);
+      if (next === null) continue;
+      forks.push({ index: slot - 1, total });
+      if (search(at + width, next.low, next.length)) return true;
+      forks.pop();
+    }
+    deadEnds.add(key);
+    return false;
+  };
+  return search(0, 0, 0) ? forks : null;
 }
 
 /**

@@ -1006,7 +1006,10 @@ first.
   development. The `#__gio` boundary now records its position
   (`data-gio-tree`) and the browser hydrates from the same one, so ids match
   inside streamed Suspense content and static exports too, and the client
-  router keeps that position for every later page.
+  router keeps that position for every later page. One rare case remains: a
+  root layout that puts `children` past React's 30-bit tree id, with slots
+  in lists of 8 or more children around it or in the page, can still see an
+  id differ by a `0` digit.
 
 ### Known limitations
 
