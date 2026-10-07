@@ -115,3 +115,18 @@ test('idProblems: headings without ids and repeated ids', () => {
   // Ids in serialized props (a script) are not elements.
   assert.deepEqual(idProblems(page('<h2 id="a">A</h2><script>{"x":"<p id=\\"a\\">"}</script>')), []);
 });
+
+test('reference-table types wrap between words, never mid-word', () => {
+  // `overflow-wrap: anywhere` (or `word-break: break-all`) counts every
+  // character as a break point when the auto table layout sizes columns, so
+  // the type column shrank to one character and printed 'boole/an'.
+  // `break-word` breaks a word only when it alone overflows the column.
+  const css = readFileSync(join(siteDir, 'public', 'globals.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, selector]) => /\.(?:ref-table|config-key-table)\b/.test(selector));
+  assert.ok(rules.length > 0, 'no .ref-table rules in public/globals.css - update this test if they moved');
+  for (const [, selector, body] of rules) {
+    assert.doesNotMatch(body, /overflow-wrap\s*:\s*anywhere|word-break\s*:\s*break-all/,
+      `${selector.trim()}: breaks types mid-word - use overflow-wrap: break-word`);
+  }
+});
