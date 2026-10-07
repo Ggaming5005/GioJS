@@ -148,8 +148,12 @@ const server = spawn(join(here, ${JSON.stringify(serverName)}), process.argv.sli
   },
 });
 server.stdin.on('error', () => {});
+// Windows never forwards: a console Ctrl+C already reaches the server, and
+// kill() there is TerminateProcess, which skips its graceful shutdown.
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => server.kill(signal));
+  process.on(signal, () => {
+    if (process.platform !== 'win32') server.kill(signal);
+  });
 }
 server.on('exit', (code, signal) => process.exit(code ?? (signal === null ? 0 : 1)));
 `;

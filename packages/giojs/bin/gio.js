@@ -156,11 +156,15 @@ function runRustServer() {
     console.error(`gio: could not start the server: ${err.message}`);
     process.exit(1);
   });
-  // A terminal Ctrl+C reaches the server directly (same process group);
-  // forwarding covers signals sent to this launcher alone. Either way the
-  // launcher stays until the server has shut down.
+  // A terminal Ctrl+C reaches the server directly (same process group, or
+  // the same console on Windows); on Unix, forwarding covers signals sent to
+  // this launcher alone. Windows never forwards: kill() there is
+  // TerminateProcess, which would cut short the server's graceful shutdown.
+  // Either way the launcher stays until the server has exited.
   for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.on(signal, () => server.kill(signal));
+    process.on(signal, () => {
+      if (process.platform !== 'win32') server.kill(signal);
+    });
   }
   server.on('exit', (code, signal) => process.exit(code ?? (signal === null ? 0 : 1)));
 }
