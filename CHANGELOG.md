@@ -1016,6 +1016,15 @@ first.
   root layout that puts `children` past React's 30-bit tree id, with slots
   in lists of 8 or more children around it or in the page, can still see an
   id differ by a `0` digit.
+- An `async` `GioEventStream` handler's promise was stored as its cleanup, so
+  on disconnect the cleanup never ran and the worker logged a `TypeError`.
+  The promise is now awaited and what it resolves to is the cleanup - run
+  even when the client left first - and a rejection ends the stream like a
+  throw. A handler may also return nothing: its type is the new
+  `SseHandler`, `(stream) => SseCleanupFn | void | Promise<SseCleanupFn | void>`.
+  A result that is not a function is logged as a warning, and a cleanup
+  that throws is logged instead of failing the frame. The testing kit's
+  `callRoute` streams behave the same.
 
 ### Known limitations
 

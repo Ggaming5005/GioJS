@@ -762,6 +762,19 @@ async function main() {
       controller.abort();
     });
 
+    await test('an async GioEventStream handler\'s cleanup runs when the client leaves', async () => {
+      const cleanups = async () =>
+        (await (await fetch(`${BASE}/api/async-events?state=1`)).json()).cleanups;
+      const before = await cleanups();
+      const controller = new AbortController();
+      const res = await fetch(`${BASE}/api/async-events`, { signal: controller.signal });
+      assert.equal(res.status, 200);
+      const reader = res.body.getReader();
+      assert.match(new TextDecoder().decode((await reader.read()).value), /"ready":true/);
+      controller.abort();
+      await waitFor('the worker to run the resolved cleanup', async () => (await cleanups()) > before, 5000);
+    });
+
     await test('SSE streams outlive header_read_timeout_secs', async () => {
       // The fixture's 2s head deadline must never cut an established stream.
       const controller = new AbortController();

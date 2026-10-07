@@ -21,7 +21,7 @@ import {
   type SseRouteResult,
   type StreamRenderResult,
 } from './ssr.ts';
-import type { SseStream } from './sse.ts';
+import { runEventStream, type SseRun } from './sse.ts';
 import type { WsHandlerFn } from './ws-router.ts';
 import type { NodePluginRegistry } from './plugin.ts';
 import type { WireMiddlewareRules } from './middleware.ts';
@@ -136,7 +136,7 @@ export function createIPCServer(
 
     let ackReceived = false;
     let detachRevalidation: (() => void) | null = null;
-    const activeSseCleanups = new Map<string, () => void>();
+    const activeSseStreams = new Map<string, SseRun>();
     const activeRenders = new Map<string, AbortController>();
     const streamFlows = new Map<string, StreamFlowGate>();
     const writeDroppableFrame = makeDroppableFrameWriter(socket);
@@ -188,11 +188,8 @@ export function createIPCServer(
           logger.warn('sse_close frame missing string id');
           return;
         }
-        const cleanup = activeSseCleanups.get(msg['id']);
-        if (cleanup !== undefined) {
-          cleanup();
-          activeSseCleanups.delete(msg['id']);
-        }
+        activeSseStreams.get(msg['id'])?.disconnect();
+        activeSseStreams.delete(msg['id']);
         return;
       }
 
@@ -218,10 +215,10 @@ export function createIPCServer(
           logger.warn('cancel frame missing string id');
           return;
         }
-        const sseCleanup = activeSseCleanups.get(msg['id']);
-        if (sseCleanup !== undefined) {
-          sseCleanup();
-          activeSseCleanups.delete(msg['id']);
+        const sse = activeSseStreams.get(msg['id']);
+        if (sse !== undefined) {
+          sse.disconnect();
+          activeSseStreams.delete(msg['id']);
           return;
         }
         activeRenders.get(msg['id'])?.abort();
@@ -343,29 +340,47 @@ export function createIPCServer(
         cacheMaxAge: 0,
       } satisfies IPCOutbound, label.route));
 
-      const sseStream: SseStream = {
-        send(data: unknown, event?: string, id?: string): void {
-          writeDroppableFrame({ type: 'sse_chunk', id: req.id, data: formatSseEvent(data, event, id) });
+      // An async handler settles after this returns; its callbacks still log
+      // under the request id (the log context follows promise callbacks).
+      const sse = runEventStream(
+        routeResult.stream,
+        {
+          send(data: unknown, event?: string, id?: string): void {
+            writeDroppableFrame({ type: 'sse_chunk', id: req.id, data: formatSseEvent(data, event, id) });
+          },
+          close(): void {
+            writeFrame(socket, { type: 'sse_done', id: req.id });
+            activeSseStreams.delete(req.id);
+          },
         },
-        close(): void {
-          writeFrame(socket, { type: 'sse_done', id: req.id });
-          activeSseCleanups.delete(req.id);
+        {
+          onError(handlerError: unknown): void {
+            // Headers already sent - terminate the stream instead of erroring
+            logger.error('sse handler threw', {
+              id: req.id,
+              path: req.path,
+              error: handlerError instanceof Error ? handlerError.message : String(handlerError),
+            });
+            writeFrame(socket, { type: 'sse_done', id: req.id });
+            activeSseStreams.delete(req.id);
+          },
+          onCleanupError(cause: unknown): void {
+            logger.error('sse cleanup threw', {
+              id: req.id,
+              path: req.path,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          },
+          onInvalidCleanup(value: unknown): void {
+            logger.warn('GioEventStream handler returned something other than a cleanup function - ignored', {
+              id: req.id,
+              path: req.path,
+              returned: typeof value,
+            });
+          },
         },
-      };
-
-      try {
-        const cleanup = routeResult.stream.handler(sseStream);
-        activeSseCleanups.set(req.id, cleanup);
-      } catch (handlerError) {
-        // Headers already sent - terminate the stream instead of erroring
-        logger.error('sse handler threw', {
-          id: req.id,
-          path: req.path,
-          error: handlerError instanceof Error ? handlerError.message : String(handlerError),
-        });
-        writeFrame(socket, { type: 'sse_done', id: req.id });
-        activeSseCleanups.delete(req.id);
-      }
+      );
+      if (!sse.done) activeSseStreams.set(req.id, sse);
     }
 
     const handler = makeFrameHandler(
@@ -398,17 +413,11 @@ export function createIPCServer(
       // Nobody reads these renders and streams any more: stop their work
       // (a streamed route body would otherwise wait on its producer forever).
       for (const abort of activeRenders.values()) abort.abort();
-      // Run all pending SSE cleanups on disconnect. These are user-supplied
-      // callbacks running inside a net 'close' listener - a throw here would
-      // be an uncaught exception that kills the whole worker.
-      for (const cleanup of activeSseCleanups.values()) {
-        try {
-          cleanup();
-        } catch (cause) {
-          logger.error('sse cleanup threw on disconnect', { error: String(cause) });
-        }
-      }
-      activeSseCleanups.clear();
+      // Run all pending SSE cleanups on disconnect (runEventStream catches
+      // a throwing one: inside a net 'close' listener it would kill the
+      // whole worker).
+      for (const sse of activeSseStreams.values()) sse.disconnect();
+      activeSseStreams.clear();
     });
   });
 

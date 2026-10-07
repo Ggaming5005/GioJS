@@ -793,6 +793,20 @@ describe('callRoute', () => {
     await reader.cancel();
     expect(counter()).toBe(before + 1);
   });
+
+  it('awaits an async stream handler and runs the cleanup it resolves to', async () => {
+    const counter = (): number =>
+      Number((globalThis as Record<string, unknown>)['__testingKitSseCleanups'] ?? 0);
+    const closed = await callRoute('/api/events?count=1&async', { appDir });
+    expect(await closed.text()).toBe('id: 1\nevent: tick\ndata: {"n":1}\n\n');
+
+    const before = counter();
+    const res = await callRoute('/api/events?count=1&open&async', { appDir });
+    const reader = res.stream!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('data: {"n":1}');
+    await reader.cancel();
+    expect(counter()).toBe(before + 1);
+  });
 });
 
 describe('server-only', () => {

@@ -31,22 +31,26 @@ export function GET() {
       <h2 id="reference">Reference</h2>
       <p>
         <code>new GioEventStream(handler)</code>, returned from a <code>route.ts</code>{' '}
-        method handler.
+        method handler - any method, though a browser&apos;s <code>EventSource</code> always
+        sends <code>GET</code>.
       </p>
       <PropsTable kind="Parameter" rows={[
         {
           name: 'handler',
-          type: '(stream: SseStream) => () => void',
+          type: 'SseHandler',
           required: true,
           description: (
             <>
-              Called once the response has started. It must return - synchronously - a
-              cleanup function, which runs when the client disconnects or the server shuts
-              the stream down.
+              Called once the response has started. It may return a cleanup function, which
+              runs when the client disconnects or the server shuts the stream down, or
+              nothing. It may be <code>async</code>: the cleanup is then what its promise
+              resolves to.
             </>
           ),
         },
       ]} />
+      <CodeBlock lang="ts" code={`type SseCleanupFn = () => void;
+type SseHandler = (stream: SseStream) => SseCleanupFn | void | Promise<SseCleanupFn | void>;`} />
       <h3 id="sse-stream">SseStream</h3>
       <PropsTable kind="Field" rows={[
         {
@@ -80,8 +84,13 @@ export function GET() {
           on the wire (the <code>id</code> and <code>event</code> lines only when given).
         </li>
         <li>
-          When the handler throws, the error is logged (<code>sse handler threw</code>) and the
-          stream ends - its <code>200</code> is already sent.
+          When the handler throws, or its promise rejects, the error is logged{' '}
+          (<code>sse handler threw</code>) and the stream ends - its <code>200</code> is
+          already sent. A cleanup that throws is logged too (<code>sse cleanup threw</code>).
+        </li>
+        <li>
+          A handler that returns (or resolves to) anything but a function,{' '}
+          <code>undefined</code> or <code>null</code> logs a warning and has no cleanup.
         </li>
         <li>
           Under backpressure from a slow server connection, events may be dropped rather than
@@ -165,9 +174,11 @@ expect(await res.text()).toContain('event: tick');   // waits for close()`} />
       <h2 id="good-to-know">Good to know</h2>
       <ul>
         <li>
-          <strong>Keep the handler synchronous.</strong> An <code>async</code> handler returns
-          a promise instead of the cleanup function, so the cleanup never runs. Start async
-          work inside it and return the cleanup right away.
+          <strong>Async handlers.</strong> An <code>async</code> handler&apos;s cleanup is
+          what its promise resolves to. A client that leaves before the promise settles
+          still gets the cleanup run, as soon as it does - so set up what the cleanup undoes
+          only after the last <code>await</code>, or undo it yourself when the work before it
+          fails.
         </li>
         <li>
           <strong>Clean up before <code>close()</code>.</strong> Calling{' '}
@@ -200,6 +211,7 @@ expect(await res.text()).toContain('event: tick');   // waits for close()`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
+        { version: 'v0.1.0-beta.8', changes: <>An <code>async</code> handler&apos;s cleanup is what its promise resolves to (the promise used to be stored as the cleanup, which then threw); a handler may return nothing; any method may return a stream; <code>SseHandler</code> type.</> },
         { version: 'v0.1.0-beta.6', changes: <><code>import {'{ GioEventStream, isGioEventStream }'} from &apos;@gio.js/core&apos;</code> works: the package got a public entry point.</> },
         { version: 'v0.1.0-beta.5', changes: <><code>route.ts</code> method handlers can return a <code>GioEventStream</code>; detection is brand-based.</> },
         { version: 'v0.1.0-beta.1', changes: 'Introduced.' },
