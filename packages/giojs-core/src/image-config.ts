@@ -10,7 +10,9 @@
  * renders byte-identical srcsets.
  *
  * Without the Rust server there is no optimizer: a static export
- * (GIO_EXPORT=1) renders every image with its plain src.
+ * (GIO_EXPORT=1) renders every image with its plain src, and so does a
+ * server whose gio.toml turns it off (`[images] enabled = false`, which
+ * Rust hands over as `enabled: false`).
  */
 import { logger } from './logger.ts';
 
@@ -58,7 +60,7 @@ export function imageConfigFromEnv(env: NodeJS.ProcessEnv): ImageRenderConfig {
       typeof rawQuality === 'number' && Number.isInteger(rawQuality)
         ? Math.min(100, Math.max(1, rawQuality))
         : DEFAULT_IMAGE_QUALITY;
-    return { widths, quality, unoptimized };
+    return { widths, quality, unoptimized: unoptimized || record['enabled'] === false };
   } catch (parseError) {
     logger.warn('GIO_IMAGE_CONFIG is malformed - images use the optimizer defaults', {
       error: parseError instanceof Error ? parseError.message : String(parseError),

@@ -26,12 +26,15 @@ pub use bucket::TokenBucket;
 
 // Bounds bucket-key memory: only this many header-value bytes enter the key.
 const MAX_KEY_HEADER_VALUE_BYTES: usize = 64;
-// Distinct header-value buckets one IP may create per rule before falling
-// back to the shared per-IP bucket (defeats header-rotation bucket minting).
-const MAX_DISTINCT_HEADER_KEYS_PER_IP: u64 = 64;
+/// Default distinct header-value buckets one client may create per rule
+/// before falling back to the shared per-client bucket (defeats
+/// header-rotation bucket minting). gio.toml `[[rate_limits]]
+/// max_keys_per_client`.
+pub const DEFAULT_MAX_KEYS_PER_CLIENT: u64 = 64;
 /// Default cap on live buckets across all rules and clients (~10-20 MB).
 /// Past it, refilled buckets are swept and then the least recently seen are
 /// evicted, so source-address rotation cannot grow memory without bound.
+/// gio.toml `[server] rate_limit_max_buckets`; 0 lifts the cap.
 pub const DEFAULT_MAX_BUCKETS: usize = 100_000;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -51,9 +54,14 @@ pub struct RateLimitRule {
     /// If set, rate-limit by (client IP, value of this header) pairs - e.g.
     /// "x-api-key" - instead of the client IP alone. The value is truncated to
     /// MAX_KEY_HEADER_VALUE_BYTES; once an IP has created
-    /// MAX_DISTINCT_HEADER_KEYS_PER_IP distinct buckets for this rule, further
-    /// values share the per-IP bucket. Absent header falls back to the IP.
+    /// `max_keys_per_client` distinct buckets for this rule, further values
+    /// share the per-IP bucket. Absent header falls back to the IP.
     pub key_header: Option<String>,
+    /// Distinct `key_header` buckets one client may hold for this rule
+    /// (DEFAULT_MAX_KEYS_PER_CLIENT). 0 = unlimited: many API keys behind
+    /// one NAT address, at the price of a client minting fresh budgets by
+    /// rotating the header.
+    pub max_keys_per_client: u64,
 }
 
 pub enum RateLimitResult {
@@ -81,7 +89,7 @@ impl RateLimiter {
         Self::with_max_buckets(rules, DEFAULT_MAX_BUCKETS)
     }
 
-    /// Like `new` with an explicit cap on live buckets.
+    /// Like `new` with an explicit cap on live buckets (0 = no cap).
     pub fn with_max_buckets(mut rules: Vec<RateLimitRule>, max_buckets: usize) -> Self {
         for rule in &mut rules {
             // The server lowercases incoming header names; normalize once here
@@ -229,7 +237,7 @@ impl RateLimiter {
             if let Some(bucket) = self.store.get_or_create_in_group(
                 &compound_key,
                 &client_bucket_key,
-                MAX_DISTINCT_HEADER_KEYS_PER_IP,
+                rule.max_keys_per_client,
                 rule.per_ip,
                 rule.window_seconds,
                 rule.burst,
@@ -374,6 +382,7 @@ mod tests {
             window_seconds: 60,
             burst: 0,
             key_header: None,
+            max_keys_per_client: DEFAULT_MAX_KEYS_PER_CLIENT,
         }
     }
 
@@ -384,6 +393,7 @@ mod tests {
             window_seconds: 60,
             burst: 0,
             key_header: None,
+            max_keys_per_client: DEFAULT_MAX_KEYS_PER_CLIENT,
         }
     }
 
@@ -439,6 +449,7 @@ mod tests {
             window_seconds: 3600,
             burst: 0,
             key_header: None,
+            max_keys_per_client: DEFAULT_MAX_KEYS_PER_CLIENT,
         }
     }
 
@@ -507,6 +518,7 @@ mod tests {
             window_seconds,
             burst: 0,
             key_header: Some("x-api-key".to_string()),
+            max_keys_per_client: DEFAULT_MAX_KEYS_PER_CLIENT,
         }
     }
 
@@ -567,7 +579,7 @@ mod tests {
         }
 
         // 64 distinct buckets (1 token each) + 1 from the shared fallback bucket.
-        let expected = (MAX_DISTINCT_HEADER_KEYS_PER_IP as usize) + 1;
+        let expected = (DEFAULT_MAX_KEYS_PER_CLIENT as usize) + 1;
         assert_eq!(
             allowed, expected,
             "header rotation must saturate at the per-IP distinct-key cap"
@@ -579,6 +591,33 @@ mod tests {
             rl.check("/api/data", OTHER, &headers),
             RateLimitResult::Allowed { .. }
         ));
+    }
+
+    #[test]
+    fn the_distinct_key_cap_is_per_rule_and_zero_lifts_it() {
+        let capped = make_limiter(vec![RateLimitRule {
+            max_keys_per_client: 3,
+            ..keyed_rule(1, 3600)
+        }]);
+        let unlimited = make_limiter(vec![RateLimitRule {
+            max_keys_per_client: 0,
+            ..keyed_rule(1, 3600)
+        }]);
+        let allowed = |rl: &RateLimiter| {
+            (0..200)
+                .filter(|i| {
+                    let headers = api_key_headers(&format!("gateway-key-{i}"));
+                    matches!(
+                        rl.check("/api/data", LOCAL, &headers),
+                        RateLimitResult::Allowed { .. }
+                    )
+                })
+                .count()
+        };
+        // 3 own buckets + the shared fallback's one token.
+        assert_eq!(allowed(&capped), 4);
+        // Every key behind the one address keeps a budget of its own.
+        assert_eq!(allowed(&unlimited), 200);
     }
 
     #[test]
@@ -651,6 +690,7 @@ mod tests {
             window_seconds: 3600,
             burst: 0,
             key_header: Some("X-Api-Key".to_string()),
+            max_keys_per_client: DEFAULT_MAX_KEYS_PER_CLIENT,
         };
         let rl = make_limiter(vec![rule]);
 
@@ -688,6 +728,7 @@ mod tests {
             window_seconds: 3600,
             burst: 0,
             key_header: None,
+            max_keys_per_client: DEFAULT_MAX_KEYS_PER_CLIENT,
         }
     }
 
@@ -764,6 +805,22 @@ mod tests {
             let _ = rl.check("/api/login", ip, &empty_headers());
         }
         assert!(rl.store.len() <= 100, "store holds {}", rl.store.len());
+    }
+
+    #[test]
+    fn a_zero_bucket_cap_never_evicts() {
+        let rl = RateLimiter::with_max_buckets(vec![hourly_rule("/api/login", 1)], 0);
+        for i in 0..500u32 {
+            let ip = IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i));
+            let _ = rl.check("/api/login", ip, &empty_headers());
+        }
+        assert_eq!(rl.store.len(), 500, "every client keeps its bucket");
+        // So the first client is still out of budget.
+        let first = IpAddr::V4(Ipv4Addr::from(0x0a00_0000));
+        assert!(matches!(
+            rl.check("/api/login", first, &empty_headers()),
+            RateLimitResult::Rejected { .. }
+        ));
     }
 
     #[test]
@@ -878,6 +935,7 @@ mod tests {
             window_seconds: 60,
             burst: 0,
             key_header: None,
+            max_keys_per_client: DEFAULT_MAX_KEYS_PER_CLIENT,
         };
         let rl = make_limiter(vec![rule]);
 

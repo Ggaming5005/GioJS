@@ -10,7 +10,7 @@ pub mod processor;
 
 use bytes::{Bytes, BytesMut};
 use cache::ImageCache;
-use processor::{process_image, ImageParams, OutputFormat};
+use processor::{process_image_with_limits, DecodeLimits, ImageParams, OutputFormat};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -20,7 +20,9 @@ use url::Url;
 
 const DEFAULT_MAX_REMOTE_BYTES: u64 = 20 * 1024 * 1024;
 const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default whole-download deadline for a remote source (gio.toml `[images]
+/// remote_timeout_secs`).
+pub const DEFAULT_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct RemotePattern {
@@ -104,35 +106,63 @@ pub struct ImageHandler {
     public_dir: PathBuf,
     /// None only if TLS backend init fails; remote fetches then error per-request.
     http_client: Option<reqwest::Client>,
+    /// 0 = unlimited.
     max_remote_bytes: u64,
     /// Modern formats negotiated from Accept, in preference order.
     formats: Vec<OutputFormat>,
+    decode_limits: DecodeLimits,
+}
+
+/// The client remote sources are fetched with; `timeout` bounds a whole
+/// download (None: no deadline past the connect timeout).
+fn remote_client(timeout: Option<Duration>) -> Option<reqwest::Client> {
+    // Redirects are refused so an allowlisted host cannot bounce fetches to internal IPs.
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(REMOTE_CONNECT_TIMEOUT);
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    match builder.build() {
+        Ok(client) => Some(client),
+        Err(e) => {
+            warn!(error = %e, "image HTTP client init failed; remote sources disabled");
+            None
+        }
+    }
+}
+
+/// Whether a remote source of `len` bytes is over the `max` cap; 0 is
+/// unlimited.
+fn over_remote_cap(len: u64, max: u64) -> bool {
+    max > 0 && len > max
 }
 
 impl ImageHandler {
     pub fn new(config: ImageConfig, disk_dir: PathBuf, public_dir: PathBuf) -> Self {
         let cache = ImageCache::new(200 * 1024 * 1024, disk_dir);
-        // Redirects are refused so an allowlisted host cannot bounce fetches to internal IPs.
-        let http_client = match reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(REMOTE_CONNECT_TIMEOUT)
-            .timeout(REMOTE_REQUEST_TIMEOUT)
-            .build()
-        {
-            Ok(client) => Some(client),
-            Err(e) => {
-                warn!(error = %e, "image HTTP client init failed; remote sources disabled");
-                None
-            }
-        };
         Self {
             config,
             cache,
             public_dir,
-            http_client,
+            http_client: remote_client(Some(DEFAULT_REMOTE_TIMEOUT)),
             max_remote_bytes: DEFAULT_MAX_REMOTE_BYTES,
             formats: OutputFormat::MODERN.to_vec(),
+            decode_limits: DecodeLimits::default(),
         }
+    }
+
+    /// Override the whole-download deadline for remote sources; None
+    /// removes it. Builder-style, for startup wiring.
+    pub fn with_remote_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.http_client = remote_client(timeout);
+        self
+    }
+
+    /// Override the decoder's bounds. Builder-style, for startup wiring.
+    pub fn with_decode_limits(mut self, decode_limits: DecodeLimits) -> Self {
+        self.decode_limits = decode_limits;
+        self
     }
 
     /// Restrict and order the modern formats (gio.toml `[images] formats`).
@@ -146,7 +176,8 @@ impl ImageHandler {
         self
     }
 
-    /// Override the remote download size cap (bytes). Builder-style, for startup wiring.
+    /// Override the remote download size cap (bytes; 0 = unlimited).
+    /// Builder-style, for startup wiring.
     pub fn with_max_remote_bytes(mut self, max_remote_bytes: u64) -> Self {
         self.max_remote_bytes = max_remote_bytes;
         self
@@ -199,10 +230,13 @@ impl ImageHandler {
             quality,
             format,
         };
-        let result = tokio::task::spawn_blocking(move || process_image(source_bytes, &params))
-            .await
-            .map_err(|_| ImageError::ProcessFailed("spawn_blocking join error".into()))?
-            .map_err(|e| ImageError::ProcessFailed(e.to_string()))?;
+        let decode_limits = self.decode_limits;
+        let result = tokio::task::spawn_blocking(move || {
+            process_image_with_limits(source_bytes, &params, decode_limits)
+        })
+        .await
+        .map_err(|_| ImageError::ProcessFailed("spawn_blocking join error".into()))?
+        .map_err(|e| ImageError::ProcessFailed(e.to_string()))?;
 
         self.cache
             .put(&key, format.extension(), result.data.clone())
@@ -248,7 +282,7 @@ impl ImageHandler {
         }
         // Content-Length lets us bail early, but the streamed count is authoritative.
         if let Some(declared_len) = response.content_length() {
-            if declared_len > self.max_remote_bytes {
+            if over_remote_cap(declared_len, self.max_remote_bytes) {
                 return Err(ImageError::TooLarge(self.max_remote_bytes));
             }
         }
@@ -258,7 +292,8 @@ impl ImageHandler {
             .await
             .map_err(|e| ImageError::FetchFailed(e.to_string()))?
         {
-            if (body.len() as u64).saturating_add(chunk.len() as u64) > self.max_remote_bytes {
+            let len = (body.len() as u64).saturating_add(chunk.len() as u64);
+            if over_remote_cap(len, self.max_remote_bytes) {
                 return Err(ImageError::TooLarge(self.max_remote_bytes));
             }
             body.extend_from_slice(&chunk);
@@ -633,6 +668,13 @@ mod tests {
         let (_, format, _) = jpeg_only.handle(query(None), accept).await.unwrap();
         assert_eq!(format, OutputFormat::Jpeg);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn zero_max_remote_bytes_is_unlimited() {
+        assert!(!over_remote_cap(u64::MAX, 0));
+        assert!(!over_remote_cap(20, 20));
+        assert!(over_remote_cap(21, 20));
     }
 
     #[test]

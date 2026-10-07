@@ -101,8 +101,13 @@ pub enum CacheStatus {
 
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
+    /// false: the cache stores and serves nothing - every lookup misses and
+    /// every store is dropped.
+    pub enabled: bool,
     /// Maximum number of entries kept in memory (LRU eviction).
     pub memory_max_entries: NonZeroUsize,
+    /// false: memory only - no entry files are written or read.
+    pub disk_enabled: bool,
     /// Directory for on-disk JSON files.
     pub disk_dir: PathBuf,
     /// Stale-while-revalidate window = `max_age_secs * swr_multiplier`.
@@ -116,7 +121,9 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         CacheConfig {
+            enabled: true,
             memory_max_entries: NonZeroUsize::new(1000).expect("non-zero"),
+            disk_enabled: true,
             disk_dir: PathBuf::from(".gio/cache/pages"),
             swr_multiplier: 10,
             disk_max_bytes: 512 * 1024 * 1024,
@@ -137,18 +144,30 @@ pub enum CacheError {
 pub struct PageCache {
     backend: LocalBackend,
     swr_multiplier: u64,
+    enabled: bool,
 }
 
 impl PageCache {
     pub fn new(config: CacheConfig) -> Self {
-        PageCache {
-            backend: LocalBackend::new(
+        let backend = if config.enabled && config.disk_enabled {
+            LocalBackend::new(
                 config.memory_max_entries,
                 config.disk_dir,
                 config.disk_max_bytes,
-            ),
+            )
+        } else {
+            LocalBackend::memory_only(config.memory_max_entries)
+        };
+        PageCache {
+            backend,
             swr_multiplier: config.swr_multiplier,
+            enabled: config.enabled,
         }
+    }
+
+    /// Whether the cache stores anything (`CacheConfig::enabled`).
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Evict the oldest on-disk entries until total size is within
@@ -173,6 +192,9 @@ impl PageCache {
     /// A deployment ID mismatch is always treated as a miss so stale pages from
     /// a previous build are never served after a deploy.
     pub async fn get(&self, key: &str, deployment_id: &str) -> Option<(CacheEntry, CacheStatus)> {
+        if !self.enabled {
+            return None;
+        }
         let entry = self.backend.get(key).await?;
 
         if entry.deployment_id != deployment_id {
@@ -194,6 +216,9 @@ impl PageCache {
 
     /// Store an entry. Writes to memory immediately; disk write is non-blocking.
     pub async fn put(&self, key: &str, entry: CacheEntry) -> Result<(), CacheError> {
+        if !self.enabled {
+            return Ok(());
+        }
         self.backend.put(key, with_etag(entry)).await
     }
 
@@ -206,13 +231,17 @@ impl PageCache {
     /// `put`, unless an invalidation since `ticket` matches the entry's tags:
     /// the render started before that purge, so its content may predate it.
     /// Returns whether the entry was stored. A dropped write costs one more
-    /// miss; storing it would serve purged content until it expired.
+    /// miss; storing it would serve purged content until it expired. A
+    /// disabled cache stores nothing.
     pub async fn put_fresh(
         &self,
         key: &str,
         entry: CacheEntry,
         ticket: FillTicket,
     ) -> Result<bool, CacheError> {
+        if !self.enabled {
+            return Ok(false);
+        }
         self.backend.put_fresh(key, with_etag(entry), ticket).await
     }
 
@@ -354,6 +383,7 @@ mod tests {
             disk_dir: std::env::temp_dir().join("giojs-cache-test"),
             swr_multiplier: multiplier,
             disk_max_bytes: 0,
+            ..CacheConfig::default()
         })
     }
 
@@ -417,6 +447,7 @@ mod tests {
             disk_dir: dir.clone(),
             swr_multiplier: 10,
             disk_max_bytes: 0,
+            ..CacheConfig::default()
         });
         cache.put("key-clear", make_entry(3600, 0)).await.unwrap();
         assert!(cache.get("key-clear", "deploy-1").await.is_some());
@@ -439,6 +470,7 @@ mod tests {
             disk_dir: dir.clone(),
             swr_multiplier: 10,
             disk_max_bytes: 0,
+            ..CacheConfig::default()
         });
         cache.put("key-gone", make_entry(60, 65)).await.unwrap();
         cache.put("key-kept", make_entry(60, 65)).await.unwrap();
@@ -485,6 +517,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_disabled_cache_stores_and_serves_nothing() {
+        let dir = std::env::temp_dir().join(format!("giojs-cache-off-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let cache = PageCache::new(CacheConfig {
+            enabled: false,
+            disk_dir: dir.clone(),
+            ..CacheConfig::default()
+        });
+        assert!(!cache.is_enabled());
+        cache.put("off-key", make_entry(3600, 0)).await.unwrap();
+        let ticket = cache.fill_ticket();
+        assert!(!cache
+            .put_fresh("off-fresh", make_entry(3600, 0), ticket)
+            .await
+            .unwrap());
+        assert!(cache.get("off-key", "deploy-1").await.is_none());
+        assert!(cache.get("off-fresh", "deploy-1").await.is_none());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!dir.exists(), "nothing reaches the disk either");
+    }
+
+    #[tokio::test]
+    async fn a_memory_only_cache_serves_hits_without_writing_files() {
+        let dir = std::env::temp_dir().join(format!("giojs-cache-mem-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let cache = PageCache::new(CacheConfig {
+            disk_enabled: false,
+            disk_dir: dir.clone(),
+            ..CacheConfig::default()
+        });
+        assert!(cache.is_enabled());
+        cache.put("mem-key", make_entry(3600, 0)).await.unwrap();
+        assert_eq!(
+            cache
+                .get("mem-key", "deploy-1")
+                .await
+                .map(|(_, status)| status),
+            Some(CacheStatus::Hit)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!dir.exists(), "no entry file is written");
+    }
+
+    #[tokio::test]
     async fn swr_disabled_when_multiplier_is_zero() {
         let cache = cache_with_swr(0);
         // Entry is 5s past max_age; with swr_multiplier=0 it should be a miss
@@ -524,6 +600,7 @@ mod tests {
                 disk_dir: self.0.clone(),
                 swr_multiplier: 10,
                 disk_max_bytes: 0,
+                ..CacheConfig::default()
             })
         }
 

@@ -236,9 +236,10 @@ export function Chat({ room }: { room: string }) {
       <h2>Limits</h2>
       <p>
         <code>[websocket]</code> in <code>gio.toml</code> sets <code>max_connections</code>{' '}
-        (default 1000; further connections close with 1013) and{' '}
+        (default 1000; further connections close with 1013; <code>0</code> = unlimited) and{' '}
         <code>ping_interval_secs</code> (default 30), the keep-alive ping that also reaps dead
-        peers. See <a href="/docs/configuration">Configuration</a>.
+        peers (<code>0</code> sends none, so a vanished peer lingers until TCP notices). See{' '}
+        <a href="/docs/configuration">Configuration</a>.
       </p>
     </>
   );

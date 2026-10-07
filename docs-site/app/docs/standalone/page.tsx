@@ -56,7 +56,9 @@ export default function Page(): React.JSX.Element {
         <code>static/</code> are built ahead of time too, and so are the route stylesheets:{' '}
         <a href="/docs/css">CSS imports and CSS Modules</a> work exactly as with{' '}
         <code>gio</code>, with each CSS Module&apos;s class names compiled into{' '}
-        <code>worker.js</code>.
+        <code>worker.js</code>. The build minifies them unless the project&apos;s{' '}
+        <code>gio.toml</code> says <code>[css] minify = false</code>; changing that key in the
+        deployed <code>gio.toml</code> needs a rebuild.
       </p>
 
       <h2>Deploy</h2>

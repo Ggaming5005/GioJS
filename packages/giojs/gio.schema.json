@@ -14,9 +14,13 @@
         }
       ],
       "default": {
+        "disk_enabled": true,
         "disk_max_bytes": 536870912,
         "disk_path": ".gio/cache/pages",
-        "memory_max_entries": 1000
+        "enabled": true,
+        "etag": true,
+        "memory_max_entries": 1000,
+        "swr_multiplier": 10
       }
     },
     "compression": {
@@ -120,6 +124,7 @@
         }
       ],
       "default": {
+        "enabled": true,
         "max_concurrent": 5,
         "max_per_second": 20
       }
@@ -206,6 +211,11 @@
       "description": "`[cache]`: the page cache (memory LRU in front of a disk directory).",
       "type": "object",
       "properties": {
+        "disk_enabled": {
+          "description": "Keep a disk tier behind the memory LRU (it also outlives restarts).\nfalse: memory only, no files written.",
+          "type": "boolean",
+          "default": true
+        },
         "disk_max_bytes": {
           "description": "Disk cache size bound; the oldest entries are evicted past it. 0\ndisables the bound.",
           "type": "integer",
@@ -218,12 +228,29 @@
           "type": "string",
           "default": ".gio/cache/pages"
         },
+        "enabled": {
+          "description": "Store and serve pages that export `revalidate`. false renders every\nrequest; Cache-Control still follows `revalidate`, so a CDN in front\ncan keep caching.",
+          "type": "boolean",
+          "default": true
+        },
+        "etag": {
+          "description": "Send a weak ETag with cached pages and answer a matching\nIf-None-Match with 304. false: no page ETags and no 304s.",
+          "type": "boolean",
+          "default": true
+        },
         "memory_max_entries": {
-          "description": "Pages kept in the in-memory LRU; the disk cache holds the rest.",
+          "description": "Pages kept in the in-memory LRU; the disk cache holds the rest. At\nleast 1 (`enabled = false` is the off switch).",
           "type": "integer",
           "format": "uint",
           "default": 1000,
           "minimum": 1
+        },
+        "swr_multiplier": {
+          "description": "A page stays servable stale (while one refresh runs) until it is\nthis many times its `revalidate` old; it also sizes the CDN\n`stale-while-revalidate` window. 0 = never serve stale, and no\n`stale-while-revalidate` directive.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -280,7 +307,7 @@
       "additionalProperties": false
     },
     "CssConfig": {
-      "description": "`[css]`: the Lightning CSS pipeline for app stylesheets.",
+      "description": "`[css]`: the CSS pipeline. Imported CSS (`import './x.css'`, CSS\nModules) is part of the module graph and always bundled by the worker;\nthese keys shape how it and path-served stylesheets are processed.",
       "type": "object",
       "properties": {
         "critical_extraction": {
@@ -289,10 +316,12 @@
           "default": true
         },
         "enabled": {
+          "description": "Serve `app/*.css` files requested by path from a startup cache\nprocessed by Lightning CSS. false: they are not served that way.\nImported CSS is unaffected.",
           "type": "boolean",
           "default": true
         },
         "minify": {
+          "description": "Minify production CSS: path-served stylesheets (Lightning CSS) and\nthe bundled route stylesheets (esbuild). Development never minifies.\n`gio build standalone` bakes the route stylesheets at build time, so\nfor those the gio.toml the build reads is the one that counts.",
           "type": "boolean",
           "default": true
         }
@@ -348,6 +377,11 @@
       "properties": {
         "family": {
           "type": "string"
+        },
+        "preload": {
+          "description": "Preload the file from every page's head. false for fonts only used\nbelow the fold: the browser then fetches it when text needs it.",
+          "type": "boolean",
+          "default": true
         },
         "style": {
           "type": "string",
@@ -578,6 +612,11 @@
           "default": 536870912,
           "minimum": 0
         },
+        "enabled": {
+          "description": "Run the optimizer. false leaves `/_gio/image` unrouted (404) and\n`<GioImage>` renders its plain `src` without a srcset - for apps\nthat use an image CDN, or want no CPU-heavy endpoint.",
+          "type": "boolean",
+          "default": true
+        },
         "formats": {
           "description": "Modern formats to serve when the browser accepts them, in order of\npreference; everything else gets JPEG. Leave AVIF out to save CPU:\nit is several times slower to encode than WebP.",
           "type": "array",
@@ -589,11 +628,25 @@
             "$ref": "#/definitions/ImageFormat"
           }
         },
+        "max_decode_bytes": {
+          "description": "Most memory decoding one source may allocate, in bytes. 0 =\nunlimited.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 268435456,
+          "minimum": 0
+        },
         "max_remote_bytes": {
-          "description": "Largest remote source the optimizer downloads.",
+          "description": "Largest remote source the optimizer downloads, in bytes. 0 =\nunlimited.",
           "type": "integer",
           "format": "uint64",
           "default": 20971520,
+          "minimum": 0
+        },
+        "max_source_dimension": {
+          "description": "Largest source width or height the optimizer decodes, in pixels;\nlarger sources are a 500. 0 = unlimited.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 10000,
           "minimum": 0
         },
         "quality": {
@@ -610,6 +663,13 @@
           "items": {
             "$ref": "#/definitions/RemotePattern"
           }
+        },
+        "remote_timeout_secs": {
+          "description": "Deadline for downloading a whole remote source. 0 = none (the 5s\nconnect timeout still applies).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -675,15 +735,20 @@
       "description": "`[prefetch]`: per-client budgets for prefetch requests (`Purpose:\nprefetch`, sent by `<GioLink>`). Over budget is a 429, which the client\ntreats as \"not prefetched\". Which links prefetch is chosen per link.",
       "type": "object",
       "properties": {
+        "enabled": {
+          "description": "Answer prefetches at all. false answers every prefetch request 429\nbefore it renders, which turns prefetching off site-wide.",
+          "type": "boolean",
+          "default": true
+        },
         "max_concurrent": {
-          "description": "Prefetches one client may have in flight at once. 0 refuses all.",
+          "description": "Prefetches one client may have in flight at once. 0 = unlimited.",
           "type": "integer",
           "format": "uint",
           "default": 5,
           "minimum": 0
         },
         "max_per_second": {
-          "description": "Prefetches one client may start per second. 0 refuses all.",
+          "description": "Prefetches one client may start per second. 0 = unlimited.",
           "type": "integer",
           "format": "uint",
           "default": 20,
@@ -723,6 +788,13 @@
             "string",
             "null"
           ]
+        },
+        "max_keys_per_client": {
+          "description": "With `key_header`: distinct header values one client may hold a\nbudget for; past it they share the client's own bucket. 0 =\nunlimited (many API keys behind one NAT address).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 64,
+          "minimum": 0
         },
         "path": {
           "description": "Exact path, or a prefix with a trailing `*` (`/api/*` covers `/api`).",
@@ -976,6 +1048,20 @@
           ],
           "default": "x-forwarded"
         },
+        "rate_limit_max_buckets": {
+          "description": "Live `[[rate_limits]]` buckets kept across all rules and clients;\npast it refilled buckets are dropped, then the least recently seen.\n0 = unlimited.",
+          "type": "integer",
+          "format": "uint",
+          "default": 100000,
+          "minimum": 0
+        },
+        "render_timeout_secs": {
+          "description": "Deadline for the Node worker's answer: a whole buffered response,\nthe head of a streamed one, and every gap between its chunks.\nExceeded -> 504 (a streamed body is cut short). SSE streams are not\nbounded by it.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
         "request_body_timeout_secs": {
           "description": "Deadline for buffering a whole request body; exceeded -> 408.",
           "type": "integer",
@@ -1058,13 +1144,14 @@
           "default": true
         },
         "max_connections": {
-          "description": "Concurrent WebSocket connections.",
+          "description": "Concurrent WebSocket connections; past it new sockets are closed\nwith 1013 (try again later). 0 = unlimited.",
           "type": "integer",
           "format": "uint",
           "default": 1000,
           "minimum": 0
         },
         "ping_interval_secs": {
+          "description": "Ping every socket this often, so dead peers are noticed and closed.\n0 = no server pings.",
           "type": "integer",
           "format": "uint64",
           "default": 30,

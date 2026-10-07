@@ -578,6 +578,11 @@ pub struct RateLimitEntry {
     pub burst: u64,
     /// Key buckets on this request header's value instead of the client IP.
     pub key_header: Option<String>,
+    /// With `key_header`: distinct header values one client may hold a
+    /// budget for; past it they share the client's own bucket. 0 =
+    /// unlimited (many API keys behind one NAT address).
+    #[serde(default = "default_max_keys_per_client")]
+    pub max_keys_per_client: u64,
 }
 
 fn default_per_ip() -> u64 {
@@ -589,6 +594,9 @@ fn default_window_seconds() -> u64 {
 fn default_burst() -> u64 {
     20
 }
+fn default_max_keys_per_client() -> u64 {
+    giojs_ratelimit::DEFAULT_MAX_KEYS_PER_CLIENT
+}
 
 /// `[websocket]`: WebSocket routes (`route.ts` exporting `WS`).
 #[derive(Debug, Deserialize, Clone)]
@@ -597,9 +605,12 @@ fn default_burst() -> u64 {
 pub struct WebsocketConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Concurrent WebSocket connections.
+    /// Concurrent WebSocket connections; past it new sockets are closed
+    /// with 1013 (try again later). 0 = unlimited.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// Ping every socket this often, so dead peers are noticed and closed.
+    /// 0 = no server pings.
     #[serde(default = "default_ping_interval")]
     pub ping_interval_secs: u64,
 }
@@ -621,13 +632,22 @@ impl Default for WebsocketConfig {
     }
 }
 
-/// `[css]`: the Lightning CSS pipeline for app stylesheets.
+/// `[css]`: the CSS pipeline. Imported CSS (`import './x.css'`, CSS
+/// Modules) is part of the module graph and always bundled by the worker;
+/// these keys shape how it and path-served stylesheets are processed.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub struct CssConfig {
+    /// Serve `app/*.css` files requested by path from a startup cache
+    /// processed by Lightning CSS. false: they are not served that way.
+    /// Imported CSS is unaffected.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Minify production CSS: path-served stylesheets (Lightning CSS) and
+    /// the bundled route stylesheets (esbuild). Development never minifies.
+    /// `gio build standalone` bakes the route stylesheets at build time, so
+    /// for those the gio.toml the build reads is the one that counts.
     #[serde(default = "default_true")]
     pub minify: bool,
     /// Inline the CSS a page's first paint needs.
@@ -689,10 +709,14 @@ impl Default for CompressionConfig {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub struct PrefetchConfig {
-    /// Prefetches one client may have in flight at once. 0 refuses all.
+    /// Answer prefetches at all. false answers every prefetch request 429
+    /// before it renders, which turns prefetching off site-wide.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Prefetches one client may have in flight at once. 0 = unlimited.
     #[serde(default = "default_prefetch_max_concurrent")]
     pub max_concurrent: usize,
-    /// Prefetches one client may start per second. 0 refuses all.
+    /// Prefetches one client may start per second. 0 = unlimited.
     #[serde(default = "default_prefetch_max_per_second")]
     pub max_per_second: usize,
 }
@@ -707,6 +731,7 @@ fn default_prefetch_max_per_second() -> usize {
 impl Default for PrefetchConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             max_concurrent: default_prefetch_max_concurrent(),
             max_per_second: default_prefetch_max_per_second(),
         }
@@ -727,9 +752,19 @@ impl PrefetchConfig {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub struct CacheConfig {
-    /// Pages kept in the in-memory LRU; the disk cache holds the rest.
+    /// Store and serve pages that export `revalidate`. false renders every
+    /// request; Cache-Control still follows `revalidate`, so a CDN in front
+    /// can keep caching.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Pages kept in the in-memory LRU; the disk cache holds the rest. At
+    /// least 1 (`enabled = false` is the off switch).
     #[serde(default = "default_memory_max_entries")]
     pub memory_max_entries: std::num::NonZeroUsize,
+    /// Keep a disk tier behind the memory LRU (it also outlives restarts).
+    /// false: memory only, no files written.
+    #[serde(default = "default_true")]
+    pub disk_enabled: bool,
     /// Page cache directory, relative to the project root. GioJS only ever
     /// deletes its own entry files there (`<sha256>.json`), but a dedicated
     /// directory is clearer; it must not be, contain, or sit inside app/ or
@@ -743,6 +778,16 @@ pub struct CacheConfig {
     /// disables the bound.
     #[serde(default = "default_cache_disk_max_bytes")]
     pub disk_max_bytes: u64,
+    /// Send a weak ETag with cached pages and answer a matching
+    /// If-None-Match with 304. false: no page ETags and no 304s.
+    #[serde(default = "default_true")]
+    pub etag: bool,
+    /// A page stays servable stale (while one refresh runs) until it is
+    /// this many times its `revalidate` old; it also sizes the CDN
+    /// `stale-while-revalidate` window. 0 = never serve stale, and no
+    /// `stale-while-revalidate` directive.
+    #[serde(default = "default_cache_swr_multiplier")]
+    pub swr_multiplier: u64,
 }
 
 fn default_memory_max_entries() -> std::num::NonZeroUsize {
@@ -753,6 +798,9 @@ fn default_cache_disk_path() -> String {
 }
 fn default_cache_disk_max_bytes() -> u64 {
     512 * 1024 * 1024
+}
+fn default_cache_swr_multiplier() -> u64 {
+    10
 }
 
 /// `disk_path` must name a directory below the project root. Clearing and
@@ -791,9 +839,13 @@ fn cache_disk_path<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             memory_max_entries: default_memory_max_entries(),
+            disk_enabled: true,
             disk_path: default_cache_disk_path(),
             disk_max_bytes: default_cache_disk_max_bytes(),
+            etag: true,
+            swr_multiplier: default_cache_swr_multiplier(),
         }
     }
 }
@@ -882,6 +934,11 @@ pub enum ImageFormat {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ImageConfig {
+    /// Run the optimizer. false leaves `/_gio/image` unrouted (404) and
+    /// `<GioImage>` renders its plain `src` without a srcset - for apps
+    /// that use an image CDN, or want no CPU-heavy endpoint.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// The only widths `/_gio/image` resizes to (anything else is a 400),
     /// and the `<GioImage>` srcset candidates.
     #[serde(default = "default_allowed_widths")]
@@ -895,9 +952,22 @@ pub struct ImageConfig {
     /// On-disk optimized-image cache cap.
     #[serde(default = "default_image_disk_max_bytes")]
     pub disk_max_bytes: u64,
-    /// Largest remote source the optimizer downloads.
+    /// Largest remote source the optimizer downloads, in bytes. 0 =
+    /// unlimited.
     #[serde(default = "default_image_max_remote_bytes")]
     pub max_remote_bytes: u64,
+    /// Deadline for downloading a whole remote source. 0 = none (the 5s
+    /// connect timeout still applies).
+    #[serde(default = "default_image_remote_timeout_secs")]
+    pub remote_timeout_secs: u64,
+    /// Largest source width or height the optimizer decodes, in pixels;
+    /// larger sources are a 500. 0 = unlimited.
+    #[serde(default = "default_image_max_source_dimension")]
+    pub max_source_dimension: u32,
+    /// Most memory decoding one source may allocate, in bytes. 0 =
+    /// unlimited.
+    #[serde(default = "default_image_max_decode_bytes")]
+    pub max_decode_bytes: u64,
     /// Modern formats to serve when the browser accepts them, in order of
     /// preference; everything else gets JPEG. Leave AVIF out to save CPU:
     /// it is several times slower to encode than WebP.
@@ -923,6 +993,18 @@ fn default_image_max_remote_bytes() -> u64 {
     20 * 1024 * 1024
 }
 
+fn default_image_remote_timeout_secs() -> u64 {
+    giojs_image::DEFAULT_REMOTE_TIMEOUT.as_secs()
+}
+
+fn default_image_max_source_dimension() -> u32 {
+    giojs_image::processor::DEFAULT_MAX_SOURCE_DIMENSION
+}
+
+fn default_image_max_decode_bytes() -> u64 {
+    giojs_image::processor::DEFAULT_MAX_DECODE_BYTES
+}
+
 fn default_image_formats() -> Vec<ImageFormat> {
     vec![ImageFormat::Avif, ImageFormat::Webp]
 }
@@ -930,11 +1012,15 @@ fn default_image_formats() -> Vec<ImageFormat> {
 impl Default for ImageConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             allowed_widths: default_allowed_widths(),
             quality: default_image_quality(),
             remote_patterns: Vec::new(),
             disk_max_bytes: default_image_disk_max_bytes(),
             max_remote_bytes: default_image_max_remote_bytes(),
+            remote_timeout_secs: default_image_remote_timeout_secs(),
+            max_source_dimension: default_image_max_source_dimension(),
+            max_decode_bytes: default_image_max_decode_bytes(),
             formats: default_image_formats(),
         }
     }
@@ -943,19 +1029,31 @@ impl Default for ImageConfig {
 /// Env var the Node worker reads its `[images]` settings from.
 pub const WORKER_IMAGE_CONFIG_ENV: &str = "GIO_IMAGE_CONFIG";
 
+/// Env var the Node worker reads its `[css]` settings from.
+pub const WORKER_CSS_CONFIG_ENV: &str = "GIO_CSS_CONFIG";
+
 /// Worker env vars whose values change the rendered HTML. They are hashed
 /// into the derived deployment ID, so a restart with different values never
 /// serves persisted pages rendered with the old ones. Never list a secret or
 /// a per-boot value here: the ID is public, and must stay stable across
 /// restarts of the same build and config.
-pub const WORKER_RENDER_SETTINGS_ENV: &[&str] = &[WORKER_IMAGE_CONFIG_ENV];
+pub const WORKER_RENDER_SETTINGS_ENV: &[&str] = &[WORKER_IMAGE_CONFIG_ENV, WORKER_CSS_CONFIG_ENV];
+
+impl CssConfig {
+    /// The `[css]` settings the worker's stylesheet build follows, as JSON:
+    /// `minify`. The others are the server's own (path-served stylesheets,
+    /// critical CSS inlining).
+    pub fn worker_json(&self) -> String {
+        serde_json::json!({ "minify": self.minify }).to_string()
+    }
+}
 
 impl ImageConfig {
     /// The `[images]` settings `<GioImage>` renders with, as JSON for the
     /// worker: srcset candidates must be widths `/_gio/image` accepts (any
     /// other width is a 400), and the default quality matches the
     /// optimizer's. Widths are sorted and deduplicated; 0 is never a usable
-    /// candidate.
+    /// candidate. `enabled: false` (no optimizer) renders plain `src`.
     pub fn worker_json(&self) -> String {
         let mut widths: Vec<u32> = self
             .allowed_widths
@@ -966,10 +1064,24 @@ impl ImageConfig {
         widths.sort_unstable();
         widths.dedup();
         serde_json::json!({
+            "enabled": self.enabled,
             "widths": widths,
             "quality": self.quality.clamp(1, 100),
         })
         .to_string()
+    }
+
+    /// The optimizer's decoder bounds (`max_source_dimension`,
+    /// `max_decode_bytes`; 0 lifts one).
+    pub fn decode_limits(&self) -> giojs_image::processor::DecodeLimits {
+        giojs_image::processor::DecodeLimits {
+            max_dimension: self.max_source_dimension,
+            max_alloc_bytes: self.max_decode_bytes,
+        }
+    }
+
+    pub fn remote_timeout(&self) -> Option<std::time::Duration> {
+        secs(self.remote_timeout_secs)
     }
 
     /// `formats` as the optimizer's negotiation order, duplicates dropped.
@@ -1000,6 +1112,10 @@ pub struct FontEntry {
     pub weight: u16,
     #[serde(default = "default_font_style")]
     pub style: String,
+    /// Preload the file from every page's head. false for fonts only used
+    /// below the fold: the browser then fetches it when text needs it.
+    #[serde(default = "default_true")]
+    pub preload: bool,
 }
 
 fn default_font_weight() -> u16 {
@@ -1065,6 +1181,12 @@ pub struct ServerConfig {
     /// Deadline for buffering a whole request body; exceeded -> 408.
     #[serde(default = "default_request_body_timeout_secs")]
     pub request_body_timeout_secs: u64,
+    /// Deadline for the Node worker's answer: a whole buffered response,
+    /// the head of a streamed one, and every gap between its chunks.
+    /// Exceeded -> 504 (a streamed body is cut short). SSE streams are not
+    /// bounded by it.
+    #[serde(default = "default_render_timeout_secs")]
+    pub render_timeout_secs: u64,
     /// Close connections with no request in flight for this long (HTTP/2
     /// mainly; HTTP/1.1 idles are usually reaped by header_read_timeout_secs
     /// first). Streaming and SSE responses count as in flight.
@@ -1102,6 +1224,11 @@ pub struct ServerConfig {
     #[serde(default)]
     #[cfg_attr(test, schemars(with = "WorkersSchema"))]
     pub workers: WorkersSetting,
+    /// Live `[[rate_limits]]` buckets kept across all rules and clients;
+    /// past it refilled buckets are dropped, then the least recently seen.
+    /// 0 = unlimited.
+    #[serde(default = "default_rate_limit_max_buckets")]
+    pub rate_limit_max_buckets: usize,
     #[serde(default)]
     pub tls: TlsConfig,
 }
@@ -1212,6 +1339,10 @@ fn default_http2() -> bool {
     true
 }
 
+fn default_rate_limit_max_buckets() -> usize {
+    giojs_ratelimit::DEFAULT_MAX_BUCKETS
+}
+
 fn default_accept_request_id() -> bool {
     true
 }
@@ -1231,6 +1362,9 @@ fn default_header_read_timeout_secs() -> u64 {
 }
 fn default_request_body_timeout_secs() -> u64 {
     30
+}
+fn default_render_timeout_secs() -> u64 {
+    crate::ipc::DEFAULT_RENDER_TIMEOUT.as_secs()
 }
 fn default_idle_timeout_secs() -> u64 {
     60
@@ -1262,6 +1396,9 @@ impl ServerConfig {
     }
     pub fn idle_timeout(&self) -> Option<std::time::Duration> {
         secs(self.idle_timeout_secs)
+    }
+    pub fn render_timeout(&self) -> Option<std::time::Duration> {
+        secs(self.render_timeout_secs)
     }
     /// (interval, ack timeout), or None when either is 0: a ping without an
     /// ack deadline reaps nothing.
@@ -1301,6 +1438,7 @@ impl Default for ServerConfig {
             tls_handshake_timeout_secs: default_tls_handshake_timeout_secs(),
             header_read_timeout_secs: default_header_read_timeout_secs(),
             request_body_timeout_secs: default_request_body_timeout_secs(),
+            render_timeout_secs: default_render_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
             http2_max_concurrent_streams: default_http2_max_concurrent_streams(),
             http2_keep_alive_interval_secs: default_http2_keep_alive_interval_secs(),
@@ -1310,6 +1448,7 @@ impl Default for ServerConfig {
             accept_request_id: default_accept_request_id(),
             skew_protection: true,
             workers: WorkersSetting::default(),
+            rate_limit_max_buckets: default_rate_limit_max_buckets(),
             tls: TlsConfig::default(),
         }
     }
@@ -1690,13 +1829,78 @@ mod tests {
             serde_json::from_str(&result.unwrap().images.worker_json()).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "widths": [640, 828, 1200], "quality": 80 })
+            serde_json::json!({ "enabled": true, "widths": [640, 828, 1200], "quality": 80 })
         );
 
         let defaults: serde_json::Value =
             serde_json::from_str(&ImageConfig::default().worker_json()).unwrap();
         assert_eq!(defaults["widths"].as_array().unwrap().len(), 16);
         assert_eq!(defaults["quality"], 75);
+        assert_eq!(defaults["enabled"], true);
+    }
+
+    #[test]
+    fn images_can_be_turned_off_and_their_limits_lifted() {
+        let off = parse("[images]\nenabled = false\n").unwrap().images;
+        assert!(!off.enabled);
+        let json: serde_json::Value = serde_json::from_str(&off.worker_json()).unwrap();
+        assert_eq!(json["enabled"], false, "the worker renders plain src");
+
+        let defaults = parse("").unwrap().images;
+        assert!(defaults.enabled);
+        assert_eq!(defaults.remote_timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(
+            defaults.decode_limits(),
+            giojs_image::processor::DecodeLimits::default()
+        );
+        assert_eq!(defaults.max_source_dimension, 10_000);
+        assert_eq!(defaults.max_decode_bytes, 268_435_456);
+
+        let lifted = parse(
+            "[images]\nmax_remote_bytes = 0\nremote_timeout_secs = 0\n\
+             max_source_dimension = 0\nmax_decode_bytes = 0\n",
+        )
+        .unwrap()
+        .images;
+        assert_eq!(lifted.max_remote_bytes, 0);
+        assert_eq!(lifted.remote_timeout(), None);
+        assert_eq!(
+            lifted.decode_limits(),
+            giojs_image::processor::DecodeLimits {
+                max_dimension: 0,
+                max_alloc_bytes: 0,
+            }
+        );
+        let raised = parse("[images]\nmax_source_dimension = 20000\nremote_timeout_secs = 5\n")
+            .unwrap()
+            .images;
+        assert_eq!(raised.decode_limits().max_dimension, 20_000);
+        assert_eq!(raised.remote_timeout(), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn css_worker_json_carries_minify_and_feeds_the_deployment_id() {
+        let defaults: serde_json::Value =
+            serde_json::from_str(&parse("").unwrap().css.worker_json()).unwrap();
+        assert_eq!(defaults, serde_json::json!({ "minify": true }));
+        let unminified = parse("[css]\nminify = false\n").unwrap().css;
+        let json: serde_json::Value = serde_json::from_str(&unminified.worker_json()).unwrap();
+        assert_eq!(json, serde_json::json!({ "minify": false }));
+        // It changes the stylesheets pages link, so persisted pages must not
+        // outlive a change to it.
+        assert!(WORKER_RENDER_SETTINGS_ENV.contains(&WORKER_CSS_CONFIG_ENV));
+    }
+
+    #[test]
+    fn fonts_preload_by_default_and_per_entry_opt_out() {
+        let fonts = parse(
+            "[[fonts]]\nfamily = \"Inter\"\nurl = \"/fonts/inter.woff2\"\n\n\
+             [[fonts]]\nfamily = \"Serif\"\nurl = \"/fonts/serif.woff2\"\npreload = false\n",
+        )
+        .unwrap()
+        .fonts;
+        assert!(fonts[0].preload);
+        assert!(!fonts[1].preload);
     }
 
     #[test]
@@ -1796,6 +2000,7 @@ mod tests {
         );
         assert_eq!(server.header_read_timeout(), Some(Duration::from_secs(10)));
         assert_eq!(server.request_body_timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(server.render_timeout(), Some(Duration::from_secs(30)));
         assert_eq!(server.idle_timeout(), Some(Duration::from_secs(60)));
         assert_eq!(server.http2_max_concurrent_streams, 250);
         assert_eq!(
@@ -1807,6 +2012,7 @@ mod tests {
         assert_eq!(fallback.max_connections, server.max_connections);
         assert_eq!(fallback.header_read_timeout(), server.header_read_timeout());
         assert_eq!(fallback.idle_timeout(), server.idle_timeout());
+        assert_eq!(fallback.render_timeout(), server.render_timeout());
         assert_eq!(fallback.http2_keep_alive(), server.http2_keep_alive());
     }
 
@@ -1823,6 +2029,7 @@ max_connections = 64
 tls_handshake_timeout_secs = 0
 header_read_timeout_secs = 2
 request_body_timeout_secs = 0
+render_timeout_secs = 0
 idle_timeout_secs = 5
 http2_max_concurrent_streams = 16
 http2_keep_alive_interval_secs = 7
@@ -1837,6 +2044,7 @@ http2_keep_alive_timeout_secs = 0
         assert_eq!(server.tls_handshake_timeout(), None);
         assert_eq!(server.header_read_timeout(), Some(Duration::from_secs(2)));
         assert_eq!(server.request_body_timeout(), None);
+        assert_eq!(server.render_timeout(), None);
         assert_eq!(server.idle_timeout(), Some(Duration::from_secs(5)));
         assert_eq!(server.http2_max_concurrent_streams, 16);
         assert_eq!(
@@ -1900,6 +2108,21 @@ redirect_to    = "/"
         let bundle = config.middleware_rules();
         assert_eq!(bundle.redirects.len(), 2);
         assert_eq!(bundle.guards.len(), 1);
+    }
+
+    #[test]
+    fn rate_limiter_caps_default_and_zero_lifts_them() {
+        let defaults =
+            parse("[[rate_limits]]\npath = \"/api/*\"\nkey_header = \"x-api-key\"\n").unwrap();
+        assert_eq!(defaults.server.rate_limit_max_buckets, 100_000);
+        assert_eq!(defaults.rate_limits[0].max_keys_per_client, 64);
+        let lifted = parse(
+            "[server]\nrate_limit_max_buckets = 0\n\n\
+             [[rate_limits]]\npath = \"/api/*\"\nkey_header = \"x-api-key\"\nmax_keys_per_client = 0\n",
+        )
+        .unwrap();
+        assert_eq!(lifted.server.rate_limit_max_buckets, 0);
+        assert_eq!(lifted.rate_limits[0].max_keys_per_client, 0);
     }
 
     #[test]
@@ -2591,6 +2814,25 @@ check_origin = true
             !enforced.try_acquire(ip),
             "a third concurrent prefetch is over budget"
         );
+        assert!(parse("").unwrap().prefetch.enabled);
+    }
+
+    #[test]
+    fn prefetch_can_be_turned_off_and_zero_budgets_are_unlimited() {
+        let off = parse("[prefetch]\nenabled = false\n").unwrap().prefetch;
+        assert!(!off.enabled);
+        assert_eq!(off.max_concurrent, 5, "the budgets keep their defaults");
+
+        // 0 = unlimited, like every [server] limit: it used to refuse all.
+        let budgets = parse("[prefetch]\nmax_concurrent = 0\nmax_per_second = 0\n")
+            .unwrap()
+            .prefetch
+            .budgets();
+        let unlimited = giojs_prefetch::PrefetchBudgets::new(budgets);
+        let ip: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        for _ in 0..100 {
+            assert!(unlimited.try_acquire(ip));
+        }
     }
 
     #[test]
@@ -2615,6 +2857,22 @@ check_origin = true
             std::path::PathBuf::from("/tmp/gio-pages")
         );
         assert_eq!(cache.disk_dir(root, Some("")), root.join("var/pages"));
+    }
+
+    #[test]
+    fn cache_switches_default_on_and_turn_off() {
+        let defaults = parse("").unwrap().cache;
+        assert!(defaults.enabled && defaults.disk_enabled && defaults.etag);
+        assert_eq!(defaults.swr_multiplier, 10);
+        let off = parse(
+            "[cache]\nenabled = false\ndisk_enabled = false\netag = false\nswr_multiplier = 0\n",
+        )
+        .unwrap()
+        .cache;
+        assert!(!off.enabled && !off.disk_enabled && !off.etag);
+        assert_eq!(off.swr_multiplier, 0);
+        // enabled is the off switch; an empty LRU is still refused.
+        assert!(parse("[cache]\nmemory_max_entries = 0\n").is_err());
     }
 
     #[test]

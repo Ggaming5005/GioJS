@@ -145,15 +145,17 @@ fn entry_age_secs(entry: &CacheEntry) -> u64 {
         .as_secs()
 }
 
-/// Stale entries keep serving (while one refresh runs) until they are this
-/// many times `max_age` old. Also sizes the CDN stale-while-revalidate window.
-const CACHE_SWR_MULTIPLIER: u64 = 10;
-
 /// How browsers and CDNs may cache a page response the pipeline built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PageCachePolicy {
     /// A shareable cached render, `age_secs` into its `max_age_secs` life.
-    Shared { max_age_secs: u64, age_secs: u64 },
+    /// Stale entries keep serving (while one refresh runs) until they are
+    /// `swr_multiplier` times `max_age_secs` old (`[cache] swr_multiplier`).
+    Shared {
+        max_age_secs: u64,
+        age_secs: u64,
+        swr_multiplier: u64,
+    },
     /// Personal or uncacheable - and every PPR response: its holes are
     /// rendered with the visitor's cookies.
     Private,
@@ -162,16 +164,26 @@ enum PageCachePolicy {
 /// The Cache-Control value for `policy`. A shared page is CDN-fresh for what
 /// is left of its revalidate window, CDN-servable stale (while it refreshes)
 /// for what is left of the SWR window, and always revalidated by browsers
-/// (max-age=0). Personal pages are `private, no-cache` - never `no-store`,
-/// which would disable the back/forward cache.
+/// (max-age=0). Without an SWR window (`swr_multiplier = 0`) there is no
+/// stale-while-revalidate directive. Personal pages are `private, no-cache`
+/// - never `no-store`, which would disable the back/forward cache.
 fn page_cache_control(policy: PageCachePolicy) -> String {
     match policy {
         PageCachePolicy::Shared {
             max_age_secs,
             age_secs,
+            swr_multiplier: 0,
         } => {
             let fresh = max_age_secs.saturating_sub(age_secs);
-            let swr_end = max_age_secs.saturating_mul(CACHE_SWR_MULTIPLIER);
+            format!("public, max-age=0, s-maxage={fresh}")
+        }
+        PageCachePolicy::Shared {
+            max_age_secs,
+            age_secs,
+            swr_multiplier,
+        } => {
+            let fresh = max_age_secs.saturating_sub(age_secs);
+            let swr_end = max_age_secs.saturating_mul(swr_multiplier);
             let swr = swr_end.saturating_sub(age_secs.max(max_age_secs));
             format!("public, max-age=0, s-maxage={fresh}, stale-while-revalidate={swr}")
         }
@@ -259,6 +271,13 @@ fn shared_cache_audience(req: &Request) -> bool {
     req.extensions().get::<HeaderNegotiatedLocale>().is_none()
         && req.extensions().get::<GuardAdmitted>().is_none()
         && !req.headers().contains_key(header::AUTHORIZATION)
+}
+
+/// Whether a page answer may carry its ETag (and so turn into a 304):
+/// `[cache] etag` is on, the URL serves one audience (`shared_cache_audience`)
+/// and no CSP nonces make every body unique.
+fn page_etags_allowed(etag_switch: bool, shared_audience: bool, csp_nonces: bool) -> bool {
+    etag_switch && shared_audience && !csp_nonces
 }
 
 /// If-None-Match evaluation (RFC 9110 weak comparison, as the header
@@ -450,10 +469,15 @@ struct AppState {
     coalesce: Arc<SingleFlight<CoalescedRender>>,
     revalidating: Arc<dashmap::DashSet<String>>,
     prefetch: Arc<PrefetchBudgets>,
+    /// `[prefetch] enabled`: false answers every prefetch 429.
+    prefetch_enabled: bool,
     font_snippets: Arc<Vec<String>>,
     image: Arc<giojs_image::ImageHandler>,
     css_cache: Arc<css_assets::CssCache>,
     css_config: config::CssConfig,
+    /// `[cache]`: page ETags and the stale window (the switches the cache
+    /// itself does not hold).
+    cache_config: config::CacheConfig,
     http2: bool,
     tls_enabled: bool,
     /// `[server] max_body_bytes`, with 0 resolved to the IPC frame cap.
@@ -557,10 +581,17 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     // the HTML depends on are listed in config::WORKER_RENDER_SETTINGS_ENV,
     // which hashes them into the derived deployment ID: changing them drops
     // persisted pages.
-    let worker_env = vec![(
-        config::WORKER_IMAGE_CONFIG_ENV.to_string(),
-        cfg.images.worker_json(),
-    )];
+    let worker_env = vec![
+        (
+            config::WORKER_IMAGE_CONFIG_ENV.to_string(),
+            cfg.images.worker_json(),
+        ),
+        // [css] minify reaches the worker's esbuild stylesheet build too.
+        (
+            config::WORKER_CSS_CONFIG_ENV.to_string(),
+            cfg.css.worker_json(),
+        ),
+    ];
 
     // Every refusal that depends on more than gio.toml's syntax, before
     // anything is created or spawned. Shared with --check-config, so the
@@ -580,6 +611,11 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
+    ipc::set_render_timeout(cfg.server.render_timeout());
+    // Protections gio.toml turns off or loosens: allowed, never silent.
+    for warning in config_check::protections_off_warnings(&cfg) {
+        warn!("{warning}");
+    }
     let config_check::StartupEnv {
         app_dir,
         public_dir,
@@ -616,17 +652,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         files
     };
 
-    let font_snippets: Vec<String> = font_files
-        .iter()
-        .map(|file| format!(
-            r#"<link rel="preload" href="/_gio/fonts/{file}" as="font" type="font/woff2" crossorigin>"#
-        ))
-        .chain(if font_entries.is_empty() {
-            None
-        } else {
-            Some(r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string())
-        })
-        .collect();
+    let font_snippets = font_head_snippets(&cfg.fonts, &font_files);
 
     // Everything the deployment ID covers besides the build the worker is
     // about to produce: the worker's render settings, and what the server
@@ -703,11 +729,18 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         security::cache_epoch(ipc.deployment_id(), nonce_placeholder.as_deref()).into();
 
     let cache = Arc::new(PageCache::new(CacheConfig {
+        enabled: cfg.cache.enabled,
         memory_max_entries: cfg.cache.memory_max_entries,
+        disk_enabled: cfg.cache.disk_enabled,
         disk_dir: cache_dir.clone(),
-        swr_multiplier: CACHE_SWR_MULTIPLIER,
+        swr_multiplier: cfg.cache.swr_multiplier,
         disk_max_bytes: cfg.cache.disk_max_bytes,
     }));
+    if !cfg.cache.enabled {
+        info!("page cache disabled ([cache] enabled = false): every request renders");
+    } else if !cfg.cache.disk_enabled {
+        info!("page cache is memory only ([cache] disk_enabled = false)");
+    }
 
     // Index what a previous run left on disk so tag and path purges reach
     // it. In the background: lookups stay correct while it runs.
@@ -737,7 +770,11 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let image_cache_dir = std::env::var("GIO_IMAGE_CACHE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/cache/images"));
-    tokio::fs::create_dir_all(&image_cache_dir).await?;
+    if cfg.images.enabled {
+        tokio::fs::create_dir_all(&image_cache_dir).await?;
+    } else {
+        info!("image optimizer disabled ([images] enabled = false): /_gio/image is not routed");
+    }
 
     let image_config = giojs_image::ImageConfig {
         allowed_widths: cfg.images.allowed_widths.clone(),
@@ -757,7 +794,9 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         giojs_image::ImageHandler::new(image_config, image_cache_dir, public_dir.clone())
             .with_disk_max_bytes(cfg.images.disk_max_bytes)
             .with_formats(cfg.images.negotiated_formats())
-            .with_max_remote_bytes(cfg.images.max_remote_bytes),
+            .with_max_remote_bytes(cfg.images.max_remote_bytes)
+            .with_remote_timeout(cfg.images.remote_timeout())
+            .with_decode_limits(cfg.images.decode_limits()),
     );
 
     let http2 = cfg.server.http2;
@@ -818,10 +857,14 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
                 window_seconds: e.window_seconds,
                 burst: e.burst,
                 key_header: e.key_header.clone(),
+                max_keys_per_client: e.max_keys_per_client,
             })
             .collect();
         info!("Rate limiting enabled: {} rule(s)", rules.len());
-        let rl = Arc::new(RateLimiter::new(rules));
+        let rl = Arc::new(RateLimiter::with_max_buckets(
+            rules,
+            cfg.server.rate_limit_max_buckets,
+        ));
         let rl_evict = rl.clone();
         tokio::spawn(async move {
             loop {
@@ -890,10 +933,12 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         coalesce: Arc::new(SingleFlight::new()),
         revalidating: Arc::new(dashmap::DashSet::new()),
         prefetch,
+        prefetch_enabled: cfg.prefetch.enabled,
         font_snippets: Arc::new(font_snippets),
         image: image_handler,
         css_cache,
         css_config,
+        cache_config: cfg.cache.clone(),
         http2,
         tls_enabled,
         max_body_bytes: cfg.server.body_limit(),
@@ -1026,11 +1071,15 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let compression = compression_layer(cfg.compression);
 
     let mut app = Router::new()
-        .route("/_gio/metrics", get(metrics_handler))
-        .route("/_gio/image", get(image_handler_route));
+        .route("/_gio/metrics", get(metrics_handler));
     // `[health] enabled = false`: an unrouted /_gio path, so a 404.
     if cfg.health.enabled {
         app = app.route("/_gio/health", get(health_handler));
+    }
+    // Unrouted while off: /_gio/image then answers 404 like any unknown
+    // /_gio path.
+    if cfg.images.enabled {
+        app = app.route("/_gio/image", get(image_handler_route));
     }
     // Without a token the route does not exist: /_gio/revalidate is then an
     // unrouted /_gio path and answers 404 like any other.
@@ -1630,12 +1679,42 @@ async fn prefetch_budget_middleware(
         return next.run(req).await;
     }
     let ip = client_identity::client_ip(&req, addr);
-    let Some(_slot) = PrefetchSlot::acquire(&state.prefetch, ip) else {
-        warn!(ip = %ip, path = %req.uri().path(), "prefetch budget exceeded");
-        state.metrics.record_prefetch_rejected();
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    let _slot = match admit_prefetch(state.prefetch_enabled, &state.prefetch, ip) {
+        PrefetchAdmission::Admitted(slot) => slot,
+        PrefetchAdmission::Disabled => {
+            state.metrics.record_prefetch_rejected();
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+        PrefetchAdmission::OverBudget => {
+            warn!(ip = %ip, path = %req.uri().path(), "prefetch budget exceeded");
+            state.metrics.record_prefetch_rejected();
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
     };
     next.run(req).await
+}
+
+/// What happens to one prefetch request. Both refusals are a 429 the
+/// client reads as "not prefetched"; only an exceeded budget is logged.
+enum PrefetchAdmission {
+    Admitted(PrefetchSlot),
+    /// `[prefetch] enabled = false`: refused before anything renders.
+    Disabled,
+    OverBudget,
+}
+
+fn admit_prefetch(
+    enabled: bool,
+    budgets: &Arc<PrefetchBudgets>,
+    ip: std::net::IpAddr,
+) -> PrefetchAdmission {
+    if !enabled {
+        return PrefetchAdmission::Disabled;
+    }
+    match PrefetchSlot::acquire(budgets, ip) {
+        Some(slot) => PrefetchAdmission::Admitted(slot),
+        None => PrefetchAdmission::OverBudget,
+    }
 }
 
 /// One in-flight prefetch, released when dropped: when the response is
@@ -2161,8 +2240,12 @@ async fn dynamic_handler(
         .unwrap_or_default();
     // A hit's ETag must stand for one body under this URL, for everyone:
     // not for a URL with several audiences, and not with CSP nonces (unique
-    // per body).
-    let etag_allowed = shared_audience && security::nonce_placeholder().is_none();
+    // per body). `[cache] etag = false` sends none at all.
+    let etag_allowed = page_etags_allowed(
+        state.cache_config.etag,
+        shared_audience,
+        security::nonce_placeholder().is_some(),
+    );
     let if_none_match = req.headers().get(header::IF_NONE_MATCH).cloned();
     // Nothing under /_gio belongs to the app. path_hygiene_middleware already
     // 404s unrouted /_gio requests; this also covers paths that only land in
@@ -2351,6 +2434,7 @@ async fn dynamic_handler(
             let policy = PageCachePolicy::Shared {
                 max_age_secs: entry.max_age_secs,
                 age_secs,
+                swr_multiplier: state.cache_config.swr_multiplier,
             };
             let route = entry.route.clone();
             let etag = entry.etag.clone().filter(|_| {
@@ -2397,6 +2481,7 @@ async fn dynamic_handler(
             let policy = PageCachePolicy::Shared {
                 max_age_secs: entry.max_age_secs,
                 age_secs,
+                swr_multiplier: state.cache_config.swr_multiplier,
             };
             let route = entry.route.clone();
             let etag = entry.etag.clone().filter(|_| {
@@ -2615,12 +2700,22 @@ async fn dynamic_handler(
                 &state.css_config,
                 dev_mode,
             );
-            insert_cache_status_header(&mut resp_out, "miss; stored");
+            // `[cache] enabled = false` stored nothing: a shareable page
+            // nobody will hit again here, still public for CDNs.
+            insert_cache_status_header(
+                &mut resp_out,
+                if state.cache.is_enabled() {
+                    "miss; stored"
+                } else {
+                    "bypass"
+                },
+            );
             apply_page_cache_control(
                 &mut resp_out,
                 PageCachePolicy::Shared {
                     max_age_secs: page.max_age_secs,
                     age_secs: 0,
+                    swr_multiplier: state.cache_config.swr_multiplier,
                 },
             );
             let etag_servable =
@@ -2930,7 +3025,10 @@ async fn respond_from_render(
     locale: &str,
     start: std::time::Instant,
 ) -> Response {
-    let will_cache = render_is_shareable(&resp) && matches!(method, "GET" | "HEAD");
+    let shareable = render_is_shareable(&resp) && matches!(method, "GET" | "HEAD");
+    // `[cache] enabled = false`: a shareable page keeps its public
+    // Cache-Control (CDNs may still cache it) but is not stored here.
+    let will_cache = shareable && state.cache.is_enabled();
     let (body, composed) = if will_cache {
         compose_for_cache(
             state,
@@ -2994,10 +3092,11 @@ async fn respond_from_render(
     if !resp.route_handler {
         apply_page_cache_control(
             &mut resp_out,
-            if will_cache {
+            if shareable {
                 PageCachePolicy::Shared {
                     max_age_secs: resp.cache_max_age,
                     age_secs: 0,
+                    swr_multiplier: state.cache_config.swr_multiplier,
                 }
             } else {
                 PageCachePolicy::Private
@@ -3180,8 +3279,11 @@ fn respond_stream(
         stream_inject::StreamInjector::passthrough()
     };
 
-    let capture_shell =
-        response.ppr_shell && is_html && method == "GET" && render_is_shareable(&response);
+    let capture_shell = response.ppr_shell
+        && is_html
+        && method == "GET"
+        && render_is_shareable(&response)
+        && state.cache.is_enabled();
     let shell_capture = capture_shell.then(|| PprShellCapture {
         raw: BytesMut::new(),
         overflowed: false,
@@ -3204,8 +3306,9 @@ fn respond_stream(
         req_id: response.id.clone(),
         ipc: state.ipc.clone(),
         injector,
-        idle: has_render_idle_gap(&response)
-            .then(|| Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT))),
+        idle: ipc::render_timeout()
+            .filter(|_| has_render_idle_gap(&response))
+            .map(IdleDeadline::new),
         done: false,
         shell_capture,
         span: tracing::Span::current(),
@@ -3315,6 +3418,9 @@ async fn store_fill(
     fill_ticket: FillTicket,
     path: &str,
 ) {
+    if !cache.is_enabled() {
+        return;
+    }
     match cache.put_fresh(cache_key, entry, fill_ticket).await {
         Ok(true) => {}
         Ok(false) => {
@@ -3402,6 +3508,33 @@ impl PprShellCapture {
     }
 }
 
+/// The idle-gap deadline of a streamed body: `period` (`[server]
+/// render_timeout_secs`) after the last frame.
+struct IdleDeadline {
+    period: Duration,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl IdleDeadline {
+    fn new(period: Duration) -> Self {
+        Self {
+            period,
+            sleep: Box::pin(tokio::time::sleep(period)),
+        }
+    }
+
+    /// A frame arrived: the gap starts over.
+    fn reset(&mut self) {
+        self.sleep
+            .as_mut()
+            .reset(tokio::time::Instant::now() + self.period);
+    }
+
+    fn poll_elapsed(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        self.sleep.as_mut().poll(cx)
+    }
+}
+
 /// Chunked HTML body fed by the IPC reader loop. The head frame already
 /// consumed the request timeout budget; from here on an idle gap between
 /// chunks longer than the same budget ends the body (headers are sent, so
@@ -3411,8 +3544,9 @@ struct RenderBodyStream {
     req_id: String,
     ipc: Arc<IpcClient>,
     injector: stream_inject::StreamInjector,
-    /// Idle-gap deadline, reset per frame; None for route.ts bodies.
-    idle: Option<Pin<Box<tokio::time::Sleep>>>,
+    /// Idle-gap deadline, reset per frame; None for route.ts bodies and
+    /// with `[server] render_timeout_secs = 0`.
+    idle: Option<IdleDeadline>,
     done: bool,
     /// Set on PPR miss renders; a stream ending without shell_end drops the
     /// capture unstored, so an aborted render can never cache a torn shell.
@@ -3445,8 +3579,7 @@ impl Stream for RenderBodyStream {
             match this.inner.poll_recv(cx) {
                 Poll::Ready(Some(RenderFrame::Chunk(bytes))) => {
                     if let Some(idle) = this.idle.as_mut() {
-                        idle.as_mut()
-                            .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                        idle.reset();
                     }
                     if let Some(capture) = this.shell_capture.as_mut() {
                         capture.absorb(&bytes);
@@ -3458,8 +3591,7 @@ impl Stream for RenderBodyStream {
                 }
                 Poll::Ready(Some(RenderFrame::ShellEnd)) => {
                     if let Some(idle) = this.idle.as_mut() {
-                        idle.as_mut()
-                            .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                        idle.reset();
                     }
                     if let Some(capture) = this.shell_capture.take() {
                         capture.store();
@@ -3476,7 +3608,7 @@ impl Stream for RenderBodyStream {
                     if this
                         .idle
                         .as_mut()
-                        .is_some_and(|idle| idle.as_mut().poll(cx).is_ready())
+                        .is_some_and(|idle| idle.poll_elapsed(cx).is_ready())
                     {
                         warn!(id = %this.req_id, "streaming render idle-gap timeout - truncating body");
                         this.done = true;
@@ -3590,7 +3722,7 @@ async fn feed_ppr_holes(
             response,
             mut body_rx,
         }) => loop {
-            match tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT, body_rx.recv()).await {
+            match ipc::within(ipc::render_timeout(), body_rx.recv()).await {
                 Ok(Some(RenderFrame::Chunk(bytes))) => {
                     if tx.send(bytes).is_err() {
                         // Client went away mid-holes: stop the render.
@@ -5198,7 +5330,7 @@ async fn collect_ppr_shell(
 ) -> Option<Bytes> {
     let mut raw = BytesMut::new();
     loop {
-        match tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT, body_rx.recv()).await {
+        match ipc::within(ipc::render_timeout(), body_rx.recv()).await {
             Ok(Some(RenderFrame::Chunk(bytes))) => {
                 if raw.len() + bytes.len() > MAX_PPR_SHELL_BYTES {
                     return None;
@@ -5210,6 +5342,26 @@ async fn collect_ppr_shell(
             Err(_) => return None,
         }
     }
+}
+
+/// The head links for the served fonts (`files`, one per `[[fonts]]`
+/// entry): a preload per font whose entry keeps `preload = true`, then the
+/// @font-face stylesheet.
+fn font_head_snippets(fonts: &[config::FontEntry], files: &[String]) -> Vec<String> {
+    fonts
+        .iter()
+        .zip(files)
+        .filter(|(font, _)| font.preload)
+        .map(|(_, file)| {
+            format!(
+                r#"<link rel="preload" href="/_gio/fonts/{file}" as="font" type="font/woff2" crossorigin>"#
+            )
+        })
+        .chain(
+            (!fonts.is_empty())
+                .then(|| r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string()),
+        )
+        .collect()
 }
 
 /// How many Node workers render: `[server] workers`, except that dev mode
@@ -6028,6 +6180,7 @@ mod tests {
             disk_dir: dir.clone(),
             swr_multiplier: 1,
             disk_max_bytes: u64::MAX,
+            ..giojs_cache::CacheConfig::default()
         });
         // Simulates a stale render landing after the pre-restart clear.
         cache
@@ -6143,6 +6296,7 @@ mod tests {
             window_seconds: 3600,
             burst: 0,
             key_header: None,
+            max_keys_per_client: giojs_ratelimit::DEFAULT_MAX_KEYS_PER_CLIENT,
         }]);
         let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
         let headers = HashMap::new();
@@ -6778,6 +6932,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fonts_with_preload_off_get_no_preload_link() {
+        let font = |family: &str, preload: bool| config::FontEntry {
+            family: family.to_string(),
+            url: format!("/fonts/{family}.woff2"),
+            weight: 400,
+            style: "normal".to_string(),
+            preload,
+        };
+        let files = vec!["inter-1.woff2".to_string(), "serif-2.woff2".to_string()];
+        assert_eq!(
+            font_head_snippets(&[font("inter", true), font("serif", false)], &files),
+            vec![
+                r#"<link rel="preload" href="/_gio/fonts/inter-1.woff2" as="font" type="font/woff2" crossorigin>"#
+                    .to_string(),
+                r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string(),
+            ]
+        );
+        // Every font still has its @font-face rule; without fonts, no links.
+        assert_eq!(
+            font_head_snippets(&[font("serif", false)], &files[1..]),
+            vec![r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string()]
+        );
+        assert!(font_head_snippets(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn disabled_prefetching_refuses_every_prefetch_whatever_the_budget() {
+        // Unlimited budgets (0), so only the switch can refuse.
+        let budgets = Arc::new(PrefetchBudgets::new(giojs_prefetch::PrefetchConfig {
+            max_in_flight: 0,
+            max_per_second: 0,
+        }));
+        let ip: std::net::IpAddr = "192.0.2.8".parse().unwrap();
+        assert!(matches!(
+            admit_prefetch(false, &budgets, ip),
+            PrefetchAdmission::Disabled
+        ));
+        assert!(matches!(
+            admit_prefetch(true, &budgets, ip),
+            PrefetchAdmission::Admitted(_)
+        ));
+        let tight = Arc::new(PrefetchBudgets::new(giojs_prefetch::PrefetchConfig {
+            max_in_flight: 1,
+            max_per_second: 100,
+        }));
+        let _held = admit_prefetch(true, &tight, ip);
+        assert!(matches!(
+            admit_prefetch(true, &tight, ip),
+            PrefetchAdmission::OverBudget
+        ));
+    }
+
     // ── query decoding ────────────────────────────────────────────────────────
 
     #[test]
@@ -6958,6 +7165,7 @@ mod tests {
         let fresh = PageCachePolicy::Shared {
             max_age_secs: 60,
             age_secs: 0,
+            swr_multiplier: 10,
         };
         assert_eq!(
             page_cache_control(fresh),
@@ -6967,6 +7175,7 @@ mod tests {
         let aged = PageCachePolicy::Shared {
             max_age_secs: 60,
             age_secs: 45,
+            swr_multiplier: 10,
         };
         assert_eq!(
             page_cache_control(aged),
@@ -6975,10 +7184,27 @@ mod tests {
         let stale = PageCachePolicy::Shared {
             max_age_secs: 60,
             age_secs: 100,
+            swr_multiplier: 10,
         };
         assert_eq!(
             page_cache_control(stale),
             "public, max-age=0, s-maxage=0, stale-while-revalidate=500"
+        );
+        // [cache] swr_multiplier = 0: never stale, so no SWR directive.
+        let no_swr = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 45,
+            swr_multiplier: 0,
+        };
+        assert_eq!(page_cache_control(no_swr), "public, max-age=0, s-maxage=15");
+        let doubled = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 0,
+            swr_multiplier: 2,
+        };
+        assert_eq!(
+            page_cache_control(doubled),
+            "public, max-age=0, s-maxage=60, stale-while-revalidate=60"
         );
         // Never no-store: it disables the back/forward cache.
         assert_eq!(
@@ -7021,6 +7247,7 @@ mod tests {
         let shared = PageCachePolicy::Shared {
             max_age_secs: 300,
             age_secs: 10,
+            swr_multiplier: 10,
         };
         let mut page = html_response(None, "text/html; charset=utf-8");
         set_page_cache_control(&mut page, shared, true);
@@ -7045,6 +7272,7 @@ mod tests {
         let shared = PageCachePolicy::Shared {
             max_age_secs: 60,
             age_secs: 0,
+            swr_multiplier: 10,
         };
         let mut page = html_response(None, "text/html");
         apply_page_cache_control(&mut page, shared);
@@ -7069,6 +7297,17 @@ mod tests {
         apply_page_cache_control(&mut own, shared);
         make_framework_cache_control_private(&mut own);
         assert_eq!(own.headers()[header::CACHE_CONTROL], "public, max-age=5");
+    }
+
+    #[test]
+    fn page_etags_need_the_switch_one_audience_and_no_nonces() {
+        assert!(page_etags_allowed(true, true, false));
+        assert!(
+            !page_etags_allowed(false, true, false),
+            "[cache] etag = false"
+        );
+        assert!(!page_etags_allowed(true, false, false));
+        assert!(!page_etags_allowed(true, true, true));
     }
 
     #[test]
@@ -7661,7 +7900,7 @@ mod tests {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
         let mut stream =
             render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
-        tokio::time::advance(ipc::IPC_RESPONSE_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::advance(ipc::DEFAULT_RENDER_TIMEOUT + Duration::from_secs(1)).await;
         let log = captured_log("warn", || {
             stream.span = request_span("rid-body");
             let mut cx = Context::from_waker(std::task::Waker::noop());
@@ -7840,7 +8079,7 @@ mod tests {
             req_id: "req-stream".into(),
             ipc: Arc::new(client),
             injector,
-            idle: Some(Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT))),
+            idle: Some(IdleDeadline::new(ipc::DEFAULT_RENDER_TIMEOUT)),
             done: false,
             shell_capture: None,
             span: tracing::Span::none(),
@@ -7905,7 +8144,7 @@ mod tests {
             .unwrap();
         assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"data: 1\n\n");
         // An event stream may wait far longer than a render may stall.
-        let quiet = tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT * 4, stream.next()).await;
+        let quiet = tokio::time::timeout(ipc::DEFAULT_RENDER_TIMEOUT * 4, stream.next()).await;
         assert!(quiet.is_err(), "the body must still be open");
         assert!(write_rx.try_recv().is_err(), "no cancel sent");
         tx.send(RenderFrame::Chunk(Bytes::from("data: 2\n\n")))
@@ -7966,6 +8205,7 @@ mod tests {
             disk_dir: dir.clone(),
             swr_multiplier: 10,
             disk_max_bytes: 0,
+            ..giojs_cache::CacheConfig::default()
         }));
         (cache, dir)
     }

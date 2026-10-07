@@ -237,6 +237,65 @@ pub fn protections_off_warnings(config: &GioConfig) -> Vec<String> {
                 .to_string(),
         );
     }
+    let images = &config.images;
+    if images.enabled {
+        for (key, zero, risk) in [
+            (
+                "max_remote_bytes",
+                images.max_remote_bytes == 0,
+                "remote sources of any size are downloaded into memory",
+            ),
+            (
+                "remote_timeout_secs",
+                images.remote_timeout_secs == 0,
+                "a slow remote source holds its request open indefinitely",
+            ),
+            (
+                "max_source_dimension",
+                images.max_source_dimension == 0,
+                "a small file declaring huge dimensions can exhaust memory and CPU",
+            ),
+            (
+                "max_decode_bytes",
+                images.max_decode_bytes == 0,
+                "decoding one source may allocate any amount of memory",
+            ),
+        ] {
+            if zero {
+                warnings.push(format!("[images] {key} = 0: {risk}"));
+            }
+        }
+    }
+    if config.server.render_timeout_secs == 0 {
+        warnings.push(
+            "[server] render_timeout_secs = 0: a render that never answers holds its \
+             connection and a worker slot indefinitely"
+                .to_string(),
+        );
+    }
+    if !config.rate_limits.is_empty() && config.server.rate_limit_max_buckets == 0 {
+        warnings.push(
+            "[server] rate_limit_max_buckets = 0: rate-limit buckets are never evicted - \
+             clients rotating addresses grow memory without bound"
+                .to_string(),
+        );
+    }
+    for rule in &config.rate_limits {
+        if rule.key_header.is_some() && rule.max_keys_per_client == 0 {
+            warnings.push(format!(
+                "[[rate_limits]] {}: max_keys_per_client = 0 - one client can mint a fresh \
+                 budget for every key_header value it sends",
+                rule.path
+            ));
+        }
+    }
+    if config.websocket.enabled && config.websocket.max_connections == 0 {
+        warnings.push(
+            "[websocket] max_connections = 0: WebSocket connections are unlimited - every \
+             open socket holds memory and a file descriptor"
+                .to_string(),
+        );
+    }
     warnings
 }
 
@@ -704,6 +763,88 @@ mod tests {
         let report_value = report(&loaded(&[]), parse(""), &env);
         assert_eq!(report_value["sessionSecret"], "valid");
         assert!(!report_value.to_string().contains(&"a".repeat(32)));
+    }
+
+    /// The warnings for `toml` (none expected from anything else in it).
+    fn protection_warnings(toml: &str) -> Vec<String> {
+        protections_off_warnings(&parse(toml).unwrap())
+    }
+
+    #[test]
+    fn the_defaults_loosen_no_protection() {
+        assert_eq!(protection_warnings(""), Vec::<String>::new());
+        let root = test_root();
+        assert_eq!(
+            report(&loaded(&[]), parse(""), &env_in(&root))["warnings"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn unlimited_websocket_connections_are_a_warning() {
+        let warnings = protection_warnings("[websocket]\nmax_connections = 0\n");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("[websocket] max_connections = 0: "));
+        // Not while WebSockets are off.
+        assert!(
+            protection_warnings("[websocket]\nenabled = false\nmax_connections = 0\n").is_empty()
+        );
+
+        // --check-config reports the same line, and still passes.
+        let root = test_root();
+        let report = report(
+            &loaded(&[]),
+            parse("[websocket]\nmax_connections = 0\n"),
+            &env_in(&root),
+        );
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["warnings"], json!(warnings));
+    }
+
+    #[test]
+    fn image_limits_lifted_to_zero_are_warnings() {
+        let all = "[images]\nmax_remote_bytes = 0\nremote_timeout_secs = 0\n\
+                   max_source_dimension = 0\nmax_decode_bytes = 0\n";
+        let warnings = protection_warnings(all);
+        let keys: Vec<&str> = warnings
+            .iter()
+            .map(|warning| warning.split(" = 0:").next().unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "[images] max_remote_bytes",
+                "[images] remote_timeout_secs",
+                "[images] max_source_dimension",
+                "[images] max_decode_bytes",
+            ]
+        );
+        // Raised limits are no warning, and neither are any with the
+        // optimizer off.
+        assert!(protection_warnings("[images]\nmax_source_dimension = 30000\n").is_empty());
+        assert!(protection_warnings(&format!("{all}enabled = false\n")).is_empty());
+    }
+
+    #[test]
+    fn no_render_timeout_is_a_warning() {
+        let warnings = protection_warnings("[server]\nrender_timeout_secs = 0\n");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("[server] render_timeout_secs = 0: "));
+        assert!(protection_warnings("[server]\nrender_timeout_secs = 120\n").is_empty());
+    }
+
+    #[test]
+    fn lifted_rate_limiter_caps_are_warnings() {
+        let warnings = protection_warnings(
+            "[server]\nrate_limit_max_buckets = 0\n\n\
+             [[rate_limits]]\npath = \"/api/*\"\nkey_header = \"x-api-key\"\nmax_keys_per_client = 0\n\n\
+             [[rate_limits]]\npath = \"/login\"\nmax_keys_per_client = 0\n",
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].starts_with("[server] rate_limit_max_buckets = 0: "));
+        assert!(warnings[1].starts_with("[[rate_limits]] /api/*: max_keys_per_client = 0 - "));
+        // Without rules there are no buckets to cap.
+        assert!(protection_warnings("[server]\nrate_limit_max_buckets = 0\n").is_empty());
     }
 
     #[test]

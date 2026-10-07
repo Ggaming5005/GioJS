@@ -40,11 +40,13 @@ pub struct RateLimitStore {
 }
 
 impl RateLimitStore {
+    /// `max_entries` = 0: no cap - nothing is evicted to make room (the
+    /// periodic sweep still drops refilled buckets).
     pub fn new(max_entries: usize) -> Self {
         Self {
             entries: DashMap::new(),
             distinct_counts: DashMap::new(),
-            max_entries: max_entries.max(1),
+            max_entries,
             making_room: AtomicBool::new(false),
         }
     }
@@ -76,10 +78,11 @@ impl RateLimitStore {
     }
 
     /// Like `get_or_create` for a header-keyed bucket that counts against
-    /// `group`'s allowance of `cap` live buckets. Returns `None` when the key
-    /// is new and the group is saturated, so the caller falls back to a
-    /// shared bucket instead of minting unbounded fresh ones. Admission and
-    /// insertion happen under the same shard lock, so the count stays exact.
+    /// `group`'s allowance of `cap` live buckets (0 = unlimited). Returns
+    /// `None` when the key is new and the group is saturated, so the caller
+    /// falls back to a shared bucket instead of minting unbounded fresh
+    /// ones. Admission and insertion happen under the same shard lock, so
+    /// the count stays exact.
     pub fn get_or_create_in_group(
         &self,
         key: &str,
@@ -105,7 +108,7 @@ impl RateLimitStore {
                     .entry(group.to_string())
                     .or_insert_with(|| AtomicU64::new(0))
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                        (count < cap).then_some(count + 1)
+                        (cap == 0 || count < cap).then_some(count + 1)
                     })
                     .is_ok();
                 if !admitted {
@@ -142,7 +145,7 @@ impl RateLimitStore {
     /// Called before inserting a new key. Overshoot is bounded by the number
     /// of inserts racing the thread that is making room.
     fn make_room(&self) {
-        if self.entries.len() < self.max_entries {
+        if self.max_entries == 0 || self.entries.len() < self.max_entries {
             return;
         }
         if self.making_room.swap(true, Ordering::AcqRel) {

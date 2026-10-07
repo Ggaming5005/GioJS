@@ -35,6 +35,7 @@ max_connections = 10000   # concurrent connections (see Connection limits)
 tls_handshake_timeout_secs = 10
 header_read_timeout_secs = 10       # slowloris guard; also the HTTP/1.1 idle timeout
 request_body_timeout_secs = 30      # whole-body upload deadline, then 408
+render_timeout_secs = 30            # worker answer deadline, then 504; 0 = none
 idle_timeout_secs = 60              # close connections with nothing in flight
 http2_max_concurrent_streams = 250
 http2_keep_alive_interval_secs = 20 # PING HTTP/2 peers this often...
@@ -44,6 +45,7 @@ proxy_headers = "x-forwarded"       # "x-forwarded" (X-Forwarded-*) or "forwarde
 accept_request_id = true            # keep a trusted proxy's X-Request-Id (false = always generate)
 skew_protection = true  # 409 + hard reload for a client from another deployment (false = ignore)
 workers = 1             # Node render processes: a count or "auto" (see Render workers)
+rate_limit_max_buckets = 100000     # live [[rate_limits]] buckets kept; 0 = unlimited
 
 [server.tls]
 enabled = false         # set true to terminate TLS in GioJS directly
@@ -51,9 +53,13 @@ cert_path = "/path/to/cert.pem"
 key_path  = "/path/to/key.pem"
 
 [cache]                 # the page cache (see Caching)
+enabled = true          # false: store nothing, render every request (Cache-Control unchanged)
 memory_max_entries = 1000           # pages kept in memory; the disk tier holds the rest
+disk_enabled = true     # false: memory only, no files written
 disk_path = ".gio/cache/pages"      # relative to the project root; GIO_CACHE_DIR overrides
 disk_max_bytes = 536870912          # disk tier cap (512 MiB), oldest evicted first; 0 = unbounded
+etag = true             # false: no page ETags, no 304s
+swr_multiplier = 10     # serve stale until 10x revalidate old; 0 = never stale
 
 [compression]
 enabled = true          # gzip / Brotli, negotiated from Accept-Encoding
@@ -61,21 +67,27 @@ min_size_bytes = 1024   # smaller bodies are sent as-is (max 65535)
 prefer_brotli = true    # false = gzip only
 
 [prefetch]              # per-client budgets for <GioLink> prefetches (429 past them)
-max_concurrent = 5      # in flight at once
-max_per_second = 20
+enabled = true          # false: every prefetch gets 429, nothing prefetches
+max_concurrent = 5      # in flight at once; 0 = unlimited
+max_per_second = 20     # 0 = unlimited
 
 [[fonts]]               # self-hosted fonts, repeat per font file
 family = "Inter"
 url    = "/fonts/inter.woff2"   # public/fonts/inter.woff2, or an https:// URL (downloaded once)
 weight = 400            # default 400
 style  = "normal"       # default "normal"
+preload = true          # false: no preload link (fonts used below the fold)
 
 [images]
+enabled = true          # false: /_gio/image is a 404 and <GioImage> renders plain src
 allowed_widths = [16, 32, 48, 64, 96, 128, 256, 384, 640, 750, 828, 1080, 1200, 1920, 2048, 3840]
 quality = 75            # 1-100
 formats = ["avif", "webp"]    # modern formats to negotiate, in order; JPEG is the fallback
 disk_max_bytes = 536870912    # on-disk image cache cap (512 MiB)
-max_remote_bytes = 20971520   # max fetched remote source size (20 MiB)
+max_remote_bytes = 20971520   # max fetched remote source size (20 MiB); 0 = unlimited
+remote_timeout_secs = 30      # whole remote download deadline; 0 = none
+max_source_dimension = 10000  # widest/tallest source decoded, in px; 0 = unlimited
+max_decode_bytes = 268435456  # decoder memory per source (256 MiB); 0 = unlimited
 
 [[images.remote_patterns]]
 protocol = "https"      # default "https"
@@ -83,14 +95,14 @@ hostname = "images.example.com"
 pathname = "/photos/*"  # optional; exact match, or prefix with trailing *
 
 [css]
-enabled = true          # CSS pipeline (Lightning CSS)
-minify = true
+enabled = true          # serve app/*.css by path (imported CSS is always bundled)
+minify = true           # production CSS, path-served and bundled (standalone: at build time)
 critical_extraction = true
 
 [websocket]
 enabled = true
-max_connections = 1000
-ping_interval_secs = 30
+max_connections = 1000  # 0 = unlimited
+ping_interval_secs = 30 # 0 = no server pings
 
 [[rate_limits]]         # repeat per path rule; /_gio/image honors these too
 path = "/api/*"         # exact, or prefix with trailing * ("/api/*" covers /api too)
@@ -98,6 +110,7 @@ per_ip = 100            # requests per window (default 100)
 window_seconds = 60     # default 60
 burst = 20              # default 20
 key_header = "x-api-key"  # optional: key on a header value instead of IP
+max_keys_per_client = 64  # key_header values one client may hold a budget for; 0 = unlimited
 
 [[redirects]]           # evaluated in Rust before routing (see Middleware)
 from = "/old-blog/:slug"
@@ -261,14 +274,19 @@ giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: inval
           <tr><th>Key</th><th>Default</th><th>Description</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>[cache] memory_max_entries</code></td><td>1000</td><td>Pages kept in the in-memory LRU. Pages pushed out of memory are still served from the disk tier.</td></tr>
+          <tr><td><code>[cache] enabled</code></td><td>true</td><td><code>false</code> stores and serves nothing from the page cache: every request renders and answers <code>X-Gio-Cache: bypass</code>. Pages still send the <code>Cache-Control</code> their <code>revalidate</code> asks for, so a CDN in front can keep caching them.</td></tr>
+          <tr><td><code>[cache] memory_max_entries</code></td><td>1000</td><td>Pages kept in the in-memory LRU. Pages pushed out of memory are still served from the disk tier. At least 1: <code>enabled = false</code> is the off switch.</td></tr>
+          <tr><td><code>[cache] disk_enabled</code></td><td>true</td><td><code>false</code> keeps the memory LRU only: no entry files are written, a page the LRU drops renders again, and nothing survives a restart.</td></tr>
           <tr><td><code>[cache] disk_path</code></td><td><code>.gio/cache/pages</code></td><td>The disk tier&apos;s directory, relative to the project root: a directory below the root (not <code>.</code>, not outside the project). Eviction and development-mode clears only ever delete the cache&apos;s own entry files (<code>&lt;sha256&gt;.json</code>), so other files in the directory are safe, but a dedicated directory keeps things clear. It must not be, contain or sit inside <code>app/</code> or <code>public/</code> (where entries would be served as static files); startup stops if it does. <code>GIO_CACHE_DIR</code> overrides it, may be absolute, and is held to the same rule.</td></tr>
           <tr><td><code>[cache] disk_max_bytes</code></td><td>536870912 (512 MiB)</td><td>Size cap of the disk tier; the oldest entries are evicted past it. <code>0</code> disables the cap.</td></tr>
+          <tr><td><code>[cache] etag</code></td><td>true</td><td><code>false</code> sends no ETag with pages and never answers <code>304</code>, for CDNs that mishandle weak validators or apps that set their own.</td></tr>
+          <tr><td><code>[cache] swr_multiplier</code></td><td>10</td><td>A page stays servable stale (while one refresh runs) until it is this many times its <code>revalidate</code> old, and the <code>stale-while-revalidate</code> directive covers the same window. <code>0</code> never serves stale and drops the directive.</td></tr>
           <tr><td><code>[compression] enabled</code></td><td>true</td><td>Compress responses with Brotli or gzip, whichever the client accepts. Images, server-sent events and responses that already carry a <code>Content-Encoding</code> are never compressed. Turn it off when a proxy or CDN in front compresses instead.</td></tr>
           <tr><td><code>[compression] min_size_bytes</code></td><td>1024</td><td>Responses with a known length below this are sent as-is. Streamed responses have no known length and are always compressed. At most 65535.</td></tr>
           <tr><td><code>[compression] prefer_brotli</code></td><td>true</td><td><code>true</code>: Brotli for clients that accept it, gzip otherwise. <code>false</code>: gzip only.</td></tr>
-          <tr><td><code>[prefetch] max_concurrent</code></td><td>5</td><td>Prefetch requests (<code>Purpose: prefetch</code>, sent by <code>{'<GioLink>'}</code>) one client may have in flight. Past it the server answers <code>429</code>, which the client treats as &quot;not prefetched&quot;. <code>0</code> refuses every prefetch.</td></tr>
-          <tr><td><code>[prefetch] max_per_second</code></td><td>20</td><td>Prefetch requests one client may start per second.</td></tr>
+          <tr><td><code>[prefetch] enabled</code></td><td>true</td><td><code>false</code> answers every prefetch request <code>429</code> before it renders, which turns prefetching off site-wide.</td></tr>
+          <tr><td><code>[prefetch] max_concurrent</code></td><td>5</td><td>Prefetch requests (<code>Purpose: prefetch</code>, sent by <code>{'<GioLink>'}</code>) one client may have in flight. Past it the server answers <code>429</code>, which the client treats as &quot;not prefetched&quot;. <code>0</code> = unlimited.</td></tr>
+          <tr><td><code>[prefetch] max_per_second</code></td><td>20</td><td>Prefetch requests one client may start per second. <code>0</code> = unlimited.</td></tr>
         </tbody>
       </table>
 
@@ -348,6 +366,7 @@ export default defineConfig({
           <tr><td><code>tls_handshake_timeout_secs</code></td><td>10</td><td>Deadline for completing the TLS handshake when <code>[server.tls]</code> is enabled.</td></tr>
           <tr><td><code>header_read_timeout_secs</code></td><td>10</td><td>Deadline for receiving a complete request head (the slowloris guard). A new connection must send its first request within it, including the HTTP/2 handshake. Because the timer restarts while an HTTP/1.1 connection waits for its next request, it is also the HTTP/1.1 keep-alive idle timeout.</td></tr>
           <tr><td><code>request_body_timeout_secs</code></td><td>30</td><td>Deadline for receiving a whole request body. A client that sends the body too slowly gets <code>408 Request Timeout</code>.</td></tr>
+          <tr><td><code>render_timeout_secs</code></td><td>30</td><td>Deadline for the Node worker&apos;s answer: a whole buffered response, the head of a streamed one, and every gap between its chunks. Past it the request answers <code>504</code>, or a streamed body ends where it is. SSE streams are not bounded by it. <code>0</code> lets a render that never answers hold its connection and a worker slot indefinitely.</td></tr>
           <tr><td><code>idle_timeout_secs</code></td><td>60</td><td>Connections with no request in flight are closed after this long, gracefully for HTTP/2 (GOAWAY). In practice it applies to HTTP/2, because HTTP/1.1 idles are reaped by <code>header_read_timeout_secs</code> first.</td></tr>
           <tr><td><code>http2_max_concurrent_streams</code></td><td>250</td><td>Concurrent streams (requests) per HTTP/2 connection.</td></tr>
           <tr><td><code>http2_keep_alive_interval_secs</code><br /><code>http2_keep_alive_timeout_secs</code></td><td>20 / 20</td><td>The server PINGs each HTTP/2 connection on this interval and closes it if the ack does not arrive within the timeout, so dead peers are reaped. Setting either to <code>0</code> disables pings.</td></tr>
@@ -731,8 +750,19 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         <li>
           <strong>Memory is bounded.</strong> Buckets that have refilled are
           dropped (a new one starts full, so nothing is lost), and the store
-          holds at most 100,000 buckets - past that the least recently seen
-          are evicted.
+          holds at most <code>[server] rate_limit_max_buckets</code> buckets
+          (100,000) - past that the least recently seen are evicted.{' '}
+          <code>0</code> lifts the cap.
+        </li>
+        <li>
+          <strong>
+            <code>key_header</code> budgets are capped per client.
+          </strong>{' '}
+          One client gets its own bucket for at most{' '}
+          <code>max_keys_per_client</code> (64) distinct header values per
+          rule; further values share the client&apos;s own bucket, so rotating
+          the header cannot mint fresh budgets. Set it to <code>0</code> (no
+          cap) for an API gateway whose many keys arrive from one address.
         </li>
       </ul>
 

@@ -63,7 +63,7 @@ disk_max_bytes = 536870912          # L2 cap; 0 = unbounded`} />
         <li><code>hit; ttl=&lt;secs&gt;</code> - served from the Rust page cache without touching Node; <code>ttl</code> is the seconds until the entry goes stale</li>
         <li><code>stale; age=&lt;secs&gt;; revalidating</code> - served instantly from the cache past its TTL while one background render refreshes the entry; <code>age</code> is seconds since it was rendered. A refresh that answers 404 (the page called <code>notFound()</code>) evicts the entry instead</li>
         <li><code>miss; stored</code> - rendered by the Node worker and stored; the next request for this key is a hit</li>
-        <li><code>bypass</code> - rendered (or redirected) but not cached: the page did not declare <code>revalidate</code>, the request was not GET/HEAD, the response varies per user, it set per-request headers, or its <code>getServerSideProps</code> read the visitor&apos;s cookies, authorization header, IP (<code>ctx.ip</code>) or the host it asked for (<code>ctx.host</code>, <code>ctx.scheme</code>)</li>
+        <li><code>bypass</code> - rendered (or redirected) but not cached: the page cache is off (<code>[cache] enabled = false</code>), the page did not declare <code>revalidate</code>, the request was not GET/HEAD, the response varies per user, it set per-request headers, or its <code>getServerSideProps</code> read the visitor&apos;s cookies, authorization header, IP (<code>ctx.ip</code>) or the host it asked for (<code>ctx.host</code>, <code>ctx.scheme</code>)</li>
         <li><code>static</code> - served by the Rust static file layer (public/ assets at the site root or under /public/*, hashed chunks, fonts); never touches the cache or Node</li>
       </ul>
       <p>

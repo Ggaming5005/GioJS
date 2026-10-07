@@ -49,6 +49,14 @@ first.
   its path.
 - **The page cache directory** (`[cache] disk_path` or `GIO_CACHE_DIR`) may no
   longer be, contain or sit inside `app/` or `public/`.
+- **`0` lifts a limit everywhere in `gio.toml`,** as it already did in
+  `[server]`. `[prefetch] max_concurrent` or `max_per_second = 0` used to
+  refuse every prefetch, `[websocket] max_connections = 0` closed every socket
+  with 1013, `[websocket] ping_interval_secs = 0` crashed every WebSocket
+  connection, and `[images] max_remote_bytes = 0` rejected every remote image.
+  Each now means unlimited (no pings, for `ping_interval_secs`). To turn
+  prefetching off use `[prefetch] enabled = false`; to refuse WebSockets,
+  `[websocket] enabled = false`.
 - **CSRF protection is on.** Cross-site `POST`/`PUT`/`PATCH`/`DELETE` requests
   (judged by `Sec-Fetch-Site`, or `Origin` against the request's host) get
   `403` in Rust before Node runs. Requests without browser headers (curl,
@@ -676,6 +684,33 @@ first.
   `[security.csrf]`, `[security.websocket]`), `[logging]`, `[revalidate]`,
   `[dev] allowed_hosts`, and in `[server]` the connection limits, `workers`,
   `trusted_proxies`, `proxy_headers` and `accept_request_id`.
+- **Feature switches, on by default.** `[prefetch] enabled = false` answers
+  every prefetch `429` before it renders. `[images] enabled = false` leaves
+  `/_gio/image` unrouted (404) and `<GioImage>` renders its plain `src`.
+  `[cache] enabled = false` stores and serves nothing (`X-Gio-Cache: bypass`)
+  while `Cache-Control` still follows `revalidate`, so a CDN can keep caching.
+  `[cache]` also gets `disk_enabled` (`false`: memory only, no files), `etag`
+  (`false`: no page ETags, no 304s) and `swr_multiplier` (default 10, was
+  fixed; `0` never serves stale and drops `stale-while-revalidate`). A
+  `[[fonts]]` entry with `preload = false` keeps its `@font-face` but drops
+  its preload link.
+- **Limits that were hardcoded are keys,** each with `0` = unlimited or none:
+  `[server] render_timeout_secs` (30: the deadline for a worker's answer and
+  for every gap in a streamed one, then 504), `[server]
+  rate_limit_max_buckets` (100000), `[[rate_limits]] max_keys_per_client` (64
+  `key_header` values per client, for API gateways behind one address), and
+  `[images] max_source_dimension` (10000 px), `max_decode_bytes` (256 MiB)
+  and `remote_timeout_secs` (30).
+- **`[css] minify` reaches the worker.** Rust hands `[css]` to the worker in
+  `GIO_CSS_CONFIG`, so `minify = false` also leaves the bundled route
+  stylesheets unminified (it only covered path-served `app/*.css` before).
+  `gio build standalone` reads the key from the project's gio.toml when it
+  bakes the route stylesheets, so there a change needs a rebuild.
+  `[css] enabled` covers path-served stylesheets only: imported CSS is part
+  of the module graph and always bundled.
+- **Loosened limits are never silent.** Lifting the image, rate-limiter,
+  render or WebSocket connection limits to `0` logs one startup warning per
+  key, and `--check-config` reports the same lines under `warnings`.
 - **`[dev] watch_ignore`** (`["data/**", "*.db.json"]`): files the app writes
   into the project no longer restart the dev worker. The page cache's own
   writes never do.

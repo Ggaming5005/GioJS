@@ -36,6 +36,16 @@ describe('imageConfigFromEnv', () => {
     }
   });
 
+  it('an optimizer turned off in gio.toml renders unoptimized', () => {
+    expect(
+      imageConfigFromEnv({ GIO_IMAGE_CONFIG: '{"enabled":false,"widths":[640],"quality":80}' }),
+    ).toEqual({ widths: [640], quality: 80, unoptimized: true });
+    expect(
+      imageConfigFromEnv({ GIO_IMAGE_CONFIG: '{"enabled":true,"widths":[640],"quality":80}' })
+        .unoptimized,
+    ).toBe(false);
+  });
+
   it('a static export renders unoptimized: there is no /_gio/image', () => {
     expect(imageConfigFromEnv({ GIO_EXPORT: '1' }).unoptimized).toBe(true);
     expect(

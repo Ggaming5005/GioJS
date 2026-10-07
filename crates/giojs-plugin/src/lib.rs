@@ -143,6 +143,7 @@ mod tests {
             disk_dir: std::path::PathBuf::from("/tmp/gio-plugin-test"),
             swr_multiplier: 2,
             disk_max_bytes: 0,
+            ..giojs_cache::CacheConfig::default()
         }));
         PluginStartupCtx {
             cache,

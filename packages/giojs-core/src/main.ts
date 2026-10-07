@@ -22,7 +22,7 @@ import {
   assertNoMetadataRouteConflicts,
 } from './router.ts';
 import { buildClientBundles } from './client-build.ts';
-import { buildRouteStylesheets } from './css-build.ts';
+import { buildRouteStylesheets, cssConfigFromEnv } from './css-build.ts';
 import {
   BUILD_ID_ENV,
   loadClientBuild,
@@ -113,6 +113,7 @@ export async function runServer(): Promise<void> {
         segmentFiles,
         projectRoot,
         dev: isDevMode(),
+        minify: cssConfigFromEnv(process.env).minify,
       });
       const clientScripts = await buildClientBundles({
         routes,

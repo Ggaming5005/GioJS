@@ -193,7 +193,7 @@ export GIO_REVALIDATE_TOKEN=<token>     # or [revalidate] token = "..." in gio.t
 ETag: W/"4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
       <ul>
         <li><code>s-maxage</code> - what is left of the page&apos;s <code>revalidate</code> window, so a CDN in front of GioJS caches it no longer than GioJS does</li>
-        <li><code>stale-while-revalidate</code> - the rest of the window in which GioJS itself serves the page stale while it refreshes (nine times <code>revalidate</code>)</li>
+        <li><code>stale-while-revalidate</code> - the rest of the window in which GioJS itself serves the page stale while it refreshes (nine times <code>revalidate</code> by default: a page stays servable until it is <code>[cache] swr_multiplier</code> times <code>revalidate</code> old, 10 unless set; <code>0</code> never serves stale and leaves the directive out)</li>
         <li><code>max-age=0</code> - browsers revalidate every time; with the ETag that costs a <code>304 Not Modified</code> without a body while the page is unchanged</li>
       </ul>
       <p>
@@ -209,8 +209,9 @@ ETag: W/"4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
         a strong ETag would have to differ between those encodings. A
         request whose <code>If-None-Match</code> names it gets a 304 with the same headers
         (<code>X-Request-Id</code>, security headers, header rules and the{' '}
-        <code>Vary: accept-encoding</code> of a compressed page included). The dev
-        server sends no page ETags: it inlines your current CSS into every response, so a
+        <code>Vary: accept-encoding</code> of a compressed page included).{' '}
+        <code>[cache] etag = false</code> sends no page ETags and no 304s. The dev
+        server sends none either: it inlines your current CSS into every response, so a
         stylesheet edit always reaches the browser. Pages
         rendered per visitor - personalized, uncached, streamed, every{' '}
         <a href="/docs/caching-layers">PPR</a> response (its holes are personal) and error

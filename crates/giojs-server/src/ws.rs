@@ -65,7 +65,7 @@ async fn run_connection(
     ping_interval_secs: u64,
 ) {
     let route_id = info.route_id.clone();
-    if ws_registry.active_count() >= max_connections {
+    if at_connection_limit(ws_registry.active_count(), max_connections) {
         warn!(route = %route_id, addr = %addr, "WebSocket connection limit reached");
         // 1013 "try again later": clients back off and retry, where a bare
         // drop would read as a network failure.
@@ -87,8 +87,7 @@ async fn run_connection(
     ws_ipc.send_ws_connect(&conn_id, &info, &addr);
     debug!(conn_id = %conn_id, route = %route_id, addr = %addr, "WebSocket connected");
 
-    let mut ping_interval = tokio::time::interval(Duration::from_secs(ping_interval_secs));
-    ping_interval.tick().await; // skip immediate first tick
+    let mut ping_interval = ping_interval(ping_interval_secs);
 
     let mut close_code: u16 = 1001;
     let mut close_reason = String::new();
@@ -137,7 +136,7 @@ async fn run_connection(
                     None => break,
                 }
             }
-            _ = ping_interval.tick() => {
+            _ = next_ping(&mut ping_interval) => {
                 if socket.send(Message::Ping(vec![])).await.is_err() {
                     break;
                 }
@@ -155,6 +154,31 @@ async fn run_connection(
     ws_registry.deregister(&conn_id, &route_id);
     ws_ipc.send_ws_disconnect(&conn_id, close_code, &close_reason);
     debug!(conn_id = %conn_id, code = %close_code, reason = %close_reason, "WebSocket disconnected");
+}
+
+/// Whether `active` sockets use up `[websocket] max_connections`; 0 is
+/// unlimited, like the `[server]` limits.
+fn at_connection_limit(active: usize, max_connections: usize) -> bool {
+    max_connections > 0 && active >= max_connections
+}
+
+/// The ping schedule for `[websocket] ping_interval_secs`, first ping one
+/// period in; None for 0 (no server pings - a zero period would panic).
+fn ping_interval(secs: u64) -> Option<tokio::time::Interval> {
+    (secs > 0).then(|| {
+        let period = Duration::from_secs(secs);
+        tokio::time::interval_at(tokio::time::Instant::now() + period, period)
+    })
+}
+
+/// The next ping tick; never, without a schedule.
+async fn next_ping(interval: &mut Option<tokio::time::Interval>) {
+    match interval {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => std::future::pending().await,
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +200,36 @@ mod tests {
         assert!(is_upgrade_request(&with_upgrade(&["WebSocket"])));
         assert!(is_upgrade_request(&with_upgrade(&["h2c, websocket"])));
         assert!(is_upgrade_request(&with_upgrade(&["h2c", "websocket"])));
+    }
+
+    #[test]
+    fn zero_max_connections_is_unlimited() {
+        assert!(!at_connection_limit(100_000, 0));
+        assert!(!at_connection_limit(999, 1000));
+        assert!(at_connection_limit(1000, 1000));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_ping_interval_sends_no_pings_instead_of_panicking() {
+        let mut none = ping_interval(0);
+        assert!(none.is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3600), next_ping(&mut none))
+                .await
+                .is_err(),
+            "no ping is ever due"
+        );
+
+        // The first ping is one period in, not immediately.
+        let mut every_30s = ping_interval(30);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(29), next_ping(&mut every_30s))
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(2), next_ping(&mut every_30s))
+            .await
+            .expect("due at 30s");
     }
 
     #[test]
