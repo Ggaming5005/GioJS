@@ -98,6 +98,8 @@ interface GioNodePlugin {
           an unknown key, a <code>plugins</code> that is not an array, or a plugin without a
           string <code>name</code> stops the worker with an error naming the file:{' '}
           <code>gio.config.ts: unknown key &quot;plugin&quot; - did you mean &quot;plugins&quot;? (gio.config takes plugins; server settings belong in gio.toml)</code>.
+          The server prints it and exits 1 (see{' '}
+          <a href="/docs/cli/giojs-server#worker-boot-errors">worker boot errors</a>).
         </li>
         <li>
           <strong>Which requests.</strong> Every request the Node worker handles: page renders

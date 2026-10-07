@@ -894,7 +894,12 @@ async function startServer(
       if (/address already in use|AddrInUse|os error (98|48|10048)/i.test(log)) {
         throw new PortInUseError(`port ${port} is in use:\n${tail}`);
       }
-      throw new Error(`giojs-server exited before it was ready:\n${tail}`);
+      // The server's own last words (a config error, a worker that failed
+      // to boot - a middleware.ts that throws) lead; the log tail follows.
+      const reason = startupFailureOf(log);
+      throw new Error(
+        `giojs-server exited before it was ready${reason !== null ? `: ${reason}` : ''}\n\nlog:\n${tail}`,
+      );
     }
     const health = await healthCheck(url);
     if (health?.nodeReady === true) break;
@@ -908,6 +913,22 @@ async function startServer(
   }
 
   return { url, port, logs: () => log, close };
+}
+
+/**
+ * Why the server refused to start, from its log: its own messages
+ * (`giojs-server: ...`, and the indented detail lines under them). Null
+ * when it printed none.
+ */
+function startupFailureOf(log: string): string | null {
+  const lines = log.split('\n');
+  const first = lines.findIndex(line => line.startsWith('giojs-server: '));
+  if (first === -1) return null;
+  return lines
+    .slice(first)
+    .filter(line => line.startsWith('giojs-server: ') || line.startsWith('  '))
+    .map(line => line.replace(/^giojs-server: /, ''))
+    .join('\n');
 }
 
 function serverEnv(

@@ -27,7 +27,7 @@ import type {
 import { emptySegmentFiles } from './router.ts';
 import type { MetadataRouteKind, MetadataRouteModule, MetadataRoutes } from './metadata-routes.ts';
 import { styleManifestFromJson, type StyleManifestJson } from './style-manifest.ts';
-import { sanitizeMiddlewareRules } from './middleware.ts';
+import { middlewareRulesOrThrow } from './middleware.ts';
 import {
   registerFailedRouteModule,
   registerRouteModule,
@@ -157,10 +157,8 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     };
   }
 
-  const { rules: middlewareRules, warnings } = sanitizeMiddlewareRules(registry.middleware);
-  for (const warning of warnings) {
-    logger.warn(warning, { source: 'standalone registry' });
-  }
+  // A rule that cannot be enforced stops the worker, as from source.
+  const middlewareRules = middlewareRulesOrThrow(registry.middleware, 'middleware.ts (standalone build)');
 
   const clientScripts = new Map(Object.entries(registry.clientScripts ?? {}));
   const stylesheets = styleManifestFromJson(registry.stylesheets);

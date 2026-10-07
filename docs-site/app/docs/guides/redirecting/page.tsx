@@ -236,7 +236,7 @@ location: /login?tab=2`} />
       <h2 id="order-of-evaluation">Order of evaluation</h2>
       <p>For each request the Rust server checks, in order:</p>
       <ol>
-        <li>guards, then redirects, then rewrites - <code>gio.toml</code> rules before <code>middleware.ts</code> rules within each step, and the first match wins;</li>
+        <li>guards, then redirects, then rewrites - <code>gio.toml</code> rules before <code>middleware.ts</code> rules within each step. Every matching guard must admit the request; among redirects and among rewrites the first match wins;</li>
         <li>the page cache and static files;</li>
         <li>the Node worker: a page action, then <code>getServerSideProps</code>, or a route handler.</li>
       </ol>

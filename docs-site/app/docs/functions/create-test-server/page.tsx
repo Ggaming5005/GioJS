@@ -100,7 +100,13 @@ await server.close();`} />
           and <code>GIO_SERVER_BIN</code>. A <code>binary</code> or{' '}
           <code>GIO_SERVER_BIN</code> path that does not exist throws too.
         </li>
-        <li>The server exits before it is ready: it throws with the last 40 lines of its log.</li>
+        <li>
+          The server exits before it is ready: it throws with the server&apos;s own error first
+          - a <code>gio.toml</code> refusal, or a worker that could not boot, such as a{' '}
+          <code>middleware.ts</code> that throws (<code>giojs-server exited before it was ready:
+          the Node worker exited before it was ready (exit status: 1): .../middleware.ts failed
+          to load: ...</code>) - then the last 40 lines of its log.
+        </li>
         <li>Not ready within <code>timeoutMs</code>: it stops the server and throws, with the log.</li>
         <li>The chosen free port was taken in the meantime: it retries on another port, up to three times.</li>
       </ul>

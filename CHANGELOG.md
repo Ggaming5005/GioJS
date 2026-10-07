@@ -49,7 +49,15 @@ first.
   with a warning, and so does a `[[redirects]]`, `[[rewrites]]` or
   `[[headers]]` rule that cannot be compiled (a relative pattern, a
   catch-all that is not last, an unknown capture, a bad status or header).
-  A malformed `middleware.ts` guard denies every request to its path.
+- **`middleware.ts` is strict and fails closed.** A file that throws while
+  it loads, has no default export, or holds a rule that cannot be enforced
+  (an invalid pattern, a malformed field, an unknown key, a guard without a
+  requirement) stops the worker at boot with every problem listed: in
+  production the server exits 1 with the error, in development it waits
+  for the fix (and a later breakage answers `503` until the next save). It
+  used to drop the rules - every rule, guards included, for a file that
+  threw - with a warning while the app served. The integration fixture's
+  deliberately malformed guard is gone with it.
 - **`[i18n]` is checked.** An unknown `detect_from` value (with the closest
   valid one), a `default_locale` that is not one of a non-empty `locales`,
   and an empty or duplicate locale stop startup; they used to be ignored.
@@ -1022,6 +1030,16 @@ first.
   (literal segments, `:param`, a trailing `*rest`); `/api/*`, `/api*` and
   exact paths keep working. A path that cannot be parsed (no leading `/`, a
   `*rest` that is not last) stops startup and `--check-config` reports it.
+- A worker that could not boot (an invalid `gio.config.ts`, a route
+  conflict, a `middleware.ts` that throws) was reported as
+  `IPC connect to .gio/ipc-*.sock failed after 60 attempts` with a Rust
+  backtrace, about 15 seconds later; the real error was a JSON line further
+  up. The server now notices the worker exit at once and ends with the
+  worker's own error (`the Node worker exited before it was ready (exit
+  status: 1):` and the message), exit 1 and no backtrace. Dev waits for a
+  file change and starts the worker again, and a dev worker that crashes
+  after startup is respawned on the next save instead of after the respawn
+  backoff. `createTestServer` leads its error with the same message.
 
 ### Known limitations
 

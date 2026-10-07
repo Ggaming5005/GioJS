@@ -1747,6 +1747,7 @@ fn project_root_of(app_dir: Option<&str>) -> std::path::PathBuf {
 /// Past this many, a report stops looking: the rest is likely fallout.
 const MAX_REPORTED_ERRORS: usize = 50;
 
+#[cfg(test)]
 fn first_error(mut errors: Vec<ConfigError>) -> ConfigError {
     errors.swap_remove(0)
 }

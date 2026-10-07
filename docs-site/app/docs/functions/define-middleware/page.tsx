@@ -99,9 +99,10 @@ export default defineMiddleware({
           worker restarts - in development, on every source change.
         </li>
         <li>
-          Per request: guards, then redirects, then rewrites; the first match wins within each
-          phase, and <code>gio.toml</code> rules are checked before <code>middleware.ts</code>{' '}
-          rules in every phase. Header rules are applied independently, matched against the
+          Per request: guards, then redirects, then rewrites, and <code>gio.toml</code> rules
+          are checked before <code>middleware.ts</code> rules in every phase. Every matching
+          guard must admit the request; among redirects and among rewrites the first match
+          wins. Header rules are applied independently, matched against the
           path that was asked for (not a rewritten one).
         </li>
         <li>
@@ -115,18 +116,16 @@ export default defineMiddleware({
       <h3 id="validation">Validation</h3>
       <ul>
         <li>
-          A malformed redirect, rewrite or header rule is dropped with a warning in the log;
-          the rest of the file still applies.
+          Strict, like <code>gio.toml</code>: a rule that cannot be enforced as written - an
+          invalid pattern, a malformed field (<code>{"requireSession: 'true'"}</code>), an
+          unknown key, a <code>redirectTo</code> or <code>to</code> that is not a path, a
+          guard without a requirement - stops the worker at boot with every problem listed.
+          Nothing is dropped while the app serves.
         </li>
         <li>
-          A malformed guard fails closed: a guard with a <code>path</code> whose requirement
-          is missing or wrong (<code>{"requireSession: 'true'"}</code>, an unknown key, a{' '}
-          <code>redirectTo</code> that does not start with <code>/</code>) denies every request
-          to that path - redirecting to its <code>redirectTo</code>, or <code>/</code> - until
-          it is fixed.
-        </li>
-        <li>
-          A default export that is not an object is ignored with a warning.
+          So does a file that throws while it loads, a default export that is not an
+          object, and a file without a default export. See{' '}
+          <a href="/docs/file-conventions/middleware#validation"><code>middleware.ts</code> validation</a>.
         </li>
       </ul>
 
@@ -214,8 +213,8 @@ export default defineMiddleware({
           version: 'v0.1.0-beta.8',
           changes: (
             <>
-              Guards gain <code>requireSession</code>, verified in Rust; a malformed guard
-              denies its path instead of being dropped. <code>*rest</code> matches zero
+              Guards gain <code>requireSession</code>, verified in Rust; a malformed rule or
+              a file that throws stops the worker at boot instead of being dropped. <code>*rest</code> matches zero
               segments too. Header rules also apply to redirect and guard responses and match
               the requested path rather than a rewritten one.
             </>

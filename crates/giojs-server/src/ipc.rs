@@ -9,13 +9,19 @@
 //! handshake is authenticated with per-worker token proofs so a foreign
 //! local process can neither impersonate a worker nor drive it.
 //!
+//! A worker that cannot boot - it exits before READY (a gio.config.ts or
+//! middleware.ts error, a route conflict), or its READY carries rules that
+//! cannot be enforced - fails startup with a `WorkerBootError` holding the
+//! worker's own error, taken from its stderr (which is forwarded line by
+//! line and its tail kept, see `forward_stderr`).
+//!
 //! The first worker is the builder: only it bundles the client code into
 //! `.gio/build` (and writes `.gio/routes.d.ts`). The others start once it is
 //! READY and load its build manifest instead (REUSE_BUILD_ENV), so N workers
 //! never race on the same files - and in production a respawned worker,
 //! the builder included, reuses the build too.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -24,7 +30,7 @@ use std::time::Duration;
 use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
@@ -108,6 +114,108 @@ pub async fn within<F: std::future::Future>(
         Some(limit) => timeout(limit, future).await,
         None => Ok(future.await),
     }
+}
+
+/// A worker that could not boot: it exited before its READY frame, or its
+/// READY frame was refused (middleware.ts rules that cannot be enforced).
+/// The message is the worker's own error, ready to print; startup refuses
+/// with it, and dev mode waits for a file change and tries again.
+#[derive(Debug)]
+pub struct WorkerBootError {
+    pub message: String,
+}
+
+impl std::fmt::Display for WorkerBootError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for WorkerBootError {}
+
+/// Lines of a worker's stderr kept for a boot failure, and the bytes of
+/// each: enough for a stack trace, bounded however much it writes.
+const STDERR_TAIL_LINES: usize = 40;
+const STDERR_TAIL_LINE_BYTES: usize = 8 * 1024;
+/// How long a boot failure waits for the rest of a dead worker's stderr.
+const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The last lines a worker wrote to stderr.
+#[derive(Clone, Default)]
+struct StderrTail(Arc<std::sync::Mutex<VecDeque<String>>>);
+
+impl StderrTail {
+    fn push(&self, line: &[u8]) {
+        let line = String::from_utf8_lossy(&line[..line.len().min(STDERR_TAIL_LINE_BYTES)])
+            .trim_end()
+            .to_string();
+        if line.is_empty() {
+            return;
+        }
+        let mut lines = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if lines.len() == STDERR_TAIL_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(line);
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+/// Copy a worker's stderr to the server's, line by line, keeping the tail.
+/// The task ends at end of file: when the worker and every process that
+/// inherited the pipe are gone.
+fn forward_stderr(stderr: tokio::process::ChildStderr) -> (StderrTail, tokio::task::JoinHandle<()>) {
+    let tail = StderrTail::default();
+    let kept = tail.clone();
+    let task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    use std::io::Write;
+                    let _ = std::io::stderr().lock().write_all(&line);
+                    kept.push(&line);
+                }
+            }
+        }
+    });
+    (tail, task)
+}
+
+/// What a worker that exited before READY said, for its `WorkerBootError`:
+/// the `error` of its last error log line (the logger writes JSON lines -
+/// the uncaught boot error is one), with the file it names; otherwise its
+/// last lines as written.
+fn boot_failure_message(status: &str, lines: &[String]) -> String {
+    let logged = lines.iter().rev().find_map(|line| {
+        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+        if entry["level"] != "error" {
+            return None;
+        }
+        entry["error"].as_str().map(str::to_string)
+    });
+    let detail = match logged {
+        Some(error) => error,
+        None if lines.is_empty() => "(it wrote nothing to stderr)".to_string(),
+        None => lines[lines.len().saturating_sub(10)..].join("\n"),
+    };
+    let detail = detail
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("the Node worker exited before it was ready ({status}):\n{detail}")
 }
 
 /// Startup budget: Node + tsx can take several seconds to boot.
@@ -854,6 +962,8 @@ struct WorkerProcess {
     /// Captured at spawn: child.id() is None once the wrapper is gone, but
     /// its process group (and any orphaned runtime child) may live on.
     pid: Option<u32>,
+    /// The tail of its stderr, and the task forwarding it.
+    stderr: Option<(StderrTail, tokio::task::JoinHandle<()>)>,
 }
 
 impl WorkerProcess {
@@ -864,6 +974,26 @@ impl WorkerProcess {
 
     fn exited(&mut self) -> bool {
         !matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// The boot failure of a worker that exited with `status` before READY,
+    /// once the rest of its stderr has been read.
+    async fn boot_failure(&mut self, status: std::io::Result<std::process::ExitStatus>) -> WorkerBootError {
+        let status = match status {
+            Ok(status) => status.to_string(),
+            Err(error) => format!("wait failed: {error}"),
+        };
+        let lines = match self.stderr.as_mut() {
+            Some((tail, task)) => {
+                // A grandchild may hold the pipe open; the tail so far will do.
+                let _ = timeout(STDERR_DRAIN_TIMEOUT, task).await;
+                tail.lines()
+            }
+            None => Vec::new(),
+        };
+        WorkerBootError {
+            message: boot_failure_message(&status, &lines),
+        }
     }
 }
 
@@ -893,8 +1023,14 @@ impl NodeWorker {
             &env,
         )?;
         let stdin = child.stdin.take();
+        let stderr = child.stderr.take().map(forward_stderr);
         let pid = child.id();
-        Ok(WorkerProcess { child, stdin, pid })
+        Ok(WorkerProcess {
+            child,
+            stdin,
+            pid,
+            stderr,
+        })
     }
 }
 
@@ -1049,14 +1185,18 @@ impl IpcClient {
         let builder = &slots[0].node;
         let mut process = builder.spawn()?;
         info!(worker = 0, "Node process spawned (pid {:?})", process.pid);
-        let connection = match connect_and_handshake(
-            &builder.ipc_path,
-            |build_hash| deployment.with_build(build_hash),
-            &builder.token,
-            STARTUP_CONNECT_ATTEMPTS,
-        )
-        .await
-        {
+        // A worker that exits before READY fails startup at once, with its
+        // own error rather than the connect attempts running out.
+        let connected = tokio::select! {
+            connected = connect_and_handshake(
+                &builder.ipc_path,
+                |build_hash| deployment.with_build(build_hash),
+                &builder.token,
+                STARTUP_CONNECT_ATTEMPTS,
+            ) => connected,
+            status = process.child.wait() => Err(process.boot_failure(status).await.into()),
+        };
+        let connection = match connected {
             Ok(conn) => conn,
             Err(e) => {
                 process.kill().await;
@@ -1818,7 +1958,8 @@ fn spawn_worker_command(
         // supervisor drops the child or this process dies in any way.
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        // Forwarded to ours line by line, its tail kept for a boot failure.
+        .stderr(Stdio::piped())
         // Reap the worker when the supervisor drops it (panic/unwind paths).
         .kill_on_drop(true);
     // The CSP nonce placeholder the worker renders with (security.rs). Never
@@ -1877,22 +2018,31 @@ fn ready_build_hash(ready: &serde_json::Value) -> Option<&str> {
         .filter(|hash| !hash.is_empty())
 }
 
-/// Compile the optional `middleware` field of a READY frame. Absent or
-/// malformed rules yield an empty set (with a warning) - a rules problem must
-/// never block the handshake. Old workers that do not send the field simply
+/// Compile the optional `middleware` field of a READY frame (middleware.ts,
+/// validated by the worker). Rules that do not parse or cannot be enforced
+/// as written refuse the worker instead of being dropped: its guards must
+/// never be missing while it serves. Old workers that do not send the field
 /// contribute no rules; the field is not part of the protocol version.
-fn parse_ready_middleware(ready: &serde_json::Value) -> RuleSet {
+fn parse_ready_middleware(ready: &serde_json::Value) -> Result<RuleSet, WorkerBootError> {
     let raw = match ready.get("middleware") {
         None => MiddlewareRules::default(),
-        Some(value) => match serde_json::from_value::<MiddlewareRules>(value.clone()) {
-            Ok(rules) => rules,
-            Err(e) => {
-                warn!(error = %e, "READY middleware field malformed - ignoring worker rules");
-                MiddlewareRules::default()
+        Some(value) => serde_json::from_value::<MiddlewareRules>(value.clone()).map_err(|e| {
+            WorkerBootError {
+                message: format!("the worker sent middleware.ts rules the server cannot read: {e}"),
             }
-        },
+        })?,
     };
-    RuleSet::compile(&raw)
+    let problems = RuleSet::problems(&raw);
+    if !problems.is_empty() {
+        let lines: Vec<String> = problems
+            .iter()
+            .map(|p| format!("  - {}[{}] (\"{}\"): {}", p.kind, p.index, p.pattern, p.error))
+            .collect();
+        return Err(WorkerBootError {
+            message: format!("middleware.ts rules cannot be enforced:\n{}", lines.join("\n")),
+        });
+    }
+    Ok(RuleSet::compile(&raw))
 }
 
 /// Connect to the worker's socket and run the authenticated READY/ACK
@@ -1957,7 +2107,9 @@ async fn connect_and_handshake(
             .get("routes")
             .and_then(|r| serde_json::from_value::<Vec<RouteInfo>>(r.clone()).ok())
             .unwrap_or_default();
-        let worker_rules = parse_ready_middleware(&ready);
+        // Fatal like a failed token proof: the worker would serve without
+        // rules it declared, and retrying gets the same READY.
+        let worker_rules = parse_ready_middleware(&ready)?;
         let deployment_id = deployment_id(ready_build_hash(&ready));
         let ack = serde_json::to_vec(&serde_json::json!({
             "type": "ack",
@@ -2470,7 +2622,7 @@ async fn ipc_supervisor(
         }
 
         let connection = tokio::select! {
-            connection = recover_worker(&worker, &mut process, &mut write_rx, &inner) => connection,
+            connection = recover_worker(&worker, &mut process, &mut write_rx, &mut restart_rx, &inner) => connection,
             _ = shutdown_requested(&mut shutdown) => None,
         };
         let Some(connection) = connection else {
@@ -2488,12 +2640,15 @@ async fn ipc_supervisor(
 
 /// Recovery loop: respawn the worker if it is dead (or was never spawned),
 /// then reconnect. Between rounds, requests queued for the dead connection
-/// are failed fast with 503 instead of sitting until their 30s timeout.
-/// None when the write channel closed (shut down).
+/// are failed fast with 503 instead of sitting until their 30s timeout. A
+/// dev-watch restart ends the wait: a worker that failed to boot is tried
+/// again as soon as a file changes. None when the write channel closed
+/// (shut down).
 async fn recover_worker(
     worker: &NodeWorker,
     process: &mut Option<WorkerProcess>,
     write_rx: &mut mpsc::Receiver<Bytes>,
+    restart_rx: &mut mpsc::Receiver<()>,
     inner: &WorkerInner,
 ) -> Option<WorkerConnection> {
     let mut backoff_ms = 250u64;
@@ -2524,15 +2679,35 @@ async fn recover_worker(
                 Err(e) => error!(worker = worker.index, error = %e, "Node worker respawn failed"),
             }
         }
-        match connect_and_handshake(
-            &worker.ipc_path,
-            |_| inner.deployment_id.clone(),
-            &worker.token,
-            connect_attempts,
-        )
-        .await
-        {
+        let connected = match process.as_mut() {
+            // A worker that exits mid-boot ends the round at once, with its error.
+            Some(running) if dead => tokio::select! {
+                connected = connect_and_handshake(
+                    &worker.ipc_path,
+                    |_| inner.deployment_id.clone(),
+                    &worker.token,
+                    connect_attempts,
+                ) => connected,
+                status = running.child.wait() => Err(running.boot_failure(status).await.into()),
+            },
+            _ => {
+                connect_and_handshake(
+                    &worker.ipc_path,
+                    |_| inner.deployment_id.clone(),
+                    &worker.token,
+                    connect_attempts,
+                )
+                .await
+            }
+        };
+        match connected {
             Ok(conn) => return Some(conn),
+            Err(e) if e.is::<WorkerBootError>() => {
+                error!(worker = worker.index, "Node worker failed to boot - {e}");
+                if let Some(process) = process.as_mut() {
+                    process.kill().await;
+                }
+            }
             Err(e) => {
                 warn!(worker = worker.index, error = %e, "IPC recovery round failed - killing worker and retrying");
                 // A worker that is alive but not completing the handshake
@@ -2542,10 +2717,18 @@ async fn recover_worker(
                 }
             }
         }
-        if fail_queued_writes(write_rx, inner, Duration::from_millis(backoff_ms)).await {
-            return None;
+        tokio::select! {
+            closed = fail_queued_writes(write_rx, inner, Duration::from_millis(backoff_ms)) => {
+                if closed {
+                    return None;
+                }
+                backoff_ms = (backoff_ms * 2).min(RESPAWN_BACKOFF_MAX_MS);
+            }
+            Some(()) = restart_rx.recv() => {
+                info!(worker = worker.index, "worker restart requested (dev watch) - respawning now");
+                backoff_ms = 250;
+            }
         }
-        backoff_ms = (backoff_ms * 2).min(RESPAWN_BACKOFF_MAX_MS);
     }
 }
 
@@ -3941,7 +4124,7 @@ mod tests {
     #[test]
     fn ready_without_middleware_field_yields_empty_rules() {
         let ready = serde_json::json!({ "type": "ready", "version": "test" });
-        let rules = parse_ready_middleware(&ready);
+        let rules = parse_ready_middleware(&ready).unwrap();
         assert!(rules.is_empty());
     }
 
@@ -3954,7 +4137,7 @@ mod tests {
                 "guards": [{"path": "/admin", "requireCookie": "session", "redirectTo": "/"}],
             },
         });
-        let rules = parse_ready_middleware(&ready);
+        let rules = parse_ready_middleware(&ready).unwrap();
         assert!(matches!(
             rules.apply("/old-home", None),
             crate::rules::RuleOutcome::Redirect { status, .. } if status.as_u16() == 301
@@ -3970,36 +4153,106 @@ mod tests {
     }
 
     #[test]
-    fn ready_guard_without_a_requirement_denies_everything() {
-        // sanitizeMiddlewareRules sends a malformed middleware.ts guard in
-        // this shape so it fails closed instead of disappearing.
+    fn ready_rules_that_cannot_be_enforced_refuse_the_worker() {
+        // These used to be skipped with a warning (or, for a guard without a
+        // requirement, kept as deny-all): the worker served with a path open.
         let ready = serde_json::json!({
             "type": "ready",
             "middleware": {
-                "guards": [{"path": "/admin/*rest", "redirectTo": "/login"}],
+                "guards": [
+                    {"path": "members/*rest", "requireSession": true, "redirectTo": "/login"},
+                    {"path": "/a/*rest/c", "requireCookie": "s", "redirectTo": "/login"},
+                    {"path": "/admin/*rest", "redirectTo": "/login"},
+                ],
+                "headers": [{"path": "/x", "headers": {"bad name": "1"}}],
             },
         });
-        let rules = parse_ready_middleware(&ready);
-        for cookies in [None, Some("session=x; gio_session=x")] {
-            assert!(matches!(
-                rules.apply("/admin/users", cookies),
-                crate::rules::RuleOutcome::Redirect { ref location, .. } if location == "/login"
-            ));
-        }
+        let error = parse_ready_middleware(&ready).unwrap_err().to_string();
         assert_eq!(
-            rules.apply("/elsewhere", None),
-            crate::rules::RuleOutcome::None
+            error,
+            "middleware.ts rules cannot be enforced:\n  \
+             - guards[0] (\"members/*rest\"): pattern must start with '/': members/*rest\n  \
+             - guards[1] (\"/a/*rest/c\"): catch-all segment must be the last segment: /a/*rest/c\n  \
+             - guards[2] (\"/admin/*rest\"): names no requirement: set require_session = true or a non-empty require_cookie\n  \
+             - headers[0] (\"/x\"): invalid header name: bad name"
         );
     }
 
     #[test]
-    fn malformed_ready_middleware_is_ignored_not_fatal() {
+    fn malformed_ready_middleware_refuses_the_worker() {
         let ready = serde_json::json!({
             "type": "ready",
             "middleware": {"redirects": "not-an-array"},
         });
-        let rules = parse_ready_middleware(&ready);
-        assert!(rules.is_empty());
+        let error = parse_ready_middleware(&ready).unwrap_err().to_string();
+        assert!(error.starts_with("the worker sent middleware.ts rules the server cannot read: "), "{error}");
+    }
+
+    #[test]
+    fn boot_failures_quote_the_workers_logged_error() {
+        let logged = [
+            r#"{"ts":"t","level":"info","msg":"discovering routes"}"#.to_string(),
+            r#"{"ts":"t","level":"error","msg":"uncaught exception - worker exiting for respawn","error":"gio.config.ts: unknown key \"plugin\" - did you mean \"plugins\"?","stack":"Error: ..."}"#.to_string(),
+        ];
+        assert_eq!(
+            boot_failure_message("exit status: 1", &logged),
+            "the Node worker exited before it was ready (exit status: 1):\n  \
+             gio.config.ts: unknown key \"plugin\" - did you mean \"plugins\"?"
+        );
+        // Not our logger's output (node itself failed): the last lines as written.
+        let raw = ["node:internal/modules/cjs/loader:1228".to_string(), "Error: Cannot find module 'tsx'".to_string()];
+        assert_eq!(
+            boot_failure_message("exit status: 1", &raw),
+            "the Node worker exited before it was ready (exit status: 1):\n  \
+             node:internal/modules/cjs/loader:1228\n  Error: Cannot find module 'tsx'"
+        );
+        assert!(boot_failure_message("signal: 9", &[]).ends_with("(it wrote nothing to stderr)"));
+    }
+
+    #[test]
+    fn the_stderr_tail_is_bounded() {
+        let tail = StderrTail::default();
+        for index in 0..100 {
+            tail.push(format!("line {index}\n").as_bytes());
+        }
+        tail.push(&vec![b'x'; STDERR_TAIL_LINE_BYTES * 2]);
+        let lines = tail.lines();
+        assert_eq!(lines.len(), STDERR_TAIL_LINES);
+        assert_eq!(lines[0], "line 61");
+        assert_eq!(lines.last().unwrap().len(), STDERR_TAIL_LINE_BYTES);
+    }
+
+    #[tokio::test]
+    async fn a_worker_that_exits_before_ready_fails_startup_with_its_own_error() {
+        // A stand-in worker that logs its boot error the way worker-boot.ts
+        // does and exits: startup must report that error at once, instead of
+        // an IPC connect error after the attempts run out.
+        let dir = std::env::temp_dir().join(format!("gio_boot_fail_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("worker.mjs");
+        std::fs::write(
+            &script,
+            "process.stderr.write(JSON.stringify({ level: 'error', msg: 'uncaught exception - worker exiting for respawn', error: 'middleware.ts failed to load: boom' }) + '\\n');\n\
+             process.exit(1);\n",
+        )
+        .unwrap();
+        let paths = IpcPaths {
+            http: dir.join("ipc.sock").display().to_string(),
+            ws: dir.join("ws.sock").display().to_string(),
+        };
+        let deployment = DeploymentInputs::new(None, Vec::new(), &[], Vec::new());
+        let started = std::time::Instant::now();
+        let error = match IpcClient::start(&script.display().to_string(), &paths, false, Vec::new(), 1, &deployment).await {
+            Ok(_) => panic!("a worker that exits must fail startup"),
+            Err(error) => error,
+        };
+        assert!(started.elapsed() < Duration::from_secs(10), "it waited for the connect attempts");
+        let boot = error.downcast_ref::<WorkerBootError>().expect("a WorkerBootError");
+        assert_eq!(
+            boot.message,
+            "the Node worker exited before it was ready (exit status: 1):\n  middleware.ts failed to load: boom"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(windows)]

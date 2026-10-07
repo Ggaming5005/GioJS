@@ -2029,18 +2029,6 @@ async function main() {
       assert.match(await resigned.text(), /user=(<!-- -->)?anonymous/);
     });
 
-    await test('a malformed middleware.ts guard denies every request instead of vanishing', async () => {
-      const session = sessionCookieOf(await loginAs('alice'));
-      for (const cookie of [undefined, session, 'session=int-test']) {
-        for (const path of ['/broken-guard', '/broken-guard/x']) {
-          const res = await rawGet(path, cookie === undefined ? {} : { cookie });
-          assert.equal(res.status, 302, `${path} with ${cookie ?? 'no cookie'} must stay closed`);
-          assert.equal(res.headers.location, '/login', path);
-        }
-      }
-      assert.match(log, /guard for \/broken-guard\/\*rest is malformed \(requireSession must be true or false\)/);
-    });
-
     await test('session pages are personal: never cached across users', async () => {
       const alice = sessionCookieOf(await loginAs('alice'));
       const bob = sessionCookieOf(await loginAs('bob'));
@@ -5298,6 +5286,105 @@ async function strictConfigPhase() {
 }
 
 /**
+ * Phase 0b (worker boot failures): a worker that cannot boot - middleware.ts
+ * throws while loading or holds a rule the server cannot enforce,
+ * gio.config.ts has an unknown key - stops a production server with the
+ * worker's own error and exit 1: no IPC connect error after 15 seconds, no
+ * backtrace. Its rules (guards above all) used to be dropped with a warning
+ * while the app served. Dev waits for the fix instead, serving nothing, and
+ * a later breakage answers 503 until the file is fixed again.
+ */
+async function workerBootPhase() {
+  const binary = findServerBinary();
+  const projectDir = await copyFixtureForDev('.boot-fixture');
+  const middlewarePath = join(projectDir, 'middleware.ts');
+  const validMiddleware = await readFile(middlewarePath, 'utf8');
+  const throwing = `${validMiddleware}\nthrow new Error('BOOT_MIDDLEWARE_BOOM');\n`;
+  const env = {
+    ...process.env,
+    GIO_APP_DIR: join(projectDir, 'app'),
+    NODE_ENV: 'production',
+    RUST_BACKTRACE: '1',
+  };
+  let devServer = null;
+  let log = '';
+  try {
+    const cases = [
+      [
+        'a middleware.ts that throws while loading',
+        { 'middleware.ts': throwing },
+        /giojs-server: the Node worker exited before it was ready \(exit status: 1\):\n {2}\S*middleware\.ts failed to load: BOOT_MIDDLEWARE_BOOM\n/,
+      ],
+      [
+        'a middleware.ts guard whose path the server cannot match',
+        {
+          'middleware.ts':
+            "export default { guards: [{ path: 'members/*rest', requireSession: true, redirectTo: '/login' }," +
+            " { path: '/a/*rest/c', requireCookie: 's', redirectTo: '/login' }] };\n",
+        },
+        /\S*middleware\.ts is invalid - no rule loads until every problem is fixed:\n {4}- guards\[0\] \("members\/\*rest"\): path must start with "\/"\n {4}- guards\[1\] \("\/a\/\*rest\/c"\): path a catch-all \(\*rest\) must be the last segment/,
+      ],
+      [
+        'a gio.config.ts with an unknown key',
+        { 'middleware.ts': validMiddleware, 'gio.config.ts': 'export default { plugin: [] };\n' },
+        /giojs-server: the Node worker exited before it was ready \(exit status: 1\):\n {2}gio\.config\.ts: unknown key "plugin" - did you mean "plugins"\?/,
+      ],
+    ];
+    const originalConfig = await readFile(join(projectDir, 'gio.config.ts'), 'utf8');
+    for (const [label, files, expected] of cases) {
+      for (const [name, content] of Object.entries(files)) await writeFile(join(projectDir, name), content);
+      await test(`production: ${label} stops startup with the worker's own error`, async () => {
+        const started = Date.now();
+        const run = spawnSync(binary, [], { cwd: repoRoot, env, encoding: 'utf8', timeout: 60_000 });
+        assert.equal(run.status, 1, `exit status ${run.status} (signal ${run.signal}), stderr:\n${run.stderr}`);
+        assert.match(run.stderr, expected);
+        assert.doesNotMatch(run.stderr, /IPC connect|stack backtrace|panicked/);
+        assert.ok(Date.now() - started < 30_000, 'failed at once, not after the connect attempts');
+      });
+    }
+    await writeFile(join(projectDir, 'gio.config.ts'), originalConfig);
+
+    // Dev: the broken file keeps the server from serving at all; fixing it
+    // starts the worker, with its guards.
+    await writeFile(middlewarePath, throwing);
+    devServer = spawn(binary, [], { cwd: repoRoot, env: { ...env, NODE_ENV: 'development' } });
+    devServer.stdout.on('data', (d) => { log += d.toString(); });
+    devServer.stderr.on('data', (d) => { log += d.toString(); });
+    await test('dev: a middleware.ts that throws at startup waits for the fix, serving nothing', async () => {
+      await waitFor('the boot failure', async () => log.includes('waiting for a file change'), 60_000);
+      assert.match(log, /middleware\.ts failed to load: BOOT_MIDDLEWARE_BOOM/);
+      assert.equal(await fetch(`${BASE}/admin`).then(() => 'answered', () => 'refused'), 'refused');
+      await editAndWait('the worker after the fix', middlewarePath, () => validMiddleware, async () =>
+        (await fetch(`${BASE}/_gio/health`).catch(() => null))?.ok === true);
+      const admin = await rawGet('/admin');
+      assert.equal(admin.status, 302, 'the guard is enforced');
+    });
+    await test('dev: a later middleware.ts breakage answers 503 until it is fixed again', async () => {
+      const admitted = { cookie: 'session=x' };
+      assert.equal((await rawGet('/admin', admitted)).status, 200);
+      await editAndWait('the broken worker', middlewarePath, () => throwing, async () =>
+        (await rawGet('/admin', admitted)).status === 503);
+      // The last rules the worker reported stay in force meanwhile.
+      assert.equal((await rawGet('/admin')).status, 302);
+      // A file change restarts it at once, not after the respawn backoff.
+      await editAndWait('the worker after the second fix', middlewarePath, () => validMiddleware, async () =>
+        (await rawGet('/admin', admitted)).status === 200, 30_000);
+      assert.equal((await rawGet('/admin')).status, 302);
+    });
+  } catch (err) {
+    console.error(`\nintegration (worker boot failures): FAILED\n${err?.stack ?? err}`);
+    console.error(significantLogTail(log));
+    process.exitCode = 1;
+  } finally {
+    if (devServer !== null) {
+      devServer.kill();
+      await new Promise((resolve) => (devServer.exitCode !== null ? resolve() : devServer.once('exit', resolve)));
+    }
+    await rm(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Phase 1e (gio.toml settings): the keys that used to be parsed but ignored
  * now take effect - PORT for a [server] table without a port, [compression],
  * [images] formats, [prefetch] budgets and [cache] disk_path - and a
@@ -6148,6 +6235,9 @@ async function devSwitchesPhase() {
 }
 
 await strictConfigPhase();
+if (process.exitCode !== 1) {
+  await workerBootPhase();
+}
 if (process.exitCode !== 1) {
   await main();
 }

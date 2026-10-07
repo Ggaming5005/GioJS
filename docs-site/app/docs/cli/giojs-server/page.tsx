@@ -183,6 +183,31 @@ node standalone/run.mjs --check-config                 # a standalone build`} />
         <code>configFile</code>.
       </p>
 
+      <h2 id="worker-boot-errors">Worker boot errors</h2>
+      <p>
+        The Node worker loads <code>gio.config.ts</code>, discovers the routes and loads{' '}
+        <code>middleware.ts</code> before it reports ready. When it cannot - an unknown key in{' '}
+        <code>gio.config.ts</code>, two files that answer the same URL, a{' '}
+        <code>middleware.ts</code> that throws or holds a rule that cannot be enforced - it
+        exits, and the server prints the worker&apos;s own error after the worker&apos;s log
+        lines:
+      </p>
+      <CodeBlock lang="text" code={`giojs-server: the Node worker exited before it was ready (exit status: 1):
+  /srv/shop/middleware.ts failed to load: GIO_SESSION_SECRET is not set`} />
+      <ul>
+        <li>
+          <strong>Production</strong> exits <code>1</code> at once, without a backtrace: the
+          server never serves with the app&apos;s routes or rules half loaded.
+        </li>
+        <li>
+          <strong>Development</strong> prints the error and{' '}
+          <code>waiting for a file change to start the worker again</code>, binds no port, and
+          starts the worker again on the next save (<code>[dev] watch = false</code> exits
+          instead). A worker that breaks after startup is respawned on the next save, and
+          answers <code>503</code> meanwhile.
+        </li>
+      </ul>
+
       <h2 id="examples">Examples</h2>
       <h3 id="a-valid-configuration-with-warnings">A valid configuration with warnings</h3>
       <CodeBlock lang="toml" title="gio.toml" code={`[server]
@@ -255,7 +280,8 @@ node -e 'const r = require("./check.json"); if (r.warnings.length) { console.log
         <li>
           <code>--check-config</code> does not load <code>gio.config.ts</code>,{' '}
           <code>middleware.ts</code> or your modules: the Node side is checked when the worker
-          boots.
+          boots, and a worker that cannot boot stops startup with its own error (see{' '}
+          <a href="#worker-boot-errors">Worker boot errors</a>).
         </li>
         <li>
           The binary has no <code>--help</code> or <code>--version</code>; use{' '}
@@ -266,7 +292,8 @@ node -e 'const r = require("./check.json"); if (r.warnings.length) { console.log
         </li>
         <li>
           Exit codes: <code>0</code> after a graceful shutdown or a passing check,{' '}
-          <code>1</code> for a configuration error, a failed check or a failed startup.
+          <code>1</code> for a configuration error, a failed check or a failed startup (a
+          worker that cannot boot included).
         </li>
       </ul>
 

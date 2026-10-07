@@ -110,7 +110,7 @@ redirect_to = "/waitlist"`} />
       </ul>
       <h3 id="not-configurable">Not configurable</h3>
       <ul>
-        <li><strong>Guards fail closed.</strong> A broken guard never leaves its path open: in gio.toml it stops startup, and from <code>middleware.ts</code> it denies every request.</li>
+        <li><strong>Guards fail closed.</strong> A broken guard never leaves its path open: in gio.toml it stops startup, and in <code>middleware.ts</code> (or a <code>middleware.ts</code> that throws while loading) it stops the worker at boot.</li>
         <li>The refusal is always a <code>302</code>.</li>
       </ul>
 

@@ -64,10 +64,11 @@ export default defineMiddleware({
           skip a rule.
         </li>
         <li>
-          <strong>Order.</strong> Guards, then redirects, then rewrites; the first matching
-          rule of a phase wins, and <code>gio.toml</code> rules are tried before{' '}
-          <code>middleware.ts</code> rules within each phase. Header rules apply to the
-          response, redirects and guard answers included.
+          <strong>Order.</strong> Guards, then redirects, then rewrites, with{' '}
+          <code>gio.toml</code> rules tried before <code>middleware.ts</code> rules within
+          each phase. Every matching guard must admit the request (the first that refuses
+          redirects); among redirects and among rewrites the first match wins. Header rules
+          apply to the response, redirects and guard answers included.
         </li>
         <li>
           <strong>Reloads.</strong> The rules are read again whenever the worker restarts. In
@@ -80,32 +81,40 @@ export default defineMiddleware({
       </ul>
 
       <h3 id="validation">Validation</h3>
-      <p>Problems never stop the server, but they are never silent either:</p>
+      <p>
+        The file is strict, like <code>gio.toml</code>: a rule is never dropped while the app
+        serves, because a dropped guard would leave its path open. The worker refuses to boot,
+        with every problem listed, when:
+      </p>
       <ul>
         <li>
-          A file that fails to import, or a default export that is not an object: the worker
-          logs a warning and runs with no <code>middleware.ts</code> rules.
+          the file throws while it loads (an import that fails, a missing environment variable
+          read at the top level), or has no default export;
+        </li>
+        <li>the default export is not an object, or has a key other than the four sections;</li>
+        <li>
+          an entry has an unknown key (with the closest valid one), a missing or malformed
+          field, a pattern the server cannot match (no leading <code>/</code>, a{' '}
+          <code>*rest</code> that is not the last segment), a <code>to</code> that is not a
+          path or uses a capture the pattern does not define, a status other than 301, 302,
+          307 or 308, or an invalid header name or value;
         </li>
         <li>
-          A malformed redirect, rewrite or header entry is dropped with a warning (
-          <code>middleware redirects entry is malformed - entry dropped</code>). The server
-          also skips, with a warning, a rule whose pattern or header it cannot compile.
-        </li>
-        <li>
-          A guard with a misspelled key, no requirement or a bad <code>redirectTo</code> is{' '}
-          <strong>not</strong> dropped: it denies every request to its path, redirecting to
-          its <code>redirectTo</code> (or <code>/</code>), until it is fixed. A{' '}
-          <code>requireSession</code> guard does the same while{' '}
-          <code>GIO_SESSION_SECRET</code> is missing or invalid.
-        </li>
-        <li>
-          A guard whose <code>path</code> is missing or is not a valid pattern (no leading{' '}
-          <code>/</code>, a <code>*rest</code> that is not the last segment) has nothing to
-          close: it is skipped with a warning (<code>invalid guard rule skipped</code>), and
-          the path it meant to protect stays open. Check the startup log after editing
-          guards.
+          a guard names no requirement (<code>requireSession: true</code> or a{' '}
+          <code>requireCookie</code>), or its <code>redirectTo</code> is not a path.
         </li>
       </ul>
+      <CodeBlock lang="text" code={`/srv/shop/middleware.ts is invalid - no rule loads until every problem is fixed:
+  - guards[0] ("members/*rest"): path must start with "/"
+  - guards[1] ("/staff"): unknown key "require_session" - did you mean "requireSession"?`} />
+      <p>
+        In production the server then exits 1 with that error (see{' '}
+        <a href="/docs/cli/giojs-server#worker-boot-errors">worker boot errors</a>). In
+        development it waits for you to save a fix; a file broken by a later edit makes the
+        worker answer <code>503</code> - the last rules it loaded stay in force - until the
+        next save fixes it. A <code>requireSession</code> guard denies every request while{' '}
+        <code>GIO_SESSION_SECRET</code> is missing or invalid, and the server logs why.
+      </p>
 
       <h2 id="examples">Examples</h2>
       <h3 id="rules-built-from-code">Rules built from code</h3>
@@ -168,7 +177,7 @@ export default defineMiddleware({
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>A malformed guard denies every request to its path instead of being dropped. <code>*rest</code> also matches zero segments. Header rules also apply to redirect and guard responses. <code>requireSession</code> guards verify the session in Rust.</> },
+        { version: 'v0.1.0-beta.8', changes: <>A file that throws while loading, or any rule that cannot be enforced as written (an invalid pattern, a malformed field, an unknown key), stops the worker at boot; such rules used to be dropped with a warning, a guard&apos;s path left open. <code>*rest</code> also matches zero segments. Header rules also apply to redirect and guard responses. <code>requireSession</code> guards verify the session in Rust.</> },
         { version: 'v0.1.0-beta.6', changes: <>Introduced: redirects, rewrites, headers and cookie guards from a project-root <code>middleware.ts</code>.</> },
       ]} />
     </>

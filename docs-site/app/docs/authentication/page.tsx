@@ -158,9 +158,9 @@ export default defineMiddleware({
       </p>
       <p>
         A broken guard never leaves its path open: a <code>gio.toml</code> guard with a
-        misspelled key or no requirement stops the server at startup, and a{' '}
-        <code>middleware.ts</code> guard whose requirement is malformed denies every request to
-        its path until fixed, with a warning saying why.
+        misspelled key or no requirement stops the server at startup, and so does a{' '}
+        <code>middleware.ts</code> guard that is malformed, or a <code>middleware.ts</code>{' '}
+        that throws while it loads - the worker refuses to boot, naming the problem.
       </p>
 
       <h2 id="5-read-the-session">5. Read the session</h2>

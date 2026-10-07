@@ -132,24 +132,36 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a> use the same canonical form.
       </p>
       <p>
-        Every rule is validated when it is loaded, never at request time: a
-        relative pattern, a catch-all in the middle, a <code>to</code> target
-        referencing an unknown capture, a disallowed redirect status, or an
-        invalid header name/value causes that rule to be skipped with a
-        warning in the server log.
+        Every rule is validated when it is loaded, never at request time, and
+        a rule that cannot be enforced as written is an error, not a warning:
+        a skipped guard would leave its path open, and a skipped redirect or
+        header rule would quietly serve what it was meant to change. That
+        covers a relative pattern (<code>members/*rest</code>), a catch-all
+        that is not the last segment (<code>/a/*rest/c</code>), a{' '}
+        <code>to</code> target that is not a path or references an unknown
+        capture, a disallowed redirect status, an invalid header name or
+        value, a guard that names no requirement or whose{' '}
+        <code>redirectTo</code> is not a path, and an unknown key (a
+        misspelled <code>require_session</code>).
       </p>
-      <p>
-        Guards are stricter, because a skipped guard would leave its path
-        open. A <code>gio.toml</code> guard that is invalid, names no
-        requirement, or has a key the server does not know (a misspelled{' '}
-        <code>require_session</code>) stops the server at startup with the
-        reason. In <code>middleware.ts</code>, a guard whose requirement is
-        missing or malformed (<code>requireSession: &apos;true&apos;</code>, an
-        unknown key, a <code>redirectTo</code> that is not a path) denies
-        every request to its path until it is fixed - redirecting to its{' '}
-        <code>redirectTo</code>, or <code>/</code> - and the worker logs a
-        warning saying why.
-      </p>
+      <ul>
+        <li>
+          <strong>gio.toml</strong> - the server refuses to start, naming the
+          file, the line and the reason.
+        </li>
+        <li>
+          <strong>middleware.ts</strong> - the worker refuses to boot, listing
+          every problem with the rule&apos;s position (
+          <code>guards[0] (&quot;members/*rest&quot;): path must start with &quot;/&quot;</code>).
+          So does a <code>middleware.ts</code> that throws while it loads, or
+          has no default export: its rules - guards included - are never
+          dropped while the app serves. In production the server exits with
+          the error (see{' '}
+          <a href="/docs/cli/giojs-server#worker-boot-errors">worker boot errors</a>);
+          in development it waits for the fix, and a file broken by a later
+          edit makes the worker answer <code>503</code> until it is fixed.
+        </li>
+      </ul>
 
       <h2 id="evaluation-order">Evaluation order</h2>
       <p>Per request, the short-circuiting phases run in a fixed order:</p>
@@ -159,16 +171,23 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         <li><strong>Rewrites</strong></li>
       </ol>
       <p>
-        Within each phase the first matching rule wins, and{' '}
-        <code>gio.toml</code> rules are checked before{' '}
-        <code>middleware.ts</code> rules. The phase order holds across both
-        sources - a <code>middleware.ts</code> guard beats a{' '}
-        <code>gio.toml</code> redirect on the same path.
+        Guards are not first-match: every guard whose path matches is checked,
+        and each must admit the request. The first one that refuses (in order,{' '}
+        <code>gio.toml</code> guards before <code>middleware.ts</code> guards)
+        decides the redirect, so a <code>/admin/*rest</code> session guard and
+        a <code>/admin/billing</code> cookie guard both apply to{' '}
+        <code>/admin/billing</code>. Among redirects, and among rewrites, the
+        first matching rule wins, <code>gio.toml</code> rules first. The phase
+        order holds across both sources - a <code>middleware.ts</code> guard
+        beats a <code>gio.toml</code> redirect on the same path.
       </p>
       <p>
-        The original query string is preserved verbatim: redirects append it to
-        the <code>Location</code> header, and rewrites keep it on the rewritten
-        URI. A rewrite changes the path that routing and the cache key see, while
+        The original query string is preserved verbatim: redirects and guard
+        redirects append it to the <code>Location</code> header (
+        <code>/admin?next=1</code> goes to <code>/login?next=1</code>), and
+        rewrites keep it on the rewritten URI. Redirect and rewrite targets are
+        paths starting with <code>/</code> - for an external URL, redirect from
+        a route handler or <code>getServerSideProps</code>. A rewrite changes the path that routing and the cache key see, while
         the browser URL stays what the client requested.
       </p>
 

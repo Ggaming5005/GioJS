@@ -526,10 +526,17 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
-    tokio::runtime::Builder::new_multi_thread()
+    let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(env_files))
+        .block_on(run(env_files));
+    // A startup failure is a message for the person starting the server,
+    // never a debug dump with a backtrace (which RUST_BACKTRACE would add).
+    if let Err(error) = result {
+        eprintln!("giojs-server: {error:#}");
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
@@ -716,15 +723,30 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         dev_mode,
     );
     info!(workers, "Starting Node SSR worker: {node_script}");
-    let ipc = IpcClient::start(
-        &node_script,
-        &ipc_paths,
-        dev_mode,
-        worker_env,
-        workers,
-        &deployment,
-    )
-    .await?;
+    let ipc = loop {
+        let error = match IpcClient::start(
+            &node_script,
+            &ipc_paths,
+            dev_mode,
+            worker_env.clone(),
+            workers,
+            &deployment,
+        )
+        .await
+        {
+            Ok(ipc) => break ipc,
+            Err(error) => error,
+        };
+        // Production refuses to start: the server must never serve with
+        // the app's rules or routes half-loaded. Dev shows the worker's own
+        // error and tries again once a file changes.
+        if !(dev_mode && cfg.dev.watch && error.is::<ipc::WorkerBootError>()) {
+            return Err(error);
+        }
+        eprintln!("giojs-server: {error:#}");
+        eprintln!("giojs-server: waiting for a file change to start the worker again");
+        wait_for_source_change(&project_root, &app_dir, &public_dir, &cache_dir, &cfg.dev).await?;
+    };
     let cache_epoch: Arc<str> =
         security::cache_epoch(ipc.deployment_id(), nonce_placeholder.as_deref()).into();
 
@@ -4316,6 +4338,30 @@ fn spawn_dev_watcher(
             }
         }
     });
+}
+
+/// Dev, before the server is up: resolve once a source change happens (the
+/// same changes that restart a running worker), so a worker that failed to
+/// boot is started again once the file is fixed. Nothing is served while it
+/// waits - no port is bound yet.
+async fn wait_for_source_change(
+    project_root: &std::path::Path,
+    app_dir: &str,
+    public_dir: &std::path::Path,
+    page_cache_dir: &std::path::Path,
+    dev: &config::DevConfig,
+) -> anyhow::Result<()> {
+    let root = std::fs::canonicalize(project_root)?;
+    let watch = dev_watch::DevWatch::start(
+        root,
+        dev_watch::resolve_dir(std::path::Path::new(app_dir)),
+        dev_watch::resolve_dir(public_dir),
+        Some(dev_watch::resolve_dir(page_cache_dir)),
+        dev.watch_ignore.clone(),
+    )?;
+    while !watch.changes().next_batch(Duration::from_millis(300)).await.source {}
+    info!("dev watch: change detected - starting the worker again");
+    Ok(())
 }
 
 /// Dev watch: wait for the worker restart to complete, then clear the cache

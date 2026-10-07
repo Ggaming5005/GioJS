@@ -10,7 +10,9 @@
  *   GIO_SERVER_BIN=target/debug/giojs-server node --import tsx tests/integration/testing-kit.test.ts
  */
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { after, before, describe, test } from 'node:test';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -96,6 +98,32 @@ describe('createTestServer', () => {
       assert.equal((await fetch(`${second.url}/posts/2`)).status, 200);
     } finally {
       await second.close();
+    }
+  });
+});
+
+describe('createTestServer with a broken app', () => {
+  test('a middleware.ts that throws fails the server with its error, not a timeout', async () => {
+    // Its rules - guards included - used to be dropped with a warning while
+    // the server served everything.
+    const root = await mkdtemp(join(tmpdir(), 'gio-broken-middleware-'));
+    try {
+      await mkdir(join(root, 'app'));
+      await writeFile(join(root, 'app', 'page.tsx'), 'export default function Page() { return null; }\n');
+      await writeFile(
+        join(root, 'middleware.ts'),
+        "export default { guards: [{ path: '/admin/*rest', requireSession: true, redirectTo: '/login' }] };\n" +
+          "throw new Error('boom');\n",
+      );
+      await assert.rejects(createTestServer({ appDir: join(root, 'app'), timeoutMs: 60_000 }), (error: Error) => {
+        assert.match(
+          error.message,
+          /^giojs-server exited before it was ready: the Node worker exited before it was ready \(exit status: 1\):\n {2}\S*middleware\.ts failed to load: boom\n/,
+        );
+        return true;
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
