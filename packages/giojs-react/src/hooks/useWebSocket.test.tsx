@@ -248,6 +248,9 @@ describe('useWebSocket', () => {
     act(() => vi.advanceTimersByTime(10));
     act(() => latest().serverOpen());
     expect(latest().sent).toEqual(['one', 'two']);
+
+    act(() => result.close());
+    expect(result.send('after close')).toBe(false); // nothing would ever flush it
   });
 
   it('drops sends while disconnected by default', () => {

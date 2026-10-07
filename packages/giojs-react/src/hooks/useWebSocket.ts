@@ -117,6 +117,9 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
   const isServer = typeof window === 'undefined';
   const wsRef = useRef<WebSocket | null>(null);
   const queueRef = useRef<WebSocketSendData[]>([]);
+  // True once the hook stopped for good (close(), gave up, unmounted): sends
+  // have nothing to flush into. False while connecting or reconnecting.
+  const stoppedRef = useRef(false);
   // Latest options without reconnecting when an inline object changes identity.
   const optionsRef = useRef(options);
   optionsRef.current = options;
@@ -133,6 +136,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
     let disposed = false;
     let attempt = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    stoppedRef.current = false;
 
     const connect = (): void => {
       const { protocols } = optionsRef.current;
@@ -169,6 +173,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
           attempt < settings.maxAttempts &&
           (optionsRef.current.shouldReconnect ?? ((e: CloseEvent) => isRetryableClose(e.code)))(event);
         if (!retry) {
+          stoppedRef.current = true;
           wsRef.current = null;
           setIsReconnecting(false);
           queueRef.current = [];
@@ -184,6 +189,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
 
     closeRef.current = (code = 1000, reason = ''): void => {
       disposed = true;
+      stoppedRef.current = true;
       clearTimeout(timer);
       queueRef.current = [];
       setIsReconnecting(false);
@@ -199,6 +205,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
     connect();
     return (): void => {
       disposed = true;
+      stoppedRef.current = true;
       clearTimeout(timer);
       const ws = wsRef.current;
       wsRef.current = null;
@@ -218,8 +225,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
         return true;
       }
       const queue = optionsRef.current.queueWhileDisconnected;
-      // Nothing to flush into once the hook stopped (close(), or gave up).
-      if (queue === undefined || queue === false || ws === null) return false;
+      if (queue === undefined || queue === false || stoppedRef.current) return false;
       const max = queue === true ? DEFAULT_MAX_QUEUED : queue.maxMessages;
       if (queueRef.current.length >= max) return false;
       queueRef.current.push(data);
