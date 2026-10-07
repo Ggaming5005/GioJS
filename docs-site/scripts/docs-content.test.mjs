@@ -150,3 +150,33 @@ test("the releases page highlights the release tagged 'latest', which is release
     assert.match(source, new RegExp(`\\$\\{isLatest\\(rel\\) \\? ' ${cls}' : ''\\}`), cls);
   }
 });
+
+test('the file-convention pages state the router and metadata-route facts the code decides', () => {
+  // app/sitemap.ts, robots.ts and manifest.ts: the default revalidate.
+  const routes = read('packages/giojs-core/src/metadata-routes.ts');
+  const revalidate = /export const DEFAULT_METADATA_REVALIDATE = (\d+);/.exec(routes)?.[1];
+  assert.ok(revalidate, 'DEFAULT_METADATA_REVALIDATE not found - update this test');
+  for (const page of ['sitemap', 'robots', 'manifest']) {
+    assert.match(docsPage(`file-conventions/${page}`), new RegExp(`default: '${revalidate}'`), page);
+  }
+  assert.match(docsPage('file-conventions'), new RegExp(`default ${revalidate} seconds`));
+
+  // route.ts: the method handlers a file may export.
+  const methods = /HANDLER_METHODS = \[([^\]]+)\]/.exec(read('packages/giojs-core/src/router.ts'))?.[1];
+  assert.ok(methods, 'HANDLER_METHODS not found - update this test');
+  const routePage = docsPage('file-conventions/route');
+  for (const method of methods.match(/[A-Z]+/g)) {
+    assert.match(routePage, new RegExp(`name: '${method}'`), `the route.ts page lacks ${method}`);
+  }
+
+  // .env files: the candidates, highest precedence first.
+  const rust = read('crates/giojs-server/src/env_files.rs');
+  const candidates = /pub fn candidate_files[\s\S]*?\[([\s\S]*?)\]\n\}/.exec(rust)?.[1] ?? '';
+  const order = [...candidates.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(order, ['.env.{mode}.local', '.env.local', '.env.{mode}', '.env'],
+    'env_files.rs changed the .env order - update the .env files page');
+  const envPage = docsPage('file-conventions/env-files');
+  const shown = ['<code>.env.development.local</code>', '<code>.env.local</code></td>', '<code>.env.development</code>', '<code>.env</code></td>']
+    .map((s) => envPage.indexOf(s));
+  assert.ok(shown.every((at, n) => at > 0 && (n === 0 || at > shown[n - 1])), `the .env files page shows another order: ${shown}`);
+});
