@@ -141,6 +141,120 @@ pub fn validate(config: &GioConfig, env: &StartupEnv) -> Result<Validated, Vec<S
     }
 }
 
+/// One line per protection gio.toml turns off or loosens, naming the key:
+/// startup logs each at warn level and `--check-config` reports them under
+/// `warnings`, so the two always say the same thing. Settings that only
+/// apply in dev mode are included in every mode - the file is the same.
+pub fn protections_off_warnings(config: &GioConfig) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let security = &config.security;
+    if !security.csrf.enabled {
+        warnings.push(
+            "[security.csrf] enabled = false: any website can send form posts and other unsafe \
+             requests to this server with your visitors' cookies - prefer listing origins in \
+             [security.csrf] trusted_origins, or public endpoints in [security.csrf] exempt"
+                .to_string(),
+        );
+    }
+    if !security.websocket.check_origin {
+        warnings.push(
+            "[security.websocket] check_origin = false: any website can open WebSockets to this \
+             server with your visitors' cookies - prefer listing origins in [security.csrf] \
+             trusted_origins, or public endpoints in [security.csrf] exempt"
+                .to_string(),
+        );
+    }
+    if !security.default_headers {
+        warnings.push(
+            "[security] default_headers = false: responses no longer carry \
+             x-content-type-options, x-frame-options or referrer-policy (MIME sniffing, \
+             clickjacking and full-URL referrers are back) unless [security.headers] sets them"
+                .to_string(),
+        );
+    }
+    if crate::dev_guard::allows_any_host(&config.dev.allowed_hosts) {
+        warnings.push(
+            "[dev] allowed_hosts = [\"*\"]: in dev mode the /_gio/devtools endpoints (source \
+             codeframes, live server state) and render error details answer any Host from any \
+             machine, so DNS rebinding is no longer blocked - list the hostnames you browse from \
+             instead"
+                .to_string(),
+        );
+    }
+    let server = &config.server;
+    if server.max_body_bytes == 0 {
+        warnings.push(format!(
+            "[server] max_body_bytes = 0: request bodies have no limit of their own - each is \
+             buffered in memory up to the worker's {} MiB message cap",
+            crate::ipc::MAX_IPC_MESSAGE_SIZE / (1024 * 1024)
+        ));
+    } else if server.max_body_bytes > crate::ipc::MAX_BINARY_BODY_BYTES {
+        warnings.push(format!(
+            "[server] max_body_bytes = {} is more than a worker message can carry: binary \
+             bodies above {} MiB (base64-encoded to the {} MiB message cap) still get a 413",
+            server.max_body_bytes,
+            crate::ipc::MAX_BINARY_BODY_BYTES / (1024 * 1024),
+            crate::ipc::MAX_IPC_MESSAGE_SIZE / (1024 * 1024)
+        ));
+    }
+    if server.max_connections == 0 {
+        warnings.push(
+            "[server] max_connections = 0: concurrent connections are unlimited - a connection \
+             flood can exhaust file descriptors and memory"
+                .to_string(),
+        );
+    }
+    let metrics = &config.metrics;
+    if let Some(everything) = metrics
+        .ip_allowlist
+        .entries()
+        .iter()
+        .find(|net| net.is_everything())
+        .filter(|_| metrics.enabled && metrics.token.is_empty())
+    {
+        warnings.push(format!(
+            "[metrics] ip_allowlist includes {everything} and no token is set: /_gio/metrics is \
+             open to every client of that family - set [metrics] token, or list only your \
+             scrapers' addresses"
+        ));
+    }
+    if let Some(everything) = server
+        .trusted_proxies
+        .entries()
+        .iter()
+        .find(|net| net.is_everything())
+    {
+        warnings.push(format!(
+            "[server] trusted_proxies includes {everything}: any client of that family can pick \
+             its own IP, rate-limit bucket and request id - list only your proxies' addresses"
+        ));
+    }
+    if !server.skew_protection {
+        warnings.push(
+            "[server] skew_protection = false: a browser still running an older deployment's \
+             code keeps navigating without a reload, against pages and actions that may no \
+             longer match it"
+                .to_string(),
+        );
+    }
+    warnings
+}
+
+/// `[dev] allowed_hosts` entries dev startup ignores, one warning each.
+pub fn invalid_allowed_hosts_warnings(config: &GioConfig) -> Vec<String> {
+    crate::dev_guard::DevHostPolicy::new(&config.server.host, &config.dev.allowed_hosts)
+        .invalid_allowed_hosts()
+        .iter()
+        .map(|entry| {
+            format!(
+                "ignoring [dev] allowed_hosts entry {entry:?} in gio.toml: expected a hostname \
+                 or IP such as \"myvm.local\", \"192.168.1.20\" or \"*.tunnel.example\", or \
+                 \"*\" for any host"
+            )
+        })
+        .collect()
+}
+
 /// The `[[fonts]]` entries naming a file under public/ that startup could not
 /// copy: an invalid path, or a file that is missing or unreadable. Checked
 /// before the worker spawns, so a deploy that lost its font files fails here
@@ -222,6 +336,8 @@ fn report(
     let base = json!({
         "mode": env_files.mode.as_str(),
         "envFiles": env_files.files,
+        // `GIO_ENV_FILES` or `[env] files` when loading is off, else null.
+        "envFilesDisabledBy": env_files.disabled_by,
         "configFile": env.config_file.as_deref().map(display),
     });
     let config = match config {
@@ -249,7 +365,7 @@ fn report(
         json!({
             "ok": errors.is_empty(),
             "errors": errors,
-            "warnings": RuleSet::skipped_rules(&config.middleware_rules()),
+            "warnings": warnings(&config),
             "listen": {
                 "host": config.server.host,
                 "port": config.server.port,
@@ -268,6 +384,15 @@ fn report(
             "cacheDir": display(&absolute(&cache_dir)),
         }),
     )
+}
+
+/// Everything startup would warn about in this configuration: loosened
+/// protections, ignored `[dev] allowed_hosts` entries, skipped rules.
+fn warnings(config: &GioConfig) -> Vec<String> {
+    let mut warnings = protections_off_warnings(config);
+    warnings.extend(invalid_allowed_hosts_warnings(config));
+    warnings.extend(RuleSet::skipped_rules(&config.middleware_rules()));
+    warnings
 }
 
 fn with_fields(mut base: Value, fields: Value) -> Value {
@@ -322,6 +447,7 @@ mod tests {
             files: files.iter().map(|file| file.to_string()).collect(),
             skipped: Vec::new(),
             ignored_node_env: false,
+            disabled_by: None,
         }
     }
 
@@ -578,6 +704,98 @@ mod tests {
         let report_value = report(&loaded(&[]), parse(""), &env);
         assert_eq!(report_value["sessionSecret"], "valid");
         assert!(!report_value.to_string().contains(&"a".repeat(32)));
+    }
+
+    #[test]
+    fn the_defaults_warn_about_nothing() {
+        assert_eq!(protections_off_warnings(&parse("").unwrap()), Vec::<String>::new());
+        // Tightened or explicitly scoped settings are no protection off.
+        let scoped = parse(
+            "[server]\nmax_body_bytes = 1048576\nmax_connections = 64\n\
+             trusted_proxies = [\"10.0.0.0/8\"]\n\n\
+             [metrics]\nip_allowlist = [\"10.0.0.0/8\"]\n\n\
+             [dev]\nallowed_hosts = [\"myvm.local\"]\n",
+        )
+        .unwrap();
+        assert_eq!(protections_off_warnings(&scoped), Vec::<String>::new());
+    }
+
+    #[test]
+    fn every_protection_turned_off_is_one_warning_naming_its_key() {
+        let cases = [
+            ("[security.csrf]\nenabled = false\n", "[security.csrf] enabled = false"),
+            (
+                "[security.websocket]\ncheck_origin = false\n",
+                "[security.websocket] check_origin = false",
+            ),
+            ("[security]\ndefault_headers = false\n", "[security] default_headers = false"),
+            ("[dev]\nallowed_hosts = [\"*\"]\n", "[dev] allowed_hosts = [\"*\"]"),
+            ("[server]\nmax_body_bytes = 0\n", "[server] max_body_bytes = 0"),
+            (
+                "[server]\nmax_body_bytes = 104857600\n",
+                "[server] max_body_bytes = 104857600 is more than",
+            ),
+            ("[server]\nmax_connections = 0\n", "[server] max_connections = 0"),
+            (
+                "[metrics]\nip_allowlist = [\"0.0.0.0/0\", \"::/0\"]\n",
+                "[metrics] ip_allowlist includes 0.0.0.0/0",
+            ),
+            (
+                "[server]\ntrusted_proxies = [\"::/0\"]\n",
+                "[server] trusted_proxies includes ::/0",
+            ),
+            ("[server]\nskew_protection = false\n", "[server] skew_protection = false"),
+        ];
+        for (toml, expected) in cases {
+            let warnings = protections_off_warnings(&parse(toml).unwrap());
+            assert_eq!(warnings.len(), 1, "{toml}: {warnings:?}");
+            assert!(warnings[0].starts_with(expected), "{toml}: {warnings:?}");
+        }
+        // An open allowlist with a token, or metrics off, opens nothing.
+        for toml in [
+            "[metrics]\ntoken = \"t\"\nip_allowlist = [\"0.0.0.0/0\"]\n",
+            "[metrics]\nenabled = false\nip_allowlist = [\"0.0.0.0/0\"]\n",
+        ] {
+            assert_eq!(protections_off_warnings(&parse(toml).unwrap()), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn check_config_reports_the_warnings_startup_logs() {
+        let root = test_root();
+        let report = report(
+            &loaded(&[]),
+            parse(
+                "[security.csrf]\nenabled = false\n\n\
+                 [dev]\nallowed_hosts = [\"*\", \"foo*.example\"]\n",
+            ),
+            &env_in(&root),
+        );
+        assert_eq!(report["ok"], true, "a loosened protection does not stop startup");
+        let warnings: Vec<&str> = report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|warning| warning.as_str().unwrap())
+            .collect();
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings[0].starts_with("[security.csrf] enabled = false: "));
+        assert!(warnings[1].starts_with("[dev] allowed_hosts = [\"*\"]: "));
+        // Dev startup ignores the entry; the check says so in any mode.
+        assert!(warnings[2]
+            .starts_with("ignoring [dev] allowed_hosts entry \"foo*.example\" in gio.toml"));
+    }
+
+    #[test]
+    fn env_files_turned_off_are_reported_by_their_switch() {
+        let root = test_root();
+        let mut off = loaded(&[]);
+        assert_eq!(report(&off, parse(""), &env_in(&root))["envFilesDisabledBy"], Value::Null);
+        off.disabled_by = Some("[env] files");
+        let report = report(&off, parse("[env]\nfiles = false\n"), &env_in(&root));
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["envFilesDisabledBy"], "[env] files");
+        assert_eq!(report["envFiles"], json!([]));
     }
 
     #[test]

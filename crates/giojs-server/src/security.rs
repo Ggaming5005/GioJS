@@ -561,7 +561,14 @@ impl SecurityPolicy {
     /// error: a security setting that silently does nothing is worse than
     /// one that refuses to start.
     pub fn new(cfg: &SecurityConfig, tls_enabled: bool) -> Result<Self, SecurityConfigError> {
-        let mut defaults: Vec<(HeaderName, HeaderValue)> = DEFAULT_HEADERS
+        // `default_headers = false` drops the built-in three; HSTS and the
+        // [security.headers] entries below are separate settings.
+        let built_in: &[(&str, &str)] = if cfg.default_headers {
+            &DEFAULT_HEADERS
+        } else {
+            &[]
+        };
+        let mut defaults: Vec<(HeaderName, HeaderValue)> = built_in
             .iter()
             .map(|(name, value)| {
                 (
@@ -1277,6 +1284,34 @@ mod tests {
             Some("same-origin")
         );
         assert_eq!(header_str(&resp, "x-content-type-options"), Some("nosniff"));
+    }
+
+    #[tokio::test]
+    async fn default_headers_false_drops_only_the_built_in_three() {
+        let mut cfg = SecurityConfig {
+            default_headers: false,
+            hsts: Some(HstsSetting::Enabled(true)),
+            ..Default::default()
+        };
+        cfg.headers
+            .insert("permissions-policy".into(), "camera=()".into());
+        cfg.headers.insert("x-frame-options".into(), "DENY".into());
+        cfg.headers.insert("referrer-policy".into(), "".into());
+        let mut app_set = html_response("x");
+        app_set
+            .headers_mut()
+            .insert("x-powered-by", HeaderValue::from_static("Express"));
+        let resp = secure(&policy(cfg), app_set);
+        assert_eq!(header_str(&resp, "x-content-type-options"), None);
+        assert_eq!(header_str(&resp, "referrer-policy"), None);
+        // [security.headers] entries and HSTS are their own settings.
+        assert_eq!(header_str(&resp, "x-frame-options"), Some("DENY"));
+        assert_eq!(header_str(&resp, "permissions-policy"), Some("camera=()"));
+        assert_eq!(
+            header_str(&resp, "strict-transport-security"),
+            Some("max-age=31536000")
+        );
+        assert_eq!(header_str(&resp, "x-powered-by"), None, "still stripped");
     }
 
     #[test]

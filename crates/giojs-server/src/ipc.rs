@@ -38,7 +38,13 @@ type BoxWriter = Box<dyn AsyncWrite + Unpin + Send>;
 // Bounds allocation here; mirrors MAX_IPC_MESSAGE_SIZE in
 // packages/giojs-core/src/ipc.ts, which destroys the connection when a frame
 // declares more.
-const MAX_IPC_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+pub const MAX_IPC_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
+/// The largest binary request body a frame can carry once base64-encoded
+/// (4/3 its size), about 48 MiB: the real ceiling of `[server]
+/// max_body_bytes`, which startup warns about past it (see
+/// `config_check::protections_off_warnings`).
+pub const MAX_BINARY_BODY_BYTES: usize = MAX_IPC_MESSAGE_SIZE / 4 * 3;
 
 /// A request whose frame would exceed MAX_IPC_MESSAGE_SIZE. The worker drops
 /// the whole connection on such a frame - every in-flight request with it -

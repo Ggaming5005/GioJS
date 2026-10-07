@@ -6,10 +6,16 @@
 //! Parses the stack, fetches a codeframe for the topmost project frame from
 //! /_gio/devtools/codeframe, and renders file:line links that hit
 //! /_gio/devtools/open-in-editor. XSS-safe: all dynamic values go through
-//! textContent, never innerHTML.
+//! textContent, never innerHTML. With `[dev] devtools = false` those
+//! endpoints are not routed, so the overlay shows the message and stack
+//! only: no codeframe, no editor links, no live-reload stream.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
 (function(){
+  var DEVTOOLS = true;
   var OVERLAY_STYLES = 'position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.88);font-family:monospace;padding:2rem;';
   var CARD_STYLES = 'background:#1a0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:1.5rem 2rem;max-width:860px;width:100%;color:#fca5a5;box-shadow:0 0 40px rgba(239,68,68,0.2);overflow:auto;max-height:85vh;';
 
@@ -105,14 +111,14 @@ pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
 
     var codeframeBox = el('div', '');
     card.appendChild(codeframeBox);
-    if (topProject) renderCodeframe(codeframeBox, topProject);
+    if (topProject && DEVTOOLS) renderCodeframe(codeframeBox, topProject);
 
     if (frames.length) {
       var list = el('div', 'border-top:1px solid #3f1010;margin-top:0.75rem;padding-top:0.75rem;font-size:0.72rem;color:#94a3b8;');
       frames.slice(0, 8).forEach(function(f) {
         var row = el('div', 'margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;');
         row.appendChild(el('span', '', 'at ' + (f.fn || '<anonymous>') + ' '));
-        if (isProjectFrame(f)) {
+        if (isProjectFrame(f) && DEVTOOLS) {
           row.appendChild(fileLink(f));
         } else {
           row.appendChild(el('span', 'color:#64748b;', f.file + ':' + f.line + ':' + f.col));
@@ -146,23 +152,46 @@ pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
 
   // Dev watch: the server broadcasts `reload` on the devtools stream after
   // restarting the worker for a source change.
-  try {
-    var es = new EventSource('/_gio/devtools/stream');
-    es.addEventListener('reload', function() { location.reload(); });
-  } catch (_) {}
+  if (DEVTOOLS) {
+    try {
+      var es = new EventSource('/_gio/devtools/stream');
+      es.addEventListener('reload', function() { location.reload(); });
+    } catch (_) {}
+  }
 })();
 </script>"#;
 
-/// The overlay script as injected: `DEV_OVERLAY_SCRIPT` with the CSP nonce
-/// placeholder on its tag when nonces are on, so the overlay keeps working
-/// under a strict `script-src`.
+/// Set by `disable_devtools`, once at startup before anything is served.
+static DEVTOOLS_DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// `[dev] devtools = false`: every overlay injected from now on leaves the
+/// /_gio/devtools* endpoints alone.
+pub fn disable_devtools() {
+    DEVTOOLS_DISABLED.store(true, Ordering::Relaxed);
+}
+
+/// `DEV_OVERLAY_SCRIPT` for `[dev] devtools = false`.
+fn script_without_devtools() -> String {
+    DEV_OVERLAY_SCRIPT.replacen("var DEVTOOLS = true;", "var DEVTOOLS = false;", 1)
+}
+
+/// The overlay script as injected: `DEV_OVERLAY_SCRIPT` (without its
+/// devtools features when they are off) with the CSP nonce placeholder on
+/// its tag when nonces are on, so the overlay keeps working under a strict
+/// `script-src`.
 pub fn overlay_script() -> &'static str {
-    static NONCED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static WITHOUT_DEVTOOLS: OnceLock<String> = OnceLock::new();
+    static NONCED: OnceLock<String> = OnceLock::new();
+    let script = if DEVTOOLS_DISABLED.load(Ordering::Relaxed) {
+        WITHOUT_DEVTOOLS.get_or_init(script_without_devtools).as_str()
+    } else {
+        DEV_OVERLAY_SCRIPT
+    };
     let attr = crate::security::nonce_attr();
     if attr.is_empty() {
-        return DEV_OVERLAY_SCRIPT;
+        return script;
     }
-    NONCED.get_or_init(|| crate::security::with_nonce_attr(DEV_OVERLAY_SCRIPT, "<script", attr))
+    NONCED.get_or_init(|| crate::security::with_nonce_attr(script, "<script", attr))
 }
 
 fn escape_html(raw: &str) -> String {
@@ -269,6 +298,23 @@ mod tests {
         assert!(DEV_OVERLAY_SCRIPT.contains("/_gio/devtools/open-in-editor"));
         assert!(DEV_OVERLAY_SCRIPT.contains("__GIO_SSR_ERROR__"));
         assert!(DEV_OVERLAY_SCRIPT.contains("node_modules"));
+    }
+
+    #[test]
+    fn without_devtools_the_overlay_calls_no_dev_endpoint() {
+        let script = script_without_devtools();
+        assert!(script.contains("var DEVTOOLS = false;"));
+        assert!(!script.contains("var DEVTOOLS = true;"));
+        // Every use of a /_gio/devtools endpoint sits behind the flag.
+        assert!(script.contains("if (topProject && DEVTOOLS) renderCodeframe("));
+        assert!(script.contains("if (isProjectFrame(f) && DEVTOOLS) {"));
+        assert!(script.contains(
+            "if (DEVTOOLS) {\n    try {\n      var es = new EventSource('/_gio/devtools/stream');"
+        ));
+        assert_eq!(script.matches("renderCodeframe(").count(), 2, "defined, called once");
+        assert_eq!(script.matches("fileLink(").count(), 3, "defined, used twice");
+        assert_eq!(script.matches("EventSource(").count(), 1);
+        assert!(DEV_OVERLAY_SCRIPT.contains("var DEVTOOLS = true;"));
     }
 
     #[test]

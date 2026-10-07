@@ -14,6 +14,11 @@
 //! env-files.ts mirrors it for `gio export` and standalone builds. Only file
 //! names are ever logged, never values. A candidate that is not a regular
 //! file (`python -m venv .env` makes a `.env/` directory) is skipped.
+//!
+//! `[env] files = false` in gio.toml, or `GIO_ENV_FILES=0` (which wins
+//! either way), skips the files entirely. Loading runs before gio.toml is
+//! parsed, so that one key is read on its own (`files_disabled_by`); where
+//! gio.toml lives depends on GIO_APP_DIR only, never on a .env file.
 
 use std::cell::Cell;
 use std::fmt;
@@ -67,7 +72,14 @@ pub struct LoadedEnvFiles {
     /// environment, so honoring it would mix one mode's files with another
     /// mode's server behavior.
     pub ignored_node_env: bool,
+    /// What turned loading off (`GIO_ENV_FILES` or `[env] files`), when
+    /// nothing was loaded on purpose.
+    pub disabled_by: Option<&'static str>,
 }
+
+/// `GIO_ENV_FILES=0` skips the .env files and `1` loads them, whatever
+/// `[env] files` says; unset or empty leaves it to gio.toml.
+pub const FILES_ENV: &str = "GIO_ENV_FILES";
 
 /// A file that exists but cannot be read or parsed. Carries a line number,
 /// never the line itself: the line holds a value, and values are secrets.
@@ -115,6 +127,7 @@ pub fn load(
         files: Vec::new(),
         skipped: Vec::new(),
         ignored_node_env: false,
+        disabled_by: None,
     };
     for name in candidate_files(mode) {
         let path = root.join(&name);
@@ -158,11 +171,48 @@ pub fn load(
     Ok(loaded)
 }
 
-/// Startup entry point: the project root config.rs uses, mode from NODE_ENV.
+/// Startup entry point: the project root config.rs uses, mode from NODE_ENV,
+/// unless `GIO_ENV_FILES` or gio.toml's `[env] files` turns loading off.
 pub fn load_for_startup() -> Result<LoadedEnvFiles, EnvFileError> {
     let root = crate::config::GioConfig::project_root();
     let mode = EnvMode::from_node_env(std::env::var("NODE_ENV").ok().as_deref());
+    let gio_toml = std::fs::read_to_string(crate::config::GioConfig::path()).ok();
+    let switch = std::env::var(FILES_ENV).ok();
+    if let Some(source) = files_disabled_by(switch.as_deref(), gio_toml.as_deref())? {
+        return Ok(LoadedEnvFiles {
+            mode,
+            files: Vec::new(),
+            skipped: Vec::new(),
+            ignored_node_env: false,
+            disabled_by: Some(source),
+        });
+    }
     load(&root, mode, &mut ProcessEnv)
+}
+
+/// What turns `.env` loading off, if anything: `GIO_ENV_FILES` (`0` /
+/// `false` off, `1` / `true` on), else `[env] files` in gio.toml's contents.
+/// gio.toml is not validated here - a syntax error or a non-bool value
+/// leaves the files on, and the full parse right after reports it.
+pub fn files_disabled_by(
+    switch: Option<&str>,
+    gio_toml: Option<&str>,
+) -> Result<Option<&'static str>, EnvFileError> {
+    match switch.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("0" | "false") => return Ok(Some(FILES_ENV)),
+        Some("1" | "true") => return Ok(None),
+        Some(other) => {
+            return Err(EnvFileError {
+                file: "the .env files".to_string(),
+                reason: format!("{FILES_ENV}={other:?} must be 0 (skip them) or 1 (load them)"),
+            })
+        }
+        None => {}
+    }
+    let files = gio_toml
+        .and_then(|raw| toml_edit::ImDocument::parse(raw).ok())
+        .and_then(|doc| doc.as_table().get("env")?.get("files")?.as_bool());
+    Ok((files == Some(false)).then_some("[env] files"))
 }
 
 /// Hands dotenvy one byte per read, so the BufReader inside its iterator
@@ -442,6 +492,35 @@ mod tests {
                 ("B".to_string(), "x\ny".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn env_files_switch_reads_the_env_var_then_gio_toml() {
+        let off = "[env]\nfiles = false\n";
+        assert_eq!(files_disabled_by(None, None).unwrap(), None);
+        assert_eq!(files_disabled_by(None, Some("")).unwrap(), None);
+        assert_eq!(files_disabled_by(None, Some("[env]\nfiles = true\n")).unwrap(), None);
+        assert_eq!(files_disabled_by(None, Some(off)).unwrap(), Some("[env] files"));
+        for spelling in ["env = { files = false }\n", "env.files = false\n"] {
+            assert_eq!(
+                files_disabled_by(None, Some(spelling)).unwrap(),
+                Some("[env] files"),
+                "{spelling}"
+            );
+        }
+        // GIO_ENV_FILES wins over gio.toml in both directions.
+        for value in ["0", "false", " 0 "] {
+            assert_eq!(files_disabled_by(Some(value), None).unwrap(), Some(FILES_ENV));
+        }
+        assert_eq!(files_disabled_by(Some("1"), Some(off)).unwrap(), None);
+        assert_eq!(files_disabled_by(Some("true"), Some(off)).unwrap(), None);
+        assert_eq!(files_disabled_by(Some(""), Some(off)).unwrap(), Some("[env] files"));
+        let error = files_disabled_by(Some("no"), None).unwrap_err().to_string();
+        assert!(error.contains("GIO_ENV_FILES=\"no\" must be 0"), "{error}");
+        // Left for the full parse to report, with the files still on.
+        for broken in ["[env]\nfiles = \"no\"\n", "[env\nfiles = false\n", "[server]\nfiles = false\n"] {
+            assert_eq!(files_disabled_by(None, Some(broken)).unwrap(), None, "{broken}");
+        }
     }
 
     #[test]

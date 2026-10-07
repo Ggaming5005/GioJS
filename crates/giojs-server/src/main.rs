@@ -456,8 +456,14 @@ struct AppState {
     css_config: config::CssConfig,
     http2: bool,
     tls_enabled: bool,
+    /// `[server] max_body_bytes`, with 0 resolved to the IPC frame cap.
     max_body_bytes: usize,
     request_body_timeout: Option<Duration>,
+    /// `[server] skew_protection`: answer another deployment's client
+    /// navigations with 409 and a hard reload.
+    skew_protection: bool,
+    /// `[health] details`: report more than status and worker readiness.
+    health_details: bool,
     metrics: Arc<metrics::Metrics>,
     metrics_config: config::MetricsConfig,
     dev_mode: bool,
@@ -510,7 +516,9 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     if let Some(warning) = logging::init(cfg.logging.format) {
         warn!("{warning}");
     }
-    if !env_files.files.is_empty() {
+    if let Some(source) = env_files.disabled_by {
+        info!("not loading .env files: {source} turns them off");
+    } else if !env_files.files.is_empty() {
         info!(
             mode = env_files.mode.as_str(),
             files = %env_files.files.join(", "),
@@ -669,12 +677,10 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         websocket_origin_check = security.websocket_origin_check(),
         "security policy"
     );
-    if !security.websocket_origin_check() {
-        warn!(
-            "[security.websocket] check_origin = false: any website can open WebSockets to this \
-             server with your visitors' cookies - prefer listing origins in [security.csrf] \
-             trusted_origins, or public endpoints in [security.csrf] exempt"
-        );
+    // Every protection gio.toml turns off or loosens, in the words
+    // --check-config reports them with.
+    for warning in config_check::protections_off_warnings(&cfg) {
+        warn!("{warning}");
     }
     let security = Arc::new(security);
 
@@ -775,17 +781,6 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             proxy_headers = proxy_trust.headers.as_str(),
             "client IPs are read from forwarding headers sent by trusted proxies"
         );
-        if let Some(everything) = proxy_trust
-            .trusted
-            .entries()
-            .iter()
-            .find(|net| net.is_everything())
-        {
-            warn!(
-                "trusted_proxies includes {everything}: any client of that family can pick its own \
-                 IP, rate-limit bucket and request id - list only your proxies' addresses"
-            );
-        }
     }
 
     let css_cache: Arc<css_assets::CssCache> = Arc::new(DashMap::new());
@@ -901,8 +896,10 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         css_config,
         http2,
         tls_enabled,
-        max_body_bytes: cfg.server.max_body_bytes,
+        max_body_bytes: cfg.server.body_limit(),
         request_body_timeout: cfg.server.request_body_timeout(),
+        skew_protection: cfg.server.skew_protection,
+        health_details: cfg.health.details,
         metrics: Arc::new(metrics::Metrics::new()),
         metrics_config,
         dev_mode,
@@ -921,18 +918,25 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
 
     spawn_worker_revalidations(state.clone());
 
-    if metrics_unauthenticated(&state.metrics_config, dev_mode) {
-        warn!("/_gio/metrics is unauthenticated - set [metrics] token or ip_allowlist in gio.toml");
+    if metrics_loopback_only(&state.metrics_config) {
+        info!(
+            "/_gio/metrics answers loopback clients only - set [metrics] token or ip_allowlist \
+             in gio.toml to scrape it from elsewhere"
+        );
     }
 
     if dev_mode {
-        spawn_dev_watcher(
-            state.clone(),
-            app_dir.clone(),
-            project_root.clone(),
-            &cache_dir,
-            cfg.dev.watch_ignore.clone(),
-        );
+        if cfg.dev.watch {
+            spawn_dev_watcher(
+                state.clone(),
+                app_dir.clone(),
+                project_root.clone(),
+                &cache_dir,
+                cfg.dev.watch_ignore.clone(),
+            );
+        } else {
+            info!("[dev] watch = false: source changes do not restart the worker");
+        }
 
         let dt_mem = state.devtools.clone();
         tokio::spawn(async move {
@@ -1013,9 +1017,12 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let compression = compression_layer(cfg.compression);
 
     let mut app = Router::new()
-        .route("/_gio/health", get(health_handler))
         .route("/_gio/metrics", get(metrics_handler))
         .route("/_gio/image", get(image_handler_route));
+    // `[health] enabled = false`: an unrouted /_gio path, so a 404.
+    if cfg.health.enabled {
+        app = app.route("/_gio/health", get(health_handler));
+    }
     // Without a token the route does not exist: /_gio/revalidate is then an
     // unrouted /_gio path and answers 404 like any other.
     if let Some(token) = revalidate_token {
@@ -1043,22 +1050,29 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         ))
     });
     if let Some(dev_hosts) = &dev_hosts {
-        for entry in dev_hosts.invalid_allowed_hosts() {
-            warn!(
-                "ignoring [dev] allowed_hosts entry {entry:?} in gio.toml: expected a hostname or \
-                 IP such as \"myvm.local\", \"192.168.1.20\" or \"*.tunnel.example\""
-            );
+        for warning in config_check::invalid_allowed_hosts_warnings(&cfg) {
+            warn!("{warning}");
         }
-        if !dev_hosts.allowed_hosts().is_empty() {
-            info!(allowed_hosts = ?dev_hosts.allowed_hosts(), "dev endpoints also answer to [dev] allowed_hosts");
-        } else if dev_guard::binds_all_interfaces(&cfg.server.host) {
-            warn!(
-                "dev server is bound to {} - /_gio/devtools endpoints (error overlay codeframes, \
-                 open-in-editor, live reload) only answer this machine on localhost hosts; add \
-                 other hostnames or IPs you browse from to [dev] allowed_hosts in gio.toml",
-                cfg.server.host
-            );
+        // With "*", protections_off_warnings has already said what it costs.
+        if !dev_hosts.allows_any_host() {
+            if !dev_hosts.allowed_hosts().is_empty() {
+                info!(allowed_hosts = ?dev_hosts.allowed_hosts(), "dev endpoints also answer to [dev] allowed_hosts");
+            } else if cfg.dev.devtools && dev_guard::binds_all_interfaces(&cfg.server.host) {
+                warn!(
+                    "dev server is bound to {} - /_gio/devtools endpoints (error overlay \
+                     codeframes, open-in-editor, live reload) only answer this machine on \
+                     localhost hosts; add other hostnames or IPs you browse from to [dev] \
+                     allowed_hosts in gio.toml",
+                    cfg.server.host
+                );
+            }
         }
+        if !cfg.dev.devtools {
+            info!("[dev] devtools = false: /_gio/devtools* is not routed (404) and the error overlay shows no codeframes, editor links or live reload");
+            dev_overlay::disable_devtools();
+        }
+    }
+    if let Some(dev_hosts) = dev_hosts.as_ref().filter(|_| cfg.dev.devtools) {
         // route_layer: the guard runs only for matched dev routes, before
         // method routing, so a trusted GET to open-in-editor still gets 405.
         let dev_routes = Router::new()
@@ -1267,28 +1281,58 @@ async fn font_cache_control_middleware(req: Request, next: Next) -> Response {
 }
 
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let (cache_entries, _) = state.cache.stats();
     let workers = state.ipc.worker_statuses();
-    let ready_workers = workers.iter().filter(|w| w.ready).count();
-    axum::Json(serde_json::json!({
-        "status": "ok",
-        "http2": state.http2,
-        "tls": state.tls_enabled,
-        "deploymentId": state.ipc.deployment_id(),
-        // False only while every worker is respawning; cached/static content
-        // still serves, so this stays a 200 - readiness probes read the field.
-        "nodeReady": ready_workers > 0,
-        "workers": { "configured": workers.len(), "ready": ready_workers },
-        "cacheEntries": cache_entries,
-        "uptimeSecs": state.devtools.uptime_secs(),
+    axum::Json(health_body(&HealthFacts {
+        details: state.health_details,
+        http2: state.http2,
+        tls: state.tls_enabled,
+        deployment_id: state.ipc.deployment_id(),
+        workers_configured: workers.len(),
+        workers_ready: workers.iter().filter(|w| w.ready).count(),
+        cache_entries: state.cache.stats().0,
+        uptime_secs: state.devtools.uptime_secs(),
     }))
 }
 
-/// Whether startup warns that `/_gio/metrics` is open to anyone: only in
-/// production, and only when the endpoint exists (with `[metrics]` absent or
-/// `enabled = false` it answers 404, so there is nothing to protect).
-fn metrics_unauthenticated(config: &config::MetricsConfig, dev_mode: bool) -> bool {
-    !dev_mode && config.enabled && config.token.is_empty() && config.ip_allowlist.is_empty()
+/// What `/_gio/health` knows about the server.
+struct HealthFacts<'a> {
+    /// `[health] details`.
+    details: bool,
+    http2: bool,
+    tls: bool,
+    deployment_id: &'a str,
+    workers_configured: usize,
+    workers_ready: usize,
+    cache_entries: usize,
+    uptime_secs: u64,
+}
+
+/// The `/_gio/health` body. `[health] details = false` keeps what a probe
+/// needs and drops the deployment id and the worker topology.
+fn health_body(facts: &HealthFacts) -> serde_json::Value {
+    // False only while every worker is respawning; cached/static content
+    // still serves, so this stays a 200 - readiness probes read the field.
+    let node_ready = facts.workers_ready > 0;
+    if !facts.details {
+        return serde_json::json!({ "status": "ok", "nodeReady": node_ready });
+    }
+    serde_json::json!({
+        "status": "ok",
+        "http2": facts.http2,
+        "tls": facts.tls,
+        "deploymentId": facts.deployment_id,
+        "nodeReady": node_ready,
+        "workers": { "configured": facts.workers_configured, "ready": facts.workers_ready },
+        "cacheEntries": facts.cache_entries,
+        "uptimeSecs": facts.uptime_secs,
+    })
+}
+
+/// Whether `/_gio/metrics` answers loopback clients only: it exists (with
+/// `[metrics]` absent or `enabled = false` it answers 404) and neither a
+/// token nor an allowlist says who else may scrape it.
+fn metrics_loopback_only(config: &config::MetricsConfig) -> bool {
+    config.enabled && config.token.is_empty() && config.ip_allowlist.is_empty()
 }
 
 async fn metrics_handler(
@@ -1296,30 +1340,8 @@ async fn metrics_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> Response {
-    if !state.metrics_config.enabled {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    if !state.metrics_config.ip_allowlist.is_empty() {
-        // The client behind trusted proxies: allowlisting 127.0.0.1 must not
-        // admit everything a local reverse proxy forwards. A client the
-        // proxy's forwarding header could not name is refused outright.
-        let allowed = client_identity::access_ip(&req, addr)
-            .is_some_and(|ip| state.metrics_config.ip_allowlist.contains(ip));
-        if !allowed {
-            return StatusCode::FORBIDDEN.into_response();
-        }
-    }
-    if !state.metrics_config.token.is_empty() {
-        let expected = format!("Bearer {}", state.metrics_config.token);
-        let authorized = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .map(|v| constant_time_eq(v.as_bytes(), expected.as_bytes()))
-            .unwrap_or(false);
-        if !authorized {
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
+    if let Some(refusal) = metrics_refusal(&state.metrics_config, &req, addr) {
+        return refusal.into_response();
     }
     let (cache_entries, cache_size_bytes) = state.cache.stats();
     let worker_metrics = metrics::format_worker_metrics(&state.ipc.worker_statuses());
@@ -1331,6 +1353,46 @@ async fn metrics_handler(
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(axum::body::Body::from(body))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Why `/_gio/metrics` refuses this request, if it does: 404 when it is
+/// off, 403 for a client outside `ip_allowlist` (or, with neither an
+/// allowlist nor a token, any client but this machine), 401 without the
+/// token.
+fn metrics_refusal(
+    config: &config::MetricsConfig,
+    req: &Request,
+    addr: SocketAddr,
+) -> Option<StatusCode> {
+    if !config.enabled {
+        return Some(StatusCode::NOT_FOUND);
+    }
+    // The client behind trusted proxies: allowlisting 127.0.0.1 must not
+    // admit everything a local reverse proxy forwards. A client the proxy's
+    // forwarding header could not name is refused outright.
+    let client = client_identity::access_ip(req, addr);
+    if !config.ip_allowlist.is_empty() {
+        if !client.is_some_and(|ip| config.ip_allowlist.contains(ip)) {
+            return Some(StatusCode::FORBIDDEN);
+        }
+    } else if metrics_loopback_only(config)
+        && !client.is_some_and(|ip| ip.to_canonical().is_loopback())
+    {
+        return Some(StatusCode::FORBIDDEN);
+    }
+    if !config.token.is_empty() {
+        let expected = format!("Bearer {}", config.token);
+        let authorized = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| constant_time_eq(v.as_bytes(), expected.as_bytes()))
+            .unwrap_or(false);
+        if !authorized {
+            return Some(StatusCode::UNAUTHORIZED);
+        }
+    }
+    None
 }
 
 fn i18n_locales(state: &AppState) -> &[String] {
@@ -1493,7 +1555,8 @@ async fn version_skew_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    if let Some(resp) = check_version_skew(&req, state.ipc.deployment_id()) {
+    if let Some(resp) = check_version_skew(&req, state.ipc.deployment_id(), state.skew_protection)
+    {
         return resp;
     }
     next.run(req).await
@@ -1515,7 +1578,12 @@ fn payload_too_large() -> Response {
     resp
 }
 
-fn check_version_skew(req: &Request, server_id: &str) -> Option<Response> {
+/// The 409 hard-reload for a client from another deployment, unless
+/// `[server] skew_protection = false` says to ignore its x-deployment-id.
+fn check_version_skew(req: &Request, server_id: &str, protection: bool) -> Option<Response> {
+    if !protection {
+        return None;
+    }
     // Only the GioJS client runtime sends x-deployment-id (soft navigations
     // and prefetches), so its presence IS the navigate signal. fetch() cannot
     // set sec-fetch-mode: navigate - gating on it made skew detection dead.
@@ -5483,29 +5551,109 @@ mod tests {
     }
 
     #[test]
-    fn unauthenticated_metrics_warning_only_when_the_endpoint_exists() {
-        let metrics = |toml: &str| {
-            config::GioConfig::parse(toml, "gio.toml")
-                .expect("valid gio.toml")
-                .metrics
+    fn health_details_off_reports_only_status_and_readiness() {
+        let mut facts = HealthFacts {
+            details: true,
+            http2: true,
+            tls: false,
+            deployment_id: "d3pl0y",
+            workers_configured: 2,
+            workers_ready: 1,
+            cache_entries: 7,
+            uptime_secs: 42,
         };
+        let full = health_body(&facts);
+        assert_eq!(full["deploymentId"], "d3pl0y");
+        assert_eq!(full["workers"], serde_json::json!({ "configured": 2, "ready": 1 }));
+        assert_eq!(full["nodeReady"], true);
+        facts.details = false;
+        assert_eq!(
+            health_body(&facts),
+            serde_json::json!({ "status": "ok", "nodeReady": true })
+        );
+        facts.workers_ready = 0;
+        assert_eq!(health_body(&facts)["nodeReady"], false);
+    }
+
+    fn metrics_config(toml: &str) -> config::MetricsConfig {
+        config::GioConfig::parse(toml, "gio.toml")
+            .expect("valid gio.toml")
+            .metrics
+    }
+
+    #[test]
+    fn metrics_is_loopback_only_without_a_token_or_an_allowlist() {
         // No [metrics] section, or enabled = false: /_gio/metrics is a 404.
-        assert!(!metrics_unauthenticated(&metrics(""), false));
-        assert!(!metrics_unauthenticated(
-            &metrics("[metrics]\nenabled = false\n"),
-            false
-        ));
-        // Enabled without a token or an allowlist: open to anyone.
-        assert!(metrics_unauthenticated(&metrics("[metrics]\n"), false));
-        assert!(!metrics_unauthenticated(&metrics("[metrics]\n"), true));
-        assert!(!metrics_unauthenticated(
-            &metrics("[metrics]\ntoken = \"t\"\n"),
-            false
-        ));
-        assert!(!metrics_unauthenticated(
-            &metrics("[metrics]\nip_allowlist = [\"10.0.0.0/8\"]\n"),
-            false
-        ));
+        assert!(!metrics_loopback_only(&metrics_config("")));
+        assert!(!metrics_loopback_only(&metrics_config(
+            "[metrics]\nenabled = false\n"
+        )));
+        assert!(metrics_loopback_only(&metrics_config("[metrics]\n")));
+        assert!(!metrics_loopback_only(&metrics_config(
+            "[metrics]\ntoken = \"t\"\n"
+        )));
+        assert!(!metrics_loopback_only(&metrics_config(
+            "[metrics]\nip_allowlist = [\"10.0.0.0/8\"]\n"
+        )));
+    }
+
+    #[test]
+    fn metrics_refusals_follow_the_section() {
+        let request = |client: Option<&str>, authorization: Option<&str>| {
+            let mut req = Request::builder();
+            if let Some(authorization) = authorization {
+                req = req.header(header::AUTHORIZATION, authorization);
+            }
+            let mut req = req.body(Body::empty()).unwrap();
+            if let Some(client) = client {
+                req.extensions_mut().insert(client_identity::ClientInfo {
+                    ip: client.parse().unwrap(),
+                    unresolved: false,
+                    peer: "127.0.0.1:9".parse().unwrap(),
+                    scheme: "http",
+                    host: None,
+                    request_id: String::new(),
+                });
+            }
+            req
+        };
+        let local: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let remote: SocketAddr = "203.0.113.7:5000".parse().unwrap();
+        let refusal = |toml: &str, req: &axum::extract::Request, peer: SocketAddr| {
+            metrics_refusal(&metrics_config(toml), req, peer)
+        };
+
+        assert_eq!(refusal("", &request(None, None), local), Some(StatusCode::NOT_FOUND));
+        // The safe default: this machine only - a forwarded client behind a
+        // local proxy is not this machine.
+        let open = "[metrics]\n";
+        assert_eq!(refusal(open, &request(None, None), local), None);
+        assert_eq!(refusal(open, &request(None, None), "[::1]:9".parse().unwrap()), None);
+        assert_eq!(
+            refusal(open, &request(None, None), remote),
+            Some(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            refusal(open, &request(Some("198.51.100.4"), None), local),
+            Some(StatusCode::FORBIDDEN)
+        );
+        // The explicit loosening.
+        let everyone = "[metrics]\nip_allowlist = [\"0.0.0.0/0\", \"::/0\"]\n";
+        assert_eq!(refusal(everyone, &request(None, None), remote), None);
+        assert_eq!(
+            refusal(everyone, &request(None, None), "[2001:db8::1]:9".parse().unwrap()),
+            None
+        );
+        // A token alone admits any client that presents it.
+        let token = "[metrics]\ntoken = \"scrape-token\"\n";
+        assert_eq!(
+            refusal(token, &request(None, None), remote),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            refusal(token, &request(None, Some("Bearer scrape-token")), remote),
+            None
+        );
     }
 
     // ── inject_into_html ──────────────────────────────────────────────────────
@@ -6626,7 +6774,7 @@ mod tests {
             .header("x-deployment-id", "old_id")
             .body(Body::empty())
             .unwrap();
-        let resp = check_version_skew(&req, "new_id").unwrap();
+        let resp = check_version_skew(&req, "new_id", true).unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         assert_eq!(resp.headers().get("x-gio-action").unwrap(), "hard-reload");
     }
@@ -6634,7 +6782,7 @@ mod tests {
     #[test]
     fn version_skew_absent_id_passes() {
         let req = Request::builder().body(Body::empty()).unwrap();
-        assert!(check_version_skew(&req, "server_id").is_none());
+        assert!(check_version_skew(&req, "server_id", true).is_none());
     }
 
     #[test]
@@ -6643,7 +6791,7 @@ mod tests {
             .header("x-deployment-id", "same_id")
             .body(Body::empty())
             .unwrap();
-        assert!(check_version_skew(&req, "same_id").is_none());
+        assert!(check_version_skew(&req, "same_id", true).is_none());
     }
 
     #[test]
@@ -6656,8 +6804,18 @@ mod tests {
             .header("x-deployment-id", "old_id")
             .body(Body::empty())
             .unwrap();
-        let resp = check_version_skew(&req, "new_id").unwrap();
+        let resp = check_version_skew(&req, "new_id", true).unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn skew_protection_off_ignores_the_deployment_id() {
+        let req = Request::builder()
+            .header("x-deployment-id", "old_id")
+            .body(Body::empty())
+            .unwrap();
+        assert!(check_version_skew(&req, "new_id", false).is_none());
+        assert!(check_version_skew(&req, "new_id", true).is_some());
     }
 
     #[test]

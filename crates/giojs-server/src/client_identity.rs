@@ -171,6 +171,10 @@ impl IpAllowlist {
         self.0.is_empty()
     }
 
+    pub fn entries(&self) -> &[IpNet] {
+        &self.0
+    }
+
     pub fn contains(&self, ip: IpAddr) -> bool {
         self.0.iter().any(|net| net.contains(ip))
     }

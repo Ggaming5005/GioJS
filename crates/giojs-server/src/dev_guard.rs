@@ -19,6 +19,9 @@
 //! client on another machine must name the bind address or a host listed in
 //! `[dev] allowed_hosts`. Listing a host there opts in to that host from any
 //! peer, which is what a LAN device, a VM or a container's port mapping needs.
+//! `allowed_hosts = ["*"]` opts in to every Host from every peer (startup
+//! warns); the Origin and Sec-Fetch-Site checks still apply, so
+//! open-in-editor stays same-origin even then.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
@@ -127,6 +130,8 @@ pub struct DevHostPolicy {
     bind_host: Option<String>,
     /// `[dev] allowed_hosts`. Entries starting with `.` match subdomains.
     allowed_hosts: Vec<String>,
+    /// `[dev] allowed_hosts` lists `"*"`: every Host, from every peer.
+    any_host: bool,
     /// `[dev] allowed_hosts` entries that are not a hostname or IP, verbatim,
     /// so startup can name them instead of silently dropping them.
     invalid_allowed_hosts: Vec<String>,
@@ -141,6 +146,9 @@ impl DevHostPolicy {
         let mut allowed = Vec::new();
         let mut invalid = Vec::new();
         for entry in allowed_hosts {
+            if is_any_host(entry) {
+                continue;
+            }
             match parse_allowed_host(entry) {
                 Some(host) => allowed.push(host),
                 None => invalid.push(entry.clone()),
@@ -149,6 +157,7 @@ impl DevHostPolicy {
         Self {
             bind_host,
             allowed_hosts: allowed,
+            any_host: allows_any_host(allowed_hosts),
             invalid_allowed_hosts: invalid,
             warned: Mutex::default(),
         }
@@ -174,6 +183,9 @@ impl DevHostPolicy {
         host_header: &str,
         peer: Option<IpAddr>,
     ) -> Result<(), DevGuardRejection> {
+        if self.any_host {
+            return Ok(());
+        }
         let Some(host) = normalize_hostname(host_header) else {
             return Err(DevGuardRejection::UntrustedHost(host_header.to_string()));
         };
@@ -280,6 +292,10 @@ impl DevHostPolicy {
         &self.allowed_hosts
     }
 
+    pub fn allows_any_host(&self) -> bool {
+        self.any_host
+    }
+
     pub fn invalid_allowed_hosts(&self) -> &[String] {
         &self.invalid_allowed_hosts
     }
@@ -296,6 +312,15 @@ impl DevHostPolicy {
         let mut warned = self.warned.lock().unwrap_or_else(PoisonError::into_inner);
         warned.len() < MAX_WARNED_REJECTIONS && warned.insert(hasher.finish())
     }
+}
+
+/// Whether `[dev] allowed_hosts` opts in to every host (an entry `"*"`).
+pub fn allows_any_host(allowed_hosts: &[String]) -> bool {
+    allowed_hosts.iter().any(|entry| is_any_host(entry))
+}
+
+fn is_any_host(entry: &str) -> bool {
+    entry.trim() == "*"
 }
 
 /// `https://abc.example:8443/` -> `abc.example:8443`. `None` for "null".
@@ -489,9 +514,9 @@ mod tests {
     #[test]
     fn unusable_allowed_hosts_entries_are_reported_not_stored() {
         let entries = [
-            "*",
             "*.",
             "foo*.example",
+            "**",
             "http://myvm.local/app",
             "",
             "..example",
@@ -501,8 +526,64 @@ mod tests {
         let p = DevHostPolicy::new("0.0.0.0", &entries);
         assert_eq!(p.allowed_hosts(), ["ok.example"]);
         assert_eq!(p.invalid_allowed_hosts(), &entries[..6]);
+        assert!(!p.allows_any_host());
         assert!(!p.is_trusted_host("foo*.example"));
         assert!(!p.is_trusted_host(".localhost"));
+    }
+
+    #[test]
+    fn a_star_entry_answers_any_host_from_any_peer() {
+        let entries = [" * ".to_string(), "myvm.local".to_string()];
+        let p = DevHostPolicy::new("0.0.0.0", &entries);
+        assert!(p.allows_any_host());
+        assert!(allows_any_host(&entries));
+        assert!(!allows_any_host(&["myvm.local".to_string()]));
+        assert!(p.invalid_allowed_hosts().is_empty(), "\"*\" is not dropped");
+        assert_eq!(p.allowed_hosts(), ["myvm.local"]);
+        let remote: Option<IpAddr> = Some("203.0.113.9".parse().unwrap());
+        for host in ["evil.example", "localhost:3000", "192.168.1.20", "not a host"] {
+            assert!(p.is_trusted_host_from(host, remote), "{host}");
+            assert_eq!(
+                p.check_from(DevEndpointKind::Read, Some(host), None, None, remote),
+                Ok(())
+            );
+        }
+        // Only the Host check is lifted: open-in-editor stays same-origin.
+        assert_eq!(
+            p.check_from(
+                DevEndpointKind::Privileged,
+                Some("evil.example"),
+                Some("https://attacker.example"),
+                Some("cross-site"),
+                remote,
+            ),
+            Err(DevGuardRejection::CrossSite("cross-site".into()))
+        );
+        assert_eq!(
+            p.check_from(
+                DevEndpointKind::Privileged,
+                Some("evil.example"),
+                Some("https://attacker.example"),
+                None,
+                remote,
+            ),
+            Err(DevGuardRejection::ForeignOrigin("https://attacker.example".into()))
+        );
+        assert_eq!(
+            p.check_from(
+                DevEndpointKind::Privileged,
+                Some("evil.example:3000"),
+                Some("http://evil.example:3000"),
+                Some("same-origin"),
+                remote,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            p.check_from(DevEndpointKind::Read, None, None, None, remote),
+            Err(DevGuardRejection::MissingHost),
+            "a request still needs a Host"
+        );
     }
 
     #[test]

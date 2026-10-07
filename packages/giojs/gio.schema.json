@@ -46,6 +46,16 @@
     "dev": {
       "$ref": "#/definitions/DevConfig"
     },
+    "env": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/EnvConfig"
+        }
+      ],
+      "default": {
+        "files": true
+      }
+    },
     "fonts": {
       "description": "Self-hosted fonts, fetched at startup and served from /_gio/fonts.",
       "type": "array",
@@ -65,6 +75,17 @@
       "type": "array",
       "items": {
         "$ref": "#/definitions/HeaderRule"
+      }
+    },
+    "health": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/HealthConfig"
+        }
+      ],
+      "default": {
+        "details": true,
+        "enabled": true
       }
     },
     "i18n": {
@@ -283,12 +304,22 @@
       "type": "object",
       "properties": {
         "allowed_hosts": {
-          "description": "Extra Host names the /_gio/devtools* endpoints answer to besides\nlocalhost, loopback IPs, and a specific `server.host` (DNS rebinding\nprotection). A leading `.` or `*.` matches subdomains; entries that\nare not a hostname or IP are ignored with a startup warning.",
+          "description": "Extra Host names the /_gio/devtools* endpoints answer to besides\nlocalhost, loopback IPs, and a specific `server.host` (DNS rebinding\nprotection). A leading `.` or `*.` matches subdomains; `\"*\"` answers\nany Host from any machine. Entries that are not a hostname or IP are\nignored with a startup warning.",
           "type": "array",
           "default": [],
           "items": {
             "type": "string"
           }
+        },
+        "devtools": {
+          "description": "Route the /_gio/devtools* endpoints (dashboard, codeframes,\nopen-in-editor, live reload). false: they answer 404 and the error\noverlay shows no codeframe or editor links.",
+          "type": "boolean",
+          "default": true
+        },
+        "watch": {
+          "description": "Restart the worker when a source file changes. false: no watcher.",
+          "type": "boolean",
+          "default": true
         },
         "watch_ignore": {
           "description": "Glob patterns (relative to the project root) the dev watcher never\nrestarts for: data files the app writes, such as `[\"data/**\",\n\"*.db\"]`. `*` stays within a path segment, `**` spans segments; a\npattern without `/` matches a name at any depth.",
@@ -296,6 +327,18 @@
           "items": {
             "type": "string"
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "EnvConfig": {
+      "description": "`[env]`: `.env` file loading. Read before the rest of gio.toml (the files\nload first), by `env_files::files_switch`; `GIO_ENV_FILES` wins over it.",
+      "type": "object",
+      "properties": {
+        "files": {
+          "description": "Load the `.env*` files from the project root at startup. false: the\nprocess environment is all there is.",
+          "type": "boolean",
+          "default": true
         }
       },
       "additionalProperties": false
@@ -415,6 +458,23 @@
         "path",
         "headers"
       ]
+    },
+    "HealthConfig": {
+      "description": "`[health]`: the `/_gio/health` endpoint load balancers and `gio start`\npoll. On by default; unknown keys are a startup error.",
+      "type": "object",
+      "properties": {
+        "details": {
+          "description": "Report the deployment id, worker topology, cache size and uptime.\nfalse: only `{\"status\":\"ok\",\"nodeReady\":...}`.",
+          "type": "boolean",
+          "default": true
+        },
+        "enabled": {
+          "description": "Serve `/_gio/health`. false: it is not routed (404).",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
     },
     "HstsPolicy": {
       "type": "object",
@@ -588,7 +648,7 @@
       "additionalProperties": false
     },
     "MetricsConfig": {
-      "description": "`[metrics]`: the Prometheus endpoint `/_gio/metrics`. Off when the\nsection is absent; a present section turns it on unless `enabled = false`.",
+      "description": "`[metrics]`: the Prometheus endpoint `/_gio/metrics`. Off when the\nsection is absent; a present section turns it on unless `enabled = false`.\nWith neither `token` nor `ip_allowlist` it answers loopback clients only;\n`ip_allowlist = [\"0.0.0.0/0\", \"::/0\"]` opens it to everyone.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -597,7 +657,7 @@
           "default": true
         },
         "ip_allowlist": {
-          "description": "Only these client IPs or CIDR blocks may scrape (after\n`trusted_proxies` resolution). A malformed entry fails startup.",
+          "description": "Only these client IPs or CIDR blocks may scrape (after\n`trusted_proxies` resolution). Empty with no `token`: loopback\nclients only. A malformed entry fails startup.",
           "type": "array",
           "items": {
             "type": "string"
@@ -797,6 +857,11 @@
             "trusted_origins": []
           }
         },
+        "default_headers": {
+          "description": "Send the built-in default headers (`x-content-type-options: nosniff`,\n`x-frame-options: SAMEORIGIN`, `referrer-policy:\nstrict-origin-when-cross-origin`). false drops all three; entries in\n`[security.headers]` are still sent.",
+          "type": "boolean",
+          "default": true
+        },
         "headers": {
           "description": "`[security.headers]`: overrides for the default response headers\n(`x-content-type-options`, `x-frame-options`, `referrer-policy`) and\nextra headers sent by default (`permissions-policy`,\n`cross-origin-opener-policy`, ...). An empty value removes a default.",
           "type": "object",
@@ -881,7 +946,7 @@
           "minimum": 0
         },
         "max_body_bytes": {
-          "description": "Request body limit.",
+          "description": "Request body limit in bytes; past it a 413. 0: no limit of its own,\nso the worker's message size cap (64 MiB per request, about 48 MiB\nof binary body) is the ceiling.",
           "type": "integer",
           "format": "uint",
           "default": 2097152,
@@ -917,6 +982,11 @@
           "format": "uint64",
           "default": 30,
           "minimum": 0
+        },
+        "skew_protection": {
+          "description": "Answer a client navigation from another deployment (its\n`x-deployment-id` differs) with 409 and a hard reload. false ignores\nthe header: old clients keep navigating softly across versions.",
+          "type": "boolean",
+          "default": true
         },
         "tls": {
           "$ref": "#/definitions/TlsConfig"

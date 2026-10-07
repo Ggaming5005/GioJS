@@ -72,6 +72,8 @@ pub enum ConfigError {
 
 /// `[metrics]`: the Prometheus endpoint `/_gio/metrics`. Off when the
 /// section is absent; a present section turns it on unless `enabled = false`.
+/// With neither `token` nor `ip_allowlist` it answers loopback clients only;
+/// `ip_allowlist = ["0.0.0.0/0", "::/0"]` opens it to everyone.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -83,10 +85,53 @@ pub struct MetricsConfig {
     #[serde(default)]
     pub token: String,
     /// Only these client IPs or CIDR blocks may scrape (after
-    /// `trusted_proxies` resolution). A malformed entry fails startup.
+    /// `trusted_proxies` resolution). Empty with no `token`: loopback
+    /// clients only. A malformed entry fails startup.
     #[serde(default)]
     #[cfg_attr(test, schemars(with = "Vec<String>"))]
     pub ip_allowlist: crate::client_identity::IpAllowlist,
+}
+
+/// `[health]`: the `/_gio/health` endpoint load balancers and `gio start`
+/// poll. On by default; unknown keys are a startup error.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
+pub struct HealthConfig {
+    /// Serve `/_gio/health`. false: it is not routed (404).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Report the deployment id, worker topology, cache size and uptime.
+    /// false: only `{"status":"ok","nodeReady":...}`.
+    #[serde(default = "default_true")]
+    pub details: bool,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            details: true,
+        }
+    }
+}
+
+/// `[env]`: `.env` file loading. Read before the rest of gio.toml (the files
+/// load first), by `env_files::files_switch`; `GIO_ENV_FILES` wins over it.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
+pub struct EnvConfig {
+    /// Load the `.env*` files from the project root at startup. false: the
+    /// process environment is all there is.
+    #[serde(default = "default_true")]
+    pub files: bool,
+}
+
+impl Default for EnvConfig {
+    fn default() -> Self {
+        Self { files: true }
+    }
 }
 
 /// `[revalidate]`: the on-demand revalidation endpoint (see revalidate.rs).
@@ -110,16 +155,25 @@ pub struct RevalidateConfig {
 }
 
 /// `[dev]`: settings that only apply when NODE_ENV=development.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct DevConfig {
     /// Extra Host names the /_gio/devtools* endpoints answer to besides
     /// localhost, loopback IPs, and a specific `server.host` (DNS rebinding
-    /// protection). A leading `.` or `*.` matches subdomains; entries that
-    /// are not a hostname or IP are ignored with a startup warning.
+    /// protection). A leading `.` or `*.` matches subdomains; `"*"` answers
+    /// any Host from any machine. Entries that are not a hostname or IP are
+    /// ignored with a startup warning.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+    /// Route the /_gio/devtools* endpoints (dashboard, codeframes,
+    /// open-in-editor, live reload). false: they answer 404 and the error
+    /// overlay shows no codeframe or editor links.
+    #[serde(default = "default_true")]
+    pub devtools: bool,
+    /// Restart the worker when a source file changes. false: no watcher.
+    #[serde(default = "default_true")]
+    pub watch: bool,
     /// Glob patterns (relative to the project root) the dev watcher never
     /// restarts for: data files the app writes, such as `["data/**",
     /// "*.db"]`. `*` stays within a path segment, `**` spans segments; a
@@ -129,11 +183,22 @@ pub struct DevConfig {
     pub watch_ignore: crate::dev_watch::WatchIgnore,
 }
 
+impl Default for DevConfig {
+    fn default() -> Self {
+        Self {
+            allowed_hosts: Vec::new(),
+            devtools: true,
+            watch: true,
+            watch_ignore: Default::default(),
+        }
+    }
+}
+
 /// `[security]`: default response headers, Content-Security-Policy and
 /// cross-site request protection (see security.rs). Every key is optional.
 /// Unknown keys are a startup error: a misspelled security setting must not
 /// silently leave a protection off.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[cfg_attr(
@@ -144,6 +209,12 @@ pub struct DevConfig {
     )
 )]
 pub struct SecurityConfig {
+    /// Send the built-in default headers (`x-content-type-options: nosniff`,
+    /// `x-frame-options: SAMEORIGIN`, `referrer-policy:
+    /// strict-origin-when-cross-origin`). false drops all three; entries in
+    /// `[security.headers]` are still sent.
+    #[serde(default = "default_true")]
+    pub default_headers: bool,
     /// `[security.headers]`: overrides for the default response headers
     /// (`x-content-type-options`, `x-frame-options`, `referrer-policy`) and
     /// extra headers sent by default (`permissions-policy`,
@@ -167,6 +238,20 @@ pub struct SecurityConfig {
     pub csrf: CsrfConfig,
     #[serde(default)]
     pub websocket: WebSocketSecurityConfig,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            default_headers: true,
+            headers: Default::default(),
+            hsts: None,
+            csp: None,
+            csp_report_only: None,
+            csrf: CsrfConfig::default(),
+            websocket: WebSocketSecurityConfig::default(),
+        }
+    }
 }
 
 /// `hsts = true | false | "raw value" | { max_age, include_subdomains, preload }`.
@@ -342,6 +427,10 @@ pub struct GioConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub revalidate: RevalidateConfig,
+    #[serde(default)]
+    pub health: HealthConfig,
+    #[serde(default)]
+    pub env: EnvConfig,
     /// Where the listen port came from (`GIO_PORT`, `PORT`, `gio.toml` or
     /// `default`), for the startup log.
     #[serde(skip)]
@@ -372,6 +461,8 @@ pub const SECTIONS: &[(&str, bool)] = &[
     ("security", false),
     ("logging", false),
     ("revalidate", false),
+    ("health", false),
+    ("env", false),
 ];
 
 /// Keys that earlier releases documented or the example gio.toml carried,
@@ -952,7 +1043,9 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default = "default_http2")]
     pub http2: bool,
-    /// Request body limit.
+    /// Request body limit in bytes; past it a 413. 0: no limit of its own,
+    /// so the worker's message size cap (64 MiB per request, about 48 MiB
+    /// of binary body) is the ceiling.
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
     // Connection-level DoS limits. For every field below, 0 disables the
@@ -1000,6 +1093,11 @@ pub struct ServerConfig {
     /// X-Request-Id through instead of setting one (AWS ALB, Google Cloud LB).
     #[serde(default = "default_accept_request_id")]
     pub accept_request_id: bool,
+    /// Answer a client navigation from another deployment (its
+    /// `x-deployment-id` differs) with 409 and a hard reload. false ignores
+    /// the header: old clients keep navigating softly across versions.
+    #[serde(default = "default_true")]
+    pub skew_protection: bool,
     /// Node render workers: 1 (default), a count, or "auto".
     #[serde(default)]
     #[cfg_attr(test, schemars(with = "WorkersSchema"))]
@@ -1170,6 +1268,15 @@ impl ServerConfig {
     pub fn http2_keep_alive(&self) -> Option<(std::time::Duration, std::time::Duration)> {
         secs(self.http2_keep_alive_interval_secs).zip(secs(self.http2_keep_alive_timeout_secs))
     }
+    /// The size a buffered request body may reach: `max_body_bytes`, or with
+    /// 0 the largest body an IPC frame could ever carry (anything bigger
+    /// cannot reach the worker, so reading it would only waste memory).
+    pub fn body_limit(&self) -> usize {
+        match self.max_body_bytes {
+            0 => crate::ipc::MAX_IPC_MESSAGE_SIZE,
+            limit => limit,
+        }
+    }
 }
 
 /// `[server.tls]`: terminate TLS in GioJS itself.
@@ -1201,6 +1308,7 @@ impl Default for ServerConfig {
             trusted_proxies: Default::default(),
             proxy_headers: Default::default(),
             accept_request_id: default_accept_request_id(),
+            skew_protection: true,
             workers: WorkersSetting::default(),
             tls: TlsConfig::default(),
         }
@@ -1912,6 +2020,70 @@ redirect_to    = "/"
     }
 
     #[test]
+    fn protection_switches_default_on_and_parse_off() {
+        // Every switch is on without a file, with an empty one, and with
+        // its section present but the key left out.
+        for config in [
+            GioConfig::default(),
+            GioConfig::parse("", "gio.toml").unwrap(),
+            GioConfig::parse(
+                "[security]\n[dev]\n[server]\n[health]\n[env]\n",
+                "gio.toml",
+            )
+            .unwrap(),
+        ] {
+            assert!(config.security.default_headers);
+            assert!(config.dev.devtools);
+            assert!(config.dev.watch);
+            assert!(config.server.skew_protection);
+            assert!(config.health.enabled);
+            assert!(config.health.details);
+            assert!(config.env.files);
+        }
+        let off = GioConfig::parse(
+            "[security]\ndefault_headers = false\n\n\
+             [dev]\ndevtools = false\nwatch = false\nallowed_hosts = [\"*\"]\n\n\
+             [server]\nskew_protection = false\nmax_body_bytes = 0\n\n\
+             [health]\nenabled = false\ndetails = false\n\n\
+             [env]\nfiles = false\n",
+            "gio.toml",
+        )
+        .unwrap();
+        assert!(!off.security.default_headers);
+        assert!(!off.dev.devtools);
+        assert!(!off.dev.watch);
+        assert_eq!(off.dev.allowed_hosts, ["*"]);
+        assert!(!off.server.skew_protection);
+        assert_eq!(off.server.max_body_bytes, 0);
+        assert!(!off.health.enabled);
+        assert!(!off.health.details);
+        assert!(!off.env.files);
+        for misspelled in [
+            "[health]\nenabeld = false\n",
+            "[env]\nfile = false\n",
+            "[dev]\ndevtool = false\n",
+        ] {
+            assert!(
+                matches!(parse(misspelled), Err(ConfigError::UnknownKey { .. })),
+                "{misspelled}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_body_bytes_zero_falls_back_to_the_ipc_frame_cap() {
+        let server = |toml: &str| GioConfig::parse(toml, "gio.toml").unwrap().server;
+        assert_eq!(server("").body_limit(), 2 * 1024 * 1024);
+        assert_eq!(server("[server]\nmax_body_bytes = 10\n").body_limit(), 10);
+        // 0 used to refuse every body with a 413; now nothing but what the
+        // worker can take bounds it.
+        assert_eq!(
+            server("[server]\nmax_body_bytes = 0\n").body_limit(),
+            crate::ipc::MAX_IPC_MESSAGE_SIZE
+        );
+    }
+
+    #[test]
     fn security_section_parses_every_hsts_spelling() {
         let parse = |body: &str| {
             let path = unique_temp_path("security.toml");
@@ -2615,9 +2787,11 @@ check_origin = true
                 "CsrfConfig" => struct_spellings::<CsrfConfig>(),
                 "CssConfig" => struct_spellings::<CssConfig>(),
                 "DevConfig" => struct_spellings::<DevConfig>(),
+                "EnvConfig" => struct_spellings::<EnvConfig>(),
                 "FontEntry" => struct_spellings::<FontEntry>(),
                 "GuardRule" => struct_spellings::<GuardRule>(),
                 "HeaderRule" => struct_spellings::<HeaderRule>(),
+                "HealthConfig" => struct_spellings::<HealthConfig>(),
                 "HstsPolicy" => struct_spellings::<HstsPolicy>(),
                 "I18nConfig" => struct_spellings::<I18nConfig>(),
                 "ImageConfig" => struct_spellings::<ImageConfig>(),
