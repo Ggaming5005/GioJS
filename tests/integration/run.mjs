@@ -541,20 +541,16 @@ async function main() {
     });
 
     await test('event-stream Response cookies arrive as separate Set-Cookie headers', async () => {
-      // Only the head is asserted: respond_sse forwards sse_chunk frames, so
-      // a buffered event-stream body never ends the response - abort instead.
-      const controller = new AbortController();
-      const res = await fetch(`${BASE}/api/events`, { signal: controller.signal });
-      try {
-        assert.equal(res.status, 200);
-        assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/);
-        assert.deepEqual(res.headers.getSetCookie(), [
-          'sse_a=1; Path=/; Expires=Wed, 21 Oct 2037 07:28:00 GMT',
-          'sse_b=2; Path=/; HttpOnly',
-        ]);
-      } finally {
-        controller.abort();
-      }
+      const res = await fetch(`${BASE}/api/events`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/);
+      assert.deepEqual(res.headers.getSetCookie(), [
+        'sse_a=1; Path=/; Expires=Wed, 21 Oct 2037 07:28:00 GMT',
+        'sse_b=2; Path=/; HttpOnly',
+      ]);
+      // The body used to hang forever (it took the sse_chunk path); it now
+      // streams and the response ends.
+      assert.equal(await res.text(), 'data: hello\n\n');
     });
 
     await test('unexported methods get 405 with an Allow header', async () => {
@@ -656,6 +652,92 @@ async function main() {
       }
       controller.abort();
       assert.match(late, /"tick":2/, 'events still arrive past the head deadline');
+    });
+
+    await test('route.ts event-stream Responses stream incrementally and terminate', async () => {
+      // Accept-Encoding asks for compression: an event stream must never be
+      // compressed (an encoder buffers) or the first event would wait.
+      const res = await fetch(`${BASE}/api/stream-events`, {
+        headers: { 'accept-encoding': 'gzip, br' },
+      });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/);
+      assert.equal(res.headers.get('content-encoding'), null);
+      assert.equal(res.headers.get('cache-control'), 'no-cache');
+      assert.deepEqual(res.headers.getSetCookie(), [
+        'stream_a=1; Path=/',
+        'stream_b=2; Path=/; HttpOnly',
+      ]);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      const first = decoder.decode((await reader.read()).value);
+      assert.match(first, /data: first/);
+      assert.doesNotMatch(first, /second/, 'the first event arrives while the stream is still open');
+      let rest = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        rest += decoder.decode(value, { stream: true });
+      }
+      assert.match(rest, /data: second/, 'the stream ends after its last event');
+    });
+
+    await test('a client disconnect cancels a streamed route.ts body in the worker', async () => {
+      const cancelled = async () =>
+        (await (await fetch(`${BASE}/api/stream-endless?state=1`)).json()).cancelled;
+      const before = await cancelled();
+      const controller = new AbortController();
+      const res = await fetch(`${BASE}/api/stream-endless`, { signal: controller.signal });
+      const reader = res.body.getReader();
+      assert.match(new TextDecoder().decode((await reader.read()).value), /data: 0/);
+      controller.abort();
+      await waitFor('the worker to cancel the body', async () => (await cancelled()) > before, 5000);
+    });
+
+    await test('a large streamed binary body arrives intact', async () => {
+      // Default fetch negotiates compression: streaming and compression compose.
+      const res = await fetch(`${BASE}/api/download`);
+      assert.equal(res.status, 200);
+      const total = Number(res.headers.get('x-download-bytes'));
+      const body = Buffer.from(await res.arrayBuffer());
+      const expected = Buffer.alloc(total);
+      for (let i = 0; i < total; i++) expected[i] = (i * 31 + (i >> 8)) & 0xff;
+      assert.equal(body.length, total);
+      assert.ok(body.equals(expected), 'every byte must survive the chunked, base64 crossing');
+    });
+
+    await test('a client that stops reading stops a streamed body\'s producer', async () => {
+      const produced = async () =>
+        (await (await fetch(`${BASE}/api/download?state=1`)).json()).produced;
+      // identity: compression would shrink the pattern enough that socket
+      // buffers take far longer to fill.
+      const res = await new Promise((resolve, reject) => {
+        const req = httpRequest(
+          { host: '127.0.0.1', port: 39517, path: '/api/download?endless=1', headers: { 'accept-encoding': 'identity' } },
+          resolve,
+        );
+        req.on('error', reject);
+        req.end();
+      });
+      try {
+        await new Promise((resolve) => res.once('data', resolve));
+        res.pause();
+        // Without backpressure the worker produces until memory runs out;
+        // with it, the producer stalls once Rust and the socket buffers hold
+        // a bounded amount.
+        let last = -1;
+        const stalledAt = await waitFor('the producer to stall', async () => {
+          const now = await produced();
+          const stalled = now === last;
+          last = now;
+          return stalled ? now : undefined;
+        }, 10000);
+        assert.ok(stalledAt < 64 * 1024 * 1024, `stalled after ${stalledAt} bytes`);
+        res.resume();
+        await waitFor('the producer to resume', async () => (await produced()) > stalledAt, 5000);
+      } finally {
+        res.destroy();
+      }
     });
 
     /**

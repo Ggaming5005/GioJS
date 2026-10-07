@@ -172,6 +172,150 @@ pub enum RenderFrame {
     End,
 }
 
+/// Bytes of one streamed body that may sit in Rust - read from the worker but
+/// not yet written to the client - before the worker is asked to pause that
+/// stream, and the level it must drain to before it may resume. A route.ts
+/// body can be a multi-gigabyte download to a slow client; without this the
+/// reader loop (which must never block on one stream: every response shares
+/// the pipe) would buffer all of it.
+const STREAM_PAUSE_BYTES: usize = 1024 * 1024;
+const STREAM_RESUME_BYTES: usize = 256 * 1024;
+
+/// Flow control for one streamed body (see `STREAM_PAUSE_BYTES`). Chunks are
+/// counted when the reader loop queues them and released when their bytes
+/// are dropped - written to the client, or discarded with the response.
+struct StreamFlow {
+    id: String,
+    // Weak: a stream must not keep the write channel (and with it the
+    // supervisor's shutdown detection) alive.
+    write_tx: mpsc::WeakSender<Bytes>,
+    state: std::sync::Mutex<FlowState>,
+}
+
+#[derive(Default)]
+struct FlowState {
+    queued: usize,
+    paused: bool,
+    seq: u64,
+}
+
+impl StreamFlow {
+    fn new(id: &str, write_tx: &mpsc::Sender<Bytes>) -> Arc<Self> {
+        Arc::new(Self {
+            id: id.to_string(),
+            write_tx: write_tx.downgrade(),
+            state: std::sync::Mutex::new(FlowState::default()),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, FlowState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Queue `data`; the returned Bytes releases its share when dropped.
+    fn track(self: &Arc<Self>, data: Vec<u8>) -> Bytes {
+        let signal = {
+            let mut state = self.lock();
+            state.queued += data.len();
+            (!state.paused && state.queued > STREAM_PAUSE_BYTES).then(|| {
+                state.paused = true;
+                state.seq += 1;
+                state.seq
+            })
+        };
+        if let Some(seq) = signal {
+            self.signal(true, seq);
+        }
+        Bytes::from_owner(TrackedChunk {
+            data,
+            flow: Arc::clone(self),
+        })
+    }
+
+    fn release(&self, len: usize) {
+        let signal = {
+            let mut state = self.lock();
+            state.queued = state.queued.saturating_sub(len);
+            (state.paused && state.queued <= STREAM_RESUME_BYTES).then(|| {
+                state.paused = false;
+                state.seq += 1;
+                state.seq
+            })
+        };
+        if let Some(seq) = signal {
+            self.signal(false, seq);
+        }
+    }
+
+    /// `{type:"flow", id, pause, seq}`. A lost resume would stall the stream
+    /// for good, so the frame waits for channel room instead of being
+    /// dropped like a cancel; `seq` lets the worker discard a pause that
+    /// overtakes a later resume on the way.
+    fn signal(&self, pause: bool, seq: u64) {
+        let Some(tx) = self.write_tx.upgrade() else {
+            return;
+        };
+        let Ok(payload) = serde_json::to_vec(&serde_json::json!({
+            "type": "flow",
+            "id": self.id,
+            "pause": pause,
+            "seq": seq,
+        })) else {
+            return;
+        };
+        let payload = Bytes::from(payload);
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    let _ = tx.send(payload).await;
+                });
+            }
+            Err(_) => {
+                let _ = tx.try_send(payload);
+            }
+        }
+    }
+}
+
+/// A streamed chunk's bytes, owned so that dropping the last reference
+/// releases them from the stream's flow-control budget.
+struct TrackedChunk {
+    data: Vec<u8>,
+    flow: Arc<StreamFlow>,
+}
+
+impl AsRef<[u8]> for TrackedChunk {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl Drop for TrackedChunk {
+    fn drop(&mut self) {
+        self.flow.release(self.data.len());
+    }
+}
+
+/// A registered streaming body: where its frames go, and its flow control.
+struct RenderStreamTx {
+    tx: mpsc::UnboundedSender<RenderFrame>,
+    flow: Arc<StreamFlow>,
+}
+
+/// A chunk frame's payload: UTF-8 text, or base64 when the worker flagged
+/// it `bodyBase64` (route.ts bodies are arbitrary bytes). None when the
+/// flagged payload is not valid base64.
+fn chunk_payload(val: &serde_json::Value) -> Option<Vec<u8>> {
+    let data = val["data"].as_str().unwrap_or("");
+    if val["bodyBase64"].as_bool().unwrap_or(false) {
+        crate::ws_ipc::b64::decode(data).ok()
+    } else {
+        Some(data.as_bytes().to_vec())
+    }
+}
+
 /// Result of an IPC send - a buffered response, an SSE stream, or a
 /// streaming SSR render (head response plus chunked HTML body).
 pub enum IpcSendResult {
@@ -347,7 +491,7 @@ struct IpcClientInner {
     sse_streams: DashMap<String, mpsc::UnboundedSender<Option<Bytes>>>,
     /// Channels for active streaming SSR bodies: req_id → frame sender.
     /// RenderFrame::End terminates the stream (chunk_end, clean or aborted).
-    render_streams: DashMap<String, mpsc::UnboundedSender<RenderFrame>>,
+    render_streams: DashMap<String, RenderStreamTx>,
     /// Send encoded frames to the background writer task
     write_tx: mpsc::Sender<Bytes>,
     deployment_id: String,
@@ -1057,17 +1201,23 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                             // ── Streaming SSR chunk / shell_end / end (protocol v3) ──
                             Some("chunk") => {
                                 let id = val["id"].as_str().unwrap_or("");
-                                let data = val["data"].as_str().unwrap_or("");
-                                if let Some(tx) = inner.render_streams.get(id) {
-                                    let _ =
-                                        tx.send(RenderFrame::Chunk(Bytes::from(data.to_owned())));
+                                if let Some(stream) = inner.render_streams.get(id) {
+                                    match chunk_payload(&val) {
+                                        Some(data) => {
+                                            let bytes = stream.flow.track(data);
+                                            let _ = stream.tx.send(RenderFrame::Chunk(bytes));
+                                        }
+                                        None => {
+                                            warn!(id = %id, "chunk flagged bodyBase64 is not valid base64 - dropped");
+                                        }
+                                    }
                                 }
                                 continue;
                             }
                             Some("shell_end") => {
                                 let id = val["id"].as_str().unwrap_or("");
-                                if let Some(tx) = inner.render_streams.get(id) {
-                                    let _ = tx.send(RenderFrame::ShellEnd);
+                                if let Some(stream) = inner.render_streams.get(id) {
+                                    let _ = stream.tx.send(RenderFrame::ShellEnd);
                                 }
                                 continue;
                             }
@@ -1078,8 +1228,8 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                     // body early is all a stream can do.
                                     warn!(id = %id, "streaming render aborted mid-stream - body truncated");
                                 }
-                                if let Some((_, tx)) = inner.render_streams.remove(&id) {
-                                    let _ = tx.send(RenderFrame::End);
+                                if let Some((_, stream)) = inner.render_streams.remove(&id) {
+                                    let _ = stream.tx.send(RenderFrame::End);
                                 }
                                 continue;
                             }
@@ -1100,11 +1250,18 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                             }
                         };
 
-                        // Detect SSE: content-type text/event-stream → create stream channel
-                        let is_sse = resp
-                            .headers
-                            .get("content-type")
-                            .is_some_and(|ct| ct.contains("text/event-stream"));
+                        // GioEventStream heads (event-stream, empty body, not
+                        // `streaming`) are fed by sse_chunk frames. A route.ts
+                        // event-stream Response arrives as a `streaming` head
+                        // fed by chunk frames, and a buffered one already
+                        // carries its whole body - routing either to the
+                        // sse_chunk path would wait for frames that never come.
+                        let is_sse = !resp.streaming
+                            && resp.body.is_empty()
+                            && resp
+                                .headers
+                                .get("content-type")
+                                .is_some_and(|ct| ct.contains("text/event-stream"));
 
                         let resp_id = resp.id.clone();
 
@@ -1129,7 +1286,10 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                             }
                         } else if resp.streaming {
                             let (tx, rx) = mpsc::unbounded_channel::<RenderFrame>();
-                            inner.render_streams.insert(resp_id.clone(), tx);
+                            let flow = StreamFlow::new(&resp_id, &inner.write_tx);
+                            inner
+                                .render_streams
+                                .insert(resp_id.clone(), RenderStreamTx { tx, flow });
                             IpcSendResult::RenderStream {
                                 response: resp,
                                 body_rx: rx,
@@ -1262,8 +1422,8 @@ fn drain_render_streams(inner: &IpcClientInner) {
         .map(|e| e.key().clone())
         .collect();
     for id in ids {
-        if let Some((_, tx)) = inner.render_streams.remove(&id) {
-            let _ = tx.send(RenderFrame::End);
+        if let Some((_, stream)) = inner.render_streams.remove(&id) {
+            let _ = stream.tx.send(RenderFrame::End);
         }
     }
 }
@@ -1927,7 +2087,11 @@ mod tests {
     async fn drain_render_streams_terminates_bodies_on_disconnect() {
         let (client, _write_rx) = test_client_with_write_channel();
         let (tx, mut rx) = mpsc::unbounded_channel::<RenderFrame>();
-        client.inner.render_streams.insert("req-d".into(), tx);
+        let flow = StreamFlow::new("req-d", &client.inner.write_tx);
+        client
+            .inner
+            .render_streams
+            .insert("req-d".into(), RenderStreamTx { tx, flow });
         drain_render_streams(&client.inner);
         assert_eq!(rx.recv().await, Some(RenderFrame::End));
         assert!(client.inner.render_streams.is_empty());
@@ -1937,13 +2101,126 @@ mod tests {
     async fn send_render_close_unregisters_and_sends_cancel_frame() {
         let (client, mut write_rx) = test_client_with_write_channel();
         let (tx, _rx) = mpsc::unbounded_channel::<RenderFrame>();
-        client.inner.render_streams.insert("req-c".into(), tx);
+        let flow = StreamFlow::new("req-c", &client.inner.write_tx);
+        client
+            .inner
+            .render_streams
+            .insert("req-c".into(), RenderStreamTx { tx, flow });
         client.send_render_close("req-c");
         assert!(client.inner.render_streams.is_empty());
         let frame = write_rx.recv().await.expect("cancel frame queued");
         let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
         assert_eq!(value["type"], "cancel");
         assert_eq!(value["id"], "req-c");
+    }
+
+    async fn next_flow_frame(write_rx: &mut mpsc::Receiver<Bytes>) -> serde_json::Value {
+        let frame = tokio::time::timeout(Duration::from_secs(1), write_rx.recv())
+            .await
+            .expect("flow frame within 1s")
+            .expect("write channel open");
+        let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(value["type"], "flow");
+        value
+    }
+
+    #[tokio::test]
+    async fn stream_flow_pauses_above_the_high_mark_and_resumes_once_drained() {
+        let (client, mut write_rx) = test_client_with_write_channel();
+        let flow = StreamFlow::new("req-f", &client.inner.write_tx);
+        let first = flow.track(vec![0u8; 600 * 1024]);
+        assert!(write_rx.try_recv().is_err(), "under the high mark: no pause");
+        let second = flow.track(vec![1u8; 600 * 1024]);
+        let pause = next_flow_frame(&mut write_rx).await;
+        assert_eq!(pause["id"], "req-f");
+        assert_eq!(pause["pause"], true);
+        assert_eq!(pause["seq"], 1);
+
+        // Still above the low mark after the first chunk is written.
+        drop(first);
+        tokio::task::yield_now().await;
+        assert!(write_rx.try_recv().is_err(), "600 KiB queued: still paused");
+
+        // The last reference to the bytes (a slice, as the injector or
+        // hyper might hold) going away is what releases them.
+        let tail = second.slice(10..);
+        drop(second);
+        tokio::task::yield_now().await;
+        assert!(write_rx.try_recv().is_err(), "a live slice keeps the chunk queued");
+        drop(tail);
+        let resume = next_flow_frame(&mut write_rx).await;
+        assert_eq!(resume["pause"], false);
+        assert_eq!(resume["seq"], 2, "seq orders a resume after its pause");
+    }
+
+    #[tokio::test]
+    async fn reader_loop_routes_streamed_and_buffered_event_streams_off_the_sse_path() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client, _write_rx) = test_client_with_write_channel();
+        let (read_half, _keep_write_open) = tokio::io::split(server_io);
+        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), client.inner.clone()));
+        let (_r, mut node_writer) = tokio::io::split(client_io);
+
+        // A route.ts event-stream Response: streaming head + chunk frames,
+        // binary-safe via bodyBase64.
+        let (tx, rx) = oneshot::channel();
+        client.inner.pending.insert("req-e".into(), tx);
+        let head = serde_json::json!({
+            "id": "req-e", "status": 200,
+            "headers": {"content-type": "text/event-stream"},
+            "body": "", "cacheable": false, "cacheMaxAge": 0, "streaming": true,
+            "setCookies": ["a=1; Path=/"],
+        });
+        write_frame(&mut node_writer, &serde_json::to_vec(&head).unwrap())
+            .await
+            .unwrap();
+        let IpcSendResult::RenderStream {
+            response,
+            mut body_rx,
+        } = rx.await.unwrap()
+        else {
+            panic!("a streaming event-stream head must take the chunk path, not sse_chunk");
+        };
+        assert_eq!(response.set_cookies, vec!["a=1; Path=/"]);
+        let raw = [0xffu8, 0x00, 0xfe, b'd'];
+        let chunk = serde_json::json!({
+            "type": "chunk", "id": "req-e",
+            "data": crate::ws_ipc::b64::encode(&raw), "bodyBase64": true,
+        });
+        write_frame(&mut node_writer, &serde_json::to_vec(&chunk).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            body_rx.recv().await,
+            Some(RenderFrame::Chunk(Bytes::copy_from_slice(&raw)))
+        );
+        write_frame(&mut node_writer, br#"{"type":"chunk_end","id":"req-e"}"#)
+            .await
+            .unwrap();
+        assert_eq!(body_rx.recv().await, Some(RenderFrame::End));
+
+        // A buffered event-stream body is a complete response.
+        let (tx, rx) = oneshot::channel();
+        client.inner.pending.insert("req-b".into(), tx);
+        write_frame(
+            &mut node_writer,
+            br#"{"id":"req-b","status":200,"headers":{"content-type":"text/event-stream"},"body":"data: x\n\n","cacheable":false,"cacheMaxAge":0}"#,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(rx.await.unwrap(), IpcSendResult::Response(_)));
+
+        // GioEventStream's empty head still opens an SSE stream.
+        let (tx, rx) = oneshot::channel();
+        client.inner.pending.insert("req-g".into(), tx);
+        write_frame(
+            &mut node_writer,
+            br#"{"id":"req-g","status":200,"headers":{"content-type":"text/event-stream"},"body":"","cacheable":false,"cacheMaxAge":0}"#,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(rx.await.unwrap(), IpcSendResult::SseStream { .. }));
+        reader_task.abort();
     }
 
     #[test]

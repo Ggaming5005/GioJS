@@ -2410,17 +2410,30 @@ fn respond_stream(
         lang,
     });
 
+    // The idle-gap budget guards renders (a stalled React stream is a hung
+    // render). Other bodies are route.ts streams the handler paces itself -
+    // an event stream waiting for events, an LLM thinking before its first
+    // token - and end when the handler or the client says so.
     let stream = RenderBodyStream {
         inner: body_rx,
         req_id: response.id.clone(),
         ipc: state.ipc.clone(),
         injector,
-        idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
+        idle: is_html.then(|| Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT))),
         done: false,
         shell_capture,
     };
 
     let mut builder = Response::builder().status(status_code);
+    if is_event_stream_content_type(&response.headers)
+        && !response
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("cache-control"))
+    {
+        // Like respond_sse: no proxy or browser cache may hold an event stream.
+        builder = builder.header(header::CACHE_CONTROL, "no-cache");
+    }
     for (name, value) in &response.headers {
         // A streamed body has no known length; a stale content-length would
         // corrupt framing.
@@ -2575,7 +2588,8 @@ struct RenderBodyStream {
     req_id: String,
     ipc: Arc<IpcClient>,
     injector: stream_inject::StreamInjector,
-    idle: Pin<Box<tokio::time::Sleep>>,
+    /// Idle-gap deadline, reset per frame; None for route.ts bodies.
+    idle: Option<Pin<Box<tokio::time::Sleep>>>,
     done: bool,
     /// Set on PPR miss renders; a stream ending without shell_end drops the
     /// capture unstored, so an aborted render can never cache a torn shell.
@@ -2603,9 +2617,10 @@ impl Stream for RenderBodyStream {
         loop {
             match this.inner.poll_recv(cx) {
                 Poll::Ready(Some(RenderFrame::Chunk(bytes))) => {
-                    this.idle
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    if let Some(idle) = this.idle.as_mut() {
+                        idle.as_mut()
+                            .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    }
                     if let Some(capture) = this.shell_capture.as_mut() {
                         capture.absorb(&bytes);
                     }
@@ -2615,9 +2630,10 @@ impl Stream for RenderBodyStream {
                     }
                 }
                 Poll::Ready(Some(RenderFrame::ShellEnd)) => {
-                    this.idle
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    if let Some(idle) = this.idle.as_mut() {
+                        idle.as_mut()
+                            .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    }
                     if let Some(capture) = this.shell_capture.take() {
                         capture.store();
                     }
@@ -2630,7 +2646,11 @@ impl Stream for RenderBodyStream {
                     };
                 }
                 Poll::Pending => {
-                    if this.idle.as_mut().poll(cx).is_ready() {
+                    if this
+                        .idle
+                        .as_mut()
+                        .is_some_and(|idle| idle.as_mut().poll(cx).is_ready())
+                    {
                         warn!(id = %this.req_id, "streaming render idle-gap timeout - truncating body");
                         this.done = true;
                         this.ipc.send_render_close(&this.req_id);
@@ -3224,6 +3244,12 @@ fn is_html_content_type(headers: &std::collections::HashMap<String, String>) -> 
         .get("content-type")
         .map(|ct| ct.starts_with("text/html"))
         .unwrap_or(false)
+}
+
+fn is_event_stream_content_type(headers: &std::collections::HashMap<String, String>) -> bool {
+    headers
+        .get("content-type")
+        .is_some_and(|ct| ct.starts_with("text/event-stream"))
 }
 
 fn is_prefetch(req: &Request) -> bool {
@@ -5128,7 +5154,7 @@ mod tests {
             req_id: "req-stream".into(),
             ipc: Arc::new(client),
             injector,
-            idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
+            idle: Some(Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT))),
             done: false,
             shell_capture: None,
         }
@@ -5177,6 +5203,29 @@ mod tests {
         let frame = write_rx.recv().await.expect("cancel frame sent to Node");
         let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
         assert_eq!(value["type"], "cancel");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn route_stream_bodies_have_no_idle_gap_deadline() {
+        use tokio_stream::StreamExt as _;
+        let (client, mut write_rx) = ipc::test_client_with_write_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
+        let mut stream =
+            render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
+        stream.idle = None;
+
+        tx.send(RenderFrame::Chunk(Bytes::from("data: 1\n\n")))
+            .unwrap();
+        assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"data: 1\n\n");
+        // An event stream may wait far longer than a render may stall.
+        let quiet = tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT * 4, stream.next()).await;
+        assert!(quiet.is_err(), "the body must still be open");
+        assert!(write_rx.try_recv().is_err(), "no cancel sent");
+        tx.send(RenderFrame::Chunk(Bytes::from("data: 2\n\n")))
+            .unwrap();
+        tx.send(RenderFrame::End).unwrap();
+        assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"data: 2\n\n");
+        assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]

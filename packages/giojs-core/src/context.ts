@@ -245,8 +245,18 @@ export interface SseCloseMsg { type: 'sse_close'; id: string; }
 
 /** Rust → Node: abort an in-flight render (client disconnected or timed out). */
 export interface CancelMsg { type: 'cancel'; id: string; }
-/** Streaming SSR body chunk (protocol v3). `data` is always UTF-8 HTML text. */
-export interface ChunkMsg { type: 'chunk'; id: string; data: string; }
+/**
+ * Rust → Node (additive): pause or resume a streamed route.ts body while the
+ * client drains what Rust holds. `seq` increases per stream, so a frame that
+ * arrives after a newer one is stale.
+ */
+export interface FlowMsg { type: 'flow'; id: string; pause: boolean; seq: number; }
+/**
+ * Streamed body chunk (protocol v3). `data` is UTF-8 text - always, for
+ * page renders - or base64 with `bodyBase64` (additive: route.ts bodies
+ * are arbitrary bytes).
+ */
+export interface ChunkMsg { type: 'chunk'; id: string; data: string; bodyBase64?: boolean; }
 /** PPR: everything sent before this frame is the cacheable shell. */
 export interface ShellEndMsg { type: 'shell_end'; id: string; }
 /** Terminates a streamed body. `aborted` marks a render error mid-stream. */

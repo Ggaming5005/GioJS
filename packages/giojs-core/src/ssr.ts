@@ -64,6 +64,38 @@ export interface SseRouteResult {
 }
 
 /**
+ * A route.ts Response whose body streams (protocol v3 chunk frames): the
+ * head goes out first, then `prelude` - the bytes read while deciding to
+ * stream - then the rest of the body as it is produced.
+ */
+export interface RouteStreamResult {
+  type: 'route-stream';
+  head: IPCResponse;
+  prelude: Uint8Array[];
+  /** The unread remainder; null when the prelude is the whole body. */
+  rest: {
+    reader: ReadableStreamDefaultReader<Uint8Array>;
+    /** A read already in flight when the read-ahead stopped waiting. */
+    pending: Promise<ReadableStreamReadResult<Uint8Array>> | null;
+  } | null;
+}
+
+/**
+ * Read-ahead budget for route.ts Response bodies: a body that is complete
+ * within this many bytes, and without waiting on a later macrotask (a
+ * string, a Buffer, JSON), crosses as one buffered response. Anything
+ * longer - or still being produced - streams.
+ */
+export const ROUTE_BUFFER_LIMIT_BYTES = 1024 * 1024;
+
+/**
+ * Which route.ts Response bodies may stream: all of them (live IPC), only
+ * event streams (onResponse plugins installed - they need buffered bodies,
+ * but an event stream cannot be buffered), or none (static export).
+ */
+export type RouteBodyStreaming = 'all' | 'event-stream' | 'none';
+
+/**
  * Streaming render (protocol v3): the head response goes out immediately
  * after React's shell is ready; the caller pumps `stream` as chunk frames.
  * `prefix`/`suffix` carry the document shell when no root layout provides one.
@@ -571,7 +603,7 @@ export async function renderRoute(
   /** Route pattern → hydration entry script URL from the client build. */
   clientScripts?: Map<string, string>,
   extras?: RenderExtras,
-): Promise<IPCOutbound | SseRouteResult | StreamRenderResult> {
+): Promise<IPCOutbound | SseRouteResult | StreamRenderResult | RouteStreamResult> {
   const credentialHeaders = new Set([
     ...CREDENTIAL_HEADERS,
     ...CLIENT_ADDRESS_HEADERS,
@@ -610,8 +642,14 @@ export async function renderRoute(
     const method = req.method === 'HEAD' ? 'GET' : req.method;
     const handler = handlerMatch.entry.methods.get(method);
     if (handler !== undefined) {
-      const result = await runRouteHandler(req, handler, handlerMatch.params);
-      if (!isSseHandlerResult(result) && registry !== undefined && !registry.isEmpty) {
+      const bodyStreaming: RouteBodyStreaming =
+        extras?.streaming !== true || process.env.GIO_EXPORT === '1'
+          ? 'none'
+          : registry !== undefined && registry.hasResponseInterceptors
+            ? 'event-stream'
+            : 'all';
+      const result = await runRouteHandler(req, handler, handlerMatch.params, bodyStreaming);
+      if (!isStreamingHandlerResult(result) && registry !== undefined && !registry.isEmpty) {
         return registry.interceptResponse(req, result);
       }
       return result;
@@ -1032,8 +1070,11 @@ function warnPersonalRender(pattern: string, path: string): void {
 
 // ── route.ts handler dispatch ─────────────────────────────────────────────────
 
-function isSseHandlerResult(value: IPCResponse | SseRouteResult): value is SseRouteResult {
-  return 'type' in value && value.type === 'sse';
+/** SSE and streamed bodies bypass onResponse plugins: there is no body to hand them. */
+function isStreamingHandlerResult(
+  value: IPCResponse | SseRouteResult | RouteStreamResult,
+): value is SseRouteResult | RouteStreamResult {
+  return 'type' in value && (value.type === 'sse' || value.type === 'route-stream');
 }
 
 function methodNotAllowed(req: IPCRequest, allowed: string[]): IPCResponse {
@@ -1050,17 +1091,111 @@ function methodNotAllowed(req: IPCRequest, allowed: string[]): IPCResponse {
   };
 }
 
+const MACROTASK: unique symbol = Symbol('macrotask');
+
+function nextMacrotask(): Promise<typeof MACROTASK> {
+  return new Promise(resolve => setImmediate(() => resolve(MACROTASK)));
+}
+
+/**
+ * A body chunk as bytes. Strings are accepted (UTF-8) - enqueueing text into
+ * a ReadableStream is the common way to write an event stream by hand.
+ */
+export function routeChunkBytes(chunk: unknown): Uint8Array {
+  if (chunk instanceof Uint8Array) return chunk;
+  if (typeof chunk === 'string') return Buffer.from(chunk, 'utf8');
+  if (ArrayBuffer.isView(chunk)) return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
+  throw new TypeError('route.ts Response body chunks must be Uint8Array or string');
+}
+
+interface ReadAhead {
+  complete: boolean;
+  chunks: Uint8Array[];
+  reader: ReadableStreamDefaultReader<Uint8Array>;
+  pending: Promise<ReadableStreamReadResult<Uint8Array>> | null;
+}
+
+/**
+ * Read a body until it ends, exceeds ROUTE_BUFFER_LIMIT_BYTES, or makes the
+ * reader wait past a macrotask tick (already-available bytes settle in
+ * microtasks; a producer still working does not). A read still in flight is
+ * handed on so no chunk is lost.
+ */
+async function readAhead(body: ReadableStream<Uint8Array>): Promise<ReadAhead> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (size <= ROUTE_BUFFER_LIMIT_BYTES) {
+    const pending = reader.read();
+    const raced = await Promise.race([pending, nextMacrotask()]);
+    if (raced === MACROTASK) return { complete: false, chunks, reader, pending };
+    if (raced.done) return { complete: true, chunks, reader, pending: null };
+    const bytes = routeChunkBytes(raced.value);
+    chunks.push(bytes);
+    size += bytes.byteLength;
+  }
+  return { complete: false, chunks, reader, pending: null };
+}
+
+function bufferedBody(raw: Buffer): Pick<IPCResponse, 'body' | 'bodyBase64'> {
+  // Non-UTF-8 bodies cross base64-encoded like request bodies do; a text
+  // decode would lossily transcode binary payloads to U+FFFD.
+  return isUtf8(raw) ? { body: raw.toString('utf8') } : { body: raw.toString('base64'), bodyBase64: true };
+}
+
+/**
+ * Convert a route.ts web Response. Small, complete bodies stay buffered;
+ * bodies still being produced (a ReadableStream feeding an LLM token stream,
+ * an event stream, a large download) stream as chunk frames. An event-stream
+ * body always streams - Rust never buffers it - even when it is complete.
+ */
+async function routeResponseToIpc(
+  req: IPCRequest,
+  res: Response,
+  bodyStreaming: RouteBodyStreaming,
+): Promise<IPCResponse | RouteStreamResult> {
+  const base = { id: req.id, status: res.status, cacheable: false, cacheMaxAge: 0 };
+  const { headers, setCookies } = webHeadersToIpc(res.headers);
+  headers['content-type'] ??= 'text/plain; charset=utf-8';
+  const cookies = setCookiesField(setCookies);
+  const eventStream = headers['content-type'].toLowerCase().startsWith('text/event-stream');
+  const mayStream = bodyStreaming === 'all' || (bodyStreaming === 'event-stream' && eventStream);
+  if (res.body === null || !mayStream) {
+    return { ...base, headers, ...bufferedBody(Buffer.from(await res.arrayBuffer())), ...cookies };
+  }
+
+  const ahead = await readAhead(res.body);
+  if (ahead.complete && (!eventStream || req.method === 'HEAD')) {
+    return { ...base, headers, ...bufferedBody(Buffer.concat(ahead.chunks)), ...cookies };
+  }
+  if (req.method === 'HEAD') {
+    // The client discards a HEAD body: stop the producer instead of
+    // streaming it nowhere.
+    ahead.reader.cancel().catch(() => undefined);
+    return { ...base, headers, body: '', ...cookies };
+  }
+  return {
+    type: 'route-stream',
+    head: { ...base, headers, body: '', streaming: true, ...cookies },
+    prelude: ahead.chunks,
+    rest: ahead.complete ? null : { reader: ahead.reader, pending: ahead.pending },
+  };
+}
+
 /**
  * Invoke a route.ts method handler. The result contract:
- * `GioEventStream` → SSE; web `Response` → converted; null/undefined → 204;
- * anything else → JSON 200; notFound() → JSON 404. Handler responses are
- * never cacheable.
+ * `GioEventStream` → SSE; web `Response` → converted (its body streamed
+ * when it is still being produced, see routeResponseToIpc); null/undefined
+ * → 204; anything else → JSON 200; notFound() → JSON 404. Handler responses
+ * are never cacheable.
  */
 async function runRouteHandler(
   req: IPCRequest,
   handler: (gioReq: GioRequest) => unknown,
   params: Record<string, string>,
-): Promise<IPCResponse | SseRouteResult> {
+  bodyStreaming: RouteBodyStreaming = 'none',
+): Promise<IPCResponse | SseRouteResult | RouteStreamResult> {
   const base = { id: req.id, cacheable: false, cacheMaxAge: 0 };
   try {
     const result = await handler(makeGioRequest(req, params));
@@ -1069,23 +1204,7 @@ async function runRouteHandler(
       return { type: 'sse', stream: result };
     }
     if (result instanceof Response) {
-      const { headers, setCookies } = webHeadersToIpc(result.headers);
-      headers['content-type'] ??= 'text/plain; charset=utf-8';
-      const cookies = setCookiesField(setCookies);
-      // text() would lossily transcode binary payloads (images, pdfs) to
-      // U+FFFD; non-UTF-8 bodies cross base64-encoded like request bodies do.
-      const raw = Buffer.from(await result.arrayBuffer());
-      if (isUtf8(raw)) {
-        return { ...base, status: result.status, headers, body: raw.toString('utf8'), ...cookies };
-      }
-      return {
-        ...base,
-        status: result.status,
-        headers,
-        body: raw.toString('base64'),
-        bodyBase64: true,
-        ...cookies,
-      };
+      return await routeResponseToIpc(req, result, bodyStreaming);
     }
     if (result === undefined || result === null) {
       return { ...base, status: 204, headers: {}, body: '' };
