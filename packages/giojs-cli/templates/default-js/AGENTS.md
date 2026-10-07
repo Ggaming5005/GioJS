@@ -170,5 +170,9 @@ renders React. Full docs: https://giojs.com/llms.txt
 - `npm run dev` — dev server with watch mode + browser reload
 - `npm start` — production server (no separate build step; routes and client
   bundles are built at startup)
+- `npx gio routes` — every route with its type, file and layouts (`--json`)
+- `npx gio typegen` — regenerate `.gio/routes.d.ts` without a server
+- `npx gio doctor` — check the environment and project; prints a fix for each
+  problem (`npx gio --help` lists every command)
 - Health: `GET /_gio/health` · Dev dashboard: `/_gio/devtools` (dev only;
   answers localhost hosts only, add LAN IPs/hostnames to `[dev] allowed_hosts`)
