@@ -1,7 +1,7 @@
 import React from 'react';
 import { redirect, type ActionArgs, type GetServerSideProps, type Metadata, type WithActionData } from '@gio.js/core';
 import { GioForm, useGioFormState } from '@gio.js/react';
-import { addEntry, listEntries, validateEntry, type Entry } from '@/lib/guestbook.server';
+import { addEntry, listEntries, validateEntry, type Entry } from '../../lib/guestbook.server';
 import '../../components/forms.css';
 
 export const metadata: Metadata = { title: 'Guestbook' };

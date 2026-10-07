@@ -1,7 +1,7 @@
 import { spawnSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { readFile, readdir, rm, writeFile } from 'fs/promises';
-import { join, relative } from 'path';
+import { join, relative, sep } from 'path';
 import { fileURLToPath } from 'url';
 import type { CliArgs } from './args.js';
 import { copyTemplate, scaffoldFileName, templateDir } from './copy-template.js';
@@ -12,10 +12,27 @@ import { installCommand, runCommand, type PackageManager } from './package-manag
 import { gatherConfig, type Mode, type ProjectConfig } from './prompts.js';
 import { applyStaticVariant } from './static-variant.js';
 
+/**
+ * The GioJS repository this CLI runs from, or null for an installed copy.
+ * dist/create.js is at packages/giojs-cli/dist/ - four levels up is the
+ * workspace root. An install (<app>/node_modules/create-giojs/dist/) has an
+ * app four levels up, with its own gio.toml, so the check names the
+ * repository's own files and refuses any path through node_modules.
+ */
 function monorepoRoot(): string | null {
-  // dist/create.js is at packages/giojs-cli/dist/ - four levels up is the workspace root
-  const root = join(fileURLToPath(import.meta.url), '..', '..', '..', '..');
-  return existsSync(join(root, 'gio.toml')) ? root : null;
+  const packageDir = join(fileURLToPath(import.meta.url), '..', '..');
+  if (packageDir.split(sep).includes('node_modules')) return null;
+  const root = join(packageDir, '..', '..');
+  if (relative(root, packageDir) !== join('packages', 'giojs-cli')) return null;
+  if (!existsSync(join(root, 'gio.toml')) || !existsSync(join(root, 'crates', 'giojs-server', 'Cargo.toml'))) {
+    return null;
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8')) as { name?: unknown };
+    return pkg.name === 'create-giojs' ? root : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -211,8 +228,11 @@ export async function create(args: CliArgs): Promise<void> {
   const modeLabel = config.mode === 'static' ? 'static site' : 'server app';
   const displayDir = relative(process.cwd(), config.targetDir) || '.';
   console.log(`\nCreating ${config.packageName} in ${config.targetDir} - ${langLabel}, ${modeLabel}...`);
-  // A --force run's directory already holds files that are not ours to commit.
-  const preexisting = config.git && config.targetState === 'not-empty'
+  // A directory that already existed holds files that are not ours to
+  // commit: a --force run's, and in an "empty" one the editor folders and
+  // README/LICENSE inspectTargetDir lets through (.idea/*.local.xml and
+  // .vscode settings can hold credentials).
+  const preexisting = config.git && config.targetState !== 'missing'
     ? new Set(await readdir(config.targetDir))
     : undefined;
   const { linksMonorepo, files, amended, featureSteps } = await writeProject(config);

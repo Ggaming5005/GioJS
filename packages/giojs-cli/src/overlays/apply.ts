@@ -175,6 +175,9 @@ export const BASE_GITIGNORE = [
   '',
 ].join('\n');
 
+/** A gio.toml created by an overlay, before its additions. */
+export const NEW_GIO_TOML = '# GioJS server configuration. Everything not set here uses the defaults.\n';
+
 const AGENTS_HEADING = '## Starter features';
 
 /** AGENTS.md with the overlay's note under "Starter features", once. */
@@ -355,23 +358,21 @@ export async function planOverlays(
     }
     if (pkgChanged) await write('package.json', JSON.stringify(pkg, null, detectIndent(pkgRaw)) + '\n');
 
-    // gio.toml.
+    // gio.toml. It is optional (a migrated app without a next.config has
+    // none), so one is created: the additions are often what protects the
+    // feature's routes (auth's require_session guard), never a manual step.
     const tomlAdditions = overlay.toml;
     if (tomlAdditions !== undefined) {
-      let toml = await fs.read('gio.toml');
-      if (toml === undefined) {
-        plan.manual.push(`gio.toml is missing: ${overlay.name} needs ${JSON.stringify(tomlAdditions)}`);
-      } else {
-        for (const key of tomlAdditions.keys ?? []) {
-          const result = addTomlKey(toml, key);
-          toml = result.content;
-          plan.manual.push(...result.manual);
-        }
-        for (const entry of tomlAdditions.entries ?? []) {
-          toml = addTomlArrayEntry(toml, entry).content;
-        }
-        await write('gio.toml', toml);
+      let toml = (await fs.read('gio.toml')) ?? NEW_GIO_TOML;
+      for (const key of tomlAdditions.keys ?? []) {
+        const result = addTomlKey(toml, key);
+        toml = result.content;
+        plan.manual.push(...result.manual);
       }
+      for (const entry of tomlAdditions.entries ?? []) {
+        toml = addTomlArrayEntry(toml, entry).content;
+      }
+      await write('gio.toml', toml);
     }
 
     // .env files and .gitignore.

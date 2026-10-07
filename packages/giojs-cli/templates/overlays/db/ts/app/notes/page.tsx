@@ -1,7 +1,7 @@
 import React from 'react';
 import { redirect, type ActionArgs, type GetServerSideProps, type Metadata, type WithActionData } from '@gio.js/core';
 import { GioForm, useGioFormState } from '@gio.js/react';
-import { createNote, listNotes, type NoteItem } from '@/lib/db.server';
+import { createNote, listNotes, type NoteItem } from '../../lib/db.server';
 import '../../components/forms.css';
 
 export const metadata: Metadata = { title: 'Notes' };

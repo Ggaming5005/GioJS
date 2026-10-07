@@ -1,18 +1,21 @@
 import React from 'react';
+import { redirect } from '@gio.js/core';
 import { GioForm } from '@gio.js/react';
 import { sessions } from '../../lib/session.server';
 
 /** @type {import('@gio.js/core').Metadata} */
 export const metadata = { title: 'Dashboard' };
 
-// Only reached with a valid session: the require_session guard in gio.toml
-// checks the cookie in Rust and sends everyone else to /login. Reading the
-// session (ctx.cookies) also marks this render personal, so it is never
-// cached and shown to someone else.
+// The require_session guard in gio.toml checks the cookie in Rust and sends
+// everyone without a valid session to /login before Node runs. The page
+// checks too, so it stays protected if the guard is removed or the project
+// has none. Reading the session (ctx.cookies) also marks this render
+// personal, so it is never cached and shown to someone else.
 /** @type {import('@gio.js/core').GetServerSideProps<{ email: string }>} */
 export const getServerSideProps = async (ctx) => {
-  const session = sessions.getSession(ctx);
-  return { props: { email: session.get('email') ?? 'unknown' } };
+  const email = sessions.getSession(ctx).get('email');
+  if (email === undefined) return redirect('/login');
+  return { props: { email } };
 };
 
 /** @param {{ email: string }} props */

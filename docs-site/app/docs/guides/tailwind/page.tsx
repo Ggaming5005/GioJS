@@ -33,8 +33,9 @@ npm install`} />
           page stylesheets. It is generated, so it is git-ignored.
         </li>
         <li>
-          <code>@tailwindcss/cli</code> and <code>tailwindcss</code> as dev dependencies, and
-          these scripts:
+          <code>@tailwindcss/cli</code> and <code>tailwindcss</code> as dependencies (not dev
+          dependencies: <code>start</code> builds the stylesheet, and a deploy from source
+          installs with <code>npm ci --omit=dev</code>), and these scripts:
         </li>
       </ul>
       <CodeBlock lang="json" code={`{
