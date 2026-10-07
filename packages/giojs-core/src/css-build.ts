@@ -29,6 +29,7 @@
  * pages render without their own stylesheet. Never throws.
  */
 import { build, type Loader, type Metafile, type OutputFile, type Plugin } from 'esbuild';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import {
@@ -83,11 +84,57 @@ function inNodeModules(path: string): boolean {
   return path.split(/[\\/]/).includes('node_modules');
 }
 
+/** A package name with no subpath: `pkg`, `@scope/pkg`. */
+const BARE_PACKAGE = /^(?:@[^/]+\/)?[^/.@][^/]*$/;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The `style` condition of a package's "." export, if it has one. */
+function exportedStyle(exportsField: unknown): string | undefined {
+  if (!isRecord(exportsField)) return undefined;
+  const isSubpathMap = Object.keys(exportsField).some(key => key.startsWith('.'));
+  const root = isSubpathMap ? exportsField['.'] : exportsField;
+  return isRecord(root) && typeof root['style'] === 'string' ? root['style'] : undefined;
+}
+
+/**
+ * The stylesheet a package names for CSS consumers - the `style` condition
+ * of its "." export, else its `style` field, as postcss-import and Vite read
+ * them - looked up from `resolveDir` the way Node finds packages. esbuild
+ * resolves `@import "pkg"` through `main` and `exports` only, so a package
+ * whose entry is JavaScript (or that has no `main`) needs this.
+ */
+function packageStylesheet(specifier: string, resolveDir: string): string | undefined {
+  if (!BARE_PACKAGE.test(specifier)) return undefined;
+  for (let dir = resolveDir; ; dir = dirname(dir)) {
+    const packageDir = join(dir, 'node_modules', specifier);
+    const manifestPath = join(packageDir, 'package.json');
+    if (existsSync(manifestPath)) {
+      let pkg: unknown;
+      try {
+        pkg = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      } catch {
+        return undefined;
+      }
+      if (!isRecord(pkg)) return undefined;
+      const style = exportedStyle(pkg['exports']) ?? (typeof pkg['style'] === 'string' ? pkg['style'] : undefined);
+      if (style === undefined || CSS_MODULE_FILE.test(style)) return undefined;
+      const stylesheet = join(packageDir, style);
+      // Real path, as esbuild reports inputs (pnpm links node_modules/pkg).
+      return existsSync(stylesheet) ? realpathSync(stylesheet) : undefined;
+    }
+    if (dirname(dir) === dir) return undefined;
+  }
+}
+
 /**
  * Keeps the CSS build to CSS: npm JavaScript (and anything that does not
  * resolve - SSR reports that) stays external, site-absolute url()s
  * (`/public/bg.png`) stay as written, unknown file types load empty, and
  * stylesheets in `excluded` (already in the root stylesheet) load empty.
+ * Every @import is bundled, `@import "pkg"` included (packageStylesheet).
  */
 function cssGraphPlugin(excluded: ReadonlySet<string>): Plugin {
   return {
@@ -102,14 +149,31 @@ function cssGraphPlugin(excluded: ReadonlySet<string>): Plugin {
         }
         // `composes ... from` needs the real class names, never an empty stand-in.
         if (args.kind === 'composes-from') return null;
-        const isCss = args.kind !== 'url-token' && /\.css(?:$|\?)/.test(args.path);
+        // Whatever an @import names is CSS, extension or not: `@import "pkg"`
+        // is bundled like any stylesheet, never left as an external @import
+        // the server 404s.
+        const isCss =
+          args.kind === 'import-rule' || (args.kind !== 'url-token' && /\.css(?:$|\?)/.test(args.path));
         const resolved = await pluginBuild.resolve(args.path, {
           importer: args.importer,
           resolveDir: args.resolveDir,
           kind: args.kind,
           pluginData: CSS_RESOLVING,
         });
-        if (resolved.errors.length > 0) {
+        const unresolved = resolved.errors.length > 0;
+        if (
+          args.kind === 'import-rule' &&
+          (unresolved || (!resolved.external && resolved.namespace === 'file' && !/\.css$/i.test(resolved.path)))
+        ) {
+          // `@import "pkg"` that esbuild could not resolve, or resolved to JavaScript.
+          const stylesheet = packageStylesheet(args.path, args.resolveDir);
+          if (stylesheet !== undefined) {
+            return excluded.has(stylesheet)
+              ? { path: stylesheet, namespace: EXCLUDED_NAMESPACE }
+              : { path: stylesheet };
+          }
+        }
+        if (unresolved) {
           // A CSS import that does not resolve is a real error (SSR fails on
           // it too); a missing url() target only costs that asset.
           return isCss ? null : { path: args.path, external: true };

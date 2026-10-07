@@ -238,6 +238,154 @@ describe('Tailwind CLI output imported from the root layout', () => {
   }, 60_000);
 });
 
+describe('CSS Modules at the same path inside different packages', () => {
+  const button = (color: string): string => `.btn { color: ${color}; }\n`;
+  const files: Record<string, string> = {
+    'package.json': '{ "name": "collide-app", "type": "module" }\n',
+    // Two installed libraries shipping dist/button.module.css.
+    'node_modules/lib-a/package.json': '{ "name": "lib-a", "version": "1.0.0" }\n',
+    'node_modules/lib-a/dist/button.module.css': button('red'),
+    'node_modules/lib-b/package.json': '{ "name": "lib-b", "version": "1.0.0" }\n',
+    'node_modules/lib-b/dist/button.module.css': button('blue'),
+    // A nameless package.json (dist/esm) does not make its folder a package.
+    'node_modules/lib-c/package.json': '{ "name": "lib-c", "version": "2.0.0" }\n',
+    'node_modules/lib-c/dist/esm/package.json': '{ "type": "module" }\n',
+    'node_modules/lib-c/dist/esm/button.module.css': button('green'),
+    'node_modules/lib-d/package.json': '{ "name": "lib-d", "version": "2.0.0" }\n',
+    'node_modules/lib-d/dist/esm/package.json': '{ "type": "module" }\n',
+    'node_modules/lib-d/dist/esm/button.module.css': button('purple'),
+    // The app and a workspace package both have components/button.module.css.
+    'components/button.module.css': button('orange'),
+    'packages/ui/package.json': '{ "name": "@acme/ui", "type": "module" }\n',
+    'packages/ui/components/button.module.css': button('teal'),
+    'app/page.tsx': `import React from 'react';
+import a from 'lib-a/dist/button.module.css';
+import b from 'lib-b/dist/button.module.css';
+import c from 'lib-c/dist/esm/button.module.css';
+import d from 'lib-d/dist/esm/button.module.css';
+import app from '../components/button.module.css';
+import ui from '../packages/ui/components/button.module.css';
+export default function Page() {
+  return React.createElement('p', { className: [a.btn, b.btn, c.btn, d.btn, app.btn, ui.btn].join(' ') });
+}
+`,
+  };
+  const modules: Record<string, string> = {
+    red: 'node_modules/lib-a/dist/button.module.css',
+    blue: 'node_modules/lib-b/dist/button.module.css',
+    green: 'node_modules/lib-c/dist/esm/button.module.css',
+    purple: 'node_modules/lib-d/dist/esm/button.module.css',
+    orange: 'components/button.module.css',
+    teal: 'packages/ui/components/button.module.css',
+  };
+
+  it('get distinct names, and the stylesheet keeps the names SSR and the client use', async () => {
+    const root = await writeProject('gio-css-collide-', files);
+    try {
+      const manifest = await buildRouteStylesheets({ ...(await discover(root)), projectRoot: root, dev: false });
+      const url = manifest.routes.get('/')?.[0] ?? '';
+      expect(url).toMatch(/route-index-/);
+      const css = await readFile(join(root, '.gio', 'build', 'static', 'css', url.split('/').pop() ?? ''), 'utf8');
+      const names = new Set<string>();
+      for (const [color, file] of Object.entries(modules)) {
+        const name = (await compileCssModuleClasses(join(root, file)))['btn'] ?? 'missing';
+        names.add(name);
+        // Minified colors: blue is #00f, the others keep their keyword.
+        expect(css).toContain(`.${name}{color:${color === 'blue' ? '#00f' : color}}`);
+      }
+      expect(names.size).toBe(Object.keys(modules).length);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('fail the build loudly when two different files still share a name', async () => {
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    // One package name and version, installed twice with different contents.
+    const root = await writeProject('gio-css-dup-', {
+      'package.json': '{ "name": "dup-app", "type": "module" }\n',
+      'node_modules/dup/package.json': '{ "name": "dup", "version": "1.0.0" }\n',
+      'node_modules/dup/x.module.css': button('red'),
+      'node_modules/other/package.json': '{ "name": "other", "version": "1.0.0" }\n',
+      'node_modules/other/node_modules/dup/package.json': '{ "name": "dup", "version": "1.0.0" }\n',
+      'node_modules/other/node_modules/dup/x.module.css': button('blue'),
+      'node_modules/same/package.json': '{ "name": "same", "version": "1.0.0" }\n',
+      'node_modules/same/x.module.css': button('green'),
+      'node_modules/other/node_modules/same/package.json': '{ "name": "same", "version": "1.0.0" }\n',
+      'node_modules/other/node_modules/same/x.module.css': button('green'),
+      'app/page.tsx': `import a from 'dup/x.module.css';
+import b from '../node_modules/other/node_modules/dup/x.module.css';
+export default function Page() { return a.btn + b.btn; }
+`,
+      'app/same/page.tsx': `import a from 'same/x.module.css';
+import b from '../../node_modules/other/node_modules/same/x.module.css';
+export default function Page() { return a.btn + b.btn; }
+`,
+    });
+    try {
+      const manifest = await buildRouteStylesheets({ ...(await discover(root)), projectRoot: root, dev: true });
+      expect(manifest.routes.get('/')).toEqual([]);
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining('stylesheet failed to build'),
+        expect.objectContaining({
+          pattern: '/',
+          error: expect.stringMatching(/node_modules\/dup\/x\.module\.css and .*other\/node_modules\/dup\/x\.module\.css would get the same class names/),
+        }),
+      );
+      // Identical copies are harmless: their rules are the same either way.
+      expect(manifest.routes.get('/same')?.[0]).toMatch(/route-same-/);
+    } finally {
+      errorLog.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+describe('@import of a package by name', () => {
+  it('bundles the stylesheet the package names, whatever its entry fields', async () => {
+    const root = await writeProject('gio-css-import-pkg-', {
+      ...FIXTURE,
+      'app/globals.css': `@import "my-reset";
+@import "main-css";
+@import "exports-style";
+@import "@scope/fonts";
+@import url("https://fonts.example.com/css2?family=Inter");
+.global-marker { color: red; }
+`,
+      // `style` next to a JavaScript `main` (bootstrap-like).
+      'node_modules/my-reset/package.json': '{ "name": "my-reset", "style": "reset.css", "main": "index.js" }\n',
+      'node_modules/my-reset/index.js': 'module.exports = {};\n',
+      'node_modules/my-reset/reset.css': '.reset-marker { margin: 0; }\n',
+      // Only `main`, pointing at CSS (modern-normalize-like).
+      'node_modules/main-css/package.json': '{ "name": "main-css", "main": "main.css" }\n',
+      'node_modules/main-css/main.css': '.main-css-marker { margin: 1px; }\n',
+      // A `style` export condition without a CSS-reachable default.
+      'node_modules/exports-style/package.json':
+        '{ "name": "exports-style", "exports": { ".": { "style": "./s.css", "import": "./i.js" } } }\n',
+      'node_modules/exports-style/s.css': '.exports-style-marker { margin: 2px; }\n',
+      'node_modules/exports-style/i.js': 'export {};\n',
+      // Only `style`, scoped.
+      'node_modules/@scope/fonts/package.json': '{ "name": "@scope/fonts", "style": "index.css" }\n',
+      'node_modules/@scope/fonts/index.css': '.scope-fonts-marker { margin: 3px; }\n',
+    });
+    try {
+      const manifest = await buildRouteStylesheets({ ...(await discover(root)), projectRoot: root, dev: false });
+      const url = manifest.routes.get('/')?.[0] ?? '';
+      expect(url).toMatch(/root-/);
+      const css = await readFile(join(root, '.gio', 'build', 'static', 'css', url.split('/').pop() ?? ''), 'utf8');
+      for (const marker of ['reset-marker', 'main-css-marker', 'exports-style-marker', 'scope-fonts-marker']) {
+        expect(css).toContain(`.${marker}{`);
+      }
+      // Nothing left for the browser to fetch from /_next/static/css/<pkg>.
+      expect(css).not.toMatch(/@import\s*"(?:my-reset|main-css|exports-style|@scope)/);
+      // Remote stylesheets stay remote.
+      expect(css).toContain('@import"https://fonts.example.com/css2?family=Inter"');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
 describe('a stylesheet that fails to build', () => {
   it('costs only its own route its stylesheet', async () => {
     const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => undefined);

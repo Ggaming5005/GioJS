@@ -13,13 +13,20 @@
  * names to `a`, `b`, ... Neither survives across builds. So every module is
  * resolved to a virtual path whose base name carries a hash of the file's
  * location (`card-3fa9c1.module.css`): esbuild then names `.root`
- * `card_3fa9c1_root`, distinct files never collide, and the name is the same
- * in every build. Builds that compile modules this way never set
- * `minifyIdentifiers` (whitespace/syntax minification is fine).
+ * `card_3fa9c1_root`, and the name is the same in every build. Builds that
+ * compile modules this way never set `minifyIdentifiers` (whitespace/syntax
+ * minification is fine).
  *
- * The hash covers the file's path relative to its package root (the nearest
- * directory with a package.json), so names are stable across machines and
- * checkouts - and with them the content-hashed stylesheet URLs.
+ * The hash covers the package that owns the file - the `name` of the
+ * nearest package.json that has one, plus its `version` under node_modules -
+ * and the file's path inside it, so `button.module.css` at the same relative
+ * path in two packages (lib-a and lib-b, or an app and its workspace UI
+ * package) gets two names. Nothing machine-specific goes in, so names are
+ * stable across machines and checkouts - and with them the content-hashed
+ * stylesheet URLs. Only a file no named package owns hashes its absolute
+ * path. Two different files that still share a name (each compiles alone to
+ * that name, but a build holding both would rename one) fail the build that
+ * holds both, naming both files.
  *
  * Semantics are esbuild's: class names, ids and `@keyframes` are local,
  * `:global(.x)` / `:global .x` stay global, `composes: a b` and
@@ -28,7 +35,7 @@
  */
 import { build, type Plugin } from 'esbuild';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,16 +57,52 @@ export const CSS_RESOLVING = 'gio-css-resolving';
 /** Local name → generated class names (space-separated when composed). */
 export type CssModuleClasses = Record<string, string>;
 
-const packageRoots = new Map<string, string | null>();
+/** The package a module file belongs to (see the file comment). */
+interface OwningPackage {
+  /** Directory of its package.json. */
+  root: string;
+  /** Its `name`, plus `@version` when installed under node_modules. */
+  id: string;
+}
 
-/** Nearest ancestor of `dir` holding a package.json, or null. */
-function packageRootOf(dir: string): string | null {
-  const cached = packageRoots.get(dir);
+const owningPackages = new Map<string, OwningPackage | null>();
+
+/** `name` and `version` from `dir`'s package.json; null without one or without a name. */
+function packageIdentity(dir: string): { name: string; version: string } | null {
+  const file = join(dir, 'package.json');
+  if (!existsSync(file)) return null;
+  let pkg: unknown;
+  try {
+    pkg = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof pkg !== 'object' || pkg === null) return null;
+  const { name, version } = pkg as { name?: unknown; version?: unknown };
+  if (typeof name !== 'string' || name === '') return null;
+  return { name, version: typeof version === 'string' ? version : '' };
+}
+
+/**
+ * Nearest ancestor of `dir` whose package.json has a name, or null. A
+ * nameless package.json (`{ "type": "module" }` in a dist/esm folder, an
+ * unnamed workspace root) does not own its folder; its named ancestor does.
+ */
+function owningPackageOf(dir: string): OwningPackage | null {
+  const cached = owningPackages.get(dir);
   if (cached !== undefined) return cached;
+  const identity = packageIdentity(dir);
   const parent = dirname(dir);
-  const root = existsSync(join(dir, 'package.json')) ? dir : parent === dir ? null : packageRootOf(parent);
-  packageRoots.set(dir, root);
-  return root;
+  let owner: OwningPackage | null;
+  if (identity !== null) {
+    // Two versions of one package can sit side by side in node_modules.
+    const installed = dir.split(/[\\/]/).includes('node_modules') && identity.version !== '';
+    owner = { root: dir, id: installed ? `${identity.name}@${identity.version}` : identity.name };
+  } else {
+    owner = parent === dir ? null : owningPackageOf(parent);
+  }
+  owningPackages.set(dir, owner);
+  return owner;
 }
 
 /**
@@ -67,8 +110,11 @@ function packageRootOf(dir: string): string | null {
  * `<stem>-<hash>.module.css`. esbuild derives the local-name prefix from it.
  */
 export function cssModuleVirtualPath(realPath: string): string {
-  const root = packageRootOf(dirname(realPath));
-  const location = (root === null ? realPath : relative(root, realPath)).split(sep).join('/');
+  const owner = owningPackageOf(dirname(realPath));
+  const location =
+    owner === null
+      ? realPath.split(sep).join('/')
+      : `${owner.id}/${relative(owner.root, realPath).split(sep).join('/')}`;
   const hash = createHash('sha256').update(location).digest('hex').slice(0, 6);
   const stem = basename(realPath).replace(CSS_MODULE_FILE, '');
   return join(dirname(realPath), `${stem}-${hash}.module.css`);
@@ -78,6 +124,11 @@ export function cssModuleVirtualPath(realPath: string): string {
  * Resolves every `*.module.css` import - from JS, and `composes ... from`
  * between modules - to its virtual path, loaded with the `local-css` loader
  * from the real file. Shared by every build that compiles CSS Modules.
+ *
+ * Two files with one virtual base name in the same build fail it unless
+ * their contents are identical (one package installed twice): esbuild would
+ * rename the second file's classes, which neither SSR nor the client bundle
+ * - compiling each file alone - would follow.
  */
 export function cssModulePlugin(
   /** Filled with virtual path → real path for every module resolved. */
@@ -86,6 +137,8 @@ export function cssModulePlugin(
   return {
     name: 'gio-css-modules',
     setup(pluginBuild) {
+      /** Virtual base name → the first real file resolved to it in this build. */
+      const claimed = new Map<string, string>();
       pluginBuild.onResolve({ filter: CSS_MODULE_FILE }, async args => {
         if (args.pluginData === CSS_RESOLVING) return null;
         const resolved = await pluginBuild.resolve(args.path, {
@@ -98,6 +151,25 @@ export function cssModulePlugin(
           return null;
         }
         const virtualPath = cssModuleVirtualPath(resolved.path);
+        const name = basename(virtualPath);
+        const first = claimed.get(name);
+        if (first === undefined) {
+          claimed.set(name, resolved.path);
+        } else if (first !== resolved.path) {
+          const [a, b] = await Promise.all([readFile(first, 'utf8'), readFile(resolved.path, 'utf8')]);
+          if (a !== b) {
+            return {
+              errors: [
+                {
+                  text:
+                    `CSS Modules ${first} and ${resolved.path} would get the same class names ` +
+                    '(same file name and path inside packages of the same name and version, ' +
+                    'different contents) - rename one of them',
+                },
+              ],
+            };
+          }
+        }
         realPaths?.set(virtualPath, resolved.path);
         return {
           path: virtualPath,

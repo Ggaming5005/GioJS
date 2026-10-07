@@ -68,6 +68,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <code>import &apos;some-lib/dist/styles.css&apos;</code>. GioJS does not look inside
           npm packages&apos; JavaScript for CSS imports.
         </li>
+        <li>
+          <code>@import</code> inside a stylesheet is bundled too, including a bare package
+          name such as <code>@import &quot;modern-normalize&quot;;</code>. The package&apos;s
+          stylesheet is found through its <code>style</code> export condition or{' '}
+          <code>style</code> field, or else its <code>main</code>. Remote URLs (
+          <code>@import url(&quot;https://…&quot;)</code>) and site-absolute paths stay as
+          written.
+        </li>
       </ul>
       <p>
         Global CSS stays global when you navigate. Once a route&apos;s stylesheet has loaded it
@@ -96,9 +104,12 @@ export default function Card({ title }: { title: string }) {
       <p>
         The server render and the browser bundle use exactly the same class names, so pages
         hydrate cleanly. A name has the form <code>card_3fa9c1_title</code>: the file name, a
-        hash of the file&apos;s path within its package, and the local name. It stays the same
-        across builds and machines. Modules are compiled with esbuild&apos;s CSS Modules support,
-        and these are its rules:
+        hash, and the local name. The hash covers the package the file belongs to (the{' '}
+        <code>name</code> in its package.json, plus the version for an installed package) and
+        the file&apos;s path inside it. So <code>Button.module.css</code> in your app and in a
+        workspace UI package get different names, and a name stays the same across builds and
+        machines. Modules are compiled with esbuild&apos;s CSS Modules support, and these are
+        its rules:
       </p>
       <ul>
         <li>Class names, ids and <code>@keyframes</code> names are local. Element selectors and attribute selectors are not affected.</li>
