@@ -82,7 +82,7 @@ CMD ["node", "run.mjs"]`} />
           <code>200</code> as long as it runs. The check passes only when its{' '}
           <code>nodeReady</code> field is <code>true</code> - a Node worker is up - so a
           container whose worker keeps crashing is reported unhealthy, not healthy. It
-          needs the endpoint on: with <code>[health] enabled = false</code> it gets a{' '}
+          needs the endpoint on: with <a href="/docs/configuration/health"><code>[health] enabled = false</code></a> it gets a{' '}
           <code>404</code> and the container stays unhealthy, so change the check to fetch
           a page of your own (<code>[health] details = false</code> keeps{' '}
           <code>nodeReady</code> and works as is).

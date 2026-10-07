@@ -49,7 +49,7 @@ export default function Page(): React.JSX.Element {
         router sends the page&apos;s deployment id with every request; a prefetch that finds
         a new deployment never reloads the page, the click does). A blue/green or rolling
         setup that keeps the old build&apos;s chunks reachable can turn that off with{' '}
-        <code>[server] skew_protection = false</code>: the id is then ignored and old pages
+        <a href="/docs/configuration/server"><code>[server] skew_protection = false</code></a>: the id is then ignored and old pages
         keep navigating softly.
       </p>
       <p>
@@ -194,7 +194,7 @@ function SaveButton({ id }: { id: string }) {
       <div className="callout">
         Prefetching is budgeted by the Rust prefetch manager, so a page full of links will not
         flood your server: each client may have 5 prefetches in flight and start 20 per second,
-        set by <code>[prefetch] max_concurrent</code> and <code>max_per_second</code> in{' '}
+        set by <a href="/docs/configuration/prefetch"><code>[prefetch] max_concurrent</code></a> and <code>max_per_second</code> in{' '}
         <code>gio.toml</code>, where <code>0</code> lifts that budget.{' '}
         <code>[prefetch] enabled = false</code> turns prefetching off site-wide: every
         prefetch gets <code>429</code>, and a click still navigates (see{' '}

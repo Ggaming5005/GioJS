@@ -53,7 +53,7 @@ node standalone/run.mjs    # a standalone build: no node_modules needed on the h
           </tr>
           <tr>
             <td>A port to listen on</td>
-            <td><code>GIO_PORT</code>, then <code>PORT</code> (set by most platforms), then <code>[server] port</code>, then 3000.</td>
+            <td><code>GIO_PORT</code>, then <code>PORT</code> (set by most platforms), then <a href="/docs/configuration/server"><code>[server] port</code></a>, then 3000.</td>
           </tr>
           <tr>
             <td>A writable cache directory</td>

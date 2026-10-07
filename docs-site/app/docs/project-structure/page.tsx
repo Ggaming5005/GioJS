@@ -45,7 +45,7 @@ export default function Page(): React.JSX.Element {
         <a href="/docs/file-conventions/layout"><code>app/layout.tsx</code></a> renders the <code>&lt;html&gt;</code> document every
         page shares. It imports the global stylesheet and exports the site&apos;s default{' '}
         <a href="/docs/metadata">metadata</a> - a title template that each page&apos;s own{' '}
-        <code>metadata</code> fills in:
+        <a href="/docs/page-exports/metadata"><code>metadata</code></a> fills in:
       </p>
       <CodeBlock lang="tsx" title="app/layout.tsx" code={`import type { LayoutProps, Metadata } from '@gio.js/core';
 import './globals.css';

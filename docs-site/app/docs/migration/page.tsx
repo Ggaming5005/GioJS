@@ -214,7 +214,7 @@ npm run dev`} />
               <code>robots.txt</code>, <code>sitemap.xml</code>, <code>manifest.json</code>,{' '}
               <code>icon.png</code>, <code>opengraph-image.png</code>, ... - move to{' '}
               <a href="/docs/file-conventions/public-folder"><code>public/</code></a>; images and the manifest get a TODO to reference them from{' '}
-              <code>metadata</code> (<code>icons</code>, <code>openGraph.images</code>,{' '}
+              <a href="/docs/page-exports/metadata"><code>metadata</code></a> (<code>icons</code>, <code>openGraph.images</code>,{' '}
               <code>manifest</code>), which Next did implicitly
             </td>
           </tr>
@@ -298,7 +298,7 @@ headers = { "X-Frame-Options" = "DENY" }`} />
 
       <h2 id="server-actions-page-actions">Server Actions → page actions</h2>
       <p>
-        A form&apos;s Server Action becomes the page&apos;s <code>action</code> export: a POST to
+        A form&apos;s Server Action becomes the page&apos;s <a href="/docs/page-exports/action"><code>action</code></a> export: a POST to
         the page runs it, and <code>&lt;GioForm&gt;</code> (which the migration already put in
         place of the <code>&lt;form&gt;</code>) posts to it - with or without JavaScript:
       </p>

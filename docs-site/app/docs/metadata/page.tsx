@@ -22,7 +22,7 @@ export default function Page(): React.JSX.Element {
 
       <p>
         Pages and layouts describe their <code>&lt;head&gt;</code> with a{' '}
-        <code>metadata</code> export. GioJS merges the root layout, the nested layouts and the
+        <a href="/docs/page-exports/metadata"><code>metadata</code></a> export. GioJS merges the root layout, the nested layouts and the
         page into one set of tags and renders them into the document head - on the server
         (streamed pages included) and again in the browser, so a{' '}
         <a href="/docs/components/gio-link"><code>&lt;GioLink&gt;</code></a> navigation swaps the title and every tag for the next
@@ -105,7 +105,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
           Reading credentials - <code>ctx.cookies</code>, <code>ctx.ip</code>,{' '}
           <code>ctx.host</code>, <code>ctx.scheme</code>, the cookie/authorization header -
           makes the render personal exactly like it does in{' '}
-          <code>getServerSideProps</code>: a page exporting <code>revalidate</code> is not
+          <code>getServerSideProps</code>: a page exporting <a href="/docs/page-exports/revalidate"><code>revalidate</code></a> is not
           cached, with a warning. Unlike in <code>getServerSideProps</code>, this also holds
           for <a href="/docs/page-exports/shell"><code>shell = &apos;cache&apos;</code></a> (PPR) pages: the head is part of the
           shell every visitor shares. Derive metadata from params and query.

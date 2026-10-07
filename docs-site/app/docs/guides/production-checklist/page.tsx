@@ -240,11 +240,11 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
       <ul>
         <li>
           <strong>JSON logs</strong> for a log shipper: <code>GIO_LOG_FORMAT=json</code> (or{' '}
-          <code>[logging] format = &quot;json&quot;</code>). Every line of a request carries
+          <a href="/docs/configuration/logging"><code>[logging] format = &quot;json&quot;</code></a>). Every line of a request carries
           its request id in both processes. See <a href="/docs/observability">Observability</a>.
         </li>
         <li>
-          <strong>Metrics</strong>: <code>[metrics] enabled = true</code> with an{' '}
+          <strong>Metrics</strong>: <a href="/docs/configuration/metrics"><code>[metrics] enabled = true</code></a> with an{' '}
           <code>ip_allowlist</code> or <code>token</code> - without either it answers only
           this machine, and an allowlist of <code>0.0.0.0/0</code> with no token logs a
           warning at startup. Alert
@@ -254,7 +254,7 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         <li>
           <strong>Health checks</strong> on <code>/_gio/health</code>. It always answers 200
           while the server runs; read <code>nodeReady</code> for &quot;can render
-          right now&quot;. <code>[health] details = false</code> keeps the deployment id and
+          right now&quot;. <a href="/docs/configuration/health"><code>[health] details = false</code></a> keeps the deployment id and
           worker counts out of it; <code>[health] enabled = false</code> turns it into a{' '}
           <code>404</code>, so point every probe at a page of your own first. See <a href="/docs/deployment#health-check">Health check</a>.
         </li>

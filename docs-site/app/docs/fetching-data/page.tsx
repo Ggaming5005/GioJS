@@ -31,7 +31,7 @@ export async function getServerSideProps(ctx) {
         discovered (the generated <code>.gio/routes.d.ts</code>), so a typo fails{' '}
         <code>tsc</code>; a params shape (<code>{'{ id: string }'}</code>) works too. The
         result must be one the server accepts: <code>{'{ props }'}</code> (optionally with{' '}
-        <code>headers</code> and <code>tags</code>), a <code>redirect</code>,{' '}
+        <code>headers</code> and <a href="/docs/page-exports/tags"><code>tags</code></a>), a <code>redirect</code>,{' '}
         <code>{'{ notFound: true }'}</code> or <a href="/docs/functions/redirect"><code>redirect()</code></a>.
       </p>
       <CodeBlock lang="tsx" code={`import type { GetServerSideProps } from '@gio.js/core';
@@ -83,7 +83,7 @@ export async function getServerSideProps(ctx) {
 }`} />
       <h2 id="after-a-form-post">After a form post</h2>
       <p>
-        When a page&apos;s <code>action</code> re-renders it (a validation error, say),{' '}
+        When a page&apos;s <a href="/docs/page-exports/action"><code>action</code></a> re-renders it (a validation error, say),{' '}
         <code>getServerSideProps</code> runs for that POST too, with the action&apos;s result in{' '}
         <code>ctx.actionData</code>; the page component gets it as the <code>actionData</code>{' '}
         prop. Neither render is ever cached. Headers the action returned (a cookie) are sent
@@ -114,7 +114,7 @@ export async function getServerSideProps(ctx) {
         <code>notFound()</code> works by throwing, so a <code>try</code>/<code>catch</code>{' '}
         around it swallows it - call it outside the <code>try</code>, or rethrow. It works
         while rendering too, and in <a href="/docs/file-conventions/route"><code>route.ts</code></a> handlers (a JSON 404). A 404 is
-        never cached, even with <code>revalidate</code> set.
+        never cached, even with <a href="/docs/page-exports/revalidate"><code>revalidate</code></a> set.
       </p>
       <h2 id="response-headers-and-cookies">Response headers and cookies</h2>
       <p>

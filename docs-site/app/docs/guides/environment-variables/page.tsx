@@ -72,7 +72,7 @@ export default function Page(): React.JSX.Element {
         </li>
         <li>
           On a platform that injects the whole environment, stray files can be ignored:{' '}
-          <code>[env] files = false</code> in <code>gio.toml</code>, or{' '}
+          <a href="/docs/configuration/env"><code>[env] files = false</code></a> in <code>gio.toml</code>, or{' '}
           <code>GIO_ENV_FILES=0</code> (which wins over <code>gio.toml</code>, as{' '}
           <code>GIO_ENV_FILES=1</code> does the other way).
         </li>

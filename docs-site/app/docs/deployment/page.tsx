@@ -80,7 +80,7 @@ export default function DeploymentPage(): React.JSX.Element {
         worker is down at once), and <code>workers</code> counts the ready ones. Readiness
         probes should read <code>nodeReady</code>.
         Use it for readiness probes, load balancer health checks, and uptime monitors.
-        With <code>[health] details = false</code> it answers only{' '}
+        With <a href="/docs/configuration/health"><code>[health] details = false</code></a> it answers only{' '}
         <code>{'{'}&quot;status&quot;:&quot;ok&quot;,&quot;nodeReady&quot;:...{'}'}</code>; with{' '}
         <code>[health] enabled = false</code> it is a <code>404</code>, and probes must use
         a page of your own (the port only opens once a worker is ready, so{' '}

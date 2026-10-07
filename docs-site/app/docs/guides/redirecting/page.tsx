@@ -126,7 +126,7 @@ export async function getServerSideProps(ctx: GsspContext) {
 }`} />
       <p>
         Redirect answers are never stored in the page cache, even on a page that exports{' '}
-        <code>revalidate</code>. On a page cached with{' '}
+        <a href="/docs/page-exports/revalidate"><code>revalidate</code></a>. On a page cached with{' '}
         <a href="/docs/page-exports/shell"><code>shell = &apos;cache&apos;</code></a>, the
         shell&apos;s <code>200</code> is already sent when <code>getServerSideProps</code>{' '}
         answers, so the page sends the visitor on with <code>location.replace()</code> (or

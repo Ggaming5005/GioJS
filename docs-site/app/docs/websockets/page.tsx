@@ -242,7 +242,7 @@ export function Chat({ room }: { room: string }) {
         (403, before the upgrade); same-origin pages, origins listed in{' '}
         <a href="/docs/configuration/security-csrf"><code>[security.csrf] trusted_origins</code></a>, and clients that send no{' '}
         <code>Origin</code> connect normally. The check stays on when{' '}
-        <code>[security.csrf] enabled = false</code>; <code>[security.websocket] check_origin</code>{' '}
+        <code>[security.csrf] enabled = false</code>; <a href="/docs/configuration/security-websocket"><code>[security.websocket] check_origin</code></a>{' '}
         switches it. See <a href="/docs/security">Security</a>.
       </p>
 
