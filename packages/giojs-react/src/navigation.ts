@@ -644,9 +644,13 @@ export const STYLESHEET_WAIT_MS = 3000;
  * is swapped in as plain HTML: both rely on this. Inserted after the
  * existing ones, keeping cascade order; React adopts them by href when it
  * renders the route.
+ *
+ * Inline style resources (`<style data-precedence data-href>`, such as
+ * `<Animate>`'s) this document lacks are copied too, and need no wait.
  */
 export function adoptStylesheets(page: string | Document): Promise<void> {
   const parsed = typeof page === 'string' ? new DOMParser().parseFromString(page, 'text/html') : page;
+  adoptInlineStyles(parsed);
   const present = new Set(
     [...document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')].map(link =>
       link.getAttribute('href'),
@@ -680,6 +684,33 @@ export function adoptStylesheets(page: string | Document): Promise<void> {
       timer = setTimeout(resolve, STYLESHEET_WAIT_MS);
     }),
   ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Copy `parsed`'s React style resources whose hrefs (`data-href` lists them,
+ * space-separated) this document has none of. A server-only page is swapped
+ * in as plain HTML, so without this its `<Animate>` elements would have no
+ * stylesheet unless the previous page happened to load it. React adopts a
+ * copy by its `data-href` when it renders the route.
+ */
+function adoptInlineStyles(parsed: Document): void {
+  const hrefsOf = (style: Element): string[] =>
+    (style.getAttribute('data-href') ?? '').split(/\s+/).filter(href => href !== '');
+  const present = new Set(
+    [...document.querySelectorAll('style[data-href]')].flatMap(style => hrefsOf(style)),
+  );
+  for (const incoming of parsed.querySelectorAll<HTMLStyleElement>('style[data-precedence][data-href]')) {
+    const hrefs = hrefsOf(incoming);
+    if (hrefs.every(href => present.has(href))) continue;
+    for (const href of hrefs) present.add(href);
+    const style = document.createElement('style');
+    style.setAttribute('data-precedence', incoming.getAttribute('data-precedence') ?? 'default');
+    style.setAttribute('data-href', hrefs.join(' '));
+    style.textContent = incoming.textContent;
+    const last = [...document.head.querySelectorAll('[data-precedence]')].at(-1);
+    if (last !== undefined) last.after(style);
+    else document.head.append(style);
+  }
 }
 
 type HistoryMode = 'push' | 'replace' | 'pop' | 'refresh';

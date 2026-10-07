@@ -257,17 +257,51 @@ function commit(content: Element | null): void {
  * the server put after each one (@gio.js/react's Animate.tsx), but scripts
  * in swapped-in HTML never run - and a nonce from another response would
  * not pass the page's CSP anyway. So do their job: hand each element to the
- * `__GIO_ANIMATE__` observer an earlier one defined (`immediate` is the
- * script's last argument), or show it at once when there is none.
+ * `__GIO_ANIMATE__` observer (`immediate` is the script's last argument).
  */
 function startServerOnlyAnimations(content: Element): void {
-  const start = (window as unknown as { __GIO_ANIMATE__?: unknown }).__GIO_ANIMATE__;
+  const start = animateStarter();
   for (const el of Array.from(content.querySelectorAll<HTMLElement>('[data-gio-animate]'))) {
     const script = el.nextElementSibling;
     const immediate = script?.tagName === 'SCRIPT' && (script.textContent ?? '').endsWith(',1)');
-    if (typeof start === 'function') start(el, immediate ? 1 : 0);
-    else el.dataset['gioAnimateState'] = 'entered';
+    start(el, immediate ? 1 : 0);
   }
+}
+
+/** The inline script passes its previous sibling, which may be missing. */
+type AnimateStart = (el: HTMLElement | null, immediate: number) => void;
+
+/**
+ * The page's `__GIO_ANIMATE__`, which the first server-only `<Animate>`
+ * script on a document defines. When none ran here yet, define the same
+ * one: a shared observer that marks an element entered the first time it is
+ * 10% visible, or at once for `immediate` and in a browser without
+ * IntersectionObserver. Later inline scripts then share it too.
+ */
+function animateStarter(): AnimateStart {
+  const registry = window as unknown as { __GIO_ANIMATE__?: unknown };
+  if (typeof registry.__GIO_ANIMATE__ === 'function') return registry.__GIO_ANIMATE__ as AnimateStart;
+  let observer: IntersectionObserver | undefined;
+  const start: AnimateStart = (el, immediate) => {
+    if (el === null) return;
+    if (immediate !== 0 || typeof IntersectionObserver !== 'function') {
+      el.dataset['gioAnimateState'] = 'entered';
+      return;
+    }
+    observer ??= new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          (entry.target as HTMLElement).dataset['gioAnimateState'] = 'entered';
+          observer?.unobserve(entry.target);
+        }
+      },
+      { threshold: 0.1 },
+    );
+    observer.observe(el);
+  };
+  registry.__GIO_ANIMATE__ = start;
+  return start;
 }
 
 /** Called by each generated route entry when its module loads. */

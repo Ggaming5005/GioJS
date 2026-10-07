@@ -10,8 +10,9 @@
  * installs the [i18n] config on globalThis.__GIO_I18N__ for the server
  * render and the hydration envelope carries it to the browser (core's
  * i18n-config.ts), so both render the same href. Outside a GioJS-rendered
- * tree the browser falls back to window.__GIO_DEFAULT_LOCALE__, which the
- * server puts in every page; failing both, 'en'.
+ * tree the browser falls back to window.__GIO_DEFAULT_LOCALE__ and
+ * window.__GIO_LOCALES__, which the server's deployment script puts in every
+ * page; failing both, 'en' and no configured locales.
  */
 import React from 'react';
 import { GioLink } from './Link.js';
@@ -33,22 +34,25 @@ interface I18nSettings {
 
 const NO_LOCALES: readonly string[] = [];
 
+function stringsIn(value: unknown): readonly string[] {
+  return Array.isArray(value) ? value.filter((l): l is string => typeof l === 'string') : NO_LOCALES;
+}
+
 function readI18nSettings(): I18nSettings {
   const installed = (globalThis as { __GIO_I18N__?: unknown }).__GIO_I18N__;
   if (typeof installed === 'object' && installed !== null) {
     const config = installed as Record<string, unknown>;
-    const locales = Array.isArray(config['locales'])
-      ? config['locales'].filter((l): l is string => typeof l === 'string')
-      : NO_LOCALES;
     if (typeof config['defaultLocale'] === 'string') {
-      return { defaultLocale: config['defaultLocale'], locales };
+      return { defaultLocale: config['defaultLocale'], locales: stringsIn(config['locales']) };
     }
   }
-  const fromServer =
-    typeof window !== 'undefined'
-      ? (window as { __GIO_DEFAULT_LOCALE__?: unknown }).__GIO_DEFAULT_LOCALE__
-      : undefined;
-  return { defaultLocale: typeof fromServer === 'string' ? fromServer : 'en', locales: NO_LOCALES };
+  if (typeof window === 'undefined') return { defaultLocale: 'en', locales: NO_LOCALES };
+  const fromServer = window as { __GIO_DEFAULT_LOCALE__?: unknown; __GIO_LOCALES__?: unknown };
+  const defaultLocale = fromServer.__GIO_DEFAULT_LOCALE__;
+  return {
+    defaultLocale: typeof defaultLocale === 'string' ? defaultLocale : 'en',
+    locales: stringsIn(fromServer.__GIO_LOCALES__),
+  };
 }
 
 /**

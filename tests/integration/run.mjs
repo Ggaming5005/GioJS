@@ -3059,9 +3059,10 @@ async function opsPhase() {
       const de = await links('/de/links');
       assert.deepEqual(de.hrefs, ['/de/x', '/de/y', 'https://example.com/z']);
       assert.equal(de.htmlTag, '<html lang="de">');
-      // The browser gets the same config, so hydration renders these hrefs.
+      // The browser gets the same config, so hydration renders these hrefs,
+      // and the deployment script carries it for a LocaleLink outside GioJS.
       assert.match(de.html, /"i18n":\{"locales":\["en","de","pt-BR"\],"defaultLocale":"pt-BR"\}/);
-      assert.match(de.html, /window\.__GIO_DEFAULT_LOCALE__="pt-BR"/);
+      assert.match(de.html, /window\.__GIO_DEFAULT_LOCALE__="pt-BR";window\.__GIO_LOCALES__=\["en","de","pt-BR"\];/);
       // The default locale gets no prefix, though it is not `en`.
       assert.deepEqual((await links('/pt-BR/links')).hrefs, ['/x', '/de/y', 'https://example.com/z']);
       // Accept-Language: the configured spelling, whatever the header's case.

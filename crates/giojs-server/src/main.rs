@@ -662,12 +662,14 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     // Everything the deployment ID covers besides the build the worker is
     // about to produce: the worker's render settings, and what the server
     // composes into cached pages itself - the font links above and the
-    // deployment script's default locale (see `deployment_script`).
+    // deployment script's default locale and locales (see
+    // `deployment_script`; the locales are in GIO_I18N_CONFIG).
     let default_locale = if cfg.i18n.locales.is_empty() {
         "en".to_string()
     } else {
         cfg.i18n.default_locale.clone()
     };
+    install_deployment_script_locales(&cfg.i18n.locales);
     let deployment = ipc::DeploymentInputs::from_process(
         &project_root,
         &worker_env,
@@ -3181,12 +3183,44 @@ fn respond_sse(
 #[derive(Debug, Clone, Copy)]
 struct StreamedBody;
 
-/// The inline script handing the deployment id and default locale to the
-/// client runtime. Carries the CSP nonce placeholder when nonces are on
-/// (substituted per response, see security.rs).
+/// `[i18n] locales` as a JS array literal for the deployment script, or
+/// empty when i18n is off. Installed once at startup; a process global
+/// (like the CSP nonce placeholder) because every page composer writes the
+/// deployment script, most of them far from any state.
+static DEPLOYMENT_SCRIPT_LOCALES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn install_deployment_script_locales(locales: &[String]) {
+    let _ = DEPLOYMENT_SCRIPT_LOCALES.set(deployment_script_locales(locales));
+}
+
+fn deployment_script_locales(locales: &[String]) -> String {
+    if locales.is_empty() {
+        return String::new();
+    }
+    let items: Vec<String> = locales.iter().map(|l| script_json_string(l)).collect();
+    format!("[{}]", items.join(","))
+}
+
+/// The inline script handing the deployment id, the default locale and the
+/// configured locales to the client (`<LocaleLink>` outside a GioJS-rendered
+/// tree reads the locales). Carries the CSP nonce placeholder when nonces
+/// are on (substituted per response, see security.rs).
 fn deployment_script(deployment_id: &str, default_locale: &str) -> String {
+    deployment_script_with(
+        deployment_id,
+        default_locale,
+        DEPLOYMENT_SCRIPT_LOCALES.get().map_or("", String::as_str),
+    )
+}
+
+fn deployment_script_with(deployment_id: &str, default_locale: &str, locales: &str) -> String {
+    let locales = if locales.is_empty() {
+        String::new()
+    } else {
+        format!("window.__GIO_LOCALES__={locales};")
+    };
     format!(
-        r#"<script{}>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#,
+        r#"<script{}>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";{locales}</script>"#,
         security::nonce_attr()
     )
 }
@@ -5946,6 +5980,24 @@ mod tests {
         let head_pos = s.find("</head>").unwrap();
         assert!(font_pos < script_pos);
         assert!(script_pos < head_pos);
+    }
+
+    #[test]
+    fn deployment_script_carries_the_configured_locales_when_i18n_is_on() {
+        assert_eq!(deployment_script_locales(&[]), "");
+        assert_eq!(
+            deployment_script_with("d", "en", ""),
+            r#"<script>window.__GIO_DEPLOYMENT_ID__="d";window.__GIO_DEFAULT_LOCALE__="en";</script>"#
+        );
+        let locales = deployment_script_locales(&[
+            "de".to_string(),
+            "pt-BR".to_string(),
+            "</script>".to_string(),
+        ]);
+        assert_eq!(locales, r#"["de","pt-BR","\u003c/script\u003e"]"#);
+        let script = deployment_script_with("d", "de", &locales);
+        assert!(script
+            .ends_with(r#"window.__GIO_LOCALES__=["de","pt-BR","\u003c/script\u003e"];</script>"#));
     }
 
     #[test]

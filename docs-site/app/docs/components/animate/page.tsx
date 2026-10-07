@@ -110,7 +110,10 @@ export default function Home() {
         small inline <code>&lt;script&gt;</code> right after the element that does the same job
         as soon as the browser parses it, carrying the{' '}
         <a href="/docs/guides/content-security-policy">CSP nonce</a> when your policy uses one.
-        Inside the hydrated page no such script is rendered. A browser without{' '}
+        When a soft navigation swaps in such a page, the client router hands its elements to
+        the same observer instead, as scripts in swapped-in HTML never run, and adds the
+        stylesheet if the previous page had none. Inside the hydrated
+        page no such script is rendered. A browser without{' '}
         <code>IntersectionObserver</code> shows these elements at once.
       </p>
 

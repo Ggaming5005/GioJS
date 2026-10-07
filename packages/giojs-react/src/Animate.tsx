@@ -59,7 +59,8 @@ const ANIMATE_CSS = `
 /**
  * The inline stand-in for the effect: `__GIO_ANIMATE__(element, immediate)`,
  * defined by the first such script on the page with one shared observer
- * (the client runtime also calls it for server-only HTML it swaps in).
+ * (the client runtime also calls it, or defines the same one, for
+ * server-only HTML it swaps in).
  * Without IntersectionObserver the element is shown at once.
  */
 export const SERVER_ONLY_ANIMATE_SCRIPT =

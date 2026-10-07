@@ -83,8 +83,11 @@ export default function Page(): React.JSX.Element {
         <code>[i18n]</code> settings to the worker, and every hydration envelope of an app with{' '}
         <code>locales</code> carries them to the browser, so the server HTML and the hydrated link
         agree. A <code>LocaleLink</code> rendered outside a GioJS page tree (in a React root of your
-        own) reads <code>window.__GIO_DEFAULT_LOCALE__</code>, which the server puts in every page,
-        and falls back to <code>en</code> without it.
+        own) reads <code>window.__GIO_DEFAULT_LOCALE__</code> and{' '}
+        <code>window.__GIO_LOCALES__</code>, which the server puts in every page. Without them -
+        in <a href="#good-to-know"><code>renderPage</code></a>, for one - the default is <code>en</code>{' '}
+        and only an <code>href</code> that starts with the current or default locale counts as
+        already prefixed.
       </p>
       <p>
         The request locale is what the server detected: the URL prefix, the{' '}
@@ -156,8 +159,9 @@ export function LanguageSwitcher() {
         </li>
         <li>
           <a href="/docs/functions/render-page"><code>renderPage</code></a> runs no <code>[i18n]</code>: there
-          the default locale is <code>en</code>, so pass <code>defaultLocale</code> in tests of a
-          site whose default is another one.
+          the default locale is <code>en</code> and only a path starting with the current or
+          default locale is left alone, so pass <code>defaultLocale</code> in tests of a site
+          whose default is another one.
         </li>
         <li>
           Only <code>href</code>, <code>defaultLocale</code>, <code>className</code> and{' '}

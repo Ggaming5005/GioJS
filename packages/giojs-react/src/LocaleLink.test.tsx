@@ -34,6 +34,7 @@ function hrefOf(html: string): string | undefined {
 afterEach(() => {
   delete registry['__GIO_I18N__'];
   delete windowGlobals['__GIO_DEFAULT_LOCALE__'];
+  delete windowGlobals['__GIO_LOCALES__'];
   vi.restoreAllMocks();
   document.body.innerHTML = '';
 });
@@ -51,6 +52,13 @@ describe('LocaleLink default locale', () => {
     delete windowGlobals['__GIO_DEFAULT_LOCALE__'];
     expect(hrefOf(renderToString(page('de', <LocaleLink href="/x">x</LocaleLink>)))).toBe('/de/x');
     expect(hrefOf(renderToString(page('en', <LocaleLink href="/x">x</LocaleLink>)))).toBe('/x');
+  });
+
+  it('falls back to window.__GIO_LOCALES__ for hrefs that already carry a locale', () => {
+    windowGlobals['__GIO_DEFAULT_LOCALE__'] = 'en';
+    windowGlobals['__GIO_LOCALES__'] = ['en', 'de', 'fr'];
+    expect(hrefOf(renderToString(page('fr', <LocaleLink href="/de/preise">x</LocaleLink>)))).toBe('/de/preise');
+    expect(hrefOf(renderToString(page('fr', <LocaleLink href="/it/prezzi">x</LocaleLink>)))).toBe('/fr/it/prezzi');
   });
 
   it('an explicit defaultLocale prop still wins', () => {

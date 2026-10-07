@@ -880,6 +880,35 @@ describe('route stylesheets on navigation', () => {
     expect(gioText()).toBe('bare-page');
   });
 
+  it("copies the next page's inline style resources (<Animate>'s) this document lacks", async () => {
+    const animateStyle = '<style data-precedence="default" data-href="gio-animate">[data-gio-animate]{opacity:0}</style>';
+    const animated = (): Response =>
+      new Response(
+        `<html><head>${animateStyle}<style data-precedence="default" data-href="a b">.ab{}</style></head>` +
+          '<body><div id="__gio"><main>animated-page</main></div></body></html>',
+        { headers: { 'content-type': 'text/html' } },
+      );
+    serve({ '/animated': animated, '/animated?again': animated });
+    document.head.firstElementChild?.insertAdjacentHTML(
+      'afterend',
+      '<style data-precedence="default" data-href="a">.a{}</style>',
+    );
+    await nav.navigate('/animated');
+    expect(gioText()).toBe('animated-page');
+    const styles = [...document.head.querySelectorAll('style')].map(s => [s.getAttribute('data-href'), s.textContent]);
+    // After the route stylesheets; "a b" is copied for the missing "b".
+    expect(styles).toEqual([
+      ['a', '.a{}'],
+      ['gio-animate', '[data-gio-animate]{opacity:0}'],
+      ['a b', '.ab{}'],
+    ]);
+    expect(document.head.lastElementChild?.getAttribute('href')).toBe('/legacy.css');
+
+    // Already present: not copied again.
+    await nav.navigate('/animated?again');
+    expect(document.head.querySelectorAll('style[data-href="gio-animate"]')).toHaveLength(1);
+  });
+
   it('renders immediately when every stylesheet is already present', async () => {
     serve({ '/same': () => styledPage('same-page', ['/_next/static/css/root-A.css']) });
     await nav.navigate('/same');

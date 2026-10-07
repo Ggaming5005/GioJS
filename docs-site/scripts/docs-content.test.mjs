@@ -171,7 +171,8 @@ test('the component and hook reference states the defaults @gio.js/react ships',
   check(react('animate-observer.ts'), 'threshold: 0.1', 'components/animate', 'threshold <code>0.1</code>');
   const localeLink = react('LocaleLink.tsx');
   check(localeLink, 'defaultLocale ?? settings.defaultLocale', 'components/locale-link', "default: '[i18n] default_locale'");
-  check(localeLink, "typeof fromServer === 'string' ? fromServer : 'en'", 'components/locale-link', 'falls back to <code>en</code>');
+  check(localeLink, "typeof defaultLocale === 'string' ? defaultLocale : 'en'", 'components/locale-link', 'the default is <code>en</code>');
+  check(localeLink, 'stringsIn(fromServer.__GIO_LOCALES__)', 'components/locale-link', '<code>window.__GIO_LOCALES__</code>');
   check(react('Image.tsx'), 'DEFAULT_QUALITY = 75', 'components/gio-image', '[images] quality (75)');
   const ws = react('hooks/useWebSocket.ts');
   check(ws, 'DEFAULT_MAX_QUEUED = 100', 'hooks/use-web-socket', 'keeps up to 100');
