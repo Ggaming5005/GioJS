@@ -1,0 +1,955 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "gio.toml",
+  "description": "GioJS configuration (https://giojs.com/docs/configuration). Unknown keys stop the server at startup; top-level tables named x-* are left for other tools.",
+  "type": "object",
+  "properties": {
+    "app": {
+      "$ref": "#/definitions/AppConfig"
+    },
+    "cache": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/CacheConfig"
+        }
+      ],
+      "default": {
+        "disk_max_bytes": 536870912,
+        "disk_path": ".gio/cache/pages",
+        "memory_max_entries": 1000
+      }
+    },
+    "compression": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/CompressionConfig"
+        }
+      ],
+      "default": {
+        "enabled": true,
+        "min_size_bytes": 1024,
+        "prefer_brotli": true
+      }
+    },
+    "css": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/CssConfig"
+        }
+      ],
+      "default": {
+        "critical_extraction": true,
+        "enabled": true,
+        "minify": true
+      }
+    },
+    "dev": {
+      "$ref": "#/definitions/DevConfig"
+    },
+    "fonts": {
+      "description": "Self-hosted fonts, downloaded at startup and served from /_gio/fonts.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/FontEntry"
+      }
+    },
+    "guards": {
+      "description": "Cookie / session gates: a request without the credential is\nredirected and never reaches Node.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/GuardRule"
+      }
+    },
+    "headers": {
+      "description": "Response headers stamped on matching paths.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/HeaderRule"
+      }
+    },
+    "i18n": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/I18nConfig"
+        }
+      ],
+      "default": {
+        "default_locale": "en",
+        "detect_from": [
+          "path",
+          "accept-language",
+          "cookie"
+        ],
+        "locales": []
+      }
+    },
+    "images": {
+      "$ref": "#/definitions/ImageConfig"
+    },
+    "logging": {
+      "$ref": "#/definitions/LoggingConfig"
+    },
+    "metrics": {
+      "$ref": "#/definitions/MetricsConfig"
+    },
+    "prefetch": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/PrefetchConfig"
+        }
+      ],
+      "default": {
+        "max_concurrent": 5,
+        "max_per_second": 20
+      }
+    },
+    "rate_limits": {
+      "description": "Token-bucket rate limits per client, evaluated before routing.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/RateLimitEntry"
+      }
+    },
+    "redirects": {
+      "description": "Redirects evaluated in Rust before routing.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/RedirectRule"
+      }
+    },
+    "revalidate": {
+      "$ref": "#/definitions/RevalidateConfig"
+    },
+    "rewrites": {
+      "description": "Rewrites: serve another route without changing the URL.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/RewriteRule"
+      }
+    },
+    "security": {
+      "$ref": "#/definitions/SecurityConfig"
+    },
+    "server": {
+      "$ref": "#/definitions/ServerConfig"
+    },
+    "websocket": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/WebsocketConfig"
+        }
+      ],
+      "default": {
+        "enabled": true,
+        "max_connections": 1000,
+        "ping_interval_secs": 30
+      }
+    }
+  },
+  "additionalProperties": false,
+  "patternProperties": {
+    "^x-": {}
+  },
+  "definitions": {
+    "AppConfig": {
+      "description": "`[app]`: informational; nothing in the server reads it.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "router": {
+          "description": "The app/ directory router - the only router GioJS has.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppRouter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "AppRouter": {
+      "type": "string",
+      "enum": [
+        "app"
+      ]
+    },
+    "CacheConfig": {
+      "description": "`[cache]`: the page cache (memory LRU in front of a disk directory).",
+      "type": "object",
+      "properties": {
+        "disk_max_bytes": {
+          "description": "Disk cache size bound; the oldest entries are evicted past it. 0\ndisables the bound.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 536870912,
+          "minimum": 0
+        },
+        "disk_path": {
+          "description": "Page cache directory, relative to the project root. Use a dedicated\ndirectory: GioJS deletes files in it (eviction, dev-mode clears).\nGIO_CACHE_DIR overrides it (and may be absolute).",
+          "type": "string",
+          "default": ".gio/cache/pages"
+        },
+        "memory_max_entries": {
+          "description": "Pages kept in the in-memory LRU; the disk cache holds the rest.",
+          "type": "integer",
+          "format": "uint",
+          "default": 1000,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "CompressionConfig": {
+      "description": "`[compression]`: gzip / Brotli for responses, negotiated from\nAccept-Encoding. Images are never recompressed.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "min_size_bytes": {
+          "description": "Responses with a known length below this many bytes are sent as-is\n(compressing them costs more than it saves). Streamed responses have\nno known length and are always compressed. At most 65535.",
+          "type": "integer",
+          "format": "uint16",
+          "default": 1024,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "prefer_brotli": {
+          "description": "true: Brotli for clients that accept it, gzip otherwise. false: gzip\nonly (every client that accepts Brotli also accepts gzip).",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "CsrfConfig": {
+      "description": "`[security.csrf]`: cross-site request protection for unsafe methods and\nWebSocket upgrades. On by default.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "exempt": {
+          "description": "Path patterns (rule syntax: `/api/webhooks/*rest`) that skip the\ncheck entirely - for endpoints called cross-site on purpose.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "trusted_origins": {
+          "description": "Other origins allowed to send unsafe requests and open WebSockets,\nas `scheme://host[:port]` (`https://admin.example.com`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "CssConfig": {
+      "description": "`[css]`: the Lightning CSS pipeline for app stylesheets.",
+      "type": "object",
+      "properties": {
+        "critical_extraction": {
+          "description": "Inline the CSS a page's first paint needs.",
+          "type": "boolean",
+          "default": true
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "minify": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "DevConfig": {
+      "description": "`[dev]`: settings that only apply when NODE_ENV=development.",
+      "type": "object",
+      "properties": {
+        "allowed_hosts": {
+          "description": "Extra Host names the /_gio/devtools* endpoints answer to besides\nlocalhost, loopback IPs, and a specific `server.host` (DNS rebinding\nprotection). A leading `.` or `*.` matches subdomains; entries that\nare not a hostname or IP are ignored with a startup warning.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "watch_ignore": {
+          "description": "Glob patterns (relative to the project root) the dev watcher never\nrestarts for: data files the app writes, such as `[\"data/**\",\n\"*.db\"]`. `*` stays within a path segment, `**` spans segments; a\npattern without `/` matches a name at any depth.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "FontEntry": {
+      "type": "object",
+      "properties": {
+        "family": {
+          "type": "string"
+        },
+        "style": {
+          "type": "string",
+          "default": "normal"
+        },
+        "url": {
+          "description": "woff2 URL (or a /public path) downloaded at startup.",
+          "type": "string"
+        },
+        "weight": {
+          "type": "integer",
+          "format": "uint16",
+          "default": 400,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "url"
+      ]
+    },
+    "GuardRule": {
+      "description": "A gate on matching paths: a request without the credential is redirected (302) and never reaches Node. require_cookie alone asks for a non-empty cookie of that name; require_session = true asks for a valid, unexpired gio_session token (in the cookie require_cookie names). A guard that names neither stops startup.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "redirect_to": {
+          "type": "string"
+        },
+        "require_cookie": {
+          "type": "string",
+          "default": ""
+        },
+        "require_session": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "redirect_to"
+      ]
+    },
+    "HeaderRule": {
+      "description": "`[[headers]]` in gio.toml: `path = \"/x\"` plus a `[headers.headers]` table\nmapping header names to values. middleware.ts sends the same shape as a\nJSON object (`headers: { \"x-frame-options\": \"DENY\" }`).",
+      "type": "object",
+      "properties": {
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "headers"
+      ]
+    },
+    "HstsPolicy": {
+      "type": "object",
+      "properties": {
+        "include_subdomains": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_age": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 31536000,
+          "minimum": 0
+        },
+        "preload": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "HstsSetting": {
+      "description": "`hsts = true | false | \"raw value\" | { max_age, include_subdomains, preload }`.",
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/definitions/HstsPolicy"
+        }
+      ]
+    },
+    "I18nConfig": {
+      "description": "`[i18n]`: locale detection and `<html lang>`. An empty `locales` list\ndisables i18n.",
+      "type": "object",
+      "properties": {
+        "default_locale": {
+          "type": "string",
+          "default": "en"
+        },
+        "detect_from": {
+          "description": "Detection order: any of \"path\", \"accept-language\", \"cookie\".",
+          "type": "array",
+          "default": [
+            "path",
+            "accept-language",
+            "cookie"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "locales": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ImageConfig": {
+      "description": "`[images]`: the `/_gio/image` optimizer and `<GioImage>` srcsets.",
+      "type": "object",
+      "properties": {
+        "allowed_widths": {
+          "description": "The only widths `/_gio/image` resizes to (anything else is a 400),\nand the `<GioImage>` srcset candidates.",
+          "type": "array",
+          "default": [
+            16,
+            32,
+            48,
+            64,
+            96,
+            128,
+            256,
+            384,
+            640,
+            750,
+            828,
+            1080,
+            1200,
+            1920,
+            2048,
+            3840
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "disk_max_bytes": {
+          "description": "On-disk optimized-image cache cap.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 536870912,
+          "minimum": 0
+        },
+        "formats": {
+          "description": "Modern formats to serve when the browser accepts them, in order of\npreference; everything else gets JPEG. Leave AVIF out to save CPU:\nit is several times slower to encode than WebP.",
+          "type": "array",
+          "default": [
+            "avif",
+            "webp"
+          ],
+          "items": {
+            "$ref": "#/definitions/ImageFormat"
+          }
+        },
+        "max_remote_bytes": {
+          "description": "Largest remote source the optimizer downloads.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 20971520,
+          "minimum": 0
+        },
+        "quality": {
+          "description": "Default output quality, 1-100.",
+          "type": "integer",
+          "format": "uint8",
+          "default": 75,
+          "maximum": 255,
+          "minimum": 0
+        },
+        "remote_patterns": {
+          "description": "Remote image sources the optimizer may fetch; none by default.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RemotePattern"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ImageFormat": {
+      "description": "A modern format `/_gio/image` may negotiate from the Accept header.\nJPEG (PNG for `f=png`) is always the fallback.",
+      "type": "string",
+      "enum": [
+        "avif",
+        "webp"
+      ]
+    },
+    "LogFormat": {
+      "description": "`\"text\"` (human-readable, the default) or `\"json\"` (one object per line).",
+      "type": "string",
+      "enum": [
+        "text",
+        "json"
+      ]
+    },
+    "LoggingConfig": {
+      "description": "`[logging]`: server log output. GIO_LOG_FORMAT overrides `format`.",
+      "type": "object",
+      "properties": {
+        "format": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/LogFormat"
+            }
+          ],
+          "default": "text"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MetricsConfig": {
+      "description": "`[metrics]`: the Prometheus endpoint `/_gio/metrics`. Off when the\nsection is absent; a present section turns it on unless `enabled = false`.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Serve `/_gio/metrics`.",
+          "type": "boolean",
+          "default": true
+        },
+        "ip_allowlist": {
+          "description": "Only these client IPs or CIDR blocks may scrape (after\n`trusted_proxies` resolution).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "token": {
+          "description": "Require `Authorization: Bearer <token>` when set.",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false
+    },
+    "PrefetchConfig": {
+      "description": "`[prefetch]`: per-client budgets for prefetch requests (`Purpose:\nprefetch`, sent by `<GioLink>`). Over budget is a 429, which the client\ntreats as \"not prefetched\". Which links prefetch is chosen per link.",
+      "type": "object",
+      "properties": {
+        "max_concurrent": {
+          "description": "Prefetches one client may have in flight at once. 0 refuses all.",
+          "type": "integer",
+          "format": "uint",
+          "default": 5,
+          "minimum": 0
+        },
+        "max_per_second": {
+          "description": "Prefetches one client may start per second. 0 refuses all.",
+          "type": "integer",
+          "format": "uint",
+          "default": 20,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProxyHeaders": {
+      "description": "`[server] proxy_headers`: which forwarding header family a trusted proxy\nspeaks. Only that family is read.",
+      "oneOf": [
+        {
+          "description": "`X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`.",
+          "type": "string",
+          "const": "x-forwarded"
+        },
+        {
+          "description": "RFC 7239 `Forwarded: for=...;proto=...;host=...`.",
+          "type": "string",
+          "const": "forwarded"
+        }
+      ]
+    },
+    "RateLimitEntry": {
+      "description": "One `[[rate_limits]]` rule: `per_ip` requests per `window_seconds`, plus\n`burst`, per client.",
+      "type": "object",
+      "properties": {
+        "burst": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 20,
+          "minimum": 0
+        },
+        "key_header": {
+          "description": "Key buckets on this request header's value instead of the client IP.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Exact path, or a prefix with a trailing `*` (`/api/*` covers `/api`).",
+          "type": "string"
+        },
+        "per_ip": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 100,
+          "minimum": 0
+        },
+        "window_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "RedirectRule": {
+      "description": "`[[redirects]]` in gio.toml / `redirects` in middleware.ts. Unknown keys\nare a parse error (a misspelled `status` must not silently mean 302);\nsanitizeMiddlewareRules sends the READY frame only these keys.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "Pattern: literals, `:param`, `*rest` catch-all.",
+          "type": "string"
+        },
+        "status": {
+          "description": "301, 302, 307 or 308.",
+          "type": "integer",
+          "format": "uint16",
+          "default": 302,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "to": {
+          "description": "Target; may substitute the pattern's captures.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ]
+    },
+    "RemotePattern": {
+      "type": "object",
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "pathname": {
+          "description": "Exact path, or a prefix with a trailing `*`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol": {
+          "type": "string",
+          "default": "https"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "hostname"
+      ]
+    },
+    "RevalidateConfig": {
+      "description": "`[revalidate]`: POST /_gio/revalidate purges cached pages by tag or path. The endpoint exists only with a token (here or GIO_REVALIDATE_TOKEN, which wins).",
+      "type": "object",
+      "properties": {
+        "token": {
+          "description": "Bearer token for `POST /_gio/revalidate`, at least 32 bytes.",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false
+    },
+    "RewriteRule": {
+      "description": "`[[rewrites]]` in gio.toml / `rewrites` in middleware.ts.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ]
+    },
+    "SecurityConfig": {
+      "description": "`[security]`: default response headers, Content-Security-Policy and cross-site request protection. Every key is optional.",
+      "type": "object",
+      "properties": {
+        "csp": {
+          "description": "Content-Security-Policy. `{nonce}` is replaced by a fresh random\nnonce per response, which every framework inline script carries.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "csp_report_only": {
+          "description": "Content-Security-Policy-Report-Only, same syntax as `csp`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "csrf": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CsrfConfig"
+            }
+          ],
+          "default": {
+            "enabled": true,
+            "exempt": [],
+            "trusted_origins": []
+          }
+        },
+        "headers": {
+          "description": "`[security.headers]`: overrides for the default response headers\n(`x-content-type-options`, `x-frame-options`, `referrer-policy`) and\nextra headers sent by default (`permissions-policy`,\n`cross-origin-opener-policy`, ...). An empty value removes a default.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "hsts": {
+          "description": "Strict-Transport-Security. Unset: `max-age=31536000` when\n`[server.tls]` is enabled, nothing otherwise. `true` / a string / a\ntable send it on every response (TLS terminated by a proxy); `false`\nor `\"\"` never send it.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HstsSetting"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "websocket": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/WebSocketSecurityConfig"
+            }
+          ],
+          "default": {
+            "check_origin": true
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServerConfig": {
+      "description": "`[server]`: the listener. GIO_HOST overrides `host`; GIO_PORT, then\nPORT, override `port`.",
+      "type": "object",
+      "properties": {
+        "accept_request_id": {
+          "description": "Adopt a valid X-Request-Id sent by a trusted proxy (default). False\ngenerates every id here - for proxies that pass a client's own\nX-Request-Id through instead of setting one (AWS ALB, Google Cloud LB).",
+          "type": "boolean",
+          "default": true
+        },
+        "header_read_timeout_secs": {
+          "description": "Deadline for receiving a complete request head. Also bounds how long\na fresh connection may wait for its first request (protocol sniffing\nand the HTTP/2 handshake included) and, because hyper restarts the\ntimer while an HTTP/1.1 connection sits idle, its keep-alive idle time.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 0
+        },
+        "host": {
+          "description": "IP address to bind: \"0.0.0.0\" (every interface) or \"127.0.0.1\"\n(this machine only). Overridden by GIO_HOST.",
+          "type": "string",
+          "default": "0.0.0.0"
+        },
+        "http2": {
+          "type": "boolean",
+          "default": true
+        },
+        "http2_keep_alive_interval_secs": {
+          "description": "HTTP/2 PING cadence; a peer that does not ack within\nhttp2_keep_alive_timeout_secs is dead and its connection is closed.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 20,
+          "minimum": 0
+        },
+        "http2_keep_alive_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 20,
+          "minimum": 0
+        },
+        "http2_max_concurrent_streams": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 250,
+          "minimum": 0
+        },
+        "idle_timeout_secs": {
+          "description": "Close connections with no request in flight for this long (HTTP/2\nmainly; HTTP/1.1 idles are usually reaped by header_read_timeout_secs\nfirst). Streaming and SSE responses count as in flight.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        },
+        "max_body_bytes": {
+          "description": "Request body limit.",
+          "type": "integer",
+          "format": "uint",
+          "default": 2097152,
+          "minimum": 0
+        },
+        "max_connections": {
+          "description": "Concurrent TCP connections; past it the accept loop stops accepting\n(new clients wait in the kernel backlog) until a connection closes.",
+          "type": "integer",
+          "format": "uint",
+          "default": 10000,
+          "minimum": 0
+        },
+        "port": {
+          "description": "Overridden by GIO_PORT, then PORT.",
+          "type": "integer",
+          "format": "uint16",
+          "default": 3000,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "proxy_headers": {
+          "description": "Which forwarding headers the trusted proxies set: \"x-forwarded\"\n(X-Forwarded-For/-Proto/-Host, default) or \"forwarded\" (RFC 7239).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProxyHeaders"
+            }
+          ],
+          "default": "x-forwarded"
+        },
+        "request_body_timeout_secs": {
+          "description": "Deadline for buffering a whole request body; exceeded -> 408.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "tls": {
+          "$ref": "#/definitions/TlsConfig"
+        },
+        "tls_handshake_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 0
+        },
+        "trusted_proxies": {
+          "description": "Reverse proxies (IPs or CIDR blocks) whose forwarding headers name\nthe client. Empty = trust nobody: the TCP peer is the client and\nforwarding headers are ignored. A malformed entry fails startup.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "TlsConfig": {
+      "description": "`[server.tls]`: terminate TLS in GioJS itself.",
+      "type": "object",
+      "properties": {
+        "cert_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "key_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "WebSocketSecurityConfig": {
+      "description": "`[security.websocket]`: the Origin check on WebSocket upgrades (cross-site\nWebSocket hijacking). On by default and independent of\n`[security.csrf] enabled`; it accepts the same `trusted_origins` and\nskips the same `exempt` paths.",
+      "type": "object",
+      "properties": {
+        "check_origin": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "WebsocketConfig": {
+      "description": "`[websocket]`: WebSocket routes (`route.ts` exporting `WS`).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "max_connections": {
+          "description": "Concurrent WebSocket connections.",
+          "type": "integer",
+          "format": "uint",
+          "default": 1000,
+          "minimum": 0
+        },
+        "ping_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -48,13 +48,20 @@ impl OutputFormat {
 
     /// Format negotiation: AVIF > WebP > JPEG.
     pub fn from_accept(accept: &str) -> Self {
-        if accept.contains("image/avif") {
-            Self::Avif
-        } else if accept.contains("image/webp") {
-            Self::WebP
-        } else {
-            Self::Jpeg
-        }
+        Self::negotiate(accept, &Self::MODERN)
+    }
+
+    /// The modern formats, in default preference order.
+    pub const MODERN: [Self; 2] = [Self::Avif, Self::WebP];
+
+    /// The first of `preferred` (gio.toml `[images] formats`) the Accept
+    /// header names, else JPEG.
+    pub fn negotiate(accept: &str, preferred: &[Self]) -> Self {
+        preferred
+            .iter()
+            .copied()
+            .find(|format| accept.contains(format.content_type()))
+            .unwrap_or(Self::Jpeg)
     }
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -199,5 +206,25 @@ mod tests {
     #[test]
     fn format_negotiation_jpeg_default() {
         assert_eq!(OutputFormat::from_accept("*/*"), OutputFormat::Jpeg);
+    }
+
+    #[test]
+    fn format_negotiation_follows_the_configured_preference() {
+        let modern = "image/avif,image/webp,*/*";
+        let webp_only = [OutputFormat::WebP];
+        assert_eq!(
+            OutputFormat::negotiate(modern, &webp_only),
+            OutputFormat::WebP
+        );
+        let webp_first = [OutputFormat::WebP, OutputFormat::Avif];
+        assert_eq!(
+            OutputFormat::negotiate(modern, &webp_first),
+            OutputFormat::WebP
+        );
+        assert_eq!(
+            OutputFormat::negotiate("image/avif,*/*", &webp_first),
+            OutputFormat::Avif
+        );
+        assert_eq!(OutputFormat::negotiate(modern, &[]), OutputFormat::Jpeg);
     }
 }

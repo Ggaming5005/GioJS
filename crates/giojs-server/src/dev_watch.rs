@@ -13,7 +13,9 @@
 //! time) triggers a restart. Elsewhere only source-like extensions and
 //! directories appearing or disappearing do: data files a running app
 //! writes into the project (SQLite databases, logs, uploads) must not, or
-//! every request would restart the worker that served it.
+//! every request would restart the worker that served it. Data files with a
+//! source-like extension (a lowdb `db.json`) are excluded with gio.toml's
+//! `[dev] watch_ignore` globs (see `WatchIgnore`).
 //!
 //! Threading: the notify callback runs on notify's event thread, which is
 //! also the thread that services `watch()` calls - so it must never block.
@@ -121,10 +123,22 @@ impl DevWatch {
     /// Watch `root` non-recursively, each non-ignored top-level directory
     /// recursively, and `public_dir` too when it lives outside the root.
     /// All paths are expected in canonical form (see `resolve_dir`).
-    pub fn start(root: PathBuf, app_dir: PathBuf, public_dir: PathBuf) -> notify::Result<Self> {
+    pub fn start(
+        root: PathBuf,
+        app_dir: PathBuf,
+        public_dir: PathBuf,
+        ignore: WatchIgnore,
+    ) -> notify::Result<Self> {
         let changes = Arc::new(PendingChanges::default());
         let (registrations, pending_registrations) = mpsc::channel();
-        let mut classifier = EventClassifier::new(root.clone(), app_dir, public_dir.clone());
+        // Top-level directories watch_ignore covers are never registered:
+        // like node_modules, a big data tree would only burn inotify watches.
+        let watched_dirs: Vec<PathBuf> = top_level_watch_dirs(&root)
+            .into_iter()
+            .filter(|dir| !ignore.is_ignored_under(&root, dir))
+            .collect();
+        let mut classifier =
+            EventClassifier::new(root.clone(), app_dir, public_dir.clone()).with_ignore(ignore);
         let event_changes = Arc::clone(&changes);
         let event_registrations = registrations.clone();
         let mut watcher =
@@ -141,7 +155,7 @@ impl DevWatch {
         // The root itself non-recursively: top-level files (gio.toml,
         // middleware.ts, package.json, tsconfig.json) and new top-level dirs.
         notify::Watcher::watch(&mut watcher, &root, notify::RecursiveMode::NonRecursive)?;
-        for dir in top_level_watch_dirs(&root) {
+        for dir in watched_dirs {
             watch_dir_recursive(&mut watcher, &dir);
         }
         if !public_dir.starts_with(&root) && public_dir.is_dir() {
@@ -203,7 +217,9 @@ fn handle_event(
         return;
     }
     for dir in new_top_level_dirs(&classifier.root, event) {
-        let _ = registrations.send(Registration::Watch(dir));
+        if !classifier.ignore.is_ignored_under(&classifier.root, &dir) {
+            let _ = registrations.send(Registration::Watch(dir));
+        }
     }
     if let Some(change) = classifier.classify(event) {
         changes.record(change);
@@ -347,6 +363,8 @@ pub struct EventClassifier {
     /// the trash that way) from an app renaming one of its data files.
     /// Ordered, so a directory's subtree is one contiguous range.
     known_dirs: BTreeSet<PathBuf>,
+    /// `[dev] watch_ignore`: never a change, wherever in the root it is.
+    ignore: WatchIgnore,
 }
 
 impl EventClassifier {
@@ -356,10 +374,21 @@ impl EventClassifier {
             app_dir,
             public_dir,
             known_dirs: BTreeSet::new(),
+            ignore: WatchIgnore::default(),
         };
         let root = classifier.root.clone();
         classifier.collect_dirs(&root);
         classifier
+    }
+
+    /// Classify with `[dev] watch_ignore` applied. Ignored directories are
+    /// dropped from `known_dirs` too: their changes never count anyway.
+    pub fn with_ignore(mut self, ignore: WatchIgnore) -> Self {
+        let root = self.root.clone();
+        self.known_dirs
+            .retain(|dir| !ignore.is_ignored_under(&root, dir));
+        self.ignore = ignore;
+        self
     }
 
     /// The most significant change an event carries, if any.
@@ -413,6 +442,11 @@ impl EventClassifier {
     fn classify_path(&self, path: &Path, directory_change: bool) -> Option<WatchChange> {
         let file_name = path.file_name()?.to_str()?;
         if is_editor_temp_file(file_name) {
+            return None;
+        }
+        // Before the public/ check: an app writing uploads into public/ can
+        // ignore them too.
+        if self.ignore.is_ignored_under(&self.root, path) {
             return None;
         }
         // public/ may live outside the root (GIO_PUBLIC_DIR); check it first.
@@ -498,6 +532,153 @@ fn has_ignored_component(rel: &Path, rel_to_root: bool) -> bool {
                 .is_none_or(|name| is_ignored_component(name, rel_to_root && index == 0)),
             _ => false,
         })
+}
+
+/// `[dev] watch_ignore`: glob patterns, relative to the project root, whose
+/// matches never count as a change - files the running app writes into the
+/// project that look like source (a lowdb `db.json`, a JSON upload).
+///
+/// `*` matches within one path segment, `?` one character, and `**` (a
+/// whole segment) any number of segments; every other character is literal,
+/// so `app/[slug]/**` names the route folder. A pattern without a `/`
+/// matches a file or directory name at any depth (`*.db`, `uploads`); one
+/// with a `/` is anchored at the root (`data/**`, `/cache.json`). Matching a
+/// directory covers everything below it, and `dir/**` covers `dir` itself.
+#[derive(Debug, Clone, Default)]
+pub struct WatchIgnore {
+    patterns: Vec<IgnorePattern>,
+}
+
+#[derive(Debug, Clone)]
+enum IgnorePattern {
+    /// No `/`: one segment, matched against every path component.
+    Name(String),
+    /// Anchored: segments matched from the root, `**` included.
+    Anchored(Vec<String>),
+}
+
+impl WatchIgnore {
+    /// Compile the patterns, refusing what cannot mean what it says: an
+    /// empty pattern, `..`, a backslash separator, `**` inside a segment.
+    pub fn new(patterns: &[String]) -> Result<Self, String> {
+        patterns
+            .iter()
+            .map(|raw| IgnorePattern::parse(raw))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|patterns| Self { patterns })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// Whether `path` (inside `root`; anything else is never ignored) or a
+    /// directory above it matches a pattern.
+    pub fn is_ignored_under(&self, root: &Path, path: &Path) -> bool {
+        if self.patterns.is_empty() {
+            return false;
+        }
+        let Ok(rel) = path.strip_prefix(root) else {
+            return false;
+        };
+        let segments: Option<Vec<&str>> = rel
+            .components()
+            .map(|component| match component {
+                Component::Normal(name) => name.to_str(),
+                _ => None,
+            })
+            .collect();
+        segments.is_some_and(|segments| self.is_ignored(&segments))
+    }
+
+    fn is_ignored(&self, segments: &[&str]) -> bool {
+        !segments.is_empty()
+            && self.patterns.iter().any(|pattern| match pattern {
+                IgnorePattern::Name(name) => segments.iter().any(|s| wildcard_match(name, s)),
+                // The path itself or any directory above it.
+                IgnorePattern::Anchored(pattern) => {
+                    (1..=segments.len()).any(|len| segments_match(pattern, &segments[..len]))
+                }
+            })
+    }
+}
+
+impl IgnorePattern {
+    fn parse(raw: &str) -> Result<Self, String> {
+        let invalid = |reason: &str| format!("invalid watch_ignore pattern {raw:?}: {reason}");
+        if raw.contains('\\') {
+            return Err(invalid("use / as the path separator"));
+        }
+        let trimmed = raw.strip_prefix("./").unwrap_or(raw);
+        let anchored = trimmed.starts_with('/') || trimmed.trim_end_matches('/').contains('/');
+        let mut segments: Vec<String> = trimmed
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect();
+        if segments.is_empty() {
+            return Err(invalid("empty pattern"));
+        }
+        if segments.iter().any(|s| s == ".." || s == ".") {
+            return Err(invalid(
+                "patterns are relative to the project root; . and .. are not allowed",
+            ));
+        }
+        if segments.iter().any(|s| s != "**" && s.contains("**")) {
+            return Err(invalid(
+                "** must be a whole path segment (data/**/cache.json)",
+            ));
+        }
+        if !anchored && segments.len() == 1 && segments[0] != "**" {
+            return Ok(Self::Name(segments.remove(0)));
+        }
+        Ok(Self::Anchored(segments))
+    }
+}
+
+/// Anchored pattern segments against path segments; `**` takes zero or more.
+fn segments_match(pattern: &[String], path: &[&str]) -> bool {
+    match pattern.split_first() {
+        None => path.is_empty(),
+        Some((first, rest)) if first == "**" => {
+            (0..=path.len()).any(|skip| segments_match(rest, &path[skip..]))
+        }
+        Some((first, rest)) => path.split_first().is_some_and(|(segment, path)| {
+            wildcard_match(first, segment) && segments_match(rest, path)
+        }),
+    }
+}
+
+/// One segment: `*` any run of characters, `?` exactly one.
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let (mut p, mut t) = (0, 0);
+    // Where the last `*` was and how much text it has absorbed so far.
+    let mut star: Option<(usize, usize)> = None;
+    while t < text.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some((p, t));
+            p += 1;
+        } else if let Some((star_p, star_t)) = star {
+            p = star_p + 1;
+            t = star_t + 1;
+            star = Some((star_p, star_t + 1));
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|c| *c == '*')
+}
+
+impl<'de> serde::Deserialize<'de> for WatchIgnore {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = <Vec<String> as serde::Deserialize>::deserialize(deserializer)?;
+        Self::new(&raw).map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]
@@ -671,6 +852,137 @@ mod tests {
         ] {
             assert_eq!(classifier.classify(&event), None, "{event:?}");
         }
+    }
+
+    fn ignore(patterns: &[&str]) -> WatchIgnore {
+        WatchIgnore::new(&patterns.iter().map(|p| p.to_string()).collect::<Vec<_>>())
+            .expect("valid patterns")
+    }
+
+    #[test]
+    fn watch_ignore_patterns_match_names_anywhere_and_anchored_paths_from_the_root() {
+        let rules = ignore(&[
+            "data/**",
+            "*.db",
+            "uploads",
+            "app/[slug]/cache.json",
+            "/state.json",
+        ]);
+        let root = Path::new(ROOT);
+        for (path, ignored) in [
+            ("/proj/data", true),
+            ("/proj/data/db.json", true),
+            ("/proj/data/nested/deep/x.ts", true),
+            ("/proj/lib/data/db.json", false),
+            ("/proj/app.db", true),
+            ("/proj/lib/sessions.db", true),
+            ("/proj/lib/sessions.db.ts", false),
+            ("/proj/public/uploads/a.json", true),
+            ("/proj/uploads", true),
+            ("/proj/app/[slug]/cache.json", true),
+            ("/proj/app/other/cache.json", false),
+            ("/proj/state.json", true),
+            ("/proj/lib/state.json", false),
+            ("/elsewhere/data/db.json", false),
+            ("/proj", false),
+        ] {
+            assert_eq!(
+                rules.is_ignored_under(root, Path::new(path)),
+                ignored,
+                "{path}"
+            );
+        }
+        let wildcards = ignore(&["logs/*/today?.json", "cache/**/*.json"]);
+        assert!(wildcards.is_ignored_under(root, Path::new("/proj/logs/api/today1.json")));
+        assert!(!wildcards.is_ignored_under(root, Path::new("/proj/logs/api/v2/today1.json")));
+        assert!(!wildcards.is_ignored_under(root, Path::new("/proj/logs/api/today12.json")));
+        assert!(wildcards.is_ignored_under(root, Path::new("/proj/cache/a.json")));
+        assert!(wildcards.is_ignored_under(root, Path::new("/proj/cache/x/y/a.json")));
+        assert!(!wildcards.is_ignored_under(root, Path::new("/proj/cache/x/y/a.ts")));
+        assert!(WatchIgnore::default().is_empty());
+    }
+
+    #[test]
+    fn malformed_watch_ignore_patterns_are_refused() {
+        for bad in [
+            "",
+            "/",
+            "../shared/**",
+            "data/../app",
+            "data\\db.json",
+            "data**",
+            "a/**b",
+        ] {
+            let error = WatchIgnore::new(&[bad.to_string()]).unwrap_err();
+            assert!(error.contains("watch_ignore"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn watch_ignored_files_never_restart_even_with_source_extensions() {
+        let mut classifier =
+            classifier().with_ignore(ignore(&["data/**", "*.db", "public/uploads"]));
+        for path in [
+            "/proj/data/db.json",
+            "/proj/data/seed.ts",
+            "/proj/app/todos.db",
+            "/proj/public/uploads/avatar.png",
+        ] {
+            assert_eq!(classifier.classify(&modify(path)), None, "{path}");
+        }
+        // A directory appearing under an ignored tree is no change either.
+        assert_eq!(
+            classifier.classify(&event(
+                EventKind::Create(CreateKind::Folder),
+                "/proj/data/2026"
+            )),
+            None
+        );
+        // Everything else still counts.
+        assert_eq!(
+            classifier.classify(&modify("/proj/lib/db.ts")),
+            Some(WatchChange::Source)
+        );
+        assert_eq!(
+            classifier.classify(&modify("/proj/public/logo.svg")),
+            Some(WatchChange::Public)
+        );
+    }
+
+    #[test]
+    fn watch_ignored_top_level_directories_are_never_registered() {
+        let root = temp_root("ignored_registration");
+        std::fs::create_dir_all(root.join("data")).expect("mkdir");
+        let changes = PendingChanges::default();
+        let (registrations, pending) = mpsc::channel();
+        let mut classifier =
+            EventClassifier::new(root.clone(), root.join("app"), root.join("public"))
+                .with_ignore(ignore(&["data/**", "tmp"]));
+        let created = |path: PathBuf| {
+            event(
+                EventKind::Create(CreateKind::Folder),
+                path.to_str().unwrap(),
+            )
+        };
+        std::fs::create_dir_all(root.join("tmp")).expect("mkdir");
+        std::fs::create_dir_all(root.join("lib")).expect("mkdir");
+        for dir in ["data", "tmp", "lib"] {
+            handle_event(
+                &mut classifier,
+                &changes,
+                &registrations,
+                &created(root.join(dir)),
+            );
+        }
+        let registered: Vec<PathBuf> = pending
+            .try_iter()
+            .filter_map(|registration| match registration {
+                Registration::Watch(dir) => Some(dir),
+                Registration::Stop => None,
+            })
+            .collect();
+        assert_eq!(registered, vec![root.join("lib")]);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -930,8 +1242,13 @@ mod tests {
         let root = temp_root("backlog");
         std::fs::create_dir_all(root.join("app")).expect("mkdir");
         std::fs::create_dir_all(root.join("components")).expect("mkdir");
-        let watch = DevWatch::start(root.clone(), root.join("app"), root.join("public"))
-            .expect("start watch");
+        let watch = DevWatch::start(
+            root.clone(),
+            root.join("app"),
+            root.join("public"),
+            WatchIgnore::default(),
+        )
+        .expect("start watch");
         for i in 0..2_000 {
             std::fs::write(root.join(format!("components/q{i}.json")), "{}").expect("write");
         }

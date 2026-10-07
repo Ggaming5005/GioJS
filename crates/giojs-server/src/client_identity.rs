@@ -164,6 +164,7 @@ impl<'de> Deserialize<'de> for TrustedProxies {
 /// `[server] proxy_headers`: which forwarding header family a trusted proxy
 /// speaks. Only that family is read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub enum ProxyHeaders {
     /// `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`.
     #[default]

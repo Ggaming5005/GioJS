@@ -42,11 +42,18 @@ pub enum RuleError {
     NoGuardRequirement,
 }
 
-/// `[[redirects]]` in gio.toml / `redirects` in middleware.ts.
+/// `[[redirects]]` in gio.toml / `redirects` in middleware.ts. Unknown keys
+/// are a parse error (a misspelled `status` must not silently mean 302);
+/// sanitizeMiddlewareRules sends the READY frame only these keys.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct RedirectRule {
+    /// Pattern: literals, `:param`, `*rest` catch-all.
     pub from: String,
+    /// Target; may substitute the pattern's captures.
     pub to: String,
+    /// 301, 302, 307 or 308.
     #[serde(default = "default_redirect_status")]
     pub status: u16,
 }
@@ -57,6 +64,8 @@ fn default_redirect_status() -> u16 {
 
 /// `[[rewrites]]` in gio.toml / `rewrites` in middleware.ts.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct RewriteRule {
     pub from: String,
     pub to: String,
@@ -66,6 +75,8 @@ pub struct RewriteRule {
 /// mapping header names to values. middleware.ts sends the same shape as a
 /// JSON object (`headers: { "x-frame-options": "DENY" }`).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct HeaderRule {
     pub path: String,
     pub headers: std::collections::HashMap<String, String>,
@@ -86,6 +97,16 @@ pub struct HeaderRule {
 /// middleware.ts sends for a guard whose requirement was malformed.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[cfg_attr(
+    test,
+    schemars(
+        description = "A gate on matching paths: a request without the credential is \
+        redirected (302) and never reaches Node. require_cookie alone asks for a non-empty \
+        cookie of that name; require_session = true asks for a valid, unexpired gio_session \
+        token (in the cookie require_cookie names). A guard that names neither stops startup."
+    )
+)]
 pub struct GuardRule {
     pub path: String,
     #[serde(alias = "requireCookie", default)]

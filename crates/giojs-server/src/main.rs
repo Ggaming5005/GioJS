@@ -19,6 +19,7 @@
 
 mod client_identity;
 mod config;
+mod config_diagnostics;
 mod conn;
 mod css_assets;
 mod dev_codeframe;
@@ -43,7 +44,6 @@ mod ws_registry;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use giojs_cache::{CacheConfig, CacheEntry, CacheStatus, FillTicket, PageCache, SingleFlight};
 use giojs_plugin::{PluginRegistry, PluginStartupCtx};
-use giojs_prefetch::{PrefetchBudgets, PrefetchConfig};
+use giojs_prefetch::PrefetchBudgets;
 use giojs_ratelimit::{RateLimitResult, RateLimitRule, RateLimiter};
 use hyper_util::rt::TokioIo;
 use ipc::{IpcClient, IpcRequest, IpcSendResult, RenderFrame};
@@ -81,9 +81,6 @@ use tracing::{debug, error, info, warn, Instrument};
 use uuid::Uuid;
 use ws_ipc::WsIpcClient;
 use ws_registry::WsRegistry;
-
-/// Upper bound on the on-disk page cache. Oldest entries are evicted past this.
-const DEFAULT_DISK_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Cap on buffered PPR shell bytes while waiting for shell_end. Past it the
 /// capture is abandoned (the page still streams, it just is not cached).
@@ -538,9 +535,10 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         cfg.images.worker_json(),
     )];
 
-    let cache_dir = std::env::var("GIO_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| project_root.join(".gio/cache/pages"));
+    let cache_dir = cfg.cache.disk_dir(
+        &project_root,
+        std::env::var("GIO_CACHE_DIR").ok().as_deref(),
+    );
     tokio::fs::create_dir_all(&cache_dir).await?;
 
     // Before the worker spawns: it renders with the nonce placeholder.
@@ -605,10 +603,10 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         security::cache_epoch(ipc.deployment_id(), nonce_placeholder.as_deref()).into();
 
     let cache = Arc::new(PageCache::new(CacheConfig {
-        memory_max_entries: NonZeroUsize::new(1000).expect("non-zero"),
+        memory_max_entries: cfg.cache.memory_max_entries,
         disk_dir: cache_dir,
         swr_multiplier: CACHE_SWR_MULTIPLIER,
-        disk_max_bytes: DEFAULT_DISK_CACHE_MAX_BYTES,
+        disk_max_bytes: cfg.cache.disk_max_bytes,
     }));
 
     // Index what a previous run left on disk so tag and path purges reach
@@ -627,7 +625,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         }
     });
 
-    let prefetch = Arc::new(PrefetchBudgets::new(PrefetchConfig::default()));
+    let prefetch = Arc::new(PrefetchBudgets::new(cfg.prefetch.budgets()));
     let prefetch_for_eviction = prefetch.clone();
     tokio::spawn(async move {
         loop {
@@ -698,6 +696,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let image_handler = Arc::new(
         giojs_image::ImageHandler::new(image_config, image_cache_dir, public_dir.clone())
             .with_disk_max_bytes(cfg.images.disk_max_bytes)
+            .with_formats(cfg.images.negotiated_formats())
             .with_max_remote_bytes(cfg.images.max_remote_bytes),
     );
 
@@ -877,7 +876,12 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     }
 
     if dev_mode {
-        spawn_dev_watcher(state.clone(), app_dir.clone(), project_root.clone());
+        spawn_dev_watcher(
+            state.clone(),
+            app_dir.clone(),
+            project_root.clone(),
+            cfg.dev.watch_ignore.clone(),
+        );
 
         let dt_mem = state.devtools.clone();
         tokio::spawn(async move {
@@ -954,7 +958,8 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         ))
         .service(ServeDir::new(public_dir));
 
-    let compression = CompressionLayer::new().compress_when(compression_predicate());
+    install_compression_config(cfg.compression);
+    let compression = compression_layer(cfg.compression);
 
     let mut app = Router::new()
         .route("/_gio/health", get(health_handler))
@@ -1103,7 +1108,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         None
     };
 
-    info!(http2 = %http2, tls = %tls_enabled, "GioJS listening on {bind_addr}");
+    info!(http2 = %http2, tls = %tls_enabled, port_from = cfg.port_source, "GioJS listening on {bind_addr}");
     let conn_settings = conn::ConnSettings::from_config(&cfg.server);
     serve_connections(
         listener,
@@ -3549,12 +3554,56 @@ impl Stream for SseBodyStream {
 
 // ── Compression predicate ────────────────────────────────────────────────────
 
+/// gio.toml `[compression]`, installed once at startup before the router is
+/// built. A process global (like the CSP nonce placeholder) because the 304
+/// path - `compressed_by_layer`, far from any state - must agree with the
+/// layer about which responses it compresses.
+static COMPRESSION_CONFIG: std::sync::OnceLock<config::CompressionConfig> =
+    std::sync::OnceLock::new();
+
+fn install_compression_config(compression: config::CompressionConfig) {
+    let _ = COMPRESSION_CONFIG.set(compression);
+    if !compression.enabled {
+        info!("response compression disabled ([compression] enabled = false)");
+    }
+}
+
+fn compression_config() -> config::CompressionConfig {
+    COMPRESSION_CONFIG.get().copied().unwrap_or_default()
+}
+
+/// The response CompressionLayer, as `[compression]` configures it.
+fn compression_layer(
+    compression: config::CompressionConfig,
+) -> CompressionLayer<CompressionPredicate> {
+    CompressionLayer::new()
+        .br(compression.prefer_brotli)
+        .compress_when(CompressionPredicate(compression))
+}
+
 /// Which responses CompressionLayer compresses - and marks with
 /// `Vary: accept-encoding`, whatever encoding the client asked for.
 fn compression_predicate() -> impl Predicate {
-    DefaultPredicate::new()
-        .and(SizeAbove::new(1024))
-        .and(NotImagePredicate)
+    CompressionPredicate(compression_config())
+}
+
+/// tower-http's defaults (no gRPC, SSE or images), above `min_size_bytes`,
+/// and nothing at all when `[compression]` is disabled - not even the Vary
+/// header, since no response then varies by encoding.
+#[derive(Clone, Copy)]
+struct CompressionPredicate(config::CompressionConfig);
+
+impl Predicate for CompressionPredicate {
+    fn should_compress<B>(&self, response: &axum::http::Response<B>) -> bool
+    where
+        B: axum::body::HttpBody,
+    {
+        self.0.enabled
+            && DefaultPredicate::new()
+                .and(SizeAbove::new(self.0.min_size_bytes))
+                .and(NotImagePredicate)
+                .should_compress(response)
+    }
 }
 
 /// CompressionLayer's own checks, then the predicate: whether the layer
@@ -3630,7 +3679,12 @@ async fn image_handler_route(
 /// reload over the devtools SSE stream once the IPC connection is restored.
 /// public/-only changes refresh the root-serving index and reload browsers
 /// without a restart - nothing the worker holds depends on them. Dev only.
-fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
+fn spawn_dev_watcher(
+    state: AppState,
+    app_dir: String,
+    project_root: PathBuf,
+    watch_ignore: dev_watch::WatchIgnore,
+) {
     // Classification is prefix-based and event paths come back absolute (on
     // macOS through /private), so compare against canonical paths.
     let root = match std::fs::canonicalize(&project_root) {
@@ -3642,7 +3696,8 @@ fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
     };
     let app_path = dev_watch::resolve_dir(std::path::Path::new(&app_dir));
     let public_dir = dev_watch::resolve_dir(state.public_files.root());
-    let watch = match dev_watch::DevWatch::start(root.clone(), app_path, public_dir) {
+    let ignores = !watch_ignore.is_empty();
+    let watch = match dev_watch::DevWatch::start(root.clone(), app_path, public_dir, watch_ignore) {
         Ok(watch) => watch,
         Err(e) => {
             warn!(error = %e, root = %root.display(), "dev watch unavailable");
@@ -3653,7 +3708,7 @@ fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
     tokio::spawn(async move {
         // The watch stops when dropped; it lives as long as this task.
         let watch = watch;
-        info!(root = %root.display(), app_dir = %app_dir, "dev watch active");
+        info!(root = %root.display(), app_dir = %app_dir, watch_ignore = ignores, "dev watch active");
         loop {
             // Changes made while a batch is processed (a worker restart can
             // take seconds) are kept and form the next batch.
@@ -3986,12 +4041,16 @@ fn is_prefetch(req: &Request) -> bool {
 /// Inspect Accept-Encoding and return the best encoding the CompressionLayer will apply.
 /// This is used only for logging - the actual negotiation happens in tower-http.
 fn negotiate_encoding(req: &Request) -> &'static str {
+    let compression = compression_config();
+    if !compression.enabled {
+        return "identity";
+    }
     let accept = req
         .headers()
         .get(header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if accept.contains("br") {
+    if compression.prefer_brotli && accept.contains("br") {
         "br"
     } else if accept.contains("gzip") {
         "gzip"
@@ -5310,7 +5369,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("giojs-devreclear-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let cache = PageCache::new(CacheConfig {
-            memory_max_entries: NonZeroUsize::new(10).unwrap(),
+            memory_max_entries: std::num::NonZeroUsize::new(10).unwrap(),
             disk_dir: dir.clone(),
             swr_multiplier: 1,
             disk_max_bytes: u64::MAX,
@@ -6043,6 +6102,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compression_follows_the_compression_section() {
+        async fn page(req: Request<Body>) -> Response {
+            let len: usize = req.uri().query().unwrap().parse().unwrap();
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .header(header::CONTENT_LENGTH, len)
+                .body(Body::from("x".repeat(len)))
+                .unwrap()
+        }
+        async fn encoding(
+            compression: config::CompressionConfig,
+            len: usize,
+            accept: &str,
+        ) -> (Option<String>, bool) {
+            let mut app = Router::new()
+                .route("/page", get(page))
+                .layer(compression_layer(compression));
+            let resp = app
+                .call(
+                    Request::builder()
+                        .uri(format!("/page?{len}"))
+                        .header(header::ACCEPT_ENCODING, accept)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let encoding = resp
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .map(|v| v.to_str().unwrap().to_string());
+            (encoding, resp.headers().contains_key(header::VARY))
+        }
+        let defaults = config::CompressionConfig::default();
+        assert_eq!(
+            encoding(defaults, 4096, "gzip, br").await,
+            (Some("br".into()), true),
+            "Brotli by default"
+        );
+        assert_eq!(
+            encoding(defaults, 1000, "gzip, br").await,
+            (None, false),
+            "below the 1024-byte default threshold"
+        );
+        let small = config::CompressionConfig {
+            min_size_bytes: 100,
+            ..defaults
+        };
+        assert_eq!(
+            encoding(small, 200, "gzip").await,
+            (Some("gzip".into()), true)
+        );
+        assert_eq!(encoding(small, 50, "gzip").await, (None, false));
+        let gzip_only = config::CompressionConfig {
+            prefer_brotli: false,
+            ..defaults
+        };
+        assert_eq!(
+            encoding(gzip_only, 4096, "gzip, br").await,
+            (Some("gzip".into()), true)
+        );
+        let off = config::CompressionConfig {
+            enabled: false,
+            ..defaults
+        };
+        assert_eq!(
+            encoding(off, 1 << 20, "gzip, br").await,
+            (None, false),
+            "disabled: nothing compressed, nothing varies"
+        );
+    }
+
+    #[tokio::test]
     async fn a_304_carries_the_vary_compression_gives_its_200() {
         const ETAG: &str = r#""abc123""#;
         // `?<len>` picks the body size; the cache hit path, in miniature.
@@ -6643,7 +6775,7 @@ mod tests {
     fn temp_cache(name: &str) -> (Arc<PageCache>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("giojs-{name}-{}", std::process::id()));
         let cache = Arc::new(PageCache::new(CacheConfig {
-            memory_max_entries: NonZeroUsize::new(10).unwrap(),
+            memory_max_entries: std::num::NonZeroUsize::new(10).unwrap(),
             disk_dir: dir.clone(),
             swr_multiplier: 10,
             disk_max_bytes: 0,

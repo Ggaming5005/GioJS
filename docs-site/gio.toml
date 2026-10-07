@@ -1,3 +1,4 @@
+#:schema ../packages/giojs/gio.schema.json
 [app]
 name = "giojs-docs"
 router = "app"
@@ -5,6 +6,3 @@ router = "app"
 [server]
 host = "0.0.0.0"
 port = 3001
-
-[cache]
-memory_mb = 32
