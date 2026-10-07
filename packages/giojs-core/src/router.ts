@@ -15,10 +15,11 @@
  * and apply by filesystem ancestry, so one under `[id]` or `(group)` covers
  * exactly the pages beneath it.
  */
-import { readdir } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadTsModule } from './load-ts.ts';
+import { assertStaticRevalidate } from './revalidate.ts';
 import type { GioRequest } from './context.ts';
 import type { GioEventStream } from './sse.ts';
 import type { Metadata, MetadataExtras } from './metadata.ts';
@@ -334,6 +335,13 @@ export async function discoverRoutes(appDir: string): Promise<Map<string, RouteM
     byShape.set(shape, route);
     routes.set(pattern, route);
   });
+  // A literal `export const revalidate` the server cannot use stops boot
+  // here, rather than failing each request to the page.
+  await Promise.all(
+    [...routes.values()].map(async route =>
+      assertStaticRevalidate(await readFile(route.filePath, 'utf8'), displayPath(appDir, route.filePath)),
+    ),
+  );
   return routes;
 }
 

@@ -317,10 +317,12 @@ giojs-server: configuration error: gio.toml:21: invalid \`server.port\`: invalid
           directory inside <code>app/</code> or <code>public/</code>.
         </li>
         <li>
-          Startup reports every refusal at once - every unknown key and section, the TLS
-          certificate, <code>[security]</code>, the revalidation token and local{' '}
-          <code>[[fonts]]</code> files included - before the worker starts. After the unknown
-          keys, a value error that follows them is reported once those are fixed.
+          Startup reports every refusal at once - every unknown key and section, every
+          invalid value, the TLS certificate, <code>[security]</code>, the revalidation token
+          and local <code>[[fonts]]</code> files included - before the worker starts. Rules and{' '}
+          <code>[i18n]</code> locales holding a misspelled or invalid key are checked once it
+          is fixed (left out, it would only report fallout), and a required key whose value is
+          invalid (<code>path = 3</code>) ends the report there.
         </li>
       </ul>
       <p>

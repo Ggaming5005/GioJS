@@ -164,57 +164,112 @@ fn visit_value(value: &Value, path: &mut Vec<String>, offset: usize, best: &mut 
     }
 }
 
+/// What blanking a key removes: the bytes it occupies, and its dotted path
+/// from the root without array indexes (`guards.require_session`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Extent {
+    pub ranges: Vec<Range<usize>>,
+    pub path: String,
+}
+
 /// The bytes the key whose name covers `offset` occupies: its name and
 /// value, or for a table its header and everything in it. Blanking them out
 /// leaves a document without that key whose other keys sit on the same
 /// lines - how one check reports every unknown key, not just the first. None
 /// when no key name covers `offset`.
-pub fn item_extent(doc: &ImDocument<&str>, offset: usize) -> Option<Vec<Range<usize>>> {
-    let mut best = None;
-    extent_in_table(doc.as_table(), 0, offset, &mut best);
-    best.map(|(_, ranges)| ranges)
+pub fn item_extent(doc: &ImDocument<&str>, offset: usize) -> Option<Extent> {
+    extent(doc, offset, false)
 }
 
-type Extent = Option<(usize, Vec<Range<usize>>)>;
+/// The `key = value` pair whose name or value covers `offset`, inline
+/// tables and arrays whole: for an invalid value (or an unknown key inside
+/// an inline table), so the check can go on past it. Tables are never
+/// matched by their contents - blanking a whole `[[guards]]` entry would
+/// renumber the ones after it. None when no such pair covers `offset`.
+pub fn value_extent(doc: &ImDocument<&str>, offset: usize) -> Option<Extent> {
+    extent(doc, offset, true)
+}
 
-fn extent_in_table(table: &Table, depth: usize, offset: usize, best: &mut Extent) {
+fn extent(doc: &ImDocument<&str>, offset: usize, values: bool) -> Option<Extent> {
+    let mut best = None;
+    extent_in_table(doc.as_table(), doc.raw(), &mut Vec::new(), offset, values, &mut best);
+    best.map(|(_, extent)| extent)
+}
+
+fn extent_in_table(
+    table: &Table,
+    raw: &str,
+    path: &mut Vec<String>,
+    offset: usize,
+    values: bool,
+    best: &mut Option<(usize, Extent)>,
+) {
     for (name, item) in table.iter() {
+        path.push(segment(name));
         let key_span = table.key(name).and_then(|key| key.span());
-        if covers(key_span.clone(), offset) && best.as_ref().is_none_or(|(d, _)| depth >= *d) {
+        let hit = match item {
+            Item::Value(value) if values => {
+                covers(key_span.clone(), offset) || covers(value.span(), offset)
+            }
+            _ => !values && covers(key_span.clone(), offset),
+        };
+        if hit && best.as_ref().is_none_or(|(depth, _)| path.len() >= *depth) {
             let mut ranges = Vec::new();
-            item_ranges(key_span, item, &mut ranges);
-            *best = Some((depth, ranges));
+            item_ranges(raw, key_span, item, table.is_dotted(), &mut ranges);
+            *best = Some((
+                path.len(),
+                Extent {
+                    ranges,
+                    path: path.join("."),
+                },
+            ));
         }
         match item {
-            Item::Table(child) => extent_in_table(child, depth + 1, offset, best),
+            Item::Table(child) => extent_in_table(child, raw, path, offset, values, best),
             Item::ArrayOfTables(array) => {
                 for child in array.iter() {
-                    extent_in_table(child, depth + 1, offset, best);
+                    extent_in_table(child, raw, path, offset, values, best);
                 }
             }
             _ => {}
         }
+        path.pop();
     }
 }
 
-/// Everything `item`, named at `key_span`, spans in the text.
-fn item_ranges(key_span: Option<Range<usize>>, item: &Item, ranges: &mut Vec<Range<usize>>) {
+/// Everything `item`, named at `key_span`, spans in the text. In a dotted
+/// table the pair is written `server.port = 1`: it is blanked from the
+/// start of its line, or `server.` would be left behind, a syntax error.
+fn item_ranges(
+    raw: &str,
+    key_span: Option<Range<usize>>,
+    item: &Item,
+    dotted: bool,
+    ranges: &mut Vec<Range<usize>>,
+) {
     match item {
         Item::Value(value) => {
             if let (Some(key), Some(value)) = (key_span, value.span()) {
-                ranges.push(key.start..value.end);
+                let start = if dotted {
+                    raw.get(..key.start)
+                        .and_then(|before| before.rfind('\n'))
+                        .map_or(0, |newline| newline + 1)
+                } else {
+                    key.start
+                };
+                ranges.push(start..value.end);
             }
         }
-        Item::Table(table) => table_ranges(table, ranges),
-        Item::ArrayOfTables(array) => array.iter().for_each(|table| table_ranges(table, ranges)),
+        Item::Table(table) => table_ranges(raw, table, ranges),
+        Item::ArrayOfTables(array) => array.iter().for_each(|table| table_ranges(raw, table, ranges)),
         Item::None => {}
     }
 }
 
-fn table_ranges(table: &Table, ranges: &mut Vec<Range<usize>>) {
+fn table_ranges(raw: &str, table: &Table, ranges: &mut Vec<Range<usize>>) {
     ranges.extend(table.span());
     for (name, item) in table.iter() {
-        item_ranges(table.key(name).and_then(|key| key.span()), item, ranges);
+        item_ranges(raw, table.key(name).and_then(|key| key.span()), item, table.is_dotted(), ranges);
     }
 }
 

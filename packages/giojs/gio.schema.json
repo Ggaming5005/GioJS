@@ -329,7 +329,7 @@
       "additionalProperties": false
     },
     "DetectStrategy": {
-      "description": "`DETECT_STRATEGIES`, for the schema.",
+      "description": "Where the locale is read from: the path prefix (`path`), the\nAccept-Language header (`accept-language`) or the gio_locale cookie\n(`cookie`).",
       "type": "string",
       "enum": [
         "path",
@@ -828,7 +828,7 @@
       ]
     },
     "RedirectRule": {
-      "description": "`[[redirects]]` in gio.toml / `redirects` in middleware.ts. Unknown keys\nare a parse error (a misspelled `status` must not silently mean 302);\nsanitizeMiddlewareRules sends the READY frame only these keys.",
+      "description": "A redirect: a request matching from is answered with status and a Location built from to, a path on this site. An unknown key stops startup.",
       "type": "object",
       "properties": {
         "from": {

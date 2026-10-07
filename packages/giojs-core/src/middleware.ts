@@ -145,9 +145,24 @@ function captureNames(pattern: string): Set<string> {
   );
 }
 
+/**
+ * Why `target` is not a path on this site, or null (Rust's check_site_path).
+ * `//evil.com` and `/\\evil.com` start with `/`, but a browser reads them
+ * (tabs and line breaks dropped first) as protocol-relative URLs: as a
+ * Location they would send the visitor off-site.
+ */
+function sitePathProblem(key: string, target: string): string | null {
+  if (!target.startsWith('/')) return `${key} must be a path starting with "/" (got "${target}")`;
+  if (/^\/[\t\n\r]*[/\\]/.test(target)) {
+    return `${key} "${target}" is another site (a browser reads a leading // or /\\ as one) - redirect to another site from a route handler`;
+  }
+  return null;
+}
+
 /** Why a redirect or rewrite target is unusable, or null (Rust's Template::compile). */
 function targetProblem(to: string, from: string): string | null {
-  if (!to.startsWith('/')) return `to must be a path starting with "/" (got "${to}")`;
+  const notOnSite = sitePathProblem('to', to);
+  if (notOnSite !== null) return notOnSite;
   const captures = captureNames(from);
   for (const segment of to.split('/')) {
     if ((segment.startsWith(':') || segment.startsWith('*')) && !captures.has(segment.slice(1))) {
@@ -283,8 +298,11 @@ export function validateMiddlewareRules(value: unknown): ValidatedMiddleware {
     const requirement = guardRequirement(entry);
     if (typeof requirement === 'string') report(at, entry['path'], requirement);
     const redirectTo = entry['redirectTo'];
-    if (!isNonEmptyString(redirectTo) || !redirectTo.startsWith('/')) {
+    if (!isNonEmptyString(redirectTo)) {
       report(at, entry['path'], 'redirectTo must be a path starting with "/"');
+    } else {
+      const problem = sitePathProblem('redirectTo', redirectTo);
+      if (problem !== null) report(at, entry['path'], problem);
     }
     if (problems.length === before && path !== null && typeof requirement !== 'string') {
       guards.push({ path, ...requirement, redirectTo: redirectTo as string });

@@ -26,7 +26,7 @@ to = "/posts/newest"`} />
       <h2 id="reference">Reference</h2>
       <ConfigKeyTable rows={[
         { key: 'from', type: 'string', required: true, description: <>The path pattern: literal segments, <code>:param</code> and a final <code>*rest</code>. Must start with <code>/</code>.</> },
-        { key: 'to', type: 'string', required: true, description: <>The path of the route to serve, starting with <code>/</code>. It may use the pattern&apos;s captures by name.</> },
+        { key: 'to', type: 'string', required: true, description: <>The path of the route to serve, starting with one <code>/</code> (<code>//host</code> and <code>/\host</code> are refused). It may use the pattern&apos;s captures by name.</> },
       ]} />
 
       <h3 id="behavior">Behavior</h3>
@@ -86,7 +86,7 @@ to = "/docs/*rest"`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <><code>*rest</code> matches zero segments and rules match the canonical path.</> },
+        { version: 'v0.1.0-beta.8', changes: <><code>*rest</code> matches zero segments and rules match the canonical path. A rule that cannot be compiled, or whose <code>to</code> starts with <code>//</code> or <code>/\</code>, stops startup.</> },
         { version: 'v0.1.0-beta.6', changes: 'Introduced.' },
       ]} />
     </>

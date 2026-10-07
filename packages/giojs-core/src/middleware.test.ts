@@ -103,7 +103,7 @@ describe('validateMiddlewareRules', () => {
       'guards[2] ("/c"): requireSession must be true or false',
       'guards[3] ("/d"): requireCookie must be a non-empty string',
       'guards[4] ("/e"): requireCookie must be a non-empty string',
-      'guards[5] ("/f"): redirectTo must be a path starting with "/"',
+      'guards[5] ("/f"): redirectTo must be a path starting with "/" (got "login")',
       'guards[6] ("/g"): redirectTo must be a path starting with "/"',
     ]);
   });
@@ -139,6 +139,28 @@ describe('validateMiddlewareRules', () => {
       'redirects[2] ("/c"): to must be a path starting with "/" (got "https://example.com/c")',
       'rewrites[0] ("/only-from"): to must be a non-empty string',
       'rewrites[1] ("x"): from must start with "/"',
+    ]);
+  });
+
+  it('refuses targets a browser reads as another site', () => {
+    // `//evil.com` and `/\evil.com` start with "/", but as a Location they
+    // are protocol-relative URLs: the visitor would land on evil.com.
+    const { rules, problems } = validateMiddlewareRules({
+      guards: [
+        { path: '/a', requireSession: true, redirectTo: '//evil.com' },
+        { path: '/b', requireSession: true, redirectTo: '/\\evil.com' },
+        { path: '/c', requireSession: true, redirectTo: '/login?next=//x' },
+      ],
+      redirects: [{ from: '/old', to: '/\t/evil.com' }],
+      rewrites: [{ from: '/r', to: '//evil.com' }],
+    });
+    expect(rules.guards).toEqual([{ path: '/c', requireSession: true, redirectTo: '/login?next=//x' }]);
+    const offSite = '(a browser reads a leading // or /\\ as one) - redirect to another site from a route handler';
+    expect(problems).toEqual([
+      `redirects[0] ("/old"): to "/\t/evil.com" is another site ${offSite}`,
+      `rewrites[0] ("/r"): to "//evil.com" is another site ${offSite}`,
+      `guards[0] ("/a"): redirectTo "//evil.com" is another site ${offSite}`,
+      `guards[1] ("/b"): redirectTo "/\\evil.com" is another site ${offSite}`,
     ]);
   });
 

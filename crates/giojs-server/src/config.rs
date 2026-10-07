@@ -553,7 +553,10 @@ pub struct I18nConfig {
 /// an error, not a strategy that silently never detects anything.
 pub const DETECT_STRATEGIES: &[&str] = &["path", "accept-language", "cookie"];
 
-/// `DETECT_STRATEGIES`, for the schema.
+// `DETECT_STRATEGIES`, for the schema (whose description is the doc comment).
+/// Where the locale is read from: the path prefix (`path`), the
+/// Accept-Language header (`accept-language`) or the gio_locale cookie
+/// (`cookie`).
 #[cfg(test)]
 #[derive(schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -1621,12 +1624,13 @@ impl GioConfig {
     }
 
     /// Parse gio.toml's contents, reporting every problem in line order:
-    /// each unknown section and key, then - once the rest deserializes -
-    /// rules that cannot be enforced and an inconsistent `[i18n]`. serde
-    /// stops at its first error, so an unknown key is blanked out of the
-    /// text (line breaks kept, so every other key stays on its line) and the
-    /// text parsed again, until it parses or fails another way - reported
-    /// only when it is the first error, as it may be fallout otherwise.
+    /// each unknown section and key, each value of the wrong type or out of
+    /// range, rules that cannot be enforced and an inconsistent `[i18n]`.
+    /// serde stops at its first error, so the key or value it names is
+    /// blanked out of the text (line breaks kept, so every other key stays
+    /// on its line) and the text parsed again, until it parses or fails in a
+    /// way that may be the blanking's own doing (a missing field, a syntax
+    /// error) - reported only when it is the first error.
     pub(crate) fn parse_all(raw: &str, file: &str) -> Result<Self, Vec<ConfigError>> {
         // A syntax error leaves no document: toml's own error (line,
         // column) is then the best there is.
@@ -1635,6 +1639,8 @@ impl GioConfig {
         if let Some(doc) = &doc {
             errors.extend(unknown_sections(doc, raw, file));
         }
+        // Key paths blanked so far (`server.prot`, `guards.require_session`).
+        let mut blanked: Vec<String> = Vec::new();
         let mut text = raw.to_string();
         let parsed = loop {
             let source = match toml::from_str::<Self>(&text) {
@@ -1645,33 +1651,48 @@ impl GioConfig {
             let line = offset.map_or(0, |offset| config_diagnostics::line_of(&text, offset));
             let current = toml_edit::ImDocument::parse(text.as_str()).ok();
             let error = describe_error(source, current.as_ref(), &text, file);
-            let blank = match (&error, &current, offset) {
-                (ConfigError::UnknownKey { .. }, Some(current), Some(offset)) => {
-                    config_diagnostics::item_extent(current, offset)
-                }
+            // An unknown key, or a value the author wrote that is still
+            // there untouched (blanking only ever removes whole pairs), is
+            // sure to be the author's; a missing field or a syntax error may
+            // be the blanking's doing. An unknown key inside an inline table
+            // goes with the table.
+            let blank = current.as_ref().zip(offset).and_then(|(current, offset)| match &error {
+                ConfigError::UnknownKey { .. } => config_diagnostics::item_extent(current, offset)
+                    .or_else(|| config_diagnostics::value_extent(current, offset)),
+                ConfigError::InvalidValue { .. } => config_diagnostics::value_extent(current, offset),
                 _ => None,
-            };
-            // Once something is blanked, only further unknown keys are sure
-            // to be the author's: a missing field or a broken inline table
-            // may be the blanking's own doing.
+            });
             if text == raw || blank.is_some() {
                 errors.push((line, error));
             }
-            match blank {
-                Some(ranges) if errors.len() < MAX_REPORTED_ERRORS => {
-                    text = config_diagnostics::blank_out(&text, &ranges);
-                }
-                _ => break None,
+            let Some(blank) = blank.filter(|_| errors.len() < MAX_REPORTED_ERRORS) else {
+                break None;
+            };
+            let next = config_diagnostics::blank_out(&text, &blank.ranges);
+            if next == text {
+                break None;
             }
+            blanked.push(blank.path);
+            text = next;
         };
         let Some(mut config) = parsed else {
             return Err(in_line_order(errors));
         };
-        // On blanked text the rest would be fallout (a guard whose misspelled
-        // requirement was blanked names none).
-        if let Some(doc) = doc.as_ref().filter(|_| text == raw) {
-            errors.extend(rule_problems(&config, doc, raw, file));
-            errors.extend(i18n_problems(&config.i18n, doc, raw, file));
+        // Rules and [i18n] are checked as written: one whose keys were all
+        // left alone is the author's, while one with a blanked key would
+        // report fallout (a guard whose misspelled require_session was
+        // blanked names no requirement).
+        let untouched = |path: &str| !blanked.iter().any(|key| keys_overlap(key, path));
+        if let Some(doc) = &doc {
+            errors.extend(
+                rule_problems(&config, doc, raw, file)
+                    .into_iter()
+                    .filter(|(kind, _)| untouched(kind))
+                    .map(|(_, error)| error),
+            );
+            if untouched("i18n.locales") && untouched("i18n.default_locale") {
+                errors.extend(i18n_problems(&config.i18n, doc, raw, file));
+            }
         }
         if !errors.is_empty() {
             return Err(in_line_order(errors));
@@ -1773,28 +1794,43 @@ fn line_of_key(doc: &toml_edit::ImDocument<&str>, raw: &str, path: &[&str], inde
     Some(config_diagnostics::line_of(raw, span.start))
 }
 
-/// Rules that parsed but cannot be enforced as written (`RuleSet::problems`).
+/// Rules that parsed but cannot be enforced as written (`RuleSet::problems`),
+/// each with its rule table (`guards`).
 fn rule_problems(
     config: &GioConfig,
     doc: &toml_edit::ImDocument<&str>,
     raw: &str,
     file: &str,
-) -> Vec<(usize, ConfigError)> {
+) -> Vec<(&'static str, (usize, ConfigError))> {
     crate::rules::RuleSet::problems(&config.middleware_rules())
         .into_iter()
         .map(|problem| {
             let line = line_of_key(doc, raw, &[problem.kind], Some(problem.index));
             (
-                line.unwrap_or(0),
-                ConfigError::InvalidRule {
-                    location: location(file, line),
-                    kind: problem.kind,
-                    pattern: problem.pattern,
-                    source: problem.error,
-                },
+                problem.kind,
+                (
+                    line.unwrap_or(0),
+                    ConfigError::InvalidRule {
+                        location: location(file, line),
+                        kind: problem.kind,
+                        pattern: problem.pattern,
+                        source: problem.error,
+                    },
+                ),
             )
         })
         .collect()
+}
+
+/// Whether dotted key paths `a` and `b` are the same key or one holds the
+/// other (`i18n` and `i18n.locales`).
+fn keys_overlap(a: &str, b: &str) -> bool {
+    let within = |inner: &str, outer: &str| {
+        inner
+            .strip_prefix(outer)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    };
+    within(a, b) || within(b, a)
 }
 
 fn i18n_problems(
@@ -2438,6 +2474,63 @@ redirect_to    = "/"
         assert!(errors[4].starts_with("gio.toml:13: unknown key [imgaes] - did you mean [images]?"), "{errors:#?}");
         // The first by line is what `parse` returns.
         assert!(error_text("[server]\nprot = 3000\nhots = \"x\"\n").starts_with("gio.toml:2:"));
+    }
+
+    fn all_errors(raw: &str) -> Vec<String> {
+        GioConfig::parse_all(raw, "gio.toml")
+            .unwrap_err()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn invalid_values_do_not_hide_the_problems_after_them() {
+        // A value error used to end the report: the unknown key after it
+        // went unmentioned until the value was fixed.
+        let errors = all_errors("[cache]\nmemory_max_entries = \"x\"\n\n[server]\nprot = 3000\n");
+        assert_eq!(errors.len(), 2, "{errors:#?}");
+        assert!(errors[0].starts_with("gio.toml:2: invalid `cache.memory_max_entries`"), "{errors:#?}");
+        assert!(errors[1].starts_with("gio.toml:5: unknown key `server.prot`"), "{errors:#?}");
+
+        // Dotted keys: blanking `prot = 1` alone left `server.`, a syntax
+        // error that ended the report.
+        let errors = all_errors("server.prot = 1\nserver.hots = 2\n");
+        assert_eq!(errors.len(), 2, "{errors:#?}");
+        assert!(errors[1].starts_with("gio.toml:2: unknown key `server.hots`"), "{errors:#?}");
+
+        // An unknown key inside an inline table takes the table with it.
+        let errors = all_errors("[server]\ntls = { cert = \"c\", key_path = \"k\" }\nprot = 1\n");
+        assert_eq!(errors.len(), 2, "{errors:#?}");
+        assert!(errors[1].starts_with("gio.toml:3: unknown key `server.prot`"), "{errors:#?}");
+    }
+
+    #[test]
+    fn rule_and_i18n_problems_are_reported_next_to_unknown_keys() {
+        // Rules and [i18n] left untouched by the blanking are checked as
+        // written, alongside the errors elsewhere.
+        let errors = all_errors(
+            "[server]\nprot = 3000\n\n[[guards]]\npath = \"members/*rest\"\nrequire_session = true\n\
+             redirect_to = \"/login\"\n\n[i18n]\nlocales = [\"en\", \"de\"]\ndefault_locale = \"fr\"\n\
+             detect_from = [\"acept-language\"]\n",
+        );
+        assert_eq!(errors.len(), 4, "{errors:#?}");
+        assert!(errors[0].starts_with("gio.toml:2: unknown key `server.prot`"), "{errors:#?}");
+        assert!(errors[1].starts_with("gio.toml:4: invalid [[guards]] entry for \"members/*rest\""), "{errors:#?}");
+        assert!(errors[2].starts_with("gio.toml:11: invalid `i18n.default_locale`"), "{errors:#?}");
+        assert!(errors[3].starts_with("gio.toml:12: invalid `i18n.detect_from`"), "{errors:#?}");
+
+        // A rule with a blanked key is not checked: the guard whose
+        // misspelled require_session was blanked would name no requirement.
+        let errors = all_errors("[[guards]]\npath = \"/a\"\nrequire_sesion = true\nredirect_to = \"/\"\n");
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert!(errors[0].contains("unknown key `guards[0].require_sesion`"), "{errors:#?}");
+        let errors = all_errors("[[guards]]\npath = \"/a\"\nrequire_session = \"yes\"\nredirect_to = \"/\"\n");
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        // Nor an [i18n] whose locales were: they would read as empty.
+        let errors = all_errors("[i18n]\nlocales = \"en\"\ndefault_locale = \"fr\"\n");
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert!(errors[0].starts_with("gio.toml:2: invalid `i18n.locales`"), "{errors:#?}");
     }
 
     #[test]

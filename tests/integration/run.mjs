@@ -4430,6 +4430,40 @@ async function standalonePhase() {
       assert.match(await cssOf(unminified), /\.standalone-blog-css \{\n {2}color: red;\n\}/);
     });
 
+    // middleware.ts used to be a static import of worker.js: one that threw
+    // ran before the worker could report it, and the server said only that
+    // the worker reported no error.
+    await test("standalone: a middleware.ts that throws stops startup with the worker's own error", async () => {
+      const middleware = join(workDir, 'middleware.ts');
+      await writeFile(
+        middleware,
+        "export default { guards: [{ path: '/admin', requireSession: true, redirectTo: '/login' }] };\n" +
+          "throw new Error('STANDALONE_MIDDLEWARE_BOOM');\n",
+      );
+      const broken = join(workDir, 'dist-standalone-broken-middleware');
+      let build;
+      try {
+        build = spawnSync(
+          process.execPath,
+          [join(repoRoot, 'packages', 'giojs', 'bin', 'standalone.mjs'), '--out', broken],
+          { cwd: workDir, env: { ...process.env, GIO_STANDALONE_SERVER_BIN: binary }, encoding: 'utf8', timeout: 180_000 },
+        );
+      } finally {
+        await rm(middleware, { force: true });
+      }
+      assert.equal(build.status, 0, `standalone build failed:\n${build.stdout ?? ''}\n${build.stderr ?? ''}`);
+      const started = Date.now();
+      const boot = spawnSync(process.execPath, [join(broken, 'run.mjs')], { cwd: broken, encoding: 'utf8', timeout: 60_000 });
+      assert.equal(boot.status, 1, `exit status ${boot.status} (signal ${boot.signal}), stderr:\n${boot.stderr}`);
+      assert.match(
+        boot.stderr,
+        /giojs-server: the Node worker exited before it was ready \(exit status: 1\):\n {2}middleware\.ts \(standalone build\) failed to load: STANDALONE_MIDDLEWARE_BOOM\n/,
+      );
+      assert.doesNotMatch(boot.stderr, /reported no error|IPC connect|panicked/);
+      assert.ok(Date.now() - started < 30_000, 'failed at once, not after the connect attempts');
+      await rm(broken, { recursive: true, force: true });
+    });
+
     await test('static export: pages hydrate from chunks shipped in out/', async () => {
       const exportOut = join(workDir, 'out');
       const result = spawnSync(

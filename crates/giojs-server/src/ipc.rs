@@ -13,8 +13,9 @@
 //! middleware.ts error, a route conflict), or its READY carries rules that
 //! cannot be enforced - fails startup with a `WorkerBootError` holding the
 //! worker's own error, which it writes to a file the server names
-//! (`BOOT_ERROR_FILE_ENV`) before it exits. Its stderr stays inherited, so
-//! its log lines reach the terminal directly, even after the server dies.
+//! (`BOOT_ERROR_FILE_ENV`, in a private directory: `BootErrorDir`) before
+//! it exits. Its stderr stays inherited, so its log lines reach the
+//! terminal directly, even after the server dies.
 //!
 //! The first worker is the builder: only it bundles the client code into
 //! `.gio/build` (and writes `.gio/routes.d.ts`). The others start once it is
@@ -140,12 +141,46 @@ impl std::error::Error for WorkerBootError {}
 /// worker exits before READY. Mirrors BOOT_ERROR_FILE_ENV in worker-boot.ts.
 pub const BOOT_ERROR_FILE_ENV: &str = "GIO_WORKER_ERROR_FILE";
 
-/// The boot error file of pool worker `index` of this server process.
-fn boot_error_file(index: usize) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "giojs-worker-error-{}-{index}.json",
-        std::process::id()
-    ))
+/// The directory of the workers' boot error files: created fresh under an
+/// unguessable name, owner-only on Unix, and removed when the pool is
+/// dropped or shut down (a worker that crashes after READY writes its file
+/// too). A predictable name in the shared temp dir would let another local
+/// user plant a symlink there - the worker's write would then overwrite
+/// whatever it points at - or a file whose forged error the server prints.
+struct BootErrorDir {
+    path: std::path::PathBuf,
+}
+
+impl BootErrorDir {
+    fn create() -> std::io::Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "giojs-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        // Not recursive: anything already at the path - a symlink planted
+        // there included - is an error, never reused.
+        builder.create(&path)?;
+        Ok(BootErrorDir { path })
+    }
+
+    /// The boot error file of pool worker `index`.
+    fn file(&self, index: usize) -> std::path::PathBuf {
+        self.path.join(format!("worker-{index}.json"))
+    }
+
+    fn remove(&self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+impl Drop for BootErrorDir {
+    fn drop(&mut self) {
+        self.remove();
+    }
 }
 
 /// The `WorkerBootError` message of a worker that exited with `status`
@@ -762,6 +797,7 @@ struct WorkerPool {
     /// Set once at server shutdown: every supervisor stops its worker.
     shutdown: watch::Sender<bool>,
     supervisors: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    boot_errors: BootErrorDir,
 }
 
 /// One worker's connection state, shared by its supervisor, its reader loop
@@ -895,6 +931,9 @@ struct NodeWorker {
     /// handed to every respawn too. Those named in
     /// `config::WORKER_RENDER_SETTINGS_ENV` also feed the deployment ID.
     extra_env: Vec<(String, String)>,
+    /// Where it writes the error that ends it (BOOT_ERROR_FILE_ENV), in the
+    /// pool's `BootErrorDir`.
+    error_file: std::path::PathBuf,
 }
 
 /// Write end of a worker's stdin pipe (see EXIT_ON_STDIN_EOF_ENV). Held next
@@ -951,13 +990,13 @@ impl NodeWorker {
         env.push((WORKER_COUNT_ENV.to_string(), self.pool_size.to_string()));
         env.push((
             BOOT_ERROR_FILE_ENV.to_string(),
-            boot_error_file(self.index).display().to_string(),
+            self.error_file.display().to_string(),
         ));
         env
     }
 
     fn spawn(&self) -> anyhow::Result<WorkerProcess> {
-        let error_file = boot_error_file(self.index);
+        let error_file = self.error_file.clone();
         // A file left by an earlier boot must not be read as this one's.
         let _ = std::fs::remove_file(&error_file);
         let env = self.env();
@@ -1088,6 +1127,9 @@ impl IpcClient {
         let generation = Arc::new(watch::channel(1u64).0);
         let (revalidate_tx, revalidate_rx) = mpsc::channel(REVALIDATE_QUEUE * workers);
         let (shutdown, _) = watch::channel(false);
+        let boot_errors = BootErrorDir::create().map_err(|error| {
+            anyhow::anyhow!("cannot create a private directory for worker boot errors: {error}")
+        })?;
 
         struct Slot {
             node: NodeWorker,
@@ -1116,6 +1158,7 @@ impl IpcClient {
                     reuse_build: index > 0,
                     pool_size: workers,
                     extra_env: extra_env.clone(),
+                    error_file: boot_errors.file(index),
                 },
                 write_rx,
                 restart_rx,
@@ -1198,6 +1241,7 @@ impl IpcClient {
                 ws_endpoints,
                 shutdown,
                 supervisors: std::sync::Mutex::new(supervisors),
+                boot_errors,
             }),
         })
     }
@@ -1342,6 +1386,8 @@ impl IpcClient {
         for supervisor in supervisors {
             let _ = supervisor.await;
         }
+        // The process may exit without dropping the pool.
+        self.pool.boot_errors.remove();
     }
 }
 
@@ -2796,6 +2842,7 @@ pub(crate) fn test_pool(workers: usize, dev_mode: bool) -> (IpcClient, Vec<mpsc:
             ws_endpoints: vec![(String::new(), String::new()); workers],
             shutdown: watch::channel(false).0,
             supervisors: std::sync::Mutex::new(Vec::new()),
+            boot_errors: BootErrorDir::create().expect("boot error directory"),
         }),
     };
     (client, write_rxs)
@@ -4188,6 +4235,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn boot_error_files_live_in_a_private_directory_that_goes_with_the_pool() {
+        let dir = BootErrorDir::create().unwrap();
+        let file = dir.file(1);
+        assert_eq!(file.parent(), Some(dir.path.as_path()));
+        assert!(dir.path.starts_with(std::env::temp_dir()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir.path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "other users must not reach the files");
+        }
+        // Unguessable: two pools never share one.
+        let other = BootErrorDir::create().unwrap();
+        assert_ne!(other.path, dir.path);
+        std::fs::write(&file, "{}").unwrap();
+        let path = dir.path.clone();
+        drop(dir);
+        assert!(!path.exists(), "removed with what a crashed worker left in it");
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn handshake_rejects_wrong_token_proof() {
@@ -4581,12 +4649,14 @@ mod tests {
             reuse_build: true,
             pool_size: 3,
             extra_env: vec![("GIO_IMAGE_CONFIG".into(), "{}".into())],
+            error_file: std::path::PathBuf::from("/private/worker-2.json"),
         };
         let env: HashMap<String, String> = node.env().into_iter().collect();
         assert_eq!(env[WORKER_INDEX_ENV], "2");
         assert_eq!(env[WORKER_COUNT_ENV], "3");
         assert_eq!(env[REUSE_BUILD_ENV], "1");
         assert_eq!(env["GIO_IMAGE_CONFIG"], "{}", "server settings ride along");
+        assert_eq!(env[BOOT_ERROR_FILE_ENV], "/private/worker-2.json");
 
         node.index = 0;
         node.reuse_build = false;
@@ -4714,6 +4784,7 @@ mod tests {
             reuse_build: false,
             pool_size: 1,
             extra_env: Vec::new(),
+            error_file: std::env::temp_dir().join("unused.json"),
         };
         let supervisor = tokio::spawn(ipc_supervisor(
             node,

@@ -84,6 +84,40 @@ describe('route discovery across extensions', () => {
   });
 });
 
+describe('export const revalidate at discovery', () => {
+  const page = (value: string): string =>
+    `export const revalidate${value};\nexport default function P() { return null; }\n`;
+
+  // These used to fail only when the page was requested (a bare 500 before
+  // that); a literal is read from the source, so boot refuses them.
+  for (const [value, shown] of [
+    [' = -5', '-5'],
+    [' = 1.5', '1.5'],
+    [" = '60'", '"60"'],
+    [' = NaN', 'NaN'],
+    [': number = .5', '0.5'],
+    [' = true', 'boolean'],
+  ]) {
+    it(`refuses revalidate${value} naming the file`, async () => {
+      await touch('blog/page.tsx', page(value ?? ''));
+      await expect(discoverRoutes(appDir)).rejects.toThrow(
+        `app/blog/page.tsx: export const revalidate must be a whole number of seconds (0 or more) or false - got ${shown}`,
+      );
+    });
+  }
+
+  it('accepts valid literals, and leaves expressions to the render-time check', async () => {
+    await touch('a/page.tsx', page(' = 60 // one minute'));
+    await touch('b/page.tsx', page(' = false'));
+    await touch('c/page.tsx', page(' = 1_000'));
+    await touch('d/page.tsx', page(' = 60 * -1'));
+    await touch('e/page.tsx', page(' = ONE_HOUR'));
+    await touch('f/page.tsx', "// export const revalidate = -1;\nexport default function P() { return null; }\n");
+    const routes = await discoverRoutes(appDir);
+    expect([...routes.keys()].sort()).toEqual(['/a', '/b', '/c', '/d', '/e', '/f']);
+  });
+});
+
 describe('dynamic segment conventions', () => {
   it('maps [id], [...slug] and [[...slug]] to one-segment, catch-all and optional catch-all params', async () => {
     await touch('posts/[id]/page.tsx');

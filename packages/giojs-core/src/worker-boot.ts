@@ -90,12 +90,16 @@ function shutdownWorker(): void {
  */
 export const BOOT_ERROR_FILE_ENV = 'GIO_WORKER_ERROR_FILE';
 
-/** Leave `message` where the server reads it; best effort - the log has it too. */
+/**
+ * Leave `message` where the server reads it; best effort - the log has it
+ * too. The server's directory is private and the file removed before each
+ * spawn; `wx` still refuses to follow anything found at the path.
+ */
 function reportFatalError(message: string): void {
   const file = process.env[BOOT_ERROR_FILE_ENV];
   if (file === undefined || file === '') return;
   try {
-    writeFileSync(file, JSON.stringify({ error: message }));
+    writeFileSync(file, JSON.stringify({ error: message }), { flag: 'wx', mode: 0o600 });
   } catch {
     // The server falls back to pointing at the log.
   }

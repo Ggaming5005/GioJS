@@ -33,7 +33,7 @@ status = 301`} />
       <h2 id="reference">Reference</h2>
       <ConfigKeyTable rows={[
         { key: 'from', type: 'string', required: true, description: <>The path pattern: literal segments, <code>:param</code> (one segment) and a final <code>*rest</code> (the rest of the path, possibly empty). Must start with <code>/</code>.</> },
-        { key: 'to', type: 'string', required: true, description: <>The target path. It must start with <code>/</code> - a redirect stays on this site - and may use the pattern&apos;s captures by name, in any order.</> },
+        { key: 'to', type: 'string', required: true, description: <>The target path. It must start with one <code>/</code> - a redirect stays on this site, so <code>//host</code> and <code>/\host</code>, which a browser reads as another site, are refused - and may use the pattern&apos;s captures by name, in any order.</> },
         { key: 'status', type: 'integer', default: '302', description: <><code>301</code> or <code>308</code> (permanent; browsers and search engines remember it), <code>302</code> or <code>307</code> (temporary). <code>307</code> and <code>308</code> keep the method and body.</> },
       ]} />
 
@@ -109,7 +109,7 @@ to = "/p/:post/by/:user"     # /u/alice/p/42 -> /p/42/by/alice`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <><code>*rest</code> matches zero segments, rules match the canonical path, header rules are stamped on redirect responses, and a rule that cannot be compiled stops startup (it was skipped with a warning).</> },
+        { version: 'v0.1.0-beta.8', changes: <><code>*rest</code> matches zero segments, rules match the canonical path, header rules are stamped on redirect responses, and a rule that cannot be compiled stops startup (it was skipped with a warning), a <code>to</code> a browser reads as another site (<code>//host</code>, <code>/\host</code>) included.</> },
         { version: 'v0.1.0-beta.6', changes: 'Introduced.' },
       ]} />
     </>

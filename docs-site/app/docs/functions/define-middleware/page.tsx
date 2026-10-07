@@ -118,7 +118,8 @@ export default defineMiddleware({
         <li>
           Strict, like <code>gio.toml</code>: a rule that cannot be enforced as written - an
           invalid pattern, a malformed field (<code>{"requireSession: 'true'"}</code>), an
-          unknown key, a <code>redirectTo</code> or <code>to</code> that is not a path, a
+          unknown key, a <code>redirectTo</code> or <code>to</code> that is not a path on
+          this site (<code>//host</code> and <code>/\host</code> are another site to a browser), a
           guard without a requirement - stops the worker at boot with every problem listed.
           Nothing is dropped while the app serves.
         </li>
@@ -180,11 +181,12 @@ export default defineMiddleware({
           logic, use <code>getServerSideProps</code>, a route handler or a Node plugin.
         </li>
         <li>
-          <strong>A file that fails to load is ignored.</strong> When importing{' '}
-          <code>middleware.ts</code> throws, the worker logs{' '}
-          <code>middleware file failed to load - rules ignored</code> and runs without its
-          rules - its guards included. Keep guards for sensitive paths in{' '}
-          <code>gio.toml</code>, which refuses to start on a bad guard.
+          <strong>A file that fails to load stops the worker.</strong> When importing{' '}
+          <code>middleware.ts</code> throws, the worker refuses to boot with{' '}
+          <code>&lt;path&gt;/middleware.ts failed to load: &lt;error&gt;</code>: production
+          exits 1, development waits for you to save a fix. Its guards are never dropped
+          while the app serves. See{' '}
+          <a href="/docs/file-conventions/middleware#validation"><code>middleware.ts</code> validation</a>.
         </li>
         <li>
           <strong>Guards do not pass the path on.</strong> The redirect keeps the query string

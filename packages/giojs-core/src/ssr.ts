@@ -100,7 +100,7 @@ import {
   renderMetadataRoute,
   type MetadataRoutes,
 } from './metadata-routes.ts';
-import { sanitizeCacheTags } from './revalidate.ts';
+import { assertValidRevalidate, sanitizeCacheTags } from './revalidate.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -1389,24 +1389,6 @@ async function answerRoute(
       ...(dev && err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
     };
   }
-}
-
-/**
- * `export const revalidate` must be a whole number of seconds (0 or more)
- * or `false`. Anything else (`-5`, `1.5`, `'60'`, `NaN`) used to reach Rust
- * as the cache lifetime, which failed to parse the response: a bare 500 on
- * every request with no hint. Checked when the page module is used - page
- * modules load on first request, not at boot - so the failure is an
- * ordinary render error naming the file: the dev overlay in development, a
- * logged error and a 500 with a digest in production.
- */
-export function assertValidRevalidate(value: unknown, file: string): void {
-  if (value === undefined || value === false) return;
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return;
-  const got = typeof value === 'string' ? JSON.stringify(value) : typeof value === 'number' ? String(value) : typeof value;
-  throw new Error(
-    `${file}: export const revalidate must be a whole number of seconds (0 or more) or false - got ${got}`,
-  );
 }
 
 /**

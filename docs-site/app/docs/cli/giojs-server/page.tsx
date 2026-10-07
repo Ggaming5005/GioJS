@@ -160,7 +160,7 @@ node standalone/run.mjs --check-config                 # a standalone build`} />
       <h3 id="report">Report</h3>
       <PropsTable kind="Field" rows={[
         { name: 'ok', type: 'boolean', description: 'Whether the server would start.' },
-        { name: 'errors', type: 'string[]', description: <>Every refusal, worded as startup prints it after <code>configuration error:</code>, in line order: every unknown key and section, rules that cannot be enforced, and the other checks startup makes. A value error behind unknown keys shows once they are fixed.</> },
+        { name: 'errors', type: 'string[]', description: <>Every refusal, worded as startup prints it after <code>configuration error:</code>, in line order: every unknown key and section, every invalid value, rules that cannot be enforced, <code>[i18n]</code> mistakes, and the other checks startup makes. Rules (or <code>[i18n]</code> locales) holding a misspelled or invalid key are checked once it is fixed, and a required key whose value is invalid (<code>path = 3</code>) ends the list there.</> },
         { name: 'warnings', type: 'string[]', description: <>Protections the file turns off or loosens and ignored <code>[dev] allowed_hosts</code> entries - the same lines startup logs.</> },
         { name: 'mode', type: 'string', description: <><code>development</code> or <code>production</code>, from <code>NODE_ENV</code>.</> },
         { name: 'envFiles', type: 'string[]', description: <>The <code>.env</code> files loaded, by name, highest precedence first.</> },
@@ -187,10 +187,12 @@ node standalone/run.mjs --check-config                 # a standalone build`} />
       <p>
         The Node worker loads <code>gio.config.ts</code>, discovers the routes and loads{' '}
         <code>middleware.ts</code> before it reports ready. When it cannot - an unknown key in{' '}
-        <code>gio.config.ts</code>, two files that answer the same URL, a{' '}
+        <code>gio.config.ts</code>, two files that answer the same URL, a page whose{' '}
+        <code>export const revalidate</code> is a literal the server cannot use, a{' '}
         <code>middleware.ts</code> that throws or holds a rule that cannot be enforced - it
         exits, and the server prints the worker&apos;s own error after the worker&apos;s log
-        lines:
+        lines. A standalone build reports the same errors (its <code>middleware.ts</code> and{' '}
+        <code>gio.config</code> are loaded at boot too, after the worker can report them):
       </p>
       <CodeBlock lang="text" code={`giojs-server: the Node worker exited before it was ready (exit status: 1):
   /srv/shop/middleware.ts failed to load: GIO_SESSION_SECRET is not set`} />

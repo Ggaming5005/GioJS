@@ -52,13 +52,16 @@ describe('generateStandaloneEntry', () => {
     expect(source).toMatch(/pattern: "\/posts\/:id", [^\n]*load: \(\) => import\("[^"]*\/posts\/\[id\]\/page\.tsx"\)/);
   });
 
-  it('imports per-route modules lazily, and only gio.config and middleware statically', () => {
+  it('imports every app module lazily, gio.config and middleware included', () => {
     const source = generateStandaloneEntry(fullSpec());
     const statics = source.split('\n').filter(l => l.startsWith('import '));
-    expect(statics).toHaveLength(3);
-    expect(statics.join('\n')).toMatch(/runStandaloneServer[\s\S]*gioConfig[\s\S]*gioMiddleware/);
-    // 2 pages, 1 layout, 1 route file, 2 segment files, 2 metadata routes, 2 special pages.
-    expect(source.match(/\(\) => import\(/g)).toHaveLength(10);
+    // A static import of a middleware.ts that throws would run before the
+    // worker's process guards, so the server could not report its error.
+    expect(statics).toHaveLength(1);
+    expect(statics[0]).toMatch(/runStandaloneServer/);
+    // 2 pages, 1 layout, 1 route file, 2 segment files, 2 metadata routes,
+    // 2 special pages, gio.config and middleware.
+    expect(source.match(/\(\) => import\(/g)).toHaveLength(12);
   });
 
   it('uses forward-slashed absolute specifiers in every import', () => {
@@ -80,8 +83,8 @@ describe('generateStandaloneEntry', () => {
     expect(source).toMatch(
       /specialPages: \{ notFound: \(\) => import\("[^"]*\/app\/not-found\.tsx"\), error: \(\) => import\("[^"]*\/app\/error\.tsx"\) \}/,
     );
-    expect(source).toContain('config: gioConfig.default,');
-    expect(source).toContain('middleware: gioMiddleware.default,');
+    expect(source).toMatch(/ {2}config: \(\) => import\("[^"]*\/gio\.config\.ts"\),/);
+    expect(source).toMatch(/ {2}middleware: \(\) => import\("[^"]*\/middleware\.ts"\),/);
     expect(source).toContain('"/_next/static/chunks/route-index-ABC.js"');
   });
 
@@ -108,8 +111,8 @@ describe('generateStandaloneEntry', () => {
     expect(source).not.toContain('specialPages');
     expect(source).not.toContain('segmentFiles');
     expect(source).not.toContain('metadataRoutes');
-    expect(source).not.toContain('gioConfig');
-    expect(source).not.toContain('gioMiddleware');
+    expect(source).not.toContain('config:');
+    expect(source).not.toContain('middleware:');
     expect(source).not.toContain('not-found');
     expect(source).not.toContain('stylesheets');
     expect(source).toContain('clientScripts: {}');

@@ -44,14 +44,38 @@ pub enum RuleError {
     InvalidHeaderValue(String),
     #[error("names no requirement: set require_session = true or a non-empty require_cookie")]
     NoGuardRequirement,
+    #[error(
+        "target {0:?} is another site (a browser reads a leading // or /\\ as one): \
+         redirect to another site from a route handler"
+    )]
+    ExternalTarget(String),
+}
+
+/// A redirect or rewrite target, or a guard's redirect_to, must be a path on
+/// this site. `//evil.com` and `/\evil.com` start with `/` but are
+/// protocol-relative URLs to a browser (which also drops tabs and line
+/// breaks first), so as a `Location` they would send the visitor off-site.
+fn check_site_path(target: &str) -> Result<(), RuleError> {
+    let Some(rest) = target.strip_prefix('/') else {
+        return Err(RuleError::PatternNotAbsolute(target.to_string()));
+    };
+    match rest.trim_start_matches(['\t', '\n', '\r']).chars().next() {
+        Some('/' | '\\') => Err(RuleError::ExternalTarget(target.to_string())),
+        _ => Ok(()),
+    }
 }
 
 /// `[[redirects]]` in gio.toml / `redirects` in middleware.ts. Unknown keys
 /// are a parse error (a misspelled `status` must not silently mean 302);
-/// sanitizeMiddlewareRules sends the READY frame only these keys.
+/// validateMiddlewareRules sends the READY frame only these keys.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
+#[cfg_attr(
+    test,
+    schemars(description = "A redirect: a request matching from is answered with status and a \
+        Location built from to, a path on this site. An unknown key stops startup.")
+)]
 pub struct RedirectRule {
     /// Pattern: literals, `:param`, `*rest` catch-all.
     pub from: String,
@@ -95,7 +119,7 @@ pub struct HeaderRule {
 ///
 /// A broken guard must never leave its path open. Unknown keys are a parse
 /// error, so a misspelled `require_session` stops gio.toml from loading
-/// instead of being ignored (sanitizeMiddlewareRules sends the READY frame
+/// instead of being ignored (validateMiddlewareRules sends the READY frame
 /// only these keys). A guard that names no requirement is one of
 /// `RuleSet::problems`, so neither gio.toml nor middleware.ts loads it; were
 /// one compiled anyway, it would deny every request.
@@ -289,9 +313,7 @@ struct Template {
 
 impl Template {
     fn compile(raw: &str, pattern: &Pattern) -> Result<Self, RuleError> {
-        if !raw.starts_with('/') {
-            return Err(RuleError::PatternNotAbsolute(raw.to_string()));
-        }
+        check_site_path(raw)?;
         let mut parts = Vec::new();
         for raw_segment in raw.split('/').filter(|s| !s.is_empty()) {
             let capture_name = raw_segment
@@ -409,9 +431,7 @@ impl CompiledGuard {
         } else {
             GuardCheck::Cookie(rule.require_cookie.clone())
         };
-        if !rule.redirect_to.starts_with('/') {
-            return Err(RuleError::PatternNotAbsolute(rule.redirect_to.clone()));
-        }
+        check_site_path(&rule.redirect_to)?;
         Ok(CompiledGuard {
             pattern: Pattern::compile(&rule.path)?,
             check,
@@ -1305,6 +1325,38 @@ mod tests {
             guard("/admin", "", "/login").validate(),
             Err(RuleError::NoGuardRequirement)
         ));
+    }
+
+    #[test]
+    fn targets_that_leave_the_site_are_rejected_at_load() {
+        // A browser reads each of these as a protocol-relative URL: as a
+        // guard's Location it would send the visitor to evil.com.
+        for target in ["//evil.com", "/\\evil.com", "/\t/evil.com", "///evil.com"] {
+            assert!(
+                matches!(
+                    guard("/admin", "session", target).validate(),
+                    Err(RuleError::ExternalTarget(_))
+                ),
+                "{target:?}"
+            );
+            let rules = MiddlewareRules {
+                redirects: vec![RedirectRule {
+                    from: "/old".to_string(),
+                    to: target.to_string(),
+                    status: 302,
+                }],
+                rewrites: vec![RewriteRule {
+                    from: "/a".to_string(),
+                    to: target.to_string(),
+                }],
+                ..MiddlewareRules::default()
+            };
+            let problems = RuleSet::problems(&rules);
+            assert_eq!(problems.len(), 2, "{target:?}: {problems:?}");
+            assert!(problems.iter().all(|p| matches!(p.error, RuleError::ExternalTarget(_))));
+        }
+        assert!(guard("/admin", "session", "/login?next=//x").validate().is_ok());
+        assert!(guard("/admin", "session", "/").validate().is_ok());
     }
 
     #[test]

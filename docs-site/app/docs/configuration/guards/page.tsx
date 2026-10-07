@@ -35,7 +35,7 @@ redirect_to = "/login"`} />
         { key: 'path', type: 'string', required: true, description: <>The path pattern to protect: literal segments, <code>:param</code> and a final <code>*rest</code>. <code>/admin/*rest</code> also covers <code>/admin</code> itself.</> },
         { key: 'require_session', type: 'boolean', default: 'false', description: <>Require a valid, unexpired session from <a href="/docs/functions/create-session-storage"><code>createSessionStorage</code></a>: the cookie&apos;s signature must verify with <code>GIO_SESSION_SECRET</code> (any of its rotated secrets). Read from <code>gio_session</code>, or from the cookie <code>require_cookie</code> names.</> },
         { key: 'require_cookie', type: 'string', default: '""', description: <>Alone: require a non-empty cookie of this name - a presence check that proves nothing, so validate the cookie in the page too. With <code>require_session</code>: the name of the session cookie.</> },
-        { key: 'redirect_to', type: 'string', required: true, description: <>Where a refused request is sent, a path starting with <code>/</code>.</> },
+        { key: 'redirect_to', type: 'string', required: true, description: <>Where a refused request is sent: a path on this site, starting with one <code>/</code>. <code>//host</code> and <code>/\host</code> are refused - a browser reads them as another site.</> },
       ]} />
       <p>
         <code>requireSession</code>, <code>requireCookie</code> and <code>redirectTo</code> - the
@@ -66,12 +66,21 @@ redirect_to = "/login"`} />
       </ul>
 
       <h3 id="errors">Errors</h3>
-      <p>A guard that would leave its path open stops startup instead of being skipped:</p>
+      <p>
+        A guard that would leave its path open stops startup instead of being skipped. Every
+        such guard is reported in one run, one line each (<code>giojs-server --check-config</code>{' '}
+        lists the same lines):
+      </p>
       <CodeBlock lang="text" code={`gio.toml:1: invalid [[guards]] entry for "/admin/*rest": names no requirement: set require_session = true or a non-empty require_cookie
-gio.toml:1: invalid [[guards]] entry for "/admin/*rest": pattern must start with '/': login
 gio.toml:5: invalid [[guards]] entry for "members/*rest": pattern must start with '/': members/*rest
-gio.toml:9: invalid [[guards]] entry for "/a/*rest/c": catch-all segment must be the last segment: /a/*rest/c
-gio.toml:3: unknown key \`guards[0].require_sesion\` - did you mean \`guards[0].require_session\`?`} />
+gio.toml:10: invalid [[guards]] entry for "/a/*rest/c": catch-all segment must be the last segment: /a/*rest/c
+gio.toml:15: invalid [[guards]] entry for "/b/*rest": target "//evil.example" is another site (a browser reads a leading // or /\\ as one): redirect to another site from a route handler`} />
+      <p>
+        A misspelled or mistyped key in a guard is reported, but the guards are checked as rules
+        only once it is fixed: without the misspelled key, the guard would only seem to name no
+        requirement.
+      </p>
+      <CodeBlock lang="text" code={`gio.toml:3: unknown key \`guards[0].require_sesion\` - did you mean \`guards[0].require_session\`?`} />
 
       <h2 id="examples">Examples</h2>
       <h3 id="protect-an-admin-area">Protect an admin area</h3>
@@ -124,7 +133,7 @@ redirect_to = "/waitlist"`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Added <code>require_session</code>, verified in Rust. A guard with a misspelled key, no requirement or an invalid path stops startup instead of being skipped. <code>*rest</code> matches zero segments, and admitted pages are never shared by caches.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Added <code>require_session</code>, verified in Rust. A guard with a misspelled key, no requirement, an invalid path or a <code>redirect_to</code> a browser reads as another site (<code>//host</code>) stops startup instead of being skipped. <code>*rest</code> matches zero segments, and admitted pages are never shared by caches.</> },
         { version: 'v0.1.0-beta.6', changes: <>Introduced with <code>require_cookie</code>.</> },
       ]} />
     </>

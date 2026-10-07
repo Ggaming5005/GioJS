@@ -138,11 +138,14 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         header rule would quietly serve what it was meant to change. That
         covers a relative pattern (<code>members/*rest</code>), a catch-all
         that is not the last segment (<code>/a/*rest/c</code>), a{' '}
-        <code>to</code> target that is not a path or references an unknown
-        capture, a disallowed redirect status, an invalid header name or
-        value, a guard that names no requirement or whose{' '}
-        <code>redirectTo</code> is not a path, and an unknown key (a
-        misspelled <code>require_session</code>).
+        <code>to</code> target that is not a path on this site or references
+        an unknown capture, a disallowed redirect status, an invalid header
+        name or value, a guard that names no requirement or whose{' '}
+        <code>redirectTo</code> is not a path on this site, and an unknown key
+        (a misspelled <code>require_session</code>). A path on this site
+        starts with one <code>/</code>: <code>//evil.example</code> and{' '}
+        <code>/\evil.example</code> are refused, because a browser reads them
+        as another site.
       </p>
       <ul>
         <li>
@@ -186,8 +189,8 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         redirects append it to the <code>Location</code> header (
         <code>/admin?next=1</code> goes to <code>/login?next=1</code>), and
         rewrites keep it on the rewritten URI. Redirect and rewrite targets are
-        paths starting with <code>/</code> - for an external URL, redirect from
-        a route handler or <code>getServerSideProps</code>. A rewrite changes the path that routing and the cache key see, while
+        paths on this site, starting with one <code>/</code> - for an external
+        URL, redirect from a route handler or <code>getServerSideProps</code>. A rewrite changes the path that routing and the cache key see, while
         the browser URL stays what the client requested.
       </p>
 

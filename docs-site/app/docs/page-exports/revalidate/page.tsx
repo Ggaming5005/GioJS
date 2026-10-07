@@ -38,7 +38,7 @@ export default function Page(): React.JSX.Element {
           <tr><td><code>N</code> (a whole number above 0)</td><td>Cached and fresh for <code>N</code> seconds, then served stale while one background render refreshes it.</td></tr>
           <tr><td><code>false</code></td><td>Cached for one year (<code>31536000</code> seconds): in practice until a purge, or a deploy that changes the deployment ID.</td></tr>
           <tr><td><code>0</code></td><td>Not cached - the same as leaving it out.</td></tr>
-          <tr><td>anything else</td><td>A render error naming the file (see below).</td></tr>
+          <tr><td>anything else</td><td>An error naming the file: at startup when written as a literal, at render otherwise (see below).</td></tr>
         </tbody>
       </table>
 
@@ -135,9 +135,13 @@ export async function POST(req: GioRequest) {
       <ul>
         <li>
           Use a whole number of seconds or <code>false</code>. A negative or fractional number,{' '}
-          <code>NaN</code>, or a string such as <code>&apos;60&apos;</code> is a render error
-          when the page is requested (page modules load on first use, not at startup):
-          development shows it in the error overlay, production logs it and answers{' '}
+          <code>NaN</code>, or a string such as <code>&apos;60&apos;</code> is an error naming
+          the file. Written as a literal (<code>export const revalidate = 1.5</code>), it is read
+          from the source when the routes are discovered and stops the worker at boot (see{' '}
+          <a href="/docs/cli/giojs-server#worker-boot-errors">worker boot errors</a>) and{' '}
+          <code>gio build standalone</code>. Any other expression (<code>60 * 60</code>, an
+          imported constant) is checked when the page is requested, since page modules load on
+          first use: development shows it in the error overlay, production logs it and answers{' '}
           <code>500</code> with a digest.
           <CodeBlock lang="text" code={`app/blog/page.tsx: export const revalidate must be a whole number of seconds (0 or more) or false - got 1.5`} />
         </li>
@@ -182,7 +186,7 @@ export async function POST(req: GioRequest) {
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>An invalid value (negative, fractional, a string, <code>NaN</code>) is a render error naming the file; it used to answer a bare <code>500</code> because the server could not parse the response. Cached pages send <code>Cache-Control</code> and a weak <code>ETag</code>; renders that read credentials, set cookies or return headers are no longer stored; purges with <code>revalidateTag()</code>, <code>revalidatePath()</code> and <code>POST /_gio/revalidate</code>.</> },
+        { version: 'v0.1.0-beta.8', changes: <>An invalid value (negative, fractional, a string, <code>NaN</code>) stops the worker at boot when written as a literal, and is a render error naming the file otherwise; it used to answer a bare <code>500</code> because the server could not parse the response. Cached pages send <code>Cache-Control</code> and a weak <code>ETag</code>; renders that read credentials, set cookies or return headers are no longer stored; purges with <code>revalidateTag()</code>, <code>revalidatePath()</code> and <code>POST /_gio/revalidate</code>.</> },
         { version: 'v0.1.0-beta.1', changes: 'Introduced, with stale-while-revalidate.' },
       ]} />
     </>

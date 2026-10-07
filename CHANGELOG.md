@@ -40,19 +40,27 @@ first.
   Tables for other tools must be named `[x-...]`. A malformed
   `[metrics] ip_allowlist` entry stops startup like a malformed
   `trusted_proxies` one (it used to match nobody, so every scrape got `403`).
-  `giojs-server --check-config` lists every problem at once, every unknown
-  key and section included.
+  `giojs-server --check-config` lists every problem in one run, in line
+  order: each unknown key and section, each invalid value, each rule that
+  cannot be enforced and each `[i18n]` mistake. A rule table, or the
+  `[i18n]` locales, holding a misspelled or invalid key is checked once that
+  key is fixed, and a required key whose value is invalid (`path = 3`) ends
+  the list there.
 - **`gio.config.ts` is validated at boot:** unknown keys and plugins without a
   `name` are errors.
 - **Broken rules stop startup.** A `[[guards]]` entry with a misspelled key,
   no requirement or an invalid path now fails startup instead of being skipped
   with a warning, and so does a `[[redirects]]`, `[[rewrites]]` or
   `[[headers]]` rule that cannot be compiled (a relative pattern, a
-  catch-all that is not last, an unknown capture, a bad status or header).
+  catch-all that is not last, an unknown capture, a bad status or header). A
+  redirect or rewrite `to` or a guard's `redirect_to` must be a path on this
+  site: `//evil.com` and `/\evil.com`, which a browser reads as another
+  site, are refused.
 - **`middleware.ts` is strict and fails closed.** A file that throws while
   it loads, has no default export, or holds a rule that cannot be enforced
   (an invalid pattern, a malformed field, an unknown key, a guard without a
-  requirement) stops the worker at boot with every problem listed: in
+  requirement, a target that leaves the site) stops the worker at boot with
+  every problem listed: in
   production the server exits 1 with the error, in development it waits
   for the fix (and a later breakage answers `503` until the next save). It
   used to drop the rules - every rule, guards included, for a file that
@@ -760,8 +768,9 @@ first.
   exactly as startup does, runs startup's validation (gio.toml, cache
   placement, `[security]`, the revalidation token, local `[[fonts]]` files,
   TLS) and prints a JSON
-  report: the listen address, every error (each unknown key and section, not
-  just the first), warnings, and guard and proxy settings. It exits 1 when the server would refuse to start, never
+  report: the listen address, every error (each unknown key and section,
+  invalid value and unenforceable rule, not just the first), warnings, and
+  guard and proxy settings. It exits 1 when the server would refuse to start, never
   binds a port and never prints secrets, so it works as a CI step.
 - Startup reports every configuration refusal at once and checks the TLS
   certificate and key, and fetches the `[[fonts]]`, before starting the
@@ -1039,13 +1048,19 @@ first.
   status: 1):` and the message), exit 1 and no backtrace. Dev waits for a
   file change and starts the worker again, and a dev worker that crashes
   after startup is respawned on the next save instead of after the respawn
-  backoff. `createTestServer` leads its error with the same message.
+  backoff. `createTestServer` leads its error with the same message. A
+  standalone build reports a `middleware.ts` or `gio.config` that throws the
+  same way (both used to be imported before the worker could report
+  anything). The worker writes its error into a private directory the server
+  creates, not under a predictable name in the shared temp dir.
 - A page exporting an invalid `revalidate` (`-5`, `1.5`, `'60'`, `NaN`)
   answered every request with a bare `500`: the value reached the server as
   the cache lifetime and the response failed to parse. It is now a render
   error naming the file and the allowed values (a whole number of seconds,
   or `false`) - the error overlay in dev, a logged error and a `500` with a
-  digest in production.
+  digest in production. A literal value (`export const revalidate = -5`) is
+  refused at route discovery already: the worker does not boot, and
+  `gio build standalone` fails, naming the file.
 
 ### Known limitations
 

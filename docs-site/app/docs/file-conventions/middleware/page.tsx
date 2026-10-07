@@ -45,7 +45,7 @@ export default defineMiddleware({
         { name: 'redirects', type: '{ from: string; to: string; status?: 301 | 302 | 307 | 308 }[]', description: <>Answer with a redirect. <code>status</code> defaults to <code>302</code>.</> },
         { name: 'rewrites', type: '{ from: string; to: string }[]', description: 'Serve another path while the browser URL stays the same.' },
         { name: 'headers', type: '{ path: string; headers: Record<string, string> }[]', description: 'Add or override response headers on matching paths.' },
-        { name: 'guards', type: 'MiddlewareGuard[]', description: <>Redirect requests without a cookie (<code>requireCookie</code>) or without a valid session (<code>requireSession: true</code>, checking the <code>gio_session</code> cookie or the one <code>requireCookie</code> names) to <code>redirectTo</code>, a path starting with <code>/</code>, with a <code>302</code>.</> },
+        { name: 'guards', type: 'MiddlewareGuard[]', description: <>Redirect requests without a cookie (<code>requireCookie</code>) or without a valid session (<code>requireSession: true</code>, checking the <code>gio_session</code> cookie or the one <code>requireCookie</code> names) to <code>redirectTo</code>, a path on this site starting with one <code>/</code>, with a <code>302</code>.</> },
       ]} />
       <p>
         Patterns are the routing ones: literal segments, <code>:param</code> for one segment
@@ -96,17 +96,24 @@ export default defineMiddleware({
           an entry has an unknown key (with the closest valid one), a missing or malformed
           field, a pattern the server cannot match (no leading <code>/</code>, a{' '}
           <code>*rest</code> that is not the last segment), a <code>to</code> that is not a
-          path or uses a capture the pattern does not define, a status other than 301, 302,
-          307 or 308, or an invalid header name or value;
+          path on this site or uses a capture the pattern does not define, a status other
+          than 301, 302, 307 or 308, or an invalid header name or value;
         </li>
         <li>
           a guard names no requirement (<code>requireSession: true</code> or a{' '}
-          <code>requireCookie</code>), or its <code>redirectTo</code> is not a path.
+          <code>requireCookie</code>), or its <code>redirectTo</code> is not a path on this
+          site.
         </li>
       </ul>
+      <p>
+        A path on this site starts with one <code>/</code>: <code>//evil.example</code> and{' '}
+        <code>/\evil.example</code> are refused, because a browser reads them as links to
+        another site. Send visitors to another site from a route handler.
+      </p>
       <CodeBlock lang="text" code={`/srv/shop/middleware.ts is invalid - no rule loads until every problem is fixed:
   - guards[0] ("members/*rest"): path must start with "/"
-  - guards[1] ("/staff"): unknown key "require_session" - did you mean "requireSession"?`} />
+  - guards[1] ("/staff"): unknown key "require_session" - did you mean "requireSession"?
+  - guards[1] ("/staff"): names no requirement: set requireSession: true or requireCookie`} />
       <p>
         In production the server then exits 1 with that error (see{' '}
         <a href="/docs/cli/giojs-server#worker-boot-errors">worker boot errors</a>). In
@@ -157,9 +164,8 @@ export default defineMiddleware({
           when the rules come from code or should be type-checked.
         </li>
         <li>
-          Unlike <code>gio.toml</code>, an invalid guard here does not stop startup: it closes
-          its path and logs why, or, when its <code>path</code> itself is invalid, is skipped
-          with a warning. Watch the startup log after editing guards.
+          Like <code>gio.toml</code>, a rule that cannot be enforced stops the worker at boot
+          instead of being skipped, guards included (see <a href="#validation">Validation</a>).
         </li>
         <li>
           Rules see the canonical path: repeated and trailing slashes collapsed, escapes of
@@ -177,7 +183,7 @@ export default defineMiddleware({
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>A file that throws while loading, or any rule that cannot be enforced as written (an invalid pattern, a malformed field, an unknown key), stops the worker at boot; such rules used to be dropped with a warning, a guard&apos;s path left open. <code>*rest</code> also matches zero segments. Header rules also apply to redirect and guard responses. <code>requireSession</code> guards verify the session in Rust.</> },
+        { version: 'v0.1.0-beta.8', changes: <>A file that throws while loading, or any rule that cannot be enforced as written (an invalid pattern, a malformed field, an unknown key, a target a browser reads as another site), stops the worker at boot; such rules used to be dropped with a warning, a guard&apos;s path left open. <code>*rest</code> also matches zero segments. Header rules also apply to redirect and guard responses. <code>requireSession</code> guards verify the session in Rust.</> },
         { version: 'v0.1.0-beta.6', changes: <>Introduced: redirects, rewrites, headers and cookie guards from a project-root <code>middleware.ts</code>.</> },
       ]} />
     </>

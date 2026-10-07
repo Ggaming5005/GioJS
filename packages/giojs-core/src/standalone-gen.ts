@@ -11,8 +11,10 @@
  * `import()`s: esbuild still bundles them into worker.js, but evaluates each
  * one when it is first loaded - as the source path does - so a module that
  * throws while it is imported fails its own URL (500), not the whole worker
- * at startup. gio.config and middleware.ts stay static imports: they are
- * loaded at boot on both paths.
+ * at startup. gio.config and middleware.ts are loaded at boot on both paths,
+ * by runStandaloneServer once its process guards are in place: as static
+ * imports they would run before anything could report a file that throws
+ * to the server, which would then only say the worker reported no error.
  */
 import { resolve, sep } from 'node:path';
 import type { SegmentFileKind } from './router.ts';
@@ -110,12 +112,10 @@ export function generateStandaloneEntry(spec: StandaloneEntrySpec): string {
     registryFields.push(`  metadataRoutes: [\n${metadataRouteEntries.join('\n')}\n  ],`);
   }
   if (spec.configPath !== undefined) {
-    imports.push(`import * as gioConfig from ${moduleSpecifier(spec.configPath)};`);
-    registryFields.push('  config: gioConfig.default,');
+    registryFields.push(`  config: ${lazyImport(spec.configPath)},`);
   }
   if (spec.middlewarePath !== undefined) {
-    imports.push(`import * as gioMiddleware from ${moduleSpecifier(spec.middlewarePath)};`);
-    registryFields.push('  middleware: gioMiddleware.default,');
+    registryFields.push(`  middleware: ${lazyImport(spec.middlewarePath)},`);
   }
   registryFields.push(`  clientScripts: ${JSON.stringify(spec.clientScripts, null, 2).replace(/\n/g, '\n  ')},`);
   if (spec.stylesheets !== undefined) {

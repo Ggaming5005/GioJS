@@ -9,8 +9,9 @@
  * happened (or `ok: false` says why it could not be confirmed).
  *
  * Also the validation of the tags pages declare (`export const tags`, and
- * `tags` returned from getServerSideProps), shared with ssr.ts. Limits
- * mirror giojs-server/src/revalidate.rs.
+ * `tags` returned from getServerSideProps), shared with ssr.ts - limits
+ * mirror giojs-server/src/revalidate.rs - and of `export const revalidate`,
+ * at render (ssr.ts) and at route discovery (router.ts).
  */
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
@@ -437,4 +438,59 @@ export function settleRevalidateAck(msg: Record<string, unknown>): void {
     purged: typeof msg['purged'] === 'number' ? msg['purged'] : 0,
     ...(typeof msg['error'] === 'string' ? { error: msg['error'] } : {}),
   });
+}
+
+/**
+ * `export const revalidate` must be a whole number of seconds (0 or more)
+ * or `false`. Anything else (`-5`, `1.5`, `'60'`, `NaN`) used to reach Rust
+ * as the cache lifetime, which failed to parse the response: a bare 500 on
+ * every request with no hint. Checked when the page module is used - page
+ * modules load on first request, not at boot - so the failure is an
+ * ordinary render error naming the file: the dev overlay in development, a
+ * logged error and a 500 with a digest in production. A literal value is
+ * checked at discovery too (assertStaticRevalidate).
+ */
+export function assertValidRevalidate(value: unknown, file: string): void {
+  if (value === undefined || value === false) return;
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return;
+  const got = typeof value === 'string' ? JSON.stringify(value) : typeof value === 'number' ? String(value) : typeof value;
+  throw new Error(
+    `${file}: export const revalidate must be a whole number of seconds (0 or more) or false - got ${got}`,
+  );
+}
+
+/** `export const revalidate = <value>` at the start of a line. */
+const REVALIDATE_EXPORT =
+  /^[ \t]*export\s+const\s+revalidate\s*(?::[^=\n]*)?=\s*([^;\n]*?)\s*(?:;|\/\/|\/\*|$)/m;
+
+/** What `text` is as a literal, or NOT_A_LITERAL for an expression. */
+const NOT_A_LITERAL = Symbol('not a literal');
+
+function revalidateLiteral(text: string): unknown {
+  if (/^-?\s*(?:\d[\d_]*)?(?:\.\d[\d_]*)?(?:e[+-]?\d+)?$/i.test(text) && /\d/.test(text)) {
+    return Number(text.replace(/[\s_]/g, ''));
+  }
+  const words: Record<string, unknown> = {
+    NaN: Number.NaN,
+    Infinity: Number.POSITIVE_INFINITY,
+    '-Infinity': Number.NEGATIVE_INFINITY,
+    true: true,
+    false: false,
+  };
+  if (Object.hasOwn(words, text)) return words[text];
+  if (/^'[^'\\]*'$|^"[^"\\]*"$/.test(text)) return text.slice(1, -1);
+  return NOT_A_LITERAL;
+}
+
+/**
+ * The page's `export const revalidate`, read from its `source` at route
+ * discovery: a literal the server cannot use (`-5`, `1.5`, `'60'`, `NaN`)
+ * stops boot - and `gio build standalone` - naming the file, instead of
+ * failing every request to the page. Page modules load on first use, so
+ * only a literal is read here; any other expression (`60 * 60`, an
+ * imported constant) is checked when the page renders.
+ */
+export function assertStaticRevalidate(source: string, file: string): void {
+  const value = revalidateLiteral(REVALIDATE_EXPORT.exec(source)?.[1] ?? '');
+  if (value !== NOT_A_LITERAL) assertValidRevalidate(value, file);
 }

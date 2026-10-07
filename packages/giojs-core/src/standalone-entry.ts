@@ -12,6 +12,8 @@
  * evaluates them: route files at boot, the rest on first use. A route file
  * that throws while it is imported answers 500 (registerFailedRouteModule),
  * a page that does renders the error page - the worker still starts.
+ * gio.config and middleware.ts load at boot, after the process guards: one
+ * that throws stops the worker, and the server prints its error.
  */
 import { validateGioConfig, type GioConfig } from './gio-config.ts';
 import type {
@@ -83,20 +85,37 @@ export interface StandaloneRegistry {
   segmentFiles?: StandaloneSegmentFileEntry[];
   /** app/sitemap.*, app/robots.*, app/manifest.* */
   metadataRoutes?: StandaloneMetadataRouteEntry[];
-  config?: GioConfig | undefined;
-  /** Raw default export of middleware.ts; sanitized here at boot. */
-  middleware?: unknown;
+  /** gio.config's module, loaded at boot. */
+  config?: () => Promise<{ default?: unknown }>;
+  /** middleware.ts's module, loaded and validated at boot. */
+  middleware?: () => Promise<{ default?: unknown }>;
   /** Route pattern → prebuilt hydration chunk URL. */
   clientScripts?: Record<string, string>;
   /** Prebuilt stylesheet URLs per page. */
   stylesheets?: StyleManifestJson;
 }
 
+/** The module `load` imports (none without a loader), or an error naming `source`. */
+async function loadBootModule(
+  load: (() => Promise<{ default?: unknown }>) | undefined,
+  source: string,
+): Promise<{ default?: unknown } | undefined> {
+  if (load === undefined) return undefined;
+  try {
+    return await load();
+  } catch (loadError) {
+    const reason = loadError instanceof Error ? loadError.message : String(loadError);
+    throw new Error(`${source} failed to load: ${reason}`, { cause: loadError });
+  }
+}
+
 /** Boot the worker from a prebuilt registry instead of app/ discovery. */
 export async function runStandaloneServer(registry: StandaloneRegistry): Promise<void> {
   installProcessGuards();
 
-  const pluginRegistry = await startPluginRegistry(validateGioConfig(registry.config).plugins ?? []);
+  const configModule = await loadBootModule(registry.config, 'gio.config (standalone build)');
+  const config: GioConfig = validateGioConfig(configModule?.default);
+  const pluginRegistry = await startPluginRegistry(config.plugins ?? []);
 
   const routes = new Map<string, RouteModule>();
   for (const entry of registry.routes) {
@@ -157,8 +176,14 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     };
   }
 
-  // A rule that cannot be enforced stops the worker, as from source.
-  const middlewareRules = middlewareRulesOrThrow(registry.middleware, 'middleware.ts (standalone build)');
+  // A file that throws, has no default export or holds a rule that cannot
+  // be enforced stops the worker, as from source (middleware-loader.ts).
+  const middlewareSource = 'middleware.ts (standalone build)';
+  const middlewareModule = await loadBootModule(registry.middleware, middlewareSource);
+  if (middlewareModule !== undefined && !('default' in middlewareModule)) {
+    throw new Error(`${middlewareSource} has no default export - export default defineMiddleware({ ... })`);
+  }
+  const middlewareRules = middlewareRulesOrThrow(middlewareModule?.default, middlewareSource);
 
   const clientScripts = new Map(Object.entries(registry.clientScripts ?? {}));
   const stylesheets = styleManifestFromJson(registry.stylesheets);
