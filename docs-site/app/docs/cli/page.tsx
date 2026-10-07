@@ -25,9 +25,12 @@ giojs-server                        # production`} />
         <li>Never watched: node_modules/ (at any depth), hidden directories such as .git/ and .gio/ (the worker&apos;s own build output), and the top-level build output directories out/, dist/, build/, target/, standalone/, and coverage/. Editor scratch files (<code>~</code> backups, <code>.swp</code>/<code>.swx</code>, <code>4913</code>, <code>.#</code> locks) are ignored.</li>
         <li>Ignored directories are kept out of the watch registration itself, so a large node_modules/ does not use up Linux inotify watches. If a project is big enough to hit the limit anyway, the server logs which directory went unwatched; raise <code>fs.inotify.max_user_watches</code>.</li>
       </ul>
-      <h2>gio-migrate</h2>
-      <p>Converts a Next.js project toward GioJS conventions (best-effort).</p>
-      <CodeBlock lang="bash" code={`npx gio-migrate ./my-next-app`} />
+      <h2>create-giojs migrate</h2>
+      <p>Migrates a Next.js project (pages or app router) to GioJS in place and writes MIGRATION_REPORT.md - see the Migration Guide.</p>
+      <CodeBlock lang="bash" code={`npm create giojs@latest -- migrate ./my-next-app
+#   --dry-run      show the plan and a diff, write nothing
+#   -y / --yes     apply without the confirmation prompt
+#   --config <f>   only convert next.config to gio.toml`} />
     </>
   );
 }
