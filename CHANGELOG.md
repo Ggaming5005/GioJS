@@ -775,7 +775,10 @@ first.
 - **Typed params from your routes.** `.gio/routes.d.ts` fills one global
   registry that `href()`, `useParams()` and the core types read, and a route
   pattern that is not one of your routes fails `tsc`. Before the first server
-  start (or `gio typegen`), params are read from the pattern itself.
+  start (or `gio typegen`), params are read from the pattern itself - by the
+  core types and by `href()` and `useParams()` alike, so
+  `href('/posts/:id', { id })` typechecks on a fresh checkout and still
+  requires `id`. `@gio.js/react` exports `RoutePattern`.
 - `import type ... from '@gio.js/core'` no longer fails `tsc --noEmit` with
   TS5097: the package ships declaration files.
 - Starters depend on `@gio.js/core` directly and use these types (the

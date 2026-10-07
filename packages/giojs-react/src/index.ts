@@ -21,6 +21,6 @@ export type { UseWebSocketResult, UseWebSocketOptions, ReconnectOptions, WebSock
 export { useLocale } from './hooks/useLocale.js';
 export { LocaleLink } from './LocaleLink.js';
 export { href } from './typed-href.js';
-export type { GioRegisteredRoutes, RouteParamsOf } from './typed-href.js';
+export type { GioRegisteredRoutes, RouteParamsOf, RoutePattern } from './typed-href.js';
 export { GioForm, useGioFormState } from './Form.js';
 export type { GioFormProps, GioFormResult, GioFormState } from './Form.js';

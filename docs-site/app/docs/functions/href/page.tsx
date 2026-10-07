@@ -27,7 +27,7 @@ export default function Page(): React.JSX.Element {
       <PropsTable kind="Parameter" rows={[
         {
           name: 'pattern',
-          type: 'keyof GioRegisteredRoutes',
+          type: 'RoutePattern',
           required: true,
           description: (
             <>
@@ -65,7 +65,9 @@ export default function Page(): React.JSX.Element {
         <code>route.ts</code> pattern and its params. With that file in your tsconfig{' '}
         <code>include</code> (the starters have it), a pattern that is not one of your routes,
         or a missing or misspelled param, fails <code>tsc</code>, and editors autocomplete
-        both. Without it, any string is accepted and params are{' '}
+        both. Without it, any pattern is accepted and its params are read from the pattern
+        itself: <code>{"href('/posts/:id', { id })"}</code> still requires <code>id</code>.
+        Only a pattern held in a plain <code>string</code> variable takes any params, as{' '}
         <code>{'Record<string, string>'}</code>.
       </p>
       <CodeBlock lang="ts" title=".gio/routes.d.ts" code={`/**
@@ -110,7 +112,8 @@ router.push(url);`} />
         </li>
         <li>
           <strong>Before the first server start</strong> (no <code>.gio/routes.d.ts</code> yet),
-          every pattern is accepted. Run <code>gio typegen</code> in CI before{' '}
+          every pattern is accepted and its params come from the pattern, so a typo in a
+          pattern goes unnoticed. Run <code>gio typegen</code> in CI before{' '}
           <code>tsc</code>.
         </li>
         <li>
@@ -140,7 +143,10 @@ router.push(url);`} />
           changes: (
             <>
               Reads the global <code>GioJS.RegisteredRoutes</code> registry; optional
-              catch-alls (<code>*slug?</code>) drop their segment when empty.
+              catch-alls (<code>*slug?</code>) drop their segment when empty. Before{' '}
+              <code>.gio/routes.d.ts</code> exists, params are read from the pattern (a
+              pattern with params used to fail with{' '}
+              <code>Expected 1 arguments, but got 2</code>). <code>RoutePattern</code> type.
             </>
           ),
         },

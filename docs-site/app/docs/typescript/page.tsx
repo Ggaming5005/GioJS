@@ -183,9 +183,9 @@ href('/blgo/:slug', { slug: 'x' });           // tsc: not assignable to '/' | '/
       <p>
         Before <code>.gio/routes.d.ts</code> exists, these accept any pattern and parse its
         params from the string, so the <code>@gio.js/core</code> types work on a fresh
-        checkout. <code>href()</code> and <code>useParams&lt;pattern&gt;()</code> need the
-        registry: without it, <code>href(&apos;/blog/:slug&apos;, {'{ slug }'})</code> fails
-        with <code>Expected 1 arguments, but got 2</code>.
+        checkout. <code>href()</code> and <code>useParams&lt;pattern&gt;()</code> from{' '}
+        <code>@gio.js/react</code> do the same: <code>href(&apos;/blog/:slug&apos;, {'{ slug }'})</code>{' '}
+        typechecks before the first server start, and still requires <code>slug</code>.
       </p>
 
       <h3 id="gioregisteredroutes">GioRegisteredRoutes</h3>
@@ -306,7 +306,7 @@ export {};`} />
         { name: 'NavigateOptions, RouterNavigateOptions', description: <>Options of <code>navigate()</code> (<code>replace</code>, <code>scroll</code>, <code>transition</code>) and of <code>router.push</code> / <code>replace</code> (the same without <code>replace</code>).</> },
         { name: 'ReadonlyURLSearchParams', description: <><code>useSearchParams()</code>: <code>URLSearchParams</code> without the mutating methods.</> },
         { name: 'TransitionPreset, AnimatePreset', description: <>Names of the view-transition and <code>&lt;Animate&gt;</code> presets.</> },
-        { name: 'GioRegisteredRoutes, RouteParamsOf', description: <>The route registry as <code>@gio.js/react</code> sees it, and a registered pattern&apos;s params.</> },
+        { name: 'GioRegisteredRoutes, RouteParamsOf, RoutePattern', description: <>The route registry as <code>@gio.js/react</code> sees it, a pattern&apos;s params (registered, or parsed from the pattern), and the patterns <code>href()</code> accepts.</> },
       ]} />
 
       <h3 id="testing-types">Testing</h3>
