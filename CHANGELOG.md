@@ -321,12 +321,16 @@ first.
   `404.html`.
 - **A `route.ts` that throws while it is imported answers `500`.** It used to
   be skipped with a warning, so its URL answered `404` (or a same-folder page
-  took it over). Every method now answers the JSON `500` with a `digest`; the
-  log names the file and the error once at startup and per request under the
-  digest, development shows the error in the response, and `gio routes` still
-  marks it `(failed to load)`. A module-scope `createSessionStorage()` without
-  `GIO_SESSION_SECRET` in production, or a required-variable check in
-  `lib/env.server.ts`, is such a throw.
+  took it over). Every method, `OPTIONS` included, now answers the JSON `500`
+  with a `digest`, and a WebSocket connection to it is closed with `1011`
+  (reason `internal error (digest ...)`) instead of the `4404` of a path with
+  no `wsHandler`; the log names the file and the error once at startup and per
+  request or connection under the digest, development shows the error in the
+  response, and `gio routes` still marks it `(failed to load)` and says the
+  server answers `500` for it (it used to say the server skips it). A
+  module-scope `createSessionStorage()` without `GIO_SESSION_SECRET` in
+  production, or a required-variable check in `lib/env.server.ts`, is such a
+  throw.
 
 ### Data, forms and mutations
 

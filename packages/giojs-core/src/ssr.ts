@@ -36,6 +36,7 @@ import type {
   LayoutEntry,
   RedirectResult,
   HandlerEntry,
+  RouteHandlerFn,
   GsspContext,
   GsspResponseHeaders,
   SpecialPages,
@@ -813,7 +814,15 @@ async function answerRoute(
   if (handlerMatch !== null && handlerVsPage <= 0) {
     // HEAD is served by the GET handler (body discarded by the client).
     const method = req.method === 'HEAD' ? 'GET' : req.method;
-    const handler = handlerMatch.entry.methods.get(method);
+    // A route.ts that failed to import answers every method (OPTIONS too)
+    // with its 500 - it never lists methods it may not export in a 405.
+    const loadError = handlerMatch.entry.loadError;
+    const handler: RouteHandlerFn | undefined =
+      loadError !== undefined
+        ? () => {
+            throw loadError;
+          }
+        : handlerMatch.entry.methods.get(method);
     if (handler !== undefined) {
       const bodyStreaming: RouteBodyStreaming =
         extras?.streaming !== true || process.env.GIO_EXPORT === '1'

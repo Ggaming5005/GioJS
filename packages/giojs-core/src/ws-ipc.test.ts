@@ -29,7 +29,9 @@ import {
 } from './ws-ipc.ts';
 import { handshakeProof } from './ipc.ts';
 import { broadcast, MAX_ROOMS_PER_SOCKET, MAX_ROOM_NAME_BYTES, wsHub } from './ws-hub.ts';
-import type { WsHandlerFn } from './ws-router.ts';
+import { registerFailedRouteModule, type WsHandlerFn } from './ws-router.ts';
+import type { HandlerEntry } from './router.ts';
+import { logger } from './logger.ts';
 
 describe('isDroppableWsFrame', () => {
   it('marks payload frames droppable under backpressure', () => {
@@ -556,6 +558,38 @@ describe('ws dispatcher routing', () => {
     expect(writes).toEqual([
       { type: 'ws_close', connId: 'c1', code: WS_NO_HANDLER_CODE, reason: 'no websocket handler' },
     ]);
+  });
+
+  it('closes a connection to a route.ts that failed to import with 1011, not 4404, and logs it under a digest', () => {
+    const wsHandlers = new Map<string, WsHandlerFn>();
+    const handlers = new Map<string, HandlerEntry>();
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    try {
+      registerFailedRouteModule(new Error('REQ_VAR is not set'), '/app/chat/[room]/route.ts', '/chat/:room', wsHandlers, handlers);
+      // A broader wsHandler does not take the failed route's URLs over.
+      wsHandlers.set('/chat/*rest', () => {});
+      const writes: WsOutbound[] = [];
+      const dispatcher = createWsDispatcher(wsHandlers, msg => writes.push(msg));
+      dispatcher.handle(connectFrame('c1', '/chat/lobby'));
+      expect(writes).toHaveLength(1);
+      const close = writes[0] as { type: string; code: number; reason: string };
+      expect(close.type).toBe('ws_close');
+      expect(close.code).toBe(1011);
+      const digest = /^internal error \(digest ([0-9a-f]{12})\)$/.exec(close.reason)?.[1];
+      expect(digest).toBeDefined();
+      expect(close.reason).not.toContain('REQ_VAR');
+      const perConnection = errorSpy.mock.calls.at(-1);
+      expect(perConnection?.[0]).toBe('route file failed to load');
+      expect(perConnection?.[1]).toMatchObject({
+        path: '/chat/lobby',
+        connId: 'c1',
+        digest,
+        filePath: '/app/chat/[room]/route.ts',
+        error: 'REQ_VAR is not set',
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('falls back to routeId when an older server sends no path', () => {

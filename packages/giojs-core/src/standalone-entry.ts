@@ -125,7 +125,7 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     try {
       mod = await entry.load();
     } catch (loadError) {
-      registerFailedRouteModule(loadError, entry.filePath, entry.pattern, handlers);
+      registerFailedRouteModule(loadError, entry.filePath, entry.pattern, wsHandlers, handlers);
       continue;
     }
     registerRouteModule(mod, entry.filePath, entry.pattern, wsHandlers, handlers);

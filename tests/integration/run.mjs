@@ -4197,6 +4197,28 @@ async function standalonePhase() {
       assert.match(routeLine, /"msg":"route file failed to load"/);
       assert.match(routeLine, /needs-env[\\/]+route\.ts/);
       assert.match(routeLine, /"error":"STANDALONE_REQUIRED_VAR is not set"/);
+      // OPTIONS too: a 405 would list methods the module may never export.
+      const options = await fetch(`${STANDALONE_BASE}/api/needs-env`, { method: 'OPTIONS' });
+      assert.equal(options.status, 500);
+      assert.equal(options.headers.get('allow'), null);
+      await options.text();
+      // A WebSocket to it is closed with 1011 under a logged digest, not
+      // the 4404 of a path without a wsHandler.
+      const ws = new WebSocket(`${STANDALONE_BASE.replace(/^http/, 'ws')}/api/needs-env`);
+      const closed = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('WebSocket to a failed route.ts never closed')), 5_000);
+        ws.addEventListener('close', (event) => {
+          clearTimeout(timer);
+          resolve({ code: event.code, reason: event.reason });
+        });
+      });
+      assert.equal(closed.code, 1011);
+      const wsDigest = /^internal error \(digest ([0-9a-f]{12})\)$/.exec(closed.reason)?.[1];
+      assert.ok(wsDigest, `close reason: ${closed.reason}`);
+      await waitFor('ws failure logged', async () => logLine(`"digest":"${wsDigest}"`) !== undefined, 5_000);
+      const wsLine = logLine(`"digest":"${wsDigest}"`);
+      assert.match(wsLine, /"msg":"route file failed to load"/);
+      assert.match(wsLine, /needs-env[\\/]+route\.ts/);
       // The page sharing the module reports the same error - not a TypeError
       // on the export the failed evaluation left undefined.
       const page = await fetch(`${STANDALONE_BASE}/needs-env`);

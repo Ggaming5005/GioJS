@@ -252,8 +252,10 @@ export function GET() {
         <li>A thrown error is logged server-side and answered with a JSON 500 (no internals leaked).</li>
         <li>
           A <code>route.ts</code> that throws while it is imported (a module-scope check, a
-          missing <code>GIO_SESSION_SECRET</code>) answers that JSON 500 for every method, and
-          its URL stays its own - no sibling page or 404 takes it over. The log names the file
+          missing <code>GIO_SESSION_SECRET</code>) answers that JSON 500 for every method
+          (<code>OPTIONS</code> included), and its URL stays its own - no sibling page or 404
+          takes it over. A WebSocket connection to it is closed with <code>1011</code>, not the{' '}
+          <code>4404</code> of a path with no <code>wsHandler</code>. The log names the file
           and the error, once at startup and per request under the response&apos;s{' '}
           <code>digest</code>; in development the response carries the error too.
         </li>

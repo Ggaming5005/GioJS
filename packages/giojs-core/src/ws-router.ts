@@ -66,15 +66,22 @@ export function registerRouteModule(
 }
 
 /**
- * Register a route.ts that threw while it was imported: every method
- * answers 500 (ssr.ts runRouteHandler: a digest in production, the import
- * error in dev) and logs the file and the error, so the URL fails loudly
- * instead of turning into a 404 - or being taken over by a sibling page.
+ * Register a route.ts that threw while it was imported, so its URL fails
+ * loudly instead of turning into a 404 - or being taken over by a sibling
+ * page or a broader route.ts:
+ *  - HTTP: every method, OPTIONS included, answers 500 (ssr.ts
+ *    runRouteHandler: a digest in production, the import error in dev);
+ *  - WebSocket: a connection is closed with 1011 and the error is logged
+ *    under a digest (ws-ipc.ts runWsHandler) - the module may have been
+ *    meant to export a wsHandler, so it is not a "no websocket handler" 4404.
+ * The file and the error are logged once here, and again per request or
+ * connection.
  */
 export function registerFailedRouteModule(
   importError: unknown,
   filePath: string,
   urlPattern: string,
+  wsHandlers: Map<string, WsHandlerFn>,
   handlers: Map<string, HandlerEntry>,
 ): void {
   const failure = new RouteLoadError(filePath, importError);
@@ -83,13 +90,9 @@ export function registerFailedRouteModule(
     filePath: failure.file,
     ...describeError(importError),
   });
-  const fail: RouteHandlerFn = () => {
+  handlers.set(urlPattern, { filePath, urlPattern, methods: new Map(), loadError: failure });
+  wsHandlers.set(urlPattern, () => {
     throw failure;
-  };
-  handlers.set(urlPattern, {
-    filePath,
-    urlPattern,
-    methods: new Map(HANDLER_METHODS.map(method => [method, fail])),
   });
 }
 
@@ -103,7 +106,7 @@ export async function discoverRouteModules(routeFiles: RouteFile[]): Promise<Rou
       try {
         mod = await loadTsModule<RouteFileModule>(filePath);
       } catch (loadError) {
-        registerFailedRouteModule(loadError, filePath, urlPattern, handlers);
+        registerFailedRouteModule(loadError, filePath, urlPattern, wsHandlers, handlers);
         return;
       }
       registerRouteModule(mod, filePath, urlPattern, wsHandlers, handlers);

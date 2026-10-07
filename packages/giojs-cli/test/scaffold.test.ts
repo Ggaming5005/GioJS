@@ -238,7 +238,7 @@ test('a scaffold into an "empty" directory leaves its editor folders and README 
   assert.match(result.stdout, /Initialized a git repository with an initial commit/);
   assert.match(result.stdout, /not in the commit: /);
   const files = git(['ls-files'], target, env).split('\n');
-  assert.ok(files.includes('app/page.tsx') && files.includes('gio.toml'), files.join(', '));
+  assert.ok(files.includes('app/(site)/page.tsx') && files.includes('gio.toml'), files.join(', '));
   for (const file of ['.vscode/settings.json', '.idea/dataSources.local.xml', 'README.md']) {
     assert.ok(!files.includes(file), `${file} was already there and must not be committed`);
   }

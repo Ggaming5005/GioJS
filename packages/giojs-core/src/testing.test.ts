@@ -573,9 +573,11 @@ export default function Sibling() { return React.createElement('p', null, 'SIBLI
       errors.push(args);
     });
     try {
-      for (const method of ['POST', 'GET', 'HEAD', 'DELETE']) {
+      // OPTIONS too: a 405 would list methods the module may never export.
+      for (const method of ['POST', 'GET', 'HEAD', 'DELETE', 'OPTIONS']) {
         const res = await callRoute('/api/broken', { appDir, method });
         expect(res.status, method).toBe(500);
+        expect(res.headers['allow'], method).toBeUndefined();
         if (method === 'HEAD') continue;
         const body = await res.json<{ error: string; digest: string }>();
         expect(body.error).toBe('Internal Server Error');

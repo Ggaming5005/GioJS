@@ -185,6 +185,12 @@ export interface HandlerEntry {
   filePath: string;
   urlPattern: string;
   methods: Map<string, RouteHandlerFn>;
+  /**
+   * Set when the route.ts threw while it was imported (ws-router.ts
+   * registerFailedRouteModule): `methods` is empty and every method,
+   * OPTIONS included, answers 500 with this error.
+   */
+  loadError?: RouteLoadError;
 }
 
 /**

@@ -339,6 +339,18 @@ describe('gio routes / gio typegen', () => {
     assert.match(second.stdout, /is up to date/);
   });
 
+  test('a route.ts that throws at import is marked, with what the server does about it', () => {
+    const broken = tempProject({
+      'app/page.tsx': PAGE,
+      'app/api/broken/route.ts': 'throw new Error("REQ_VAR is not set");\nexport function GET() { return {}; }\n',
+    });
+    const { status, stdout, stderr } = run(['routes'], { cwd: broken });
+    assert.equal(status, 0, stderr);
+    assert.match(stdout, /^\/api\/broken +route \(failed to load\) +app\/api\/broken\/route\.ts/m);
+    assert.match(stdout, /^! app\/api\/broken\/route\.ts failed to load - the server answers 500 for its URL .*1011.*: REQ_VAR is not set$/m);
+    assert.doesNotMatch(stdout, /skips/);
+  });
+
   test('a route conflict fails with the boot error', () => {
     const conflicted = tempProject({
       'app/(a)/about/page.tsx': PAGE,
