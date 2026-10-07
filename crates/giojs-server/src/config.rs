@@ -598,10 +598,14 @@ impl Default for CompressionConfig {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub struct PrefetchConfig {
-    /// Prefetches one client may have in flight at once. 0 refuses all.
+    /// Answer prefetches at all. false answers every prefetch request 429
+    /// before it renders, which turns prefetching off site-wide.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Prefetches one client may have in flight at once. 0 = unlimited.
     #[serde(default = "default_prefetch_max_concurrent")]
     pub max_concurrent: usize,
-    /// Prefetches one client may start per second. 0 refuses all.
+    /// Prefetches one client may start per second. 0 = unlimited.
     #[serde(default = "default_prefetch_max_per_second")]
     pub max_per_second: usize,
 }
@@ -616,6 +620,7 @@ fn default_prefetch_max_per_second() -> usize {
 impl Default for PrefetchConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             max_concurrent: default_prefetch_max_concurrent(),
             max_per_second: default_prefetch_max_per_second(),
         }
@@ -2419,6 +2424,25 @@ check_origin = true
             !enforced.try_acquire(ip),
             "a third concurrent prefetch is over budget"
         );
+        assert!(parse("").unwrap().prefetch.enabled);
+    }
+
+    #[test]
+    fn prefetch_can_be_turned_off_and_zero_budgets_are_unlimited() {
+        let off = parse("[prefetch]\nenabled = false\n").unwrap().prefetch;
+        assert!(!off.enabled);
+        assert_eq!(off.max_concurrent, 5, "the budgets keep their defaults");
+
+        // 0 = unlimited, like every [server] limit: it used to refuse all.
+        let budgets = parse("[prefetch]\nmax_concurrent = 0\nmax_per_second = 0\n")
+            .unwrap()
+            .prefetch
+            .budgets();
+        let unlimited = giojs_prefetch::PrefetchBudgets::new(budgets);
+        let ip: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        for _ in 0..100 {
+            assert!(unlimited.try_acquire(ip));
+        }
     }
 
     #[test]

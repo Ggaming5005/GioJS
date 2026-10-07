@@ -4,7 +4,7 @@
 //! request counts keyed by client IP. Caps concurrent prefetches to prevent
 //! bandwidth abuse from aggressive link-viewport-prefetch polyfills.
 //!
-//! Limits (configurable via PrefetchConfig):
+//! Limits (configurable via PrefetchConfig; 0 disables that limit):
 //!   - max 5 concurrent in-flight prefetches per client IP
 //!   - max 20 prefetch requests per second per client IP
 //!
@@ -18,6 +18,7 @@ use dashmap::DashMap;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
+/// Per-client limits. 0 means unlimited, like the server's other limits.
 #[derive(Debug, Clone)]
 pub struct PrefetchConfig {
     pub max_in_flight: usize,
@@ -87,7 +88,7 @@ impl PrefetchBudgets {
         // CAS loop: atomically increment in_flight only if still under the cap.
         loop {
             let current = entry.in_flight.load(Ordering::Acquire);
-            if current >= self.max_in_flight {
+            if over_limit(current, self.max_in_flight) {
                 return false;
             }
             if entry
@@ -102,7 +103,7 @@ impl PrefetchBudgets {
         // CAS loop: atomically increment window_count only if still under rate limit.
         loop {
             let current = entry.window_count.load(Ordering::Acquire);
-            if current >= self.max_per_second {
+            if over_limit(current, self.max_per_second) {
                 entry.in_flight.fetch_sub(1, Ordering::Release);
                 return false;
             }
@@ -138,6 +139,11 @@ impl PrefetchBudgets {
         self.budgets
             .retain(|_, entry| entry.last_seen_secs.load(Ordering::Relaxed) >= cutoff);
     }
+}
+
+/// Whether `current` already uses up `limit`; a limit of 0 is unlimited.
+fn over_limit(current: usize, limit: usize) -> bool {
+    limit > 0 && current >= limit
 }
 
 fn unix_now_secs() -> u64 {
@@ -205,6 +211,24 @@ mod tests {
             assert!(b.try_acquire(LOCAL));
         }
         assert!(!b.try_acquire(LOCAL));
+    }
+
+    #[test]
+    fn zero_limits_are_unlimited() {
+        let unlimited = budget(0, 0);
+        for _ in 0..1000 {
+            assert!(unlimited.try_acquire(LOCAL));
+        }
+        // Each limit on its own: 0 lifts only that one.
+        let no_concurrency_cap = budget(0, 3);
+        for _ in 0..3 {
+            assert!(no_concurrency_cap.try_acquire(LOCAL));
+        }
+        assert!(!no_concurrency_cap.try_acquire(LOCAL), "max_per_second still holds");
+        let no_rate_cap = budget(2, 0);
+        assert!(no_rate_cap.try_acquire(LOCAL));
+        assert!(no_rate_cap.try_acquire(LOCAL));
+        assert!(!no_rate_cap.try_acquire(LOCAL), "max_in_flight still holds");
     }
 
     #[test]

@@ -99,6 +99,7 @@
         }
       ],
       "default": {
+        "enabled": true,
         "max_concurrent": 5,
         "max_per_second": 20
       }
@@ -615,15 +616,20 @@
       "description": "`[prefetch]`: per-client budgets for prefetch requests (`Purpose:\nprefetch`, sent by `<GioLink>`). Over budget is a 429, which the client\ntreats as \"not prefetched\". Which links prefetch is chosen per link.",
       "type": "object",
       "properties": {
+        "enabled": {
+          "description": "Answer prefetches at all. false answers every prefetch request 429\nbefore it renders, which turns prefetching off site-wide.",
+          "type": "boolean",
+          "default": true
+        },
         "max_concurrent": {
-          "description": "Prefetches one client may have in flight at once. 0 refuses all.",
+          "description": "Prefetches one client may have in flight at once. 0 = unlimited.",
           "type": "integer",
           "format": "uint",
           "default": 5,
           "minimum": 0
         },
         "max_per_second": {
-          "description": "Prefetches one client may start per second. 0 refuses all.",
+          "description": "Prefetches one client may start per second. 0 = unlimited.",
           "type": "integer",
           "format": "uint",
           "default": 20,

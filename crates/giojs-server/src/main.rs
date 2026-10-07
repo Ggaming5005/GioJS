@@ -450,6 +450,8 @@ struct AppState {
     coalesce: Arc<SingleFlight<CoalescedRender>>,
     revalidating: Arc<dashmap::DashSet<String>>,
     prefetch: Arc<PrefetchBudgets>,
+    /// `[prefetch] enabled`: false answers every prefetch 429.
+    prefetch_enabled: bool,
     font_snippets: Arc<Vec<String>>,
     image: Arc<giojs_image::ImageHandler>,
     css_cache: Arc<css_assets::CssCache>,
@@ -895,6 +897,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         coalesce: Arc::new(SingleFlight::new()),
         revalidating: Arc::new(dashmap::DashSet::new()),
         prefetch,
+        prefetch_enabled: cfg.prefetch.enabled,
         font_snippets: Arc::new(font_snippets),
         image: image_handler,
         css_cache,
@@ -1550,12 +1553,42 @@ async fn prefetch_budget_middleware(
         return next.run(req).await;
     }
     let ip = client_identity::client_ip(&req, addr);
-    let Some(_slot) = PrefetchSlot::acquire(&state.prefetch, ip) else {
-        warn!(ip = %ip, path = %req.uri().path(), "prefetch budget exceeded");
-        state.metrics.record_prefetch_rejected();
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    let _slot = match admit_prefetch(state.prefetch_enabled, &state.prefetch, ip) {
+        PrefetchAdmission::Admitted(slot) => slot,
+        PrefetchAdmission::Disabled => {
+            state.metrics.record_prefetch_rejected();
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+        PrefetchAdmission::OverBudget => {
+            warn!(ip = %ip, path = %req.uri().path(), "prefetch budget exceeded");
+            state.metrics.record_prefetch_rejected();
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
     };
     next.run(req).await
+}
+
+/// What happens to one prefetch request. Both refusals are a 429 the
+/// client reads as "not prefetched"; only an exceeded budget is logged.
+enum PrefetchAdmission {
+    Admitted(PrefetchSlot),
+    /// `[prefetch] enabled = false`: refused before anything renders.
+    Disabled,
+    OverBudget,
+}
+
+fn admit_prefetch(
+    enabled: bool,
+    budgets: &Arc<PrefetchBudgets>,
+    ip: std::net::IpAddr,
+) -> PrefetchAdmission {
+    if !enabled {
+        return PrefetchAdmission::Disabled;
+    }
+    match PrefetchSlot::acquire(budgets, ip) {
+        Some(slot) => PrefetchAdmission::Admitted(slot),
+        None => PrefetchAdmission::OverBudget,
+    }
 }
 
 /// One in-flight prefetch, released when dropped: when the response is
@@ -6590,6 +6623,33 @@ mod tests {
             PrefetchSlot::acquire(&budgets, ip).is_some(),
             "the cancelled prefetch released its slot"
         );
+    }
+
+    #[test]
+    fn disabled_prefetching_refuses_every_prefetch_whatever_the_budget() {
+        // Unlimited budgets (0), so only the switch can refuse.
+        let budgets = Arc::new(PrefetchBudgets::new(giojs_prefetch::PrefetchConfig {
+            max_in_flight: 0,
+            max_per_second: 0,
+        }));
+        let ip: std::net::IpAddr = "192.0.2.8".parse().unwrap();
+        assert!(matches!(
+            admit_prefetch(false, &budgets, ip),
+            PrefetchAdmission::Disabled
+        ));
+        assert!(matches!(
+            admit_prefetch(true, &budgets, ip),
+            PrefetchAdmission::Admitted(_)
+        ));
+        let tight = Arc::new(PrefetchBudgets::new(giojs_prefetch::PrefetchConfig {
+            max_in_flight: 1,
+            max_per_second: 100,
+        }));
+        let _held = admit_prefetch(true, &tight, ip);
+        assert!(matches!(
+            admit_prefetch(true, &tight, ip),
+            PrefetchAdmission::OverBudget
+        ));
     }
 
     // ── query decoding ────────────────────────────────────────────────────────
