@@ -18,6 +18,7 @@
 //! metrics and revalidation tokens, .env contents) - only whether one is set
 //! and valid. Config errors name a key or a position, never a quoted line.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -32,9 +33,23 @@ use crate::session_token::{self, SessionKeys};
 /// The argument that selects this mode; only ever the first one.
 pub const FLAG: &str = "--check-config";
 
-/// Whether the process was started as `giojs-server --check-config`.
-pub fn requested() -> bool {
-    std::env::args_os().nth(1).is_some_and(|arg| arg == FLAG)
+/// Whether the command line (without the program name) asks for the check:
+/// Ok(true) for `--check-config` alone, Ok(false) for no arguments. The
+/// binary takes no other argument - gio.toml and environment variables
+/// configure it - so anything else (`--version`, `--port 4000`) comes back
+/// as Err for startup to refuse, instead of a server that starts as if the
+/// argument had not been given.
+pub fn requested(args: impl IntoIterator<Item = OsString>) -> Result<bool, OsString> {
+    let mut args = args.into_iter();
+    let check = match args.next() {
+        None => return Ok(false),
+        Some(arg) if arg == FLAG => true,
+        Some(arg) => return Err(arg),
+    };
+    match args.next() {
+        None => Ok(check),
+        Some(extra) => Err(extra),
+    }
 }
 
 /// The process environment startup checks gio.toml against: where the app,
@@ -486,6 +501,25 @@ fn display(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::env_files::EnvMode;
+
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn only_check_config_alone_is_an_accepted_argument() {
+        assert_eq!(requested(args(&[])), Ok(false));
+        assert_eq!(requested(args(&["--check-config"])), Ok(true));
+        for (list, rejected) in [
+            (&["--version"][..], "--version"),
+            (&["--port", "4000"][..], "--port"),
+            (&["--check-config", "--verbose"][..], "--verbose"),
+            (&["serve", "--check-config"][..], "serve"),
+            (&["--check-config=1"][..], "--check-config=1"),
+        ] {
+            assert_eq!(requested(args(list)), Err(OsString::from(rejected)), "{list:?}");
+        }
+    }
 
     fn env_in(root: &Path) -> CheckEnv {
         CheckEnv {

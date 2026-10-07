@@ -19,7 +19,7 @@ import { readFile, writeFile } from 'fs/promises';
 import { basename, dirname, join, resolve } from 'path';
 import { createInterface } from 'readline/promises';
 import { unifiedDiff } from './migrate-edits.js';
-import { applyMigration, planMigration, type MigrationPlan } from './migrate.js';
+import { applyMigration, appNameFrom, planMigration, type MigrationPlan } from './migrate.js';
 import { convertConfigSource, planToml } from './next-config-converter.js';
 
 export const MIGRATE_USAGE = `Usage: create-giojs migrate [dir] [options]
@@ -38,6 +38,8 @@ Options:
   -y, --yes        Apply without asking for confirmation
   --config <file>  Only convert a next.config file to gio.toml
   -h, --help       Show this help
+
+Exit codes: 0 success, 1 the migration failed or was refused, 2 usage error.
 
 What it does:
   - moves pages/ to app/ (pages/about.tsx -> app/about/page.tsx,
@@ -167,7 +169,11 @@ async function runConfigOnly(args: MigrateArgs, io: MigrateIO): Promise<number> 
   const converted = convertConfigSource(source, basename(file));
   const tomlPath = join(dirname(file), 'gio.toml');
   const existing = existsSync(tomlPath) ? await readFile(tomlPath, 'utf8') : undefined;
-  const toml = planToml(existing, converted, 'my-app');
+  // The same [app] name the full migration writes: package.json's, next to
+  // the config file.
+  const pkgPath = join(dirname(file), 'package.json');
+  const pkgRaw = existsSync(pkgPath) ? await readFile(pkgPath, 'utf8') : undefined;
+  const toml = planToml(existing, converted, appNameFrom(pkgRaw));
   const target = join(dirname(file), toml.target);
   for (const c of converted.converted) io.log(`  ✔ ${c}`);
   for (const t of converted.todos) io.log(`  TODO ${t}`);
@@ -189,9 +195,10 @@ async function runConfigOnly(args: MigrateArgs, io: MigrateIO): Promise<number> 
 export async function runMigrate(argv: string[], io: MigrateIO = defaultIO()): Promise<number> {
   const args = parseMigrateArgs(argv);
   if ('error' in args) {
+    // Usage errors exit 2, as create-giojs's own and gio's do.
     io.error(`create-giojs migrate: ${args.error}\n`);
     io.error(MIGRATE_USAGE);
-    return 1;
+    return 2;
   }
   if (args.help) {
     io.log(MIGRATE_USAGE);

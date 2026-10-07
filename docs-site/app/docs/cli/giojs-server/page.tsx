@@ -37,12 +37,12 @@ giojs-server --check-config   # validate .env files + gio.toml, print JSON, exit
         {
           name: '--check-config',
           type: 'flag',
-          description: <>Validate and exit instead of serving (see <a href="#check-config">below</a>). Recognized only as the first argument.</>,
+          description: <>Validate and exit instead of serving (see <a href="#check-config">below</a>). Recognized only on its own.</>,
         },
         {
           name: 'other arguments',
           type: 'string',
-          description: 'Passed through by the launcher and ignored by the binary: everything else is configured with gio.toml and environment variables.',
+          description: <>Passed through by the launcher and refused by the binary: it prints <code>unexpected argument</code> and exits with <code>2</code> (a usage error, as for <code>gio</code>) without starting. Everything else is configured with gio.toml and environment variables, and <code>gio --version</code> prints the versions.</>,
         },
       ]} />
 
@@ -311,7 +311,7 @@ node -e 'const r = require("./check.json"); if (r.warnings.length) { console.log
       <VersionHistory entries={[
         {
           version: 'v0.1.0-beta.8',
-          changes: <><code>--check-config</code> introduced. The server loads <code>.env</code> files, decides the worker&apos;s mode from <code>NODE_ENV</code>, rejects unknown <code>gio.toml</code> keys, reports every startup refusal at once (every unknown key in one run), and logs a warning per loosened protection. The bin became a separate launcher: <code>gio</code> got commands, <code>giojs-server</code> kept starting the server.</>,
+          changes: <><code>--check-config</code> introduced. The server loads <code>.env</code> files, decides the worker&apos;s mode from <code>NODE_ENV</code>, rejects unknown <code>gio.toml</code> keys, reports every startup refusal at once (every unknown key in one run), and logs a warning per loosened protection. Any other argument (<code>--version</code>, <code>--port</code>) is a usage error, exit <code>2</code>, where it used to be ignored and the server started. The bin became a separate launcher: <code>gio</code> got commands, <code>giojs-server</code> kept starting the server.</>,
         },
         { version: 'v0.1.0-beta.1', changes: <>Introduced, as a second name for the <code>gio</code> bin.</> },
       ]} />

@@ -48,7 +48,7 @@ export default function Page(): React.JSX.Element {
       </table>
       <CodeBlock lang="bash" code={`gio --help             # the command list
 gio help dev           # one command's options (same as: gio dev --help)
-gio --version          # CLI, server binary and @gio.js/core versions (-v)`} />
+gio --version          # CLI, server binary and @gio.js/core package versions (-v)`} />
       <p>
         In a project, run <code>gio</code> through your package manager (<code>npx gio</code>,{' '}
         <code>pnpm gio</code>) or from a <code>package.json</code> script. A mistyped command
@@ -69,9 +69,21 @@ gio --version          # CLI, server binary and @gio.js/core versions (-v)`} />
         </tbody>
       </table>
       <p>
-        <code>gio build standalone</code>, <code>gio bench</code> and{' '}
-        <code>gio migrate</code> parse their own options and exit with <code>1</code> on a
-        usage error.
+        Every command keeps this contract, including the ones that parse their own options
+        (<code>gio build standalone</code>, <code>gio bench</code>, <code>gio migrate</code>{' '}
+        and <code>gio add</code>): a usage error exits with <code>2</code> before the command
+        does anything. An argument a command does not take is one too, after{' '}
+        <code>--help</code> or <code>--version</code> as well: <code>gio --version --bogus</code>{' '}
+        and <code>gio help dev extra</code> exit with <code>2</code>. <code>--help</code> wins
+        only over arguments that parse (<code>gio bench / --help</code> prints the help).
+      </p>
+      <p>
+        <code>gio --version</code> prints package versions, read from the installed{' '}
+        <code>package.json</code> files: <code>gio</code> is <code>@gio.js/server</code>&apos;s
+        version, the server binary its platform package&apos;s (a binary from{' '}
+        <code>GIO_SERVER_BIN</code> or a repository build prints its path instead), and{' '}
+        <code>@gio.js/core</code> its own. It never runs the binary. See{' '}
+        <a href="/docs/cli/help#version"><code>gio --version</code></a>.
       </p>
 
       <h2 id="dev">gio dev</h2>
@@ -88,7 +100,10 @@ gio --version          # CLI, server binary and @gio.js/core versions (-v)`} />
       <p>
         The whole project is watched: changes in <code>app/</code>, source files elsewhere and
         root config files restart the Node worker and reload open tabs, and edits under{' '}
-        <code>public/</code> only reload the browser. <code>node_modules</code>, hidden
+        <code>public/</code> only reload the browser. A <code>gio.toml</code> edit restarts
+        the worker too, but its new settings do not apply: the Rust server reads{' '}
+        <code>gio.toml</code> once, at startup, so stop <code>gio dev</code> and run it
+        again. <code>node_modules</code>, hidden
         directories and build output are never watched. The rules, and the{' '}
         <code>[dev] watch</code> / <code>watch_ignore</code> keys, are on the{' '}
         <a href="/docs/cli/dev#file-watching"><code>gio dev</code> page</a>.
@@ -208,7 +223,7 @@ gio bench --suite /,/posts/1 [--base <url>]`} />
           <tr><td><code>GIO_APP_DIR</code></td><td>all</td><td>The <code>app/</code> directory; the project root is its parent</td></tr>
           <tr><td><code>GIO_PORT</code> / <code>PORT</code> / <code>GIO_HOST</code></td><td><code>dev</code>, <code>start</code>, <code>cache explain</code>, <code>bench</code>, <code>doctor</code></td><td>The listen address (<code>--port</code> / <code>--host</code> set the <code>GIO_*</code> ones)</td></tr>
           <tr><td><code>NODE_ENV</code></td><td><code>export</code>, <code>routes</code>, <code>typegen</code>, <code>doctor</code>, <code>giojs-server</code></td><td><code>development</code> selects development mode and the <code>.env.development*</code> files; <code>gio dev</code> / <code>gio start</code> set it themselves</td></tr>
-          <tr><td><code>GIO_ENV_FILES</code></td><td>all that read <code>.env</code> files</td><td><code>0</code> loads no <code>.env</code> files, <code>1</code> loads them whatever <code>[env] files</code> says</td></tr>
+          <tr><td><code>GIO_ENV_FILES</code></td><td>all that read <code>.env</code> files</td><td><code>0</code> loads no <code>.env</code> files, <code>1</code> loads them whatever <code>[env] files</code> says; any other value is the error the server refuses to start with (<code>gio doctor</code> reports it)</td></tr>
           <tr><td><code>GIO_OUT_DIR</code>, <code>GIO_SITE_URL</code></td><td><code>export</code></td><td>The output directory; the site origin for <code>sitemap.xml</code></td></tr>
           <tr><td><code>GIO_STANDALONE_SERVER_BIN</code></td><td><code>build standalone</code></td><td>The binary to package, over <code>--target</code></td></tr>
         </tbody>
@@ -250,7 +265,8 @@ gio bench --suite /,/posts/1 [--base <url>]`} />
       <h2 id="giojs-server">giojs-server</h2>
       <p>
         The <code>giojs-server</code> bin starts the server with no command parsing: it keeps
-        the caller&apos;s <code>NODE_ENV</code> and passes its arguments to the binary, as the
+        the caller&apos;s <code>NODE_ENV</code> and passes its arguments to the binary (which
+        takes only <code>--check-config</code>: any other argument exits with <code>2</code>), as the
         scripts of scaffolded projects use it (
         <code>cross-env NODE_ENV=development giojs-server</code>). See{' '}
         <a href="/docs/cli/giojs-server"><code>giojs-server</code></a>.

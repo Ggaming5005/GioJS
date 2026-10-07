@@ -190,6 +190,19 @@ export function moduleTraits(path: string, source: string): ModuleTraits | undef
   return traits;
 }
 
+/**
+ * gio.toml's `[app] name`, for the full migration and `--config` alike:
+ * package.json's `name`, else `my-app` (also when package.json is invalid,
+ * which the full migration reports in its own step).
+ */
+export function appNameFrom(pkgRaw: string | undefined): string {
+  try {
+    const name = (JSON.parse(pkgRaw ?? '{}') as { name?: unknown }).name;
+    if (typeof name === 'string' && name !== '') return name;
+  } catch { /* fall through */ }
+  return 'my-app';
+}
+
 export async function planMigration(rootDir: string): Promise<MigrationPlan> {
   const root = rootDir;
   if (!(await stat(root)).isDirectory()) throw new Error(`${root} is not a directory`);
@@ -532,11 +545,7 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
   if (configFile !== undefined) {
     const converted = convertConfigSource(await read(configFile), configFile);
     staticExport = converted.staticExport;
-    let appName = 'my-app';
-    try {
-      const name = (JSON.parse(pkgRaw ?? '{}') as { name?: unknown }).name;
-      if (typeof name === 'string' && name !== '') appName = name;
-    } catch { /* invalid package.json is reported by its own step */ }
+    const appName = appNameFrom(pkgRaw);
     const existing = files.has('gio.toml') ? await read('gio.toml') : undefined;
     const toml = planToml(existing, converted, appName);
     plan.config = { source: configFile, converted, toml };

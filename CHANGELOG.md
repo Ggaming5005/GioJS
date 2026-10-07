@@ -48,6 +48,12 @@ first.
   the list there.
 - **`gio.config.ts` is validated at boot:** unknown keys and plugins without a
   `name` are errors.
+- **The server binary refuses arguments it does not take.** `giojs-server`
+  (and a standalone build's `run.mjs`) takes `--check-config` alone; any other
+  argument, such as `--version` or `--port 4000`, exits with 2 and starts
+  nothing. It used to be ignored, and the server started. Configure the
+  server with `gio.toml` and environment variables (`GIO_PORT`), and use
+  `gio --version` for versions.
 - **Broken rules stop startup.** A `[[guards]]` entry with a misspelled key,
   no requirement or an invalid path now fails startup instead of being skipped
   with a warning, and so does a `[[redirects]]`, `[[rewrites]]` or
@@ -818,8 +824,13 @@ first.
 - **`gio` has real commands.** `gio --help`, `gio help <command>` and
   `gio <command> --help` show the command table and each command's options,
   and `gio --version` prints the CLI, server binary and `@gio.js/core`
-  versions. A mistyped command or option is a did-you-mean error. Exit codes:
-  0 success, 1 failure, 2 usage error.
+  package versions (read from their `package.json`; the binary is not run). A
+  mistyped command or option is a did-you-mean error. Exit codes: 0 success,
+  1 failure, 2 usage error - in every command, including those that parse
+  their own options (`gio bench`, `gio build standalone`, `gio migrate`,
+  `gio add`). An argument a command does not take is a usage error too,
+  after `--help` or `--version` as well (`gio --version --bogus`,
+  `gio help dev extra`).
 - **`gio dev` and `gio start`** run the server in development or production
   mode, whatever `NODE_ENV` says. `-p/--port` and `-H/--host` (IPv4 or IPv6)
   set `GIO_PORT` / `GIO_HOST`, `--open` opens a browser, and the local and
@@ -827,7 +838,9 @@ first.
 - **Dev mode watches the whole project.** Changes in `app/`, source files in
   `components/`, `lib/`, `src/` and `hooks/`, and root config files restart
   the worker; edits under `public/` only reload the browser. `node_modules`,
-  `.git`, `.gio`, build output and editor temp files are ignored.
+  `.git`, `.gio`, build output and editor temp files are ignored. A
+  `gio.toml` edit restarts the worker but does not apply the new settings:
+  the server reads `gio.toml` once, at startup, so restart `gio dev`.
 - **`gio routes [--json]`** lists every route without starting the server:
   pages with their layouts and loading/error/not-found files, route-handler
   methods, WebSocket handlers and metadata routes. **`gio typegen`** writes
@@ -839,14 +852,20 @@ first.
   server itself), `tsconfig.json` including `.gio/routes.d.ts`,
   `GIO_SESSION_SECRET` for `require_session` guards, a free port,
   `trusted_proxies` behind a proxy and a writable cache directory, with a fix
-  for every problem. **`gio info [--json]`** prints versions and environment
-  details for bug reports.
+  for every problem. When the server cannot read the configuration, the checks
+  that depend on it are reported as skipped, with the reason - and so when no
+  binary of this version is installed and the CLI's lenient reader cannot read
+  `gio.toml` (the `config` check names the lines).
+  **`gio info [--json]`** prints versions and environment details for bug
+  reports.
 - **`gio migrate` and `gio add <feature>`** run the matching `create-giojs`
   commands, using the installed `create-giojs` or the same version through
   npx, pnpm dlx or bunx.
 - `gio cache explain` and `gio bench` use the address the server listens on
   (`GIO_PORT` / `PORT`, `.env` files, `gio.toml`) instead of port 3000;
-  `gio cache explain` also takes `--base <url>`.
+  `gio cache explain` also takes `--base <url>`. Both reject a target that is
+  neither a path nor an `http(s)` URL as a usage error, before any request.
+  `gio bench` and `gio build standalone` also take `--flag=value`.
 - A missing platform binary prints which package to install for your platform
   and package manager, never a stack trace. `GIO_SERVER_BIN` points the CLI at
   a binary you built yourself.
@@ -946,9 +965,10 @@ first.
   moves to `app/`; `.js` files with JSX become `.jsx`. A file is never moved
   onto an existing one.
 - `next.config` becomes `gio.toml`: redirects, rewrites and headers (`:path*`
-  to `*path`), images and i18n. Rules GioJS would match differently are
-  skipped with a TODO, and an existing `gio.toml` is merged into only when
-  safe (otherwise `gio.migrated.toml`).
+  to `*path`), images and i18n, with `[app] name` from `package.json`
+  (`--config <file>` converts just that file, the same way). Rules GioJS would
+  match differently are skipped with a TODO, and an existing `gio.toml` is
+  merged into only when safe (otherwise `gio.migrated.toml`).
 - `package.json` swaps `next` for `@gio.js/*` and gets `"type": "module"`
   (CommonJS `.js` configs become `.cjs`), `tsconfig.json` gets
   `"jsx": "react-jsx"`, and `MIGRATION_REPORT.md` lists every move, change and
@@ -1016,6 +1036,10 @@ first.
   `--out .` deleted the whole project. It now refuses the project directory,
   an ancestor of it, anything under `app/`, and a non-empty directory that is
   not a previous standalone build.
+- `gio bench` and `gio build standalone` exited with `1` on a usage error (a
+  bad flag or value), like a failed run; they now exit with `2`, as `gio`
+  documents. `gio bench` also rejects a fractional `--connections` (it was
+  rounded down), and says what a target must be instead of `Invalid URL`.
 - Every production start warned that `/_gio/metrics` is unauthenticated, even
   with metrics off (no `[metrics]` section, or `enabled = false`), where the
   endpoint answers `404`. Metrics without a `token` or `ip_allowlist` now

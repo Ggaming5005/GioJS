@@ -133,7 +133,7 @@ npm install && npx tsc --noEmit && npm run dev`} />
 +# Reference: https://giojs.com/docs/configuration
 +
 +[app]
-+name = "my-app"
++name = "next-app"
 ...
 +[[redirects]]
 +from = "/old/*path"
@@ -150,15 +150,17 @@ Dry run - nothing was written.`} />
         </li>
         <li>
           Exit codes come from <code>create-giojs migrate</code>: <code>0</code> when it
-          applied, previewed, or you answered no; <code>1</code> for an error, a refused run
-          without <code>--yes</code>, or an unknown option (it uses <code>1</code>, not{' '}
-          <code>2</code>, for usage errors). <code>gio migrate</code> exits <code>1</code>{' '}
-          itself when no suitable <code>create-giojs</code> can be found or run.
+          applied, previewed, or you answered no; <code>1</code> for an error or a refused
+          run without <code>--yes</code>; <code>2</code> for a usage error (an unknown option,
+          a second directory, <code>--config</code> without a file), as every{' '}
+          <code>gio</code> usage error. <code>gio migrate</code> exits <code>1</code> itself
+          when no suitable <code>create-giojs</code> can be found or run.
         </li>
         <li>
-          <code>--config</code> names the app <code>my-app</code> in a new{' '}
-          <code>[app]</code> table; change it afterwards. It refuses to overwrite an existing{' '}
-          <code>gio.migrated.toml</code>.
+          A new <code>gio.toml</code> names the app after the <code>name</code> in{' '}
+          <code>package.json</code> (with <code>--config</code>, the one next to the config
+          file), or <code>my-app</code> when there is none. <code>--config</code> refuses to
+          overwrite an existing <code>gio.migrated.toml</code>.
         </li>
         <li>
           <code>gio help migrate</code> prints <code>gio</code>&apos;s summary;{' '}
@@ -178,7 +180,7 @@ Dry run - nothing was written.`} />
       <VersionHistory entries={[
         {
           version: 'v0.1.0-beta.8',
-          changes: <>Introduced. The migration (also <code>create-giojs migrate</code> and the <code>gio-migrate</code> bin) parses code with the TypeScript compiler, replacing the regex codemod.</>,
+          changes: <>Introduced. The migration (also <code>create-giojs migrate</code> and the <code>gio-migrate</code> bin) parses code with the TypeScript compiler, replacing the regex codemod. Usage errors exit with <code>2</code>, and <code>--config</code> names the app after <code>package.json</code> like the full migration.</>,
         },
       ]} />
     </>

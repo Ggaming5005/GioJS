@@ -251,8 +251,9 @@ Docs: ${DOCS_URL}`;
 }
 
 function commandHelp(name) {
+  // Own keys only: `gio help constructor` is an unknown command.
+  if (!Object.prototype.hasOwnProperty.call(COMMANDS, name)) return null;
   const command = COMMANDS[name];
-  if (!command) return null;
   return `Usage: ${command.usage}\n\n${command.summary}.\n\n${command.help}\n\nDocs: ${DOCS_URL}`;
 }
 

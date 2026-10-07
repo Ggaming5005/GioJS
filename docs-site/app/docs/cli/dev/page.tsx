@@ -134,6 +134,13 @@ export default function Page(): React.JSX.Element {
         Node worker and reloads open tabs. Edits under <code>public/</code> refresh which
         files are served at the site root and reload the browser without a restart.
       </p>
+      <div className="callout">
+        A <code>gio.toml</code> edit restarts the worker like any other, but the new settings
+        do not take effect: the Rust server reads <code>gio.toml</code> once, at startup, and
+        keeps running with what it read. Stop <code>gio dev</code> (Ctrl+C) and run it again.
+        Edits to the <code>.env</code> files are not watched at all (no restart, no reload):
+        restart <code>gio dev</code> to apply them, as for a change to the environment.
+      </div>
       <ul>
         <li>
           Any change under <code>app/</code> restarts the worker. Elsewhere only these

@@ -110,18 +110,32 @@ function parseValue(raw) {
 
 /**
  * Tables, arrays of tables, and `key = value` with strings, integers,
- * booleans and (possibly multi-line) arrays of those. Dotted keys and inline
- * tables are skipped. Never throws: a line it cannot read is ignored.
+ * booleans and (possibly multi-line) arrays of those. Dotted or quoted keys,
+ * inline tables, multi-line strings and tables with quoted names are
+ * skipped. Never throws: a line it cannot read is ignored, and described in
+ * `problems` (when given) as `gio.toml:<line>: <reason>` - never quoting the
+ * line, which may hold a token - so a caller can tell a file it read from
+ * one whose settings it may have missed.
  */
-function parseTomlLite(text) {
+function parseTomlLite(text, problems = null) {
   const root = {};
   let table = root;
   const lines = String(text).split(/\r?\n/);
+  const problem = (index, reason) => {
+    if (problems) problems.push(`gio.toml:${index + 1}: ${reason}`);
+  };
   for (let i = 0; i < lines.length; i++) {
     let line = stripComment(lines[i]).trim();
     if (!line) continue;
     const arrayTable = /^\[\[\s*([A-Za-z0-9_.-]+)\s*\]\]$/.exec(line);
     const plainTable = /^\[\s*([A-Za-z0-9_.-]+)\s*\]$/.exec(line);
+    if (!arrayTable && !plainTable && line.startsWith('[')) {
+      // `[a."b.c"]` is valid TOML this reader does not follow: its keys go
+      // nowhere. `[server` is not TOML at all.
+      if (!/^\[\[?[^[\]]+\]\]?$/.test(line)) problem(i, 'not a table header');
+      table = {};
+      continue;
+    }
     if (arrayTable || plainTable) {
       const path = (arrayTable || plainTable)[1].split('.');
       let node = root;
@@ -140,15 +154,40 @@ function parseTomlLite(text) {
       continue;
     }
     const assignment = /^([A-Za-z0-9_-]+)\s*=\s*(.*)$/.exec(line);
-    if (!assignment) continue;
-    let raw = assignment[2];
+    const otherKey = !assignment && /^([A-Za-z0-9_.\-\s]|"[^"]*"|'[^']*')+=\s*(.*)$/.exec(line);
+    if (!assignment && !otherKey) {
+      problem(i, 'not a `key = value` line or a table header');
+      continue;
+    }
+    const start = i;
+    let raw = (assignment || otherKey)[2];
+    if (raw.trim() === '') {
+      problem(i, 'a key without a value');
+      continue;
+    }
+    // A multi-line string runs until its closing delimiter.
+    const multiline = /^("""|''')/.exec(raw.trim());
+    if (multiline) {
+      let rest = raw.trim().slice(3);
+      while (!rest.includes(multiline[1]) && i + 1 < lines.length) rest = lines[++i];
+      if (!rest.includes(multiline[1])) problem(start, 'a multi-line string that never ends');
+      continue;
+    }
     // A multi-line array runs until its brackets balance.
     if (raw.trim().startsWith('[')) {
       while (bracketDepth(raw) > 0 && i + 1 < lines.length) {
         raw += ' ' + stripComment(lines[++i]).trim();
       }
+      if (bracketDepth(raw) > 0) {
+        problem(start, 'an array that never closes');
+        continue;
+      }
     }
-    if (raw.trim().startsWith('{')) continue;
+    if (/^("[^"]*|'[^']*)$/.test(stripComment(raw).trim())) {
+      problem(start, 'a string that never ends');
+      continue;
+    }
+    if (otherKey || raw.trim().startsWith('{')) continue;
     table[assignment[1]] = parseValue(raw);
   }
   return root;
@@ -177,11 +216,16 @@ function envFileCandidates(mode) {
 /**
  * What turns the server's .env loading off: GIO_ENV_FILES (`0` / `false`
  * off, `1` / `true` on) over gio.toml's `[env] files`. Null when it loads.
+ * Any other GIO_ENV_FILES value throws the error the server refuses to
+ * start with.
  */
 function envFilesDisabledBy(env, toml) {
   const value = String(env.GIO_ENV_FILES || '').trim();
   if (value === '0' || value === 'false') return 'GIO_ENV_FILES';
   if (value === '1' || value === 'true') return null;
+  if (value !== '') {
+    throw new Error(`cannot load the .env files: GIO_ENV_FILES=${JSON.stringify(value)} must be 0 (skip them) or 1 (load them)`);
+  }
   return toml.env && toml.env.files === false ? '[env] files' : null;
 }
 
@@ -212,26 +256,56 @@ function envWithFiles(env, projectRoot, mode, names, loadFiles = true) {
 const LISTEN_VARS = ['GIO_HOST', 'GIO_PORT', 'PORT', 'GIO_SESSION_SECRET'];
 
 /**
- * A report shaped like --check-config's, from the lenient reader. `ok` is
- * true and `fallback` marks it: nothing was validated.
+ * A report shaped like --check-config's, from the lenient reader, marked
+ * `fallback`: nothing in gio.toml was validated, so `ok` is true - unless
+ * GIO_ENV_FILES is invalid, which the server refuses before it reads
+ * anything else. That report, like the server's, holds only the error. A
+ * gio.toml the reader cannot read (or open) leaves out every setting too,
+ * and lists why under `configProblems`.
  */
 function fallbackReport(env, projectRoot) {
   const mode = env.NODE_ENV === 'development' ? 'development' : 'production';
   const configFile = join(projectRoot, 'gio.toml');
   let toml = {};
   let configText = null;
+  const problems = [];
   if (existsSync(configFile)) {
     try {
       configText = readFileSync(configFile, 'utf8');
-      toml = parseTomlLite(configText);
-    } catch (_) {
-      toml = {};
+      toml = parseTomlLite(configText, problems);
+    } catch (err) {
+      configText = '';
+      problems.push(`gio.toml: cannot be read (${err.code || err.message})`);
     }
   }
   const server = toml.server || {};
-  const envFilesOff = envFilesDisabledBy(env, toml);
+  let envFilesOff;
+  try {
+    envFilesOff = envFilesDisabledBy(env, toml);
+  } catch (err) {
+    return {
+      ok: false,
+      fallback: true,
+      errors: [err.message],
+      warnings: [],
+      configFile: configText === null ? null : configFile,
+    };
+  }
+  const base = {
+    ok: true,
+    fallback: true,
+    errors: [],
+    warnings: [],
+    mode,
+    envFilesDisabledBy: envFilesOff,
+    configFile: configText === null ? null : configFile,
+  };
+  // Lines the reader could not read may hold any of the settings below: the
+  // report leaves them all out, as the server's does for a file it cannot
+  // parse, so no check passes on a default the file may override.
+  if (problems.length > 0) return { ...base, configProblems: problems };
   const vars = envWithFiles(env, projectRoot, mode, LISTEN_VARS, envFilesOff === null);
-  let port = Number.isInteger(server.port) ? server.port : 3000;
+  let port =Number.isInteger(server.port) ? server.port : 3000;
   let portSource = Number.isInteger(server.port) ? 'gio.toml' : 'default';
   for (const name of ['GIO_PORT', 'PORT']) {
     if (vars[name] && /^\d+$/.test(vars[name])) {
@@ -248,14 +322,8 @@ function fallbackReport(env, projectRoot) {
     ? toml.cache.disk_path
     : '.gio/cache/pages';
   return {
-    ok: true,
-    fallback: true,
-    errors: [],
-    warnings: [],
-    mode,
-    envFilesDisabledBy: envFilesOff,
-    configFile: configText === null ? null : configFile,
-    listen: { host, port, portSource, tls: Boolean(server.tls && server.tls.enabled) },
+    ...base,
+    listen:{ host, port, portSource, tls: Boolean(server.tls && server.tls.enabled) },
     trustedProxies: Array.isArray(server.trusted_proxies) ? server.trusted_proxies.length : 0,
     proxyHeaders: typeof server.proxy_headers === 'string' ? server.proxy_headers : 'x-forwarded',
     rateLimitRules: Array.isArray(toml.rate_limits) ? toml.rate_limits.length : 0,

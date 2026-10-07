@@ -215,6 +215,45 @@ describe('doctor checks', () => {
     assert.match(cache.fix, /GIO_CACHE_DIR/);
   });
 
+  test('checks that need a configuration the server could not read are skipped, with the reason', () => {
+    // --check-config's report for a gio.toml that does not parse (or an
+    // invalid .env setup) carries only the error: no guards, listen address,
+    // proxies or cache directory to check - never a pass on the missing value.
+    const broken = facts({ port: null, cacheDir: null, middlewareSessionGuards: true });
+    broken.config = {
+      ok: false, errors: ['gio.toml:3: unknown key `guards.require_sesion`'], mode: 'production', configFile: 'gio.toml',
+    };
+    const checks = runChecks(broken);
+    const byId = Object.fromEntries(checks.map((c) => [c.id, c]));
+    assert.equal(byId.config.status, 'error');
+    for (const id of ['session', 'port', 'proxy', 'cache']) {
+      assert.equal(byId[id].status, 'skip', id);
+      assert.match(byId[id].title, /not checked: the server could not read the configuration \(error above\)$/, id);
+    }
+    assert.match(formatChecks(checks), /- Session guards not checked: the server could not read the configuration/);
+    assert.doesNotMatch(formatChecks(checks), /✓ No require_session guards/);
+    // Port 0 has its own reason; a configuration that parsed is still checked.
+    assert.match(checkOf(facts({ port: null, config: { listen: { host: '0.0.0.0', port: 0, portSource: 'gio.toml', tls: false } } }), 'port').title,
+      /Port not checked: port 0 picks a free port at startup/);
+    // The fallback reader's report for a gio.toml it cannot read is the
+    // same: the config check names the lines, the rest is skipped.
+    const unread = facts({ port: null, cacheDir: null });
+    unread.config = {
+      ok: true, fallback: true, errors: [], warnings: [], mode: 'production', configFile: 'gio.toml',
+      configProblems: ['gio.toml:1: not a table header'],
+    };
+    const unreadById = Object.fromEntries(runChecks(unread).map((c) => [c.id, c]));
+    assert.equal(unreadById.config.status, 'warn');
+    assert.match(unreadById.config.detail, /^gio\.toml:1: not a table header\nThe checks that read gio\.toml are skipped\.$/);
+    for (const id of ['session', 'port', 'proxy', 'cache']) {
+      assert.equal(unreadById[id].status, 'skip', id);
+      assert.match(unreadById[id].title, /not checked: gio\.toml could not be read \(see above\)$/, id);
+    }
+    const invalidButRead = facts({ config: { ok: false, errors: ['[server.tls] cert_path: not found'], sessionGuards: 1 } });
+    assert.equal(checkOf(invalidButRead, 'session').status, 'error');
+    assert.equal(checkOf(invalidButRead, 'port').status, 'ok');
+  });
+
   test('the summary counts errors and warnings', () => {
     const output = formatChecks(runChecks(facts({ port: 'in-use', node: '18.0.0' })));
     assert.match(output, /✗ Node\.js 18\.0\.0 is too old/);
@@ -293,6 +332,26 @@ describe('gio doctor end to end', { skip: process.platform === 'win32' && 'fake 
     assert.equal(byId.session, 'warn', 'guard without a secret (read by the fallback reader), production assumed');
     assert.deepEqual(report.mode, { name: 'production', explicit: false, source: null });
     assert.equal(report.environment.serverBinary.source, 'env');
+  });
+
+  test('an invalid GIO_ENV_FILES fails the config check even from the fallback reader; dependent checks skip', () => {
+    const project = tempProject({
+      'package.json': '{"name":"app"}',
+      'tsconfig.json': '{ "include": ["app", ".gio/routes.d.ts"] }',
+      'app/page.tsx': 'export default function Page() { return null; }\n',
+      'gio.toml': '[[guards]]\npath = "/admin/*rest"\nrequire_session = true\nredirect_to = "/login"\n',
+    });
+    const { status, stdout } = run(['doctor', '--json'], {
+      cwd: project,
+      env: { GIO_SERVER_BIN: fakeServerBinary(), FAKE_SERVER_NO_CHECK: '1', GIO_ENV_FILES: 'yes' },
+    });
+    assert.equal(status, 1, stdout);
+    const byId = Object.fromEntries(JSON.parse(stdout).checks.map((c) => [c.id, c]));
+    assert.equal(byId.config.status, 'error');
+    // The server's own words (env_files.rs files_disabled_by).
+    assert.equal(byId.config.detail,
+      'cannot load the .env files: GIO_ENV_FILES="yes" must be 0 (skip them) or 1 (load them)');
+    for (const id of ['session', 'port', 'proxy', 'cache']) assert.equal(byId[id].status, 'skip', id);
   });
 
   test('a dev project passes with NODE_ENV unset; --prod checks what gio start needs', () => {

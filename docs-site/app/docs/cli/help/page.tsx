@@ -79,10 +79,24 @@ Docs: https://giojs.com/docs/cli`} />
           option list (the first two come from <code>create-giojs</code>).
         </li>
         <li>
-          <code>gio --version</code> prints three lines and exits with <code>0</code>, even
-          when no binary is installed (<code>not installed (...)</code>).
+          Anything more is a usage error, exit <code>2</code>: <code>gio help dev extra</code>,{' '}
+          <code>gio --help dev</code> (it suggests <code>gio help dev</code>),{' '}
+          <code>gio --version --bogus</code>, or an unknown name in{' '}
+          <code>gio help &lt;command&gt;</code>.
         </li>
       </ul>
+
+      <h3 id="version"><code>gio --version</code></h3>
+      <p>
+        Prints three lines and exits with <code>0</code>, even when no binary is installed
+        (<code>not installed (...)</code>). Each version is a package version, read from the
+        installed <code>package.json</code>: <code>gio</code> is{' '}
+        <code>@gio.js/server</code>&apos;s, the server binary is its platform package&apos;s
+        (<code>@gio.js/server-&lt;platform&gt;</code>), and <code>@gio.js/core</code> is the
+        installed package&apos;s. The binary is never run to ask. A binary from{' '}
+        <code>GIO_SERVER_BIN</code> or a repository build has no package, so its line shows
+        where it came from and its path instead of a version.
+      </p>
       <CodeBlock lang="text" code={`$ gio --version
 gio            0.1.0-beta.8 (@gio.js/server)
 server binary  0.1.0-beta.8 (@gio.js/server-darwin-arm64)
@@ -100,9 +114,10 @@ server binary  0.1.0-beta.8 (@gio.js/server-darwin-arm64)
         </tbody>
       </table>
       <p>
-        Three commands run their own parser and use <code>1</code> for a usage error too:{' '}
-        <code>gio build standalone</code>, <code>gio bench</code> and{' '}
-        <code>gio migrate</code>.
+        Commands that run their own parser keep the same codes:{' '}
+        <code>gio build standalone</code>, <code>gio bench</code>, <code>gio migrate</code>{' '}
+        and <code>gio add</code> exit with <code>2</code> for a usage error, before doing
+        anything.
       </p>
 
       <h2 id="examples">Examples</h2>
@@ -156,7 +171,7 @@ header: hit, stale (revalidating), miss; stored, bypass, static or ppr.
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Introduced: <code>gio help</code>, <code>--help</code> on every command, <code>--version</code>, did-you-mean errors and exit code <code>2</code> for usage errors. A bare <code>gio</code> prints the help instead of starting the server.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Introduced: <code>gio help</code>, <code>--help</code> on every command, <code>--version</code>, did-you-mean errors and exit code <code>2</code> for usage errors, in every command. A bare <code>gio</code> prints the help instead of starting the server.</> },
       ]} />
     </>
   );

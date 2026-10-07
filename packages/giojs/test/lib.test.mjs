@@ -158,6 +158,27 @@ value = { a = 1 }
   test('never throws on garbage', () => {
     assert.deepEqual(parseTomlLite('[[[\n= = =\n"unterminated'), {});
   });
+
+  test('lists the lines it cannot read, by number and without quoting them', () => {
+    const problems = [];
+    parseTomlLite('[server\nport = 1\ntoken = "s3cr3t\nbare words\nempty =\nlist = [1,\n', problems);
+    assert.deepEqual(problems, [
+      'gio.toml:1: not a table header',
+      'gio.toml:3: a string that never ends',
+      'gio.toml:4: not a `key = value` line or a table header',
+      'gio.toml:5: a key without a value',
+      'gio.toml:6: an array that never closes',
+    ]);
+    // Valid TOML it does not follow is skipped, not a problem; the tables
+    // after it are still read.
+    const valid = [];
+    const parsed = parseTomlLite('a.b = 1\n"quoted" = 2\n[x-tool."name"]\nport = 9\nnote = """\nline\n"""\n[server]\nport = 4\n', valid);
+    assert.deepEqual(valid, []);
+    assert.deepEqual(parsed, { server: { port: 4 } });
+    const unclosed = [];
+    parseTomlLite('note = """\nnever closed\n', unclosed);
+    assert.deepEqual(unclosed, ['gio.toml:1: a multi-line string that never ends']);
+  });
 });
 
 describe('fallbackReport', () => {
@@ -202,6 +223,34 @@ describe('fallbackReport', () => {
     assert.equal(fallbackReport({ GIO_ENV_FILES: '0' }, on).listen.port, 4000);
     assert.equal(fallbackReport({ GIO_ENV_FILES: '0' }, on).envFilesDisabledBy, 'GIO_ENV_FILES');
     assert.equal(fallbackReport({ GIO_ENV_FILES: '1' }, off).listen.port, 5000, 'the variable wins');
+  });
+
+  test('an invalid GIO_ENV_FILES is the error the server refuses to start with, not "load"', () => {
+    const project = tempProject({ '.env': 'GIO_PORT=5000\n', 'gio.toml': '[server]\nport = 4000\n' });
+    for (const value of ['yes', 'off', '2']) {
+      const report = fallbackReport({ GIO_ENV_FILES: value }, project);
+      assert.equal(report.ok, false, value);
+      assert.equal(report.fallback, true);
+      assert.deepEqual(report.errors,
+        [`cannot load the .env files: GIO_ENV_FILES="${value}" must be 0 (skip them) or 1 (load them)`]);
+      assert.equal(report.listen, undefined, 'nothing past the error is reported, as by --check-config');
+      assert.equal(report.configFile, join(project, 'gio.toml'));
+    }
+    // Blank (or only spaces) is unset, as in the server.
+    assert.equal(fallbackReport({ GIO_ENV_FILES: '  ' }, project).listen.port, 5000);
+  });
+
+  test('a gio.toml it cannot read leaves out every setting instead of reporting defaults', () => {
+    const project = tempProject({ 'gio.toml': '[server\nport = 1\n[[guards]]\npath = "/admin/*rest"\nrequire_session = true\n' });
+    const report = fallbackReport({}, project);
+    assert.equal(report.ok, true, 'the server is the one to refuse it');
+    assert.equal(report.fallback, true);
+    assert.deepEqual(report.configProblems, ['gio.toml:1: not a table header']);
+    assert.equal(report.configFile, join(project, 'gio.toml'));
+    for (const field of ['listen', 'sessionGuards', 'trustedProxies', 'rateLimitRules', 'cacheDir']) {
+      assert.equal(report[field], undefined, field);
+    }
+    assert.equal(fallbackReport({}, tempProject({ 'gio.toml': '[server]\nport = 1\n' })).configProblems, undefined);
   });
 });
 

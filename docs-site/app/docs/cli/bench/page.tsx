@@ -31,13 +31,13 @@ gio bench --suite /,/posts/1 [--base <url>]`} />
         {
           name: '<url-or-path>',
           type: 'string',
-          description: <>The target: an absolute URL, or a path requested from <code>--base</code> (default: the local server). Give either this or <code>--suite</code>.</>,
+          description: <>The target: an absolute <code>http</code> or <code>https</code> URL, or a path starting with <code>/</code> requested from <code>--base</code> (default: the local server). Anything else (<code>localhost:3000</code>) is a usage error. Give either this or <code>--suite</code>.</>,
         },
         {
           name: '--connections <n>',
           type: 'number',
           default: '32',
-          description: 'Concurrent keep-alive connections, each sending one request after another. Must be above 0.',
+          description: 'Concurrent keep-alive connections, each sending one request after another. A whole number above 0.',
         },
         {
           name: '--duration <s>',
@@ -60,7 +60,7 @@ gio bench --suite /,/posts/1 [--base <url>]`} />
           name: '--base <url>',
           type: 'string',
           default: 'local server',
-          description: <>Where paths go. Without it, <code>gio</code> passes the local server&apos;s address, resolved like <code>gio dev</code> resolves it (<code>GIO_PORT</code> / <code>PORT</code>, <code>.env</code> files, <code>gio.toml</code>).</>,
+          description: <>Where paths go: an <code>http</code> or <code>https</code> URL. Without it, <code>gio</code> passes the local server&apos;s address, resolved like <code>gio dev</code> resolves it (<code>GIO_PORT</code> / <code>PORT</code>, <code>.env</code> files, <code>gio.toml</code>).</>,
         },
         {
           name: '-h, --help',
@@ -132,15 +132,16 @@ target             req/s         p50         p90         p99         max  non-20
       <h2 id="good-to-know">Good to know</h2>
       <ul>
         <li>
-          Flags take their value as the next argument: <code>--duration 5</code>, not{' '}
-          <code>--duration=5</code>.
+          Flags take their value as the next argument or after <code>=</code>:{' '}
+          <code>--duration 5</code> and <code>--duration=5</code> are the same.
         </li>
         <li>
-          Errors exit with code <code>1</code>, including usage errors (a bad flag, no target,
-          both a target and <code>--suite</code>), and a single-target run with no successful
-          request (<code>no successful requests to ... - is the server running?</code>). A
-          suite run exits <code>0</code> even when a target fails; read its{' '}
-          <code>errors</code> column.
+          A usage error - a bad flag or value, no target, a target that is neither a path nor
+          an http(s) URL, both a target and <code>--suite</code> - exits with code{' '}
+          <code>2</code> before any request is sent, as every <code>gio</code> usage error
+          does. A single-target run with no successful request exits with <code>1</code>{' '}
+          (<code>no successful requests to ... - is the server running?</code>). A suite run
+          exits <code>0</code> even when a target fails; read its <code>errors</code> column.
         </li>
         <li>
           Every request is a plain anonymous <code>GET</code>: no cookies, no request body.
@@ -158,7 +159,7 @@ target             req/s         p50         p90         p99         max  non-20
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Paths and <code>--suite</code> go to the address the server listens on instead of <code>http://localhost:3000</code>.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Paths and <code>--suite</code> go to the address the server listens on instead of <code>http://localhost:3000</code>. Usage errors exit with <code>2</code> instead of <code>1</code>; flags also take <code>--flag=value</code>; a target that is not a path or an http(s) URL, and a fractional <code>--connections</code>, are usage errors.</> },
         { version: 'v0.1.0-beta.6', changes: 'Introduced.' },
       ]} />
     </>

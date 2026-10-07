@@ -207,8 +207,10 @@ async function gatherFacts({ env = process.env, cwd = process.cwd(), probePort =
     .map((name) => readText(join(projectRoot, name)))
     .find((text) => text !== null) || null;
 
+  // The listen address is known whenever gio.toml parsed - even when another
+  // setting fails validation, the port is worth checking.
   let port = null;
-  if (probePort && config.ok && config.listen && config.listen.port !== 0) {
+  if (probePort && config.listen && config.listen.port !== 0) {
     port = await portState(config.listen.host, config.listen.port);
   }
 
@@ -341,15 +343,23 @@ function versionsCheck(facts) {
 
 function configCheck(facts) {
   const config = facts.config;
-  if (config.fallback) {
-    return check('config', 'skip', 'gio.toml not validated (needs a server binary of this version)', {
-      detail: config.configFile ? 'Read leniently for the checks below; unknown keys are only caught by the server.' : undefined,
-    });
-  }
+  // Before the fallback skip: the lenient reader still reports an invalid
+  // GIO_ENV_FILES, which the server refuses before reading gio.toml.
   if (!config.ok) {
     return check('config', 'error', 'The server would refuse to start with this configuration', {
       detail: config.errors.join('\n'),
       fix: 'Fix the setting named above (the server prints the same message at startup).',
+    });
+  }
+  if (config.fallback && config.configProblems) {
+    return check('config', 'warn', 'gio.toml not validated (needs a server binary of this version), and it could not be read', {
+      detail: `${config.configProblems.join('\n')}\nThe checks that read gio.toml are skipped.`,
+      fix: 'Fix the lines named above; install the server binary of this version to validate the rest.',
+    });
+  }
+  if (config.fallback) {
+    return check('config', 'skip', 'gio.toml not validated (needs a server binary of this version)', {
+      detail: config.configFile ? 'Read leniently for the checks below; unknown keys are only caught by the server.' : undefined,
     });
   }
   // Protections the file turns off or loosens - each line names its
@@ -393,8 +403,23 @@ function tsconfigCheck(facts) {
   });
 }
 
+/**
+ * Why a check that reads `field` of the configuration report cannot run, or
+ * null when it can. A report for a configuration the server could not read
+ * (a gio.toml or .env error) carries only the error, and so does the
+ * fallback's for a gio.toml it cannot read - a check must not pass on the
+ * missing value.
+ */
+function unreadable(facts, field) {
+  if (facts.config[field] !== undefined && facts.config[field] !== null) return null;
+  if (!facts.config.ok) return 'the server could not read the configuration (error above)';
+  return facts.config.configProblems ? 'gio.toml could not be read (see above)' : null;
+}
+
 function sessionSecretCheck(facts) {
   const config = facts.config;
+  const skipped = unreadable(facts, 'sessionGuards');
+  if (skipped) return check('session', 'skip', `Session guards not checked: ${skipped}`);
   const guards = (config.sessionGuards || 0) + (facts.middlewareSessionGuards ? 1 : 0);
   const hint = 'Generate one: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"';
   if (config.sessionSecret === 'invalid') {
@@ -428,7 +453,12 @@ function sessionSecretCheck(facts) {
 
 function portCheck(facts) {
   const listen = facts.config.listen;
-  if (!listen || facts.port === null) return check('port', 'skip', 'Port not checked');
+  const skipped = unreadable(facts, 'listen');
+  if (skipped) return check('port', 'skip', `Port not checked: ${skipped}`);
+  if (!listen || facts.port === null) {
+    const why = listen && listen.port === 0 ? ': port 0 picks a free port at startup' : '';
+    return check('port', 'skip', `Port not checked${why}`);
+  }
   const where = displayAddress(listen.host, listen.port);
   if (facts.port === 'free') return check('port', 'ok', `Port ${listen.port} is free (${where}, from ${listen.portSource})`);
   if (facts.port === 'in-use') {
@@ -453,6 +483,8 @@ function portCheck(facts) {
 
 function proxyCheck(facts) {
   const config = facts.config;
+  const skipped = unreadable(facts, 'trustedProxies');
+  if (skipped) return check('proxy', 'skip', `Trusted proxies not checked: ${skipped}`);
   if ((config.trustedProxies || 0) > 0) {
     return check('proxy', 'ok', `trusted_proxies: ${config.trustedProxies} entr${config.trustedProxies === 1 ? 'y' : 'ies'} (${config.proxyHeaders})`);
   }
@@ -468,6 +500,8 @@ function proxyCheck(facts) {
 }
 
 function cacheDirCheck(facts) {
+  const skipped = unreadable(facts, 'cacheDir');
+  if (skipped) return check('cache', 'skip', `Cache directory not checked: ${skipped}`);
   if (!facts.cacheDir) return check('cache', 'skip', 'Cache directory not checked');
   if (facts.cacheDir.writable) return check('cache', 'ok', `Cache directory is writable (${facts.cacheDir.path})`);
   return check('cache', 'error', `Cache directory is not writable: ${facts.cacheDir.checked}`, {

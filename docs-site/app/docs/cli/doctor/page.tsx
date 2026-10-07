@@ -76,10 +76,25 @@ export default function Page(): React.JSX.Element {
       </table>
       <p>
         Each check has a status: <code>✓</code> ok, <code>i</code> info (a hint),{' '}
-        <code>!</code> warn, <code>✗</code> error, <code>-</code> skipped. The{' '}
-        <code>config</code> check is skipped when no binary of the CLI&apos;s own version is
-        available (a different version may not know the flag); the other checks then read{' '}
-        <code>gio.toml</code> leniently.
+        <code>!</code> warn, <code>✗</code> error, <code>-</code> skipped. A skipped check
+        says why in its title. The <code>config</code> check is skipped when no binary of the
+        CLI&apos;s own version is available (a different version may not know the flag); the
+        other checks then read <code>gio.toml</code> leniently. That reader still fails the{' '}
+        <code>config</code> check on an invalid <code>GIO_ENV_FILES</code>, with the
+        server&apos;s own error. When it cannot read <code>gio.toml</code> either (a line that
+        is not TOML, such as an unclosed <code>[server</code> header), the <code>config</code>{' '}
+        check warns with the line numbers, and the <code>session</code>, <code>port</code>,{' '}
+        <code>proxy</code> and <code>cache</code> checks are skipped with{' '}
+        <code>gio.toml could not be read (see above)</code> instead of running on defaults.
+      </p>
+      <p>
+        When the server cannot read the configuration at all (<code>gio.toml</code> does not
+        parse, or a <code>.env</code> file or <code>GIO_ENV_FILES</code> is invalid), the{' '}
+        <code>config</code> check fails with the error, and the <code>session</code>,{' '}
+        <code>port</code>, <code>proxy</code> and <code>cache</code> checks are skipped:{' '}
+        <code>- Session guards not checked: the server could not read the configuration
+        (error above)</code>. They never pass on settings nobody could read. A configuration
+        that parses but fails a later check (a missing TLS certificate) still gets them.
       </p>
 
       <h3 id="output">Output</h3>
@@ -198,7 +213,7 @@ Checking the production configuration (what \`gio start\` runs), as --prod asked
       <VersionHistory entries={[
         {
           version: 'v0.1.0-beta.8',
-          changes: <>Introduced, with <code>--dev</code>, <code>--prod</code> and <code>--json</code>. The <code>config</code> check reports the warnings for protections <code>gio.toml</code> turns off.</>,
+          changes: <>Introduced, with <code>--dev</code>, <code>--prod</code> and <code>--json</code>. The <code>config</code> check reports the warnings for protections <code>gio.toml</code> turns off. Checks that need a configuration the server could not read are skipped with the reason, instead of passing.</>,
         },
       ]} />
     </>

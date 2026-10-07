@@ -78,7 +78,8 @@ export default function Page(): React.JSX.Element {
         <code>run.mjs</code> spawns the server binary with the environment wired up
         (<code>NODE_ENV=production</code> by default, worker and static paths pointed into
         the folder), forwards <code>SIGINT</code>/<code>SIGTERM</code> for clean shutdown,
-        and passes any extra arguments through to the server. If <code>run.mjs</code>{' '}
+        and passes any extra arguments through to the server (which takes only{' '}
+        <code>--check-config</code>; any other argument exits with <code>2</code>). If <code>run.mjs</code>{' '}
         itself is killed outright (<code>SIGKILL</code>, the OOM killer), the server still
         shuts down instead of lingering on the port: it is started with a stdin pipe the
         launcher holds open, and exits gracefully when that pipe closes (see{' '}
