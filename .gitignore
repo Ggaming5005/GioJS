@@ -58,6 +58,8 @@ tests/integration/.image-cache-fixture/
 tests/integration/.build-cache-fixture/
 tests/integration/.config-fixture/
 tests/integration/.dev-cache-fixture/
+tests/integration/.switches-fixture/
+tests/integration/.dev-switches-fixture/
 
 # stray local probe file
 probe.tmp

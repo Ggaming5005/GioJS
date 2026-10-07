@@ -3782,6 +3782,7 @@ async function devWatchPhase() {
         /window\.__GIO_SSR_ERROR__=\{"message":"client bundle for route \\"\/server-only-leak\\" imports server-only code/,
       );
       assert.match(html, /__gio_dev_overlay_script/);
+      assert.match(html, /var DEVTOOLS = true;/, '[dev] devtools is on by default');
     });
 
     const trustedHost = new URL(BASE).host;
@@ -5456,6 +5457,301 @@ async function cliPhase() {
   }
 }
 
+/**
+ * Start the server for one switches run: `toml` replaces the fixture copy's
+ * gio.toml. Resolves with the process, a log reader and a stop function.
+ * With /_gio/health turned off, readiness is the home page answering - the
+ * server binds only once a worker is ready.
+ */
+async function startSwitchesServer(appRoot, toml, { env: extraEnv = {}, mode = 'production' } = {}) {
+  const binary = findServerBinary();
+  await writeFile(join(appRoot, 'gio.toml'), toml);
+  const env = {
+    ...process.env,
+    GIO_APP_DIR: join(appRoot, 'app'),
+    GIO_CACHE_DIR: await mkdtemp(join(tmpdir(), 'gio-int-switches-cache-')),
+    RUST_LOG: 'info',
+    NODE_ENV: mode,
+    // Pages behind sessions need it whether or not the .env files load.
+    GIO_SESSION_SECRET: FIXTURE_SESSION_SECRET,
+    GIO_EDITOR: 'node -e 0',
+    ...extraEnv,
+  };
+  let log = '';
+  const server = spawn(binary, [], { cwd: repoRoot, env });
+  server.stdout.on('data', (d) => { log += d.toString(); });
+  server.stderr.on('data', (d) => { log += d.toString(); });
+  let serverGone = false;
+  const serverExited = new Promise((r) =>
+    server.on('exit', () => { serverGone = true; r(); }),
+  );
+  const plainLog = () => log.replace(/\x1b\[[0-9;]*m/g, '');
+  const stop = async () => {
+    if (!serverGone) server.kill();
+    await serverExited;
+    await rm(env.GIO_CACHE_DIR, { recursive: true, force: true });
+  };
+  try {
+    await waitFor('server answering (switches)', async () => {
+      if (serverGone) throw new Error(`server exited:\n${significantLogTail(log)}`);
+      const res = await fetch(`${BASE}/`);
+      await res.arrayBuffer();
+      return res.ok;
+    }, 60_000);
+  } catch (err) {
+    console.error(significantLogTail(log));
+    await stop();
+    throw err;
+  }
+  // --check-config must report what startup logged, word for word.
+  const check = spawnSync(binary, ['--check-config'], { cwd: repoRoot, env, encoding: 'utf8' });
+  const report = JSON.parse(check.stdout.trim().split('\n').pop());
+  return { log: plainLog, stop, report };
+}
+
+const SWITCHES_SERVER_TOML =
+  '[server]\nhost = "127.0.0.1"\nport = 39517\nhttp2 = false\ntrusted_proxies = ["127.0.0.1"]\n';
+
+/**
+ * Phase 1g (protections and features turned off): every [security], [server],
+ * [metrics], [health] and [env] switch from beta.8 in its off (or loosened)
+ * state, each logged at startup in the words --check-config reports. The
+ * main phase covers the defaults: headers, CSRF 403s, the 2 MiB 413, .env
+ * loading and the health details; buildChangeCachePhase the skew 409.
+ */
+async function switchesOffPhase() {
+  const appRoot = await copyFixtureForDev('.switches-fixture');
+  const notes = (headers, text) =>
+    rawRequest('POST', '/api/notes', { 'content-type': 'application/json', ...headers }, JSON.stringify({ text }));
+  let run = null;
+  let label = 'everything off';
+  try {
+    run = await startSwitchesServer(
+      appRoot,
+      SWITCHES_SERVER_TOML +
+        'max_body_bytes = 0\nskew_protection = false\n\n' +
+        '[security]\ndefault_headers = false\n\n' +
+        '[security.headers]\npermissions-policy = "camera=()"\n\n' +
+        '[security.csrf]\nenabled = false\n\n' +
+        '[metrics]\n\n[health]\nenabled = false\n\n[env]\nfiles = false\n',
+    );
+
+    await test('switches: each protection turned off is one startup warning, as --check-config reports it', async () => {
+      const { warnings } = run.report;
+      assert.equal(run.report.ok, true);
+      for (const key of [
+        '[security.csrf] enabled = false',
+        '[security] default_headers = false',
+        '[server] max_body_bytes = 0',
+        '[server] skew_protection = false',
+      ]) {
+        const warning = warnings.find((w) => w.startsWith(key));
+        assert.ok(warning, `${key} in ${JSON.stringify(warnings)}`);
+        assert.ok(run.log().split('\n').some((line) => line.includes('WARN') && line.includes(warning)), `${key} logged`);
+      }
+      assert.equal(warnings.length, 4, JSON.stringify(warnings));
+      assert.equal(run.report.envFilesDisabledBy, '[env] files');
+    });
+
+    await test('[security] default_headers = false drops the built-in headers, not [security.headers]', async () => {
+      const res = await rawGet('/');
+      assert.equal(res.status, 200);
+      for (const name of ['x-content-type-options', 'x-frame-options', 'referrer-policy']) {
+        assert.equal(res.headers[name], undefined, name);
+      }
+      assert.equal(res.headers['permissions-policy'], 'camera=()');
+    });
+
+    await test('[security.csrf] enabled = false lets a cross-site POST reach the handler', async () => {
+      const res = await notes({ origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' }, 'csrf-off-probe');
+      assert.equal(res.status, 200, res.body);
+      const { notes: stored } = await (await fetch(`${BASE}/api/notes`)).json();
+      assert.ok(stored.includes('csrf-off-probe'));
+    });
+
+    await test('[server] max_body_bytes = 0 takes a body past the 2 MiB default', async () => {
+      const size = 3 * 1024 * 1024;
+      const form = new FormData();
+      form.append('attachment', new Blob([Buffer.alloc(size, 0xab)]), 'big.bin');
+      const res = await fetch(`${BASE}/guestbook`, { method: 'POST', body: form });
+      assert.equal(res.status, 200);
+      assert.match(await res.text(), new RegExp(`GUESTBOOK_UPLOAD name=big\\.bin size=${size} `));
+    });
+
+    await test('[server] skew_protection = false serves another deployment\'s client', async () => {
+      const res = await fetch(`${BASE}/cached`, { headers: { 'x-deployment-id': 'an-older-deployment' } });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('x-gio-action'), null);
+      assert.match(await res.text(), /INTEGRATION_FIXTURE_CACHED/);
+    });
+
+    await test('[metrics] without a token or an allowlist answers this machine only', async () => {
+      const local = await rawGet('/_gio/metrics');
+      assert.equal(local.status, 200);
+      assert.match(local.body, /^# HELP /m);
+      // Behind the trusted local proxy, the forwarded client is judged.
+      assert.equal((await rawGet('/_gio/metrics', { 'x-forwarded-for': '203.0.113.9' })).status, 403);
+      assert.match(run.log(), /\/_gio\/metrics answers loopback clients only/);
+    });
+
+    await test('[health] enabled = false: /_gio/health is not routed', async () => {
+      const res = await rawGet('/_gio/health');
+      assert.equal(res.status, 404);
+    });
+
+    await test('[env] files = false: no .env file reaches the worker', async () => {
+      assert.deepEqual(await (await fetch(`${BASE}/api/env`)).json(), {
+        dotenv: null,
+        precedence: null,
+        processWins: null,
+      });
+      assert.match(run.log(), /not loading \.env files: \[env\] files turns them off/);
+      assert.doesNotMatch(run.log(), /loaded \.env files/);
+    });
+    await run.stop();
+    run = null;
+
+    label = 'loosened';
+    run = await startSwitchesServer(
+      appRoot,
+      SWITCHES_SERVER_TOML + '\n[metrics]\nip_allowlist = ["0.0.0.0/0", "::/0"]\n\n[health]\ndetails = false\n',
+      { env: { GIO_ENV_FILES: '0' } },
+    );
+
+    await test('[metrics] ip_allowlist = ["0.0.0.0/0", "::/0"] opens it to every client, with a warning', async () => {
+      const remote = await rawGet('/_gio/metrics', { 'x-forwarded-for': '203.0.113.9' });
+      assert.equal(remote.status, 200);
+      const [warning] = run.report.warnings;
+      assert.match(warning ?? '', /^\[metrics\] ip_allowlist includes 0\.0\.0\.0\/0 and no token is set/);
+      assert.ok(run.log().includes(warning));
+    });
+
+    await test('[health] details = false reports status and readiness only', async () => {
+      const res = await rawGet('/_gio/health');
+      assert.equal(res.status, 200);
+      assert.deepEqual(JSON.parse(res.body), { status: 'ok', nodeReady: true });
+    });
+
+    await test('GIO_ENV_FILES=0 skips the .env files', async () => {
+      const body = await (await fetch(`${BASE}/api/env`)).json();
+      assert.equal(body.dotenv, null);
+      assert.equal(run.report.envFilesDisabledBy, 'GIO_ENV_FILES');
+      assert.match(run.log(), /not loading \.env files: GIO_ENV_FILES turns them off/);
+    });
+  } catch (err) {
+    console.error(`\nintegration (switches off, ${label}): FAILED`);
+    console.error(err);
+    if (run) {
+      console.error('\n── server log tail ──');
+      console.error(significantLogTail(run.log()));
+    }
+    process.exitCode = 1;
+  } finally {
+    await run?.stop();
+    await rm(appRoot, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Phase 2c (dev switches): `[dev] allowed_hosts = ["*"]` answers any Host
+ * but keeps open-in-editor same-origin, `watch = false` restarts nothing,
+ * and `devtools = false` unroutes /_gio/devtools* and strips the overlay's
+ * devtools features. devWatchPhase covers the defaults.
+ */
+async function devSwitchesPhase() {
+  const appRoot = await copyFixtureForDev('.dev-switches-fixture');
+  await mkdir(join(appRoot, 'app', 'dev-boom'), { recursive: true });
+  await writeFile(
+    join(appRoot, 'app', 'dev-boom', 'page.tsx'),
+    "export default function Boom() {\n  throw new Error('DEV_SWITCH_BOOM');\n}\n",
+  );
+  const dev = '\n[dev]\n';
+  let run = null;
+  let label = 'allowed_hosts *, no watch';
+  try {
+    run = await startSwitchesServer(
+      appRoot,
+      SWITCHES_SERVER_TOML + dev + 'allowed_hosts = ["*"]\nwatch = false\n',
+      { mode: 'development' },
+    );
+
+    await test('dev: [dev] allowed_hosts = ["*"] answers any Host, with a loud warning', async () => {
+      for (const path of ['/_gio/devtools', '/_gio/devtools/state']) {
+        const res = await rawRequest('GET', path, { host: 'evil.example' });
+        assert.equal(res.status, 200, path);
+      }
+      const boom = await rawRequest('GET', '/dev-boom', { host: 'evil.example' });
+      assert.match(boom.body, /DEV_SWITCH_BOOM/, 'error details follow allowed_hosts');
+      const [warning] = run.report.warnings;
+      assert.match(warning ?? '', /^\[dev\] allowed_hosts = \["\*"\]: /);
+      assert.ok(run.log().includes(warning));
+      assert.doesNotMatch(run.log(), /ignoring \[dev\] allowed_hosts entry/);
+    });
+
+    await test('dev: ...but open-in-editor still needs a same-origin request', async () => {
+      const editor = '/_gio/devtools/open-in-editor?file=app%2Fpage.tsx&line=1';
+      const crossSite = await rawRequest('POST', editor, {
+        host: 'evil.example',
+        origin: 'https://attacker.example',
+        'sec-fetch-site': 'cross-site',
+      });
+      assert.equal(crossSite.status, 403);
+      const foreignOrigin = await rawRequest('POST', editor, { host: 'evil.example', origin: 'https://attacker.example' });
+      assert.equal(foreignOrigin.status, 403);
+      const sameOrigin = await rawRequest('POST', editor, {
+        host: 'evil.example',
+        origin: 'http://evil.example',
+        'sec-fetch-site': 'same-origin',
+      });
+      assert.equal(sameOrigin.status, 200, sameOrigin.body);
+    });
+
+    await test('dev: [dev] watch = false never restarts the worker for a source change', async () => {
+      assert.match(run.log(), /\[dev\] watch = false: source changes do not restart the worker/);
+      assert.doesNotMatch(run.log(), /dev watch active/);
+      const page = join(appRoot, 'app', 'page.tsx');
+      await writeFile(page, (await readFile(page, 'utf8')).replace('INTEGRATION_FIXTURE_HOME', 'WATCH_OFF_EDITED'));
+      await sleep(3_000);
+      assert.match(await (await fetch(`${BASE}/`)).text(), /INTEGRATION_FIXTURE_HOME/);
+      assert.doesNotMatch(run.log(), /dev watch: change detected/);
+    });
+    await run.stop();
+    run = null;
+
+    label = 'devtools off';
+    run = await startSwitchesServer(appRoot, SWITCHES_SERVER_TOML + dev + 'devtools = false\n', { mode: 'development' });
+
+    await test('dev: [dev] devtools = false unroutes /_gio/devtools* and strips the overlay', async () => {
+      for (const path of ['/_gio/devtools', '/_gio/devtools/state', '/_gio/devtools/stream', '/_gio/devtools/codeframe?file=app%2Fpage.tsx&line=1']) {
+        const res = await rawRequest('GET', path, { host: new URL(BASE).host });
+        assert.equal(res.status, 404, path);
+      }
+      const editor = await rawRequest('POST', '/_gio/devtools/open-in-editor?file=app%2Fpage.tsx&line=1', {
+        host: new URL(BASE).host,
+        origin: BASE,
+        'sec-fetch-site': 'same-origin',
+      });
+      assert.equal(editor.status, 404);
+      const html = await (await fetch(`${BASE}/dev-boom`)).text();
+      assert.match(html, /__gio_dev_overlay_script/);
+      assert.match(html, /var DEVTOOLS = false;/);
+      assert.match(html, /DEV_SWITCH_BOOM/, 'the overlay still shows the error');
+      assert.match(run.log(), /\[dev\] devtools = false: \/_gio\/devtools\* is not routed/);
+    });
+  } catch (err) {
+    console.error(`\nintegration (dev switches, ${label}): FAILED`);
+    console.error(err);
+    if (run) {
+      console.error('\n── server log tail ──');
+      console.error(significantLogTail(run.log()));
+    }
+    process.exitCode = 1;
+  } finally {
+    await run?.stop();
+    await rm(appRoot, { recursive: true, force: true });
+  }
+}
+
 await strictConfigPhase();
 if (process.exitCode !== 1) {
   await main();
@@ -5488,6 +5784,9 @@ if (process.exitCode !== 1) {
   await configSettingsPhase();
 }
 if (process.exitCode !== 1) {
+  await switchesOffPhase();
+}
+if (process.exitCode !== 1) {
   await cliPhase();
 }
 if (process.exitCode !== 1) {
@@ -5498,6 +5797,9 @@ if (process.exitCode !== 1) {
 }
 if (process.exitCode !== 1) {
   await devCacheDirPhase();
+}
+if (process.exitCode !== 1) {
+  await devSwitchesPhase();
 }
 if (process.exitCode !== 1) {
   await standalonePhase();
