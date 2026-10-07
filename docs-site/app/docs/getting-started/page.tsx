@@ -35,10 +35,15 @@ export default function IntroductionPage(): React.JSX.Element {
       </p>
 
       <h2>Start in seconds</h2>
-      <CodeBlock lang="bash" code={`npm create giojs@latest`} />
+      <CodeBlock lang="bash" code={`npm create giojs@latest my-app
+cd my-app
+npm run dev`} />
       <p>
-        Pick TypeScript or JavaScript at the prompt, then <code>npm run dev</code>. Next,
-        head to <a href="/docs/installation">Installation</a> and <a href="/docs/project-structure">Project Structure</a>.
+        Pick TypeScript or JavaScript and a server app or a static site at the prompts; the
+        scaffolder installs dependencies with the package manager you ran it with and makes the
+        first git commit. Next, head to <a href="/docs/installation">Installation</a> for every
+        option and <a href="/docs/project-structure">Project Structure</a> for a tour of the
+        starter.
       </p>
 
       <div className="callout">

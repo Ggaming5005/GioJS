@@ -54,18 +54,21 @@ export async function copyTemplate(
   templateName: string,
   destDir: string,
   projectName: string,
+  signal?: AbortSignal,
 ): Promise<void> {
-  await copyDir(templateDir(templateName), destDir, projectName);
+  await copyDir(templateDir(templateName), destDir, projectName, signal);
 }
 
-export async function copyDir(src: string, dest: string, projectName: string): Promise<void> {
+/** `signal` stops the copy before the next file, so a rollback never races a write. */
+export async function copyDir(src: string, dest: string, projectName: string, signal?: AbortSignal): Promise<void> {
   await mkdir(dest, { recursive: true });
   const entries = await readdir(src, { withFileTypes: true });
   for (const entry of entries) {
+    signal?.throwIfAborted();
     const srcPath = join(src, entry.name);
     const destPath = join(dest, scaffoldFileName(entry.name));
     if (entry.isDirectory()) {
-      await copyDir(srcPath, destPath, projectName);
+      await copyDir(srcPath, destPath, projectName, signal);
     } else if (isTextTemplateFile(entry.name)) {
       const content = await readFile(srcPath, 'utf8');
       await writeFile(destPath, content.replaceAll('{{PROJECT_NAME}}', projectName), 'utf8');

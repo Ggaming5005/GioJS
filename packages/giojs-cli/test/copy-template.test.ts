@@ -70,3 +70,20 @@ test('copyDir writes _gitignore as .gitignore, at any depth', async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('copyDir stops before the next file once its signal is aborted', async () => {
+  // Ctrl+C mid-scaffold aborts the copy, then rolls back: no write may land
+  // after the rollback removed the directory.
+  const root = await mkdtemp(join(tmpdir(), 'gio-copy-template-'));
+  try {
+    const src = join(root, 'src');
+    await mkdir(src, { recursive: true });
+    for (const name of ['a.txt', 'b.txt', 'c.txt']) await writeFile(join(src, name), name);
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(copyDir(src, join(root, 'dest'), 'my-app', controller.signal), { name: 'AbortError' });
+    assert.deepEqual(await readdir(join(root, 'dest')), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
