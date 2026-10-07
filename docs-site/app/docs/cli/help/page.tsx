@@ -78,11 +78,19 @@ Docs: https://giojs.com/docs/cli`} />
           <code>build standalone</code>, the command&apos;s own <code>--help</code> has the full
           option list (the first two come from <code>create-giojs</code>).
         </li>
-        <li>
-          <code>gio --version</code> prints three lines and exits with <code>0</code>, even
-          when no binary is installed (<code>not installed (...)</code>).
-        </li>
       </ul>
+
+      <h3 id="version"><code>gio --version</code></h3>
+      <p>
+        Prints three lines and exits with <code>0</code>, even when no binary is installed
+        (<code>not installed (...)</code>). Each version is a package version, read from the
+        installed <code>package.json</code>: <code>gio</code> is{' '}
+        <code>@gio.js/server</code>&apos;s, the server binary is its platform package&apos;s
+        (<code>@gio.js/server-&lt;platform&gt;</code>), and <code>@gio.js/core</code> is the
+        installed package&apos;s. The binary is never run to ask. A binary from{' '}
+        <code>GIO_SERVER_BIN</code> or a repository build has no package, so its line shows
+        where it came from and its path instead of a version.
+      </p>
       <CodeBlock lang="text" code={`$ gio --version
 gio            0.1.0-beta.8 (@gio.js/server)
 server binary  0.1.0-beta.8 (@gio.js/server-darwin-arm64)

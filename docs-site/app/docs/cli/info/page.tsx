@@ -94,7 +94,9 @@ server binary  0.1.0-beta.8 (@gio.js/server-linux-x64)
 @gio.js/core   0.1.0-beta.8`} />
       <p>
         <code>gio --version</code> (<code>-v</code>) prints the three versions that must
-        match; <code>gio info</code> adds the rest.
+        match; <code>gio info</code> adds the rest. Both print package versions, read from
+        the installed <code>package.json</code> files: the server binary&apos;s is its
+        platform package&apos;s, and the binary itself is never run to ask.
       </p>
 
       <h2 id="good-to-know">Good to know</h2>

@@ -48,7 +48,7 @@ export default function Page(): React.JSX.Element {
       </table>
       <CodeBlock lang="bash" code={`gio --help             # the command list
 gio help dev           # one command's options (same as: gio dev --help)
-gio --version          # CLI, server binary and @gio.js/core versions (-v)`} />
+gio --version          # CLI, server binary and @gio.js/core package versions (-v)`} />
       <p>
         In a project, run <code>gio</code> through your package manager (<code>npx gio</code>,{' '}
         <code>pnpm gio</code>) or from a <code>package.json</code> script. A mistyped command
@@ -74,6 +74,14 @@ gio --version          # CLI, server binary and @gio.js/core versions (-v)`} />
         and <code>gio add</code>): a usage error exits with <code>2</code> before the command
         does anything.
       </p>
+      <p>
+        <code>gio --version</code> prints package versions, read from the installed{' '}
+        <code>package.json</code> files: <code>gio</code> is <code>@gio.js/server</code>&apos;s
+        version, the server binary its platform package&apos;s (a binary from{' '}
+        <code>GIO_SERVER_BIN</code> or a repository build prints its path instead), and{' '}
+        <code>@gio.js/core</code> its own. It never runs the binary. See{' '}
+        <a href="/docs/cli/help#version"><code>gio --version</code></a>.
+      </p>
 
       <h2 id="dev">gio dev</h2>
       <CodeBlock lang="bash" code={`gio dev [--port <port>] [--host <ip>] [--open]`} />
@@ -89,7 +97,10 @@ gio --version          # CLI, server binary and @gio.js/core versions (-v)`} />
       <p>
         The whole project is watched: changes in <code>app/</code>, source files elsewhere and
         root config files restart the Node worker and reload open tabs, and edits under{' '}
-        <code>public/</code> only reload the browser. <code>node_modules</code>, hidden
+        <code>public/</code> only reload the browser. A <code>gio.toml</code> edit restarts
+        the worker too, but its new settings do not apply: the Rust server reads{' '}
+        <code>gio.toml</code> once, at startup, so stop <code>gio dev</code> and run it
+        again. <code>node_modules</code>, hidden
         directories and build output are never watched. The rules, and the{' '}
         <code>[dev] watch</code> / <code>watch_ignore</code> keys, are on the{' '}
         <a href="/docs/cli/dev#file-watching"><code>gio dev</code> page</a>.

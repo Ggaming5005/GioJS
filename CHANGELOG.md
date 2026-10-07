@@ -780,10 +780,11 @@ first.
 - **`gio` has real commands.** `gio --help`, `gio help <command>` and
   `gio <command> --help` show the command table and each command's options,
   and `gio --version` prints the CLI, server binary and `@gio.js/core`
-  versions. A mistyped command or option is a did-you-mean error. Exit codes:
-  0 success, 1 failure, 2 usage error - in every command, including those
-  that parse their own options (`gio bench`, `gio build standalone`,
-  `gio migrate`, `gio add`).
+  package versions (read from their `package.json`; the binary is not run). A
+  mistyped command or option is a did-you-mean error. Exit codes: 0 success,
+  1 failure, 2 usage error - in every command, including those that parse
+  their own options (`gio bench`, `gio build standalone`, `gio migrate`,
+  `gio add`).
 - **`gio dev` and `gio start`** run the server in development or production
   mode, whatever `NODE_ENV` says. `-p/--port` and `-H/--host` (IPv4 or IPv6)
   set `GIO_PORT` / `GIO_HOST`, `--open` opens a browser, and the local and
@@ -791,7 +792,9 @@ first.
 - **Dev mode watches the whole project.** Changes in `app/`, source files in
   `components/`, `lib/`, `src/` and `hooks/`, and root config files restart
   the worker; edits under `public/` only reload the browser. `node_modules`,
-  `.git`, `.gio`, build output and editor temp files are ignored.
+  `.git`, `.gio`, build output and editor temp files are ignored. A
+  `gio.toml` edit restarts the worker but does not apply the new settings:
+  the server reads `gio.toml` once, at startup, so restart `gio dev`.
 - **`gio routes [--json]`** lists every route without starting the server:
   pages with their layouts and loading/error/not-found files, route-handler
   methods, WebSocket handlers and metadata routes. **`gio typegen`** writes
