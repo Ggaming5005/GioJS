@@ -600,3 +600,67 @@ test('gio.config.ts: the documented keys are the ones validateGioConfig accepts'
   const table = page.slice(page.indexOf('id="keys"'), page.indexOf('id="gionodeplugin"'));
   assert.deepEqual([...table.matchAll(/name: '(\w+)'/g)].map((m) => m[1]), accepted);
 });
+
+/** Every file below `dir` (repo-relative) whose name matches `pattern`, tests and fixtures left out. */
+function sourceFiles(dir, pattern) {
+  return readdirSync(join(repoDir, dir), { withFileTypes: true }).flatMap((entry) => {
+    const rel = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const skip = ['node_modules', 'test', 'tests', 'templates', 'test-fixtures'];
+      return skip.includes(entry.name) ? [] : sourceFiles(rel, pattern);
+    }
+    return pattern.test(entry.name) && !/\.test\./.test(entry.name) ? [rel] : [];
+  });
+}
+
+test('the env-vars page names every GIO_* variable the server, worker and CLIs read', () => {
+  const found = new Map();
+  const note = (name, file) => found.has(name) || found.set(name, file);
+  // Rust: string literals outside the test modules (env::var("X"), .env("X", ..), const X: &str = "X").
+  for (const file of sourceFiles('crates/giojs-server/src', /\.rs$/)) {
+    const code = read(file).split(/#\[cfg\(test\)\]/)[0];
+    for (const m of code.matchAll(/"(GIO_[A-Z0-9_]*[A-Z0-9])"/g)) note(m[1], file);
+  }
+  // JS/TS: process.env.X, env.X, env['X'] and 'X' constants (not `error.code = 'GIO_...'`).
+  for (const dir of ['packages/giojs-core/src', 'packages/giojs/bin', 'packages/giojs-cli/src']) {
+    for (const file of sourceFiles(dir, /\.(ts|js|mjs|cjs)$/)) {
+      const code = read(file);
+      const reads = /\benv(?:\.|\[['"])(GIO_[A-Z0-9_]*[A-Z0-9])\b|(?<!\.code\s*)=\s*['"](GIO_[A-Z0-9_]*[A-Z0-9])['"]/g;
+      for (const m of code.matchAll(reads)) {
+        note(m[1] ?? m[2], file);
+      }
+    }
+  }
+  found.delete('GIO_PUBLIC_X'); // an example name; the GIO_PUBLIC_* family is documented
+  assert.ok(found.size > 20, `found only ${found.size} variables - update this test`);
+  const page = docsPage('env-vars');
+  const missing = [...found].filter(([name]) => !page.includes(name)).map(([name, file]) => `${name} (${file})`);
+  assert.deepEqual(missing, [], 'document these on /docs/env-vars');
+});
+
+test('the endpoints page states the revalidation limits and the health fields the server uses', () => {
+  const rs = read('crates/giojs-server/src/revalidate.rs');
+  const constant = (name) => {
+    const m = new RegExp(`const ${name}: [^=]+= ([^;]+);`).exec(rs);
+    assert.ok(m, `${name} not found in revalidate.rs - update this test if it moved`);
+    return m[1].trim();
+  };
+  const page = docsPage('endpoints');
+  assert.equal(constant('FAILURE_LIMIT'), '10');
+  assert.match(page, /After 10 failed attempts/);
+  assert.equal(constant('FAILURE_WINDOW'), 'Duration::from_secs(60)');
+  assert.equal(constant('MAX_BODY_BYTES'), '64 * 1024');
+  assert.match(page, /at most 64 KiB/);
+  assert.equal(constant('MAX_TAGS'), '64');
+  assert.equal(constant('MAX_PATHS'), '64');
+  assert.equal(constant('MAX_TAG_BYTES'), '256');
+  // Every key of the /_gio/health body is a row of the page's field table.
+  const health = /fn health_body[\s\S]*?\n}\n/.exec(read('crates/giojs-server/src/main.rs'));
+  assert.ok(health, 'health_body not found in main.rs - update this test if it moved');
+  const keys = new Set([...health[0].matchAll(/"([a-zA-Z]+)":/g)].map((m) => m[1]));
+  assert.ok(keys.size >= 8, `found only ${keys.size} health fields`);
+  for (const key of keys) {
+    if (key === 'configured' || key === 'ready') continue; // inside `workers`
+    assert.match(page, new RegExp(`name: '${key}'`), `/_gio/health field ${key} is not documented`);
+  }
+});

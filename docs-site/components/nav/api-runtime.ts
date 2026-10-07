@@ -10,6 +10,11 @@ import type { NavGroup } from './types.ts';
 export const runtimeReferenceGroups: NavGroup[] = [
   {
     title: 'Runtime',
-    items: [],
+    items: [
+      { href: '/docs/env-vars', label: 'Environment Variables' },
+      { href: '/docs/endpoints', label: 'Endpoints' },
+      { href: '/docs/headers', label: 'Headers' },
+      { href: '/docs/typescript', label: 'TypeScript' },
+    ],
   },
 ];

@@ -42,10 +42,6 @@ const scriptFile = fileURLToPath(import.meta.url);
 export const PENDING = new Set([
   // Wave B API reference and guide pages, written in parallel. Remove each
   // entry when its page lands (check-links warns about stale ones).
-  '/docs/env-vars',
-  '/docs/endpoints',
-  '/docs/headers',
-  '/docs/typescript',
   '/docs/upgrading',
   '/docs/guides/streaming',
   '/docs/guides/redirecting',
