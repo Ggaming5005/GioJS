@@ -3,10 +3,11 @@
  * packages/giojs-react/src/Link.test.tsx
  *
  * GioLink's prefetch path: a prefetched page is reused by the click, and a
- * page that cannot be rendered in place (a static 404.html, a 500 without the
- * GioJS boundary) is remembered - hovering it again must not refetch it, and
- * clicking it goes straight to a full load. `replace`, `scroll` and same-page
- * hash links go through the router.
+ * page that cannot be rendered in place is remembered - hovering it again
+ * must not refetch it. A definitive answer (a 200 page without the GioJS
+ * boundary) sends the click straight to a full load; a failed one (a static
+ * 404.html, a 500) is fetched again by the click. `replace`, `scroll` and
+ * same-page hash links (href="#" included) go through the router.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -99,7 +100,7 @@ describe('GioLink prefetch', () => {
     expect(document.getElementById('__gio')?.textContent).toBe('prefetched-page');
   });
 
-  it('a 404 is prefetched once: later hovers do not refetch it, a click hard-navigates', async () => {
+  it('a 404 is prefetched once: later hovers do not refetch it, a click asks again and hard-navigates', async () => {
     const fetchMock = vi.fn(async () => htmlResponse(404, '<html><body><h1>404</h1></body></html>'));
     vi.stubGlobal('fetch', fetchMock);
     const assigned = captureHardNavigations();
@@ -111,10 +112,21 @@ describe('GioLink prefetch', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     await click(anchor);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(assigned).toEqual(['/prefetch-missing']);
     // The 404 document is never swapped in under the new URL.
     expect(document.getElementById('__gio')?.textContent).toBe('initial');
+  });
+
+  it('a 200 page without the GioJS boundary is remembered: the click hard-navigates without refetching', async () => {
+    const fetchMock = vi.fn(async () => htmlResponse(200, '<html><body><h1>legacy</h1></body></html>'));
+    vi.stubGlobal('fetch', fetchMock);
+    const assigned = captureHardNavigations();
+    const anchor = renderLink('/prefetch-legacy');
+    await hover(anchor);
+    await click(anchor);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(assigned).toEqual(['/prefetch-legacy']);
   });
 
   it('the marker outlives a remount of the link', async () => {
@@ -152,5 +164,17 @@ describe('GioLink prefetch', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(window.location.hash).toBe('#details');
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it('href="#" scrolls to the top without fetching the page again', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const scrollTo = vi.mocked(window.scrollTo);
+    Object.defineProperty(window, 'scrollY', { value: 700, configurable: true });
+    await click(renderLink('#'));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(scrollTo).toHaveBeenCalledWith(0, 0);
+    expect(document.getElementById('__gio')?.textContent).toBe('initial');
+    Object.defineProperty(window, 'scrollY', { value: 0, configurable: true });
   });
 });

@@ -5,9 +5,11 @@
  * The client router against jsdom with a mocked fetch: only GioJS pages are
  * rendered in place (anything else is a full load), history names the URL a
  * redirect landed on, scroll goes to the top or the #hash target and back/
- * forward restore it, same-page hash links only scroll, prefetched pages
- * expire and mutations invalidate them, refresh() re-renders in place, focus
- * moves to the new page and its title is announced, and a slow superseded
+ * forward restore it (also across a plain #anchor link the browser handled),
+ * same-page hash links only scroll, prefetched pages expire, mutations
+ * invalidate them and a failed prefetch never decides a click, refresh()
+ * re-renders in place, focus moves to a new page (but never out of a field
+ * the user is typing in) and its title is announced, and a slow superseded
  * navigation never clobbers a newer one.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -84,6 +86,28 @@ function setScroll(x: number, y: number): void {
   Object.defineProperty(window, 'scrollY', { value: y, configurable: true });
 }
 
+/** The user (or the browser) scrolled: the position, then the scroll event. */
+function userScroll(y: number): void {
+  setScroll(0, y);
+  window.dispatchEvent(new Event('scroll'));
+}
+
+/**
+ * A client runtime that keeps everything in #__gio but its <main>: a layout
+ * shared by both pages, as the persistent React root keeps it.
+ */
+function installLayoutRuntime(): void {
+  (window as unknown as Record<string, unknown>)['__GIO_RUNTIME__'] = {
+    prepare: async () => undefined,
+    commit: (content: Element | null) => {
+      const next = content?.querySelector('main');
+      if (next) document.querySelector('#__gio main')?.replaceWith(document.importNode(next, true));
+    },
+  };
+}
+
+const announced = (): string | null => document.getElementById('__gio-route-announcer')?.textContent ?? null;
+
 beforeEach(async () => {
   vi.spyOn(window, 'addEventListener').mockImplementation(((
     type: string,
@@ -119,6 +143,9 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  // Flushes the instance's pending scroll write (its timer would otherwise
+  // fire into the next test's history entry).
+  window.dispatchEvent(new Event('pagehide'));
   for (const [type, listener] of listeners.splice(0)) window.removeEventListener(type, listener);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -317,6 +344,26 @@ describe('scroll', () => {
     expect(history.state.__gio.key).toEqual(expect.any(String));
   });
 
+  it('href="#" scrolls to the top without fetching, as the browser does', async () => {
+    const fetchMock = serve({});
+    setScroll(0, 900);
+    await nav.navigate('#');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(window.scrollY).toBe(0);
+    expect(window.location.href).toBe(`${window.location.origin}/#`);
+    expect(gioText()).toBe('initial');
+  });
+
+  it('a hash link to the URL already shown replaces its entry', async () => {
+    serve({});
+    document.body.innerHTML = '<div id="__gio"><main><h2 id="faq">FAQ</h2></main></div>';
+    const push = vi.spyOn(history, 'pushState');
+    await nav.navigate('/#faq');
+    await nav.navigate('#faq');
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(2);
+  });
+
   it('back and forward restore the saved position once the page has rendered', async () => {
     serve({
       '/': () => response({ body: '<main>home</main>' }),
@@ -339,6 +386,55 @@ describe('scroll', () => {
     await settle();
     expect(gioText()).toBe('item');
     expect(window.scrollY).toBe(40);
+  });
+
+  it('back after a plain #anchor link the browser handled restores the position it left', async () => {
+    serve({});
+    document.body.innerHTML = '<div id="__gio"><main><p id="note">note</p></main></div>';
+    // Hovering any GioLink activates the router.
+    nav.prefetch('/other');
+    userScroll(1200);
+    // <a href="#note">: the browser adds a state-less entry and scrolls to
+    // the target before hashchange fires.
+    history.pushState(null, '', '/#note');
+    userScroll(3000);
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    userScroll(3100);
+
+    history.back();
+    await settle();
+    expect(window.location.hash).toBe('');
+    expect(window.scrollY).toBe(1200);
+    history.forward();
+    await settle();
+    expect(window.location.hash).toBe('#note');
+    expect(window.scrollY).toBe(3100);
+  });
+
+  it('the same when the browser reports the #anchor entry with a popstate after scrolling', async () => {
+    serve({});
+    document.body.innerHTML = '<div id="__gio"><main><p id="note">note</p></main></div>';
+    // Scrolled before the router was active: it records where it starts.
+    setScroll(0, 800);
+    nav.prefetch('/other');
+    history.pushState(null, '', '/#note');
+    setScroll(0, 3000);
+    window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+    window.dispatchEvent(new Event('scroll'));
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    history.back();
+    await settle();
+    expect(window.scrollY).toBe(800);
+  });
+
+  it('writes the position to history.state once scrolling pauses', async () => {
+    serve({});
+    nav.prefetch('/other');
+    userScroll(640);
+    expect(history.state.__gio.scroll).toBeUndefined();
+    await new Promise(r => setTimeout(r, 200));
+    expect(history.state.__gio.scroll).toEqual([0, 640]);
   });
 
   it('takes over scroll restoration and saves the position in history.state', async () => {
@@ -405,13 +501,53 @@ describe('prefetch cache', () => {
     expect(gioText()).toBe('q');
   });
 
-  it('a failed prefetch is remembered: the click is a full load without refetching', async () => {
-    const fetchMock = serve({ '/missing': () => response({ status: 404, body: null }) });
-    nav.prefetch('/missing');
-    nav.prefetch('/missing');
-    await nav.navigate('/missing');
+  it('a definitive non-GioJS prefetch is remembered: the click is a full load without refetching', async () => {
+    const fetchMock = serve({
+      '/report.json': () => new Response('{}', { headers: { 'content-type': 'application/json' } }),
+    });
+    nav.prefetch('/report.json');
+    nav.prefetch('/report.json');
+    await nav.navigate('/report.json');
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(assigned).toEqual(['/missing']);
+    expect(assigned).toEqual(['/report.json']);
+  });
+
+  it("a prefetch the server's budget rejected (429) never decides the click", async () => {
+    let calls = 0;
+    const fetchMock = serve({
+      '/post': () =>
+        ++calls === 1 ? new Response(null, { status: 429 }) : response({ title: 'Post', body: '<main>post</main>' }),
+    });
+    nav.prefetch('/post');
+    // Hovering again within the TTL does not hammer the budget.
+    nav.prefetch('/post');
+    await nav.navigate('/post');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[1]?.headers).not.toHaveProperty('Purpose');
+    expect(assigned).toEqual([]);
+    expect(gioText()).toBe('post');
+  });
+
+  it('a prefetch that failed (network error, 404, 503) is fetched again by the click', async () => {
+    let up = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (!up) {
+        if (path === '/flaky') throw new TypeError('network error');
+        return response({ status: path === '/gone' ? 404 : 503, body: '<main>error page</main>' });
+      }
+      return response({ body: `<main>${path}</main>` });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    for (const path of ['/flaky', '/gone', '/busy']) nav.prefetch(path);
+    await settle();
+    up = true;
+    for (const path of ['/flaky', '/gone', '/busy']) {
+      await nav.navigate(path);
+      expect(gioText()).toBe(path);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(assigned).toEqual([]);
   });
 
   it('a same-origin mutation invalidates prefetched pages', async () => {
@@ -469,6 +605,72 @@ describe('accessibility', () => {
     expect(region?.textContent).toBe('About us');
     // Outside the React boundary.
     expect(document.getElementById('__gio')?.contains(region ?? null)).toBe(false);
+  });
+
+  it('a query-only replace keeps focus in an input outside the page (search as you type)', async () => {
+    document.body.insertAdjacentHTML('afterbegin', '<input id="q">');
+    const input = document.getElementById('q') as HTMLInputElement;
+    input.focus();
+    serve({
+      '/?q=b': () => response({ title: 'Search', body: '<main>results b</main>' }),
+      '/?q=bo': () => response({ title: 'Search', body: '<main>results bo</main>' }),
+    });
+    await nav.navigate('/?q=b', { replace: true, scroll: false });
+    expect(gioText()).toBe('results b');
+    expect(document.activeElement).toBe(input);
+    // Only the query changed: nothing to announce.
+    expect(announced()).toBe('');
+    await nav.navigate('/?q=bo', { replace: true });
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('typing in a field of a shared layout keeps its focus, also when it leads to another page', async () => {
+    installLayoutRuntime();
+    document.body.innerHTML = '<div id="__gio"><header><input id="q"></header><main>home</main></div>';
+    const input = document.getElementById('q') as HTMLInputElement;
+    input.focus();
+    serve({
+      '/search?q=a': () => response({ title: 'Search', body: '<header></header><main>results a</main>' }),
+      '/search?q=ab': () => response({ title: 'Search', body: '<header></header><main>results ab</main>' }),
+    });
+    await nav.navigate('/search?q=a');
+    expect(document.querySelector('main')?.textContent).toBe('results a');
+    expect(document.activeElement).toBe(input);
+    // A new page is still announced.
+    expect(announced()).toBe('Search');
+    await nav.navigate('/search?q=ab', { replace: true });
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('a link of a shared layout that leads to another page: focus moves to the new main', async () => {
+    installLayoutRuntime();
+    document.body.innerHTML = '<div id="__gio"><nav><a id="about" href="/about">About</a></nav><main>home</main></div>';
+    const link = document.getElementById('about') as HTMLAnchorElement;
+    link.focus();
+    serve({ '/about': () => response({ title: 'About', body: '<nav></nav><main>about</main>' }) });
+    await nav.navigate('/about');
+    expect(document.activeElement).toBe(document.querySelector('main'));
+    expect(announced()).toBe('About');
+  });
+
+  it('scroll: false to another page (tabs) leaves focus on the tab', async () => {
+    installLayoutRuntime();
+    document.body.innerHTML = '<div id="__gio"><nav><a id="tab" href="/billing">Billing</a></nav><main>profile</main></div>';
+    const tab = document.getElementById('tab') as HTMLAnchorElement;
+    tab.focus();
+    serve({ '/billing': () => response({ title: 'Billing', body: '<nav></nav><main>billing</main>' }) });
+    await nav.navigate('/billing', { scroll: false });
+    expect(document.activeElement).toBe(tab);
+    expect(announced()).toBe('Billing');
+  });
+
+  it('a query-only navigation that removed the focused element moves focus to main', async () => {
+    document.body.innerHTML = '<div id="__gio"><main><button id="more">More</button></main></div>';
+    (document.getElementById('more') as HTMLButtonElement).focus();
+    serve({ '/?page=2': () => response({ title: 'Page 2', body: '<main>page 2</main>' }) });
+    await nav.navigate('/?page=2');
+    expect(document.activeElement).toBe(document.querySelector('main'));
+    expect(announced()).toBe('');
   });
 
   it('falls back to the h1 when the page has no title', async () => {

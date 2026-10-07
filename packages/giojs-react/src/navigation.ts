@@ -4,8 +4,8 @@
  * The client-side router behind GioLink and useRouter(): soft navigation
  * (fetch the next page's HTML and render it through the client runtime's
  * persistent React root), the prefetch cache, history entries with their
- * scroll positions, and the accessibility follow-up of every soft
- * navigation (focus, route announcement). Deployment-id version skew
+ * scroll positions, and the accessibility follow-up of a soft navigation to
+ * another page (focus, route announcement). Deployment-id version skew
  * detection lives here too. All DOM access is guarded so this module is
  * safe to import during SSR.
  *
@@ -56,11 +56,17 @@ export function handleHardReload(): void {
 
 // ── fetching pages ────────────────────────────────────────────────────────────
 
-/** A fetched page, judged. `url` is the same-origin path + query it came from. */
+/**
+ * A fetched page, judged. `url` is the same-origin path + query it came
+ * from. `transient` marks an answer the next request may not get again - a
+ * network error or a non-2xx status (the server's 429 when the prefetch
+ * budget is spent, a 503, a 404) - so a prefetch that got one is never used
+ * as a navigation's answer.
+ */
 export type PageResult =
-  | { kind: 'page'; html: string; url: string }
+  | { kind: 'page'; html: string; url: string; transient: boolean }
   /** Not a GioJS page (or unreachable): the browser loads `url` itself. */
-  | { kind: 'load'; url: string }
+  | { kind: 'load'; url: string; transient: boolean }
   /** Deployment skew (409 hard-reload): the browser must load the new build. */
   | { kind: 'reload' };
 
@@ -102,22 +108,23 @@ async function fetchPage(url: string, purpose: FetchPurpose): Promise<PageResult
       ...(purpose === 'refresh' ? { cache: 'no-cache' as const } : {}),
     });
     if (isHardReloadResponse(res)) return { kind: 'reload' };
+    const transient = !res.ok;
     // After redirects res.url is where the page really lives: history and
     // the navigation context must name it, not the link's href.
     let finalUrl = url;
     if (res.url) {
       const landed = sameOriginUrl(res.url);
-      if (landed === null) return { kind: 'load', url: res.url };
+      if (landed === null) return { kind: 'load', url: res.url, transient };
       finalUrl = landed.pathname + landed.search;
     }
-    if (!isHtml(res)) return { kind: 'load', url: finalUrl };
+    if (!isHtml(res)) return { kind: 'load', url: finalUrl, transient };
     const html = await res.text();
     // 404/500 pages rendered by GioJS carry the boundary and soft-navigate
     // like any page; a static host's 404.html or Rust's 503 page do not.
-    if (!html.includes('id="__gio"')) return { kind: 'load', url: finalUrl };
-    return { kind: 'page', html, url: finalUrl };
+    if (!html.includes('id="__gio"')) return { kind: 'load', url: finalUrl, transient };
+    return { kind: 'page', html, url: finalUrl, transient };
   } catch {
-    return { kind: 'load', url };
+    return { kind: 'load', url, transient: true };
   }
 }
 
@@ -162,6 +169,16 @@ function storePrefetch(url: string, entry: PrefetchEntry): void {
   prefetchEntries.set(url, entry);
 }
 
+/**
+ * The answer for a navigation to `url`: a fresh prefetch of it, unless that
+ * prefetch got a transient answer - then the page is fetched again.
+ */
+async function pageForNavigation(url: string): Promise<PageResult> {
+  const prefetched = await cachedPage(url)?.result;
+  if (prefetched !== undefined && (prefetched.kind === 'reload' || !prefetched.transient)) return prefetched;
+  return fetchPage(url, 'navigate');
+}
+
 /** Drop every prefetched page (refresh(), and after any same-origin mutation). */
 export function invalidatePrefetchCache(): void {
   cacheGeneration += 1;
@@ -170,9 +187,12 @@ export function invalidatePrefetchCache(): void {
 
 /**
  * Fetch `href` into the prefetch cache (GioLink hover/viewport, and
- * router.prefetch). A failed or non-GioJS response is remembered too, so
- * hovering it again does not refetch it and a click goes straight to a full
- * load. No-op on the server and for other origins.
+ * router.prefetch). Every answer is kept until it expires, so hovering the
+ * link again does not refetch it; a definitive non-GioJS answer (JSON, a 200
+ * page without the boundary) also sends a click straight to a full load. A
+ * transient one - a network error, a 429 from the server's prefetch budget,
+ * any non-2xx - is not trusted for the click: the navigation fetches the
+ * page itself. No-op on the server and for other origins.
  */
 export function prefetch(href: string): void {
   if (typeof window === 'undefined') return;
@@ -241,12 +261,17 @@ function entryState(state: unknown): EntryState | null {
 /**
  * Record `entry` in the current history entry, keeping the app's own state
  * beside it. A non-object state set by someone else is left untouched (the
- * in-memory positions still cover this document).
+ * in-memory positions still cover this document), and so is a browser that
+ * refuses the write (Safari rate-limits replaceState).
  */
 function writeEntryState(entry: EntryState): void {
   const state: unknown = history.state;
   if (state !== null && state !== undefined && !isRecord(state)) return;
-  history.replaceState({ ...(state ?? {}), [STATE_KEY]: entry }, '');
+  try {
+    history.replaceState({ ...(state ?? {}), [STATE_KEY]: entry }, '');
+  } catch {
+    // The in-memory position still covers this document.
+  }
 }
 
 let keyCounter = 0;
@@ -256,15 +281,45 @@ function newEntryKey(): string {
 }
 
 let routerActive = false;
+// The current history entry's key.
 let currentKey: string | null = null;
+// The entry whose page is on screen, and the URL fragment it was shown
+// with. They trail currentKey while a traversal's page is still loading,
+// and the fragment trails the address bar while the browser handles a plain
+// `<a href="#x">` (it scrolls to the target before hashchange keys the new
+// entry): scroll positions are recorded only while both still match.
+let shownKey: string | null = null;
+let shownHash = '';
 // The path + query the page on screen was rendered for: a popstate to the
 // same one is a hash-only traversal, nothing to fetch.
 let renderedUrl: string | null = null;
-// Back/forward cannot write the entry being left, so positions also live here.
+// Back/forward cannot write the entry being left, so positions also live
+// here, kept current by a scroll listener (an entry can be left without the
+// router seeing it go: a plain #anchor link).
 const scrollPositions = new Map<string, [number, number]>();
+// history.state gets the position too (it survives a full load of another
+// document), written once scrolling pauses.
+const SCROLL_PERSIST_DELAY_MS = 150;
+let persistTimer: ReturnType<typeof setTimeout> | undefined;
 
 function currentPageUrl(): string {
   return window.location.pathname + window.location.search;
+}
+
+/** The pathname part of a path + query such as renderedUrl. */
+function pathnameOf(url: string): string {
+  const query = url.indexOf('?');
+  return query === -1 ? url : url.slice(0, query);
+}
+
+/** The current entry's page is the one on screen: record positions for it. */
+function markShown(): void {
+  shownKey = currentKey;
+  shownHash = window.location.hash;
+}
+
+function onShownEntry(): boolean {
+  return currentKey !== null && currentKey === shownKey && window.location.hash === shownHash;
 }
 
 function setScrollRestoration(mode: 'auto' | 'manual'): void {
@@ -288,22 +343,37 @@ function ensureRouter(): void {
   const existing = entryState(history.state);
   currentKey = existing?.key ?? newEntryKey();
   if (existing === null) writeEntryState({ key: currentKey });
+  markShown();
+  scrollPositions.set(currentKey, [window.scrollX, window.scrollY]);
   setScrollRestoration('manual');
   window.addEventListener('popstate', onPopState);
   window.addEventListener('hashchange', onHashChange);
   window.addEventListener('pagehide', onPageHide);
   window.addEventListener('pageshow', onPageShow);
+  window.addEventListener('scroll', onScroll, { passive: true });
   trackMutations();
   // The live region must exist before its first message, or screen readers
   // may not announce it.
   announcer();
 }
 
+/** Record the position of the page on screen in its entry (memory and history.state). */
 function saveScroll(): void {
-  if (currentKey === null) return;
+  if (persistTimer !== undefined) {
+    clearTimeout(persistTimer);
+    persistTimer = undefined;
+  }
+  if (!onShownEntry() || currentKey === null) return;
   const scroll: [number, number] = [window.scrollX, window.scrollY];
   scrollPositions.set(currentKey, scroll);
   writeEntryState({ key: currentKey, scroll });
+}
+
+function onScroll(): void {
+  if (!onShownEntry() || currentKey === null) return;
+  scrollPositions.set(currentKey, [window.scrollX, window.scrollY]);
+  if (persistTimer !== undefined) clearTimeout(persistTimer);
+  persistTimer = setTimeout(saveScroll, SCROLL_PERSIST_DELAY_MS);
 }
 
 /** Leaving the document: the browser restores this entry itself if it comes back. */
@@ -321,6 +391,7 @@ function onHashChange(): void {
   if (entryState(history.state) !== null) return;
   currentKey = newEntryKey();
   writeEntryState({ key: currentKey });
+  markShown();
 }
 
 /**
@@ -410,24 +481,56 @@ function announcer(): HTMLElement {
   return region;
 }
 
+const NON_TEXT_INPUT_TYPES = new Set([
+  'button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit',
+]);
+
+/** A field the user types into: navigating as they type must not take it away. */
+function isTextEntry(element: Element): boolean {
+  if (element instanceof HTMLInputElement) return !NON_TEXT_INPUT_TYPES.has(element.type);
+  if (element instanceof HTMLTextAreaElement) return true;
+  return element instanceof HTMLElement && element.isContentEditable === true;
+}
+
+interface Arrival {
+  /** The pathname changed: another page, not a new query of the same one. */
+  newPage: boolean;
+  /** The navigation keeps the view where it is (`scroll: false`). */
+  keepView: boolean;
+}
+
 /**
- * After a soft navigation: move focus to the new page (its <main>, else the
- * #__gio boundary) so keyboard and screen-reader users start there instead
- * of on a link that may no longer exist, and announce the new title. A page
- * that focused something itself (autoFocus) keeps it.
+ * After a soft navigation to another page: announce its title, and move
+ * focus to it (its <main>, else the #__gio boundary) so keyboard and
+ * screen-reader users start there instead of on a link that may be gone.
+ * Focus stays where it is when the page focused something itself
+ * (autoFocus), when the user is typing in a field that is still there
+ * (search as you type), and when a `scroll: false` navigation (tabs) leaves
+ * the focused element in place.
+ *
+ * A navigation within the page (only the query changed: filters, sorting,
+ * ?page=2) neither announces nor moves focus - unless the render removed
+ * the focused element, which would leave keyboard users at the top.
  */
-function focusAndAnnounce(focusedBefore: Element | null): void {
+function focusAndAnnounce(focusedBefore: Element | null, arrival: Arrival): void {
   const boundary = document.getElementById('__gio');
   const active = document.activeElement;
-  const pageTookFocus =
-    active !== null && active !== document.body && active !== focusedBefore && boundary?.contains(active);
-  if (!pageTookFocus) {
+  const hadFocus = focusedBefore !== null && focusedBefore !== document.body;
+  const focusLost = active === null || active === document.body;
+  const pageTookFocus = !focusLost && active !== focusedBefore && boundary?.contains(active) === true;
+  const kept = !focusLost && active === focusedBefore;
+  let moveFocus: boolean;
+  if (pageTookFocus) moveFocus = false;
+  else if (!arrival.newPage) moveFocus = hadFocus && focusLost;
+  else moveFocus = !(kept && active !== null && (arrival.keepView || isTextEntry(active)));
+  if (moveFocus) {
     const target = boundary?.querySelector('main') ?? document.querySelector('main') ?? boundary;
     if (target instanceof HTMLElement) {
       if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
       target.focus({ preventScroll: true });
     }
   }
+  if (!arrival.newPage) return;
   const heading = (boundary?.querySelector('h1') ?? document.querySelector('h1'))?.textContent?.trim() ?? '';
   announcer().textContent = document.title || heading || window.location.pathname;
 }
@@ -507,6 +610,7 @@ function updateHistory(mode: HistoryMode, url: string): void {
     // Back/forward or refresh landed somewhere else (a redirect).
     history.replaceState(history.state, '', url);
   }
+  markShown();
 }
 
 // Monotonic navigation sequence: each navigation claims the next number, and
@@ -607,19 +711,22 @@ export async function navigate(href: string, options: NavigateOptions = {}): Pro
   ensureRouter();
   const path = target.pathname + target.search;
   const scroll = options.scroll !== false;
+  // A link to the URL already shown replaces its entry, as browsers do.
+  const replace = options.replace === true || target.href === window.location.href;
+  // href="#": an empty fragment, which the browser treats as the top of the page.
+  const fragment = target.hash !== '' ? target.hash : target.href.endsWith('#') ? '#' : '';
 
-  if (path === currentPageUrl() && target.hash !== '') {
+  if (path === currentPageUrl() && fragment !== '') {
     // Same page, new fragment: no fetch, just a history entry and a scroll.
     beginNavigation();
-    updateHistory(options.replace === true ? 'replace' : 'push', path + target.hash);
+    updateHistory(replace ? 'replace' : 'push', path + fragment);
     if (scroll) scrollAfterPush(target.hash);
     return;
   }
 
-  // A link to the URL already shown replaces its entry, as browsers do.
-  const replace = options.replace === true || target.href === window.location.href;
+  const fromPathname = pathnameOf(renderedUrl ?? currentPageUrl());
   const seq = beginNavigation();
-  const result = (await cachedPage(path)?.result) ?? (await fetchPage(path, 'navigate'));
+  const result = await pageForNavigation(path);
   if (!isCurrentNavigation(seq)) return;
   if (result.kind === 'reload') {
     // The deployment changed: load the new build's page.
@@ -646,7 +753,7 @@ export async function navigate(href: string, options: NavigateOptions = {}): Pro
   }
   if (!shown) return;
   if (scroll) scrollAfterPush(target.hash);
-  focusAndAnnounce(focusedBefore);
+  focusAndAnnounce(focusedBefore, { newPage: window.location.pathname !== fromPathname, keepView: !scroll });
 }
 
 /**
@@ -687,16 +794,22 @@ export function forward(): void {
 }
 
 function onPopState(event: PopStateEvent): void {
-  // The scroll position still belongs to the page being left.
-  if (currentKey !== null) scrollPositions.set(currentKey, [window.scrollX, window.scrollY]);
   const state = entryState(event.state);
+  // Back/forward to one of our entries: the scroll position still belongs to
+  // the page being left. A state-less entry may instead be one a plain
+  // #anchor link just created, and the browser may already have scrolled to
+  // its target: the scroll listener recorded the position before that.
+  if (state !== null && currentKey !== null && currentKey === shownKey) {
+    scrollPositions.set(currentKey, [window.scrollX, window.scrollY]);
+  }
   const key = state?.key ?? newEntryKey();
   if (state === null) writeEntryState({ key });
   currentKey = key;
   const url = window.location.pathname + window.location.search;
   const seq = beginNavigation();
   if (url === renderedUrl) {
-    // Only the fragment changed.
+    // Only the fragment changed: the page on screen is this entry's.
+    markShown();
     restoreScroll(key, state?.scroll);
     return;
   }
@@ -709,7 +822,7 @@ async function traverse(
   saved: [number, number] | undefined,
   seq: number,
 ): Promise<void> {
-  const result = (await cachedPage(url)?.result) ?? (await fetchPage(url, 'navigate'));
+  const result = await pageForNavigation(url);
   if (!isCurrentNavigation(seq)) return;
   const page = result.kind === 'page' ? parsePage(result.html) : null;
   if (result.kind !== 'page' || page === null) {
@@ -717,6 +830,7 @@ async function traverse(
     window.location.reload();
     return;
   }
+  const fromPathname = pathnameOf(renderedUrl ?? '');
   const focusedBefore = document.activeElement;
   try {
     if (!(await showPage(page, result.url + window.location.hash, 'pop', false, seq))) return;
@@ -725,5 +839,5 @@ async function traverse(
     return;
   }
   restoreScroll(key, saved);
-  focusAndAnnounce(focusedBefore);
+  focusAndAnnounce(focusedBefore, { newPage: window.location.pathname !== fromPathname, keepView: false });
 }
