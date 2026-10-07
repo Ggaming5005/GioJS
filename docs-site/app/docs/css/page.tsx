@@ -59,7 +59,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           production (<code>[css] minify = false</code> in <code>gio.toml</code> keeps them as
           written; a <a href="/docs/standalone">standalone build</a> bakes them, so there the
           build reads the key). Imported CSS is part of the module graph: no{' '}
-          <code>[css]</code> key turns its bundling off.
+          <a href="/docs/configuration/css"><code>[css]</code></a> key turns its bundling off.
         </li>
         <li>
           The links are React stylesheet resources (<code>precedence=&quot;default&quot;</code>),
@@ -152,7 +152,7 @@ export default function Card({ title }: { title: string }) {
 }
 declare module '*.css' {}`} />
       <p>
-        Projects scaffolded by <code>create-giojs</code> already include{' '}
+        Projects scaffolded by <a href="/docs/create-giojs"><code>create-giojs</code></a> already include{' '}
         <code>.gio/routes.d.ts</code> in their tsconfig. In an existing project, add{' '}
         <code>&quot;.gio/routes.d.ts&quot;</code> to the <code>include</code> array of{' '}
         <code>tsconfig.json</code>. Both files are written when the server starts, so on a fresh
@@ -186,13 +186,13 @@ npx @tailwindcss/cli -i ./app/tailwind.css -o ./app/tailwind.out.css --minify`} 
         CLI rebuild changes <code>tailwind.out.css</code>, and that rebuilds the stylesheets and
         reloads the browser. Import the output file, never the input: the bundler doesn&apos;t
         compile <code>@import &quot;tailwindcss&quot;</code>. Run the minify command before{' '}
-        <code>gio export</code> or <code>gio build standalone</code> as well, so the output is
+        <a href="/docs/cli/export"><code>gio export</code></a> or <a href="/docs/cli/build-standalone"><code>gio build standalone</code></a> as well, so the output is
         up to date.
       </p>
 
       <h2 id="stylesheets-served-by-path-legacy">Stylesheets served by path (legacy)</h2>
       <p>
-        Linking a stylesheet by URL still works. Files under <code>public/</code> are served
+        Linking a stylesheet by URL still works. Files under <a href="/docs/file-conventions/public-folder"><code>public/</code></a> are served
         directly by Rust:
       </p>
       <CodeBlock lang="tsx" code={`<link rel="stylesheet" href="/public/styles/globals.css" />`} />

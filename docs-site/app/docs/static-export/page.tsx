@@ -29,7 +29,7 @@ export default function Page(): React.JSX.Element {
         That wires <code>npm run build</code> to the exporter (after a{' '}
         <code>tsc --noEmit</code> typecheck in TypeScript projects), drops the production
         server scripts, and declares the starter&apos;s fonts with <code>@font-face</code> in{' '}
-        <code>app/globals.css</code> instead of <code>[[fonts]]</code> (below).
+        <code>app/globals.css</code> instead of <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a> (below).
       </p>
       <CodeBlock lang="bash" code={`npm create giojs@latest
 # ? Which language?      › TypeScript / JavaScript
@@ -45,7 +45,7 @@ export default function Page(): React.JSX.Element {
       <PmTabs command={`npm run build      # runs: gio export  →  ./out`} />
       <p>
         Every static route is rendered through the real SSR pipeline, so what you see
-        in dev is what you get in <code>out/</code>. <code>getServerSideProps</code>
+        in dev is what you get in <code>out/</code>. <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>
         runs at build time and its data is baked into the HTML. The export loads the
         project's <code>.env</code> files first, with the same{' '}
         <a href="/docs/configuration">precedence</a> as the server (<code>production</code>{' '}
@@ -53,7 +53,7 @@ export default function Page(): React.JSX.Element {
       </p>
       <p>
         Every export also writes <code>out/404.html</code> - your{` `}
-        <code>app/not-found.tsx</code> if you have one, otherwise the built-in 404
+        <a href="/docs/file-conventions/not-found"><code>app/not-found.tsx</code></a> if you have one, otherwise the built-in 404
         page - so static hosts return a real 404 for unknown URLs instead of
         falling back to the home page.
       </p>
@@ -70,7 +70,7 @@ export default function Page(): React.JSX.Element {
         Exported pages hydrate exactly like served ones. The exporter builds the
         client bundles in production mode into <code>out/_next/static/chunks/</code> and
         every page carries the same hydration envelope and bootstrap script the server
-        renders, so state, effects, event handlers, and <code>GioLink</code> soft
+        renders, so state, effects, event handlers, and <a href="/docs/components/gio-link"><code>GioLink</code></a> soft
         navigation all work on a static host.
       </p>
       <ul>
@@ -100,7 +100,7 @@ export default function Page(): React.JSX.Element {
 
       <h2 id="public-and-robotstxt">public/ and robots.txt</h2>
       <p>
-        <code>public/</code> is copied into <code>out/</code> twice, matching the server: at
+        <a href="/docs/file-conventions/public-folder"><code>public/</code></a> is copied into <code>out/</code> twice, matching the server: at
         the site root, so <code>/favicon.ico</code>, <code>/robots.txt</code>,{' '}
         <code>/manifest.json</code>, and <code>/.well-known/...</code> resolve on any static
         host, and under <code>out/public/</code> for links written as{' '}
@@ -117,8 +117,8 @@ export default function Page(): React.JSX.Element {
           exporter lists it as skipped.
         </li>
         <li>
-          <code>app/sitemap.ts</code>, <code>app/robots.ts</code> and{' '}
-          <code>app/manifest.ts</code> are written as <code>sitemap.xml</code>,{' '}
+          <a href="/docs/file-conventions/sitemap"><code>app/sitemap.ts</code></a>, <a href="/docs/file-conventions/robots"><code>app/robots.ts</code></a> and{' '}
+          <a href="/docs/file-conventions/manifest"><code>app/manifest.ts</code></a> are written as <code>sitemap.xml</code>,{' '}
           <code>robots.txt</code> and <code>manifest.webmanifest</code> (see{' '}
           <a href="/docs/metadata">Metadata &amp; SEO</a>); set <code>GIO_SITE_URL</code> so
           their relative URLs become absolute. Without those modules the exporter generates{' '}
@@ -130,7 +130,7 @@ export default function Page(): React.JSX.Element {
           and a module it shadows is listed as skipped.
         </li>
         <li>
-          Page <code>metadata</code> / <code>generateMetadata</code> run at export time; relative
+          Page <code>metadata</code> / <a href="/docs/page-exports/generate-metadata"><code>generateMetadata</code></a> run at export time; relative
           Open Graph and canonical URLs resolve against <code>metadataBase</code> or{' '}
           <code>GIO_SITE_URL</code>.
         </li>
@@ -139,7 +139,7 @@ export default function Page(): React.JSX.Element {
       <h2 id="dynamic-routes">Dynamic routes</h2>
       <p>
         A dynamic route like <code>app/posts/[id]/page.tsx</code> needs to know which
-        paths to render. Export <code>getStaticPaths</code> to list them:
+        paths to render. Export <a href="/docs/page-exports/get-static-paths"><code>getStaticPaths</code></a> to list them:
       </p>
       <CodeBlock lang="tsx" code={`export async function getStaticPaths() {
   const posts = await db.posts.all();
@@ -172,11 +172,11 @@ export default function Page(): React.JSX.Element {
       <h2 id="what-cant-be-static">What can't be static</h2>
       <p>The exporter skips anything that needs a live server, and tells you what it skipped:</p>
       <ul>
-        <li><code>route.ts</code> handlers and Server-Sent Events</li>
-        <li>WebSocket (<code>wsHandler</code>) routes</li>
-        <li>ISR revalidation (<code>export const revalidate</code> - there's no server to revalidate on)</li>
+        <li><a href="/docs/file-conventions/route"><code>route.ts</code></a> handlers and Server-Sent Events</li>
+        <li>WebSocket (<a href="/docs/page-exports/ws-handler"><code>wsHandler</code></a>) routes</li>
+        <li>ISR revalidation (<a href="/docs/page-exports/revalidate"><code>export const revalidate</code></a> - there's no server to revalidate on)</li>
         <li>
-          Runtime image optimization via <code>/_gio/image</code>: <code>GioImage</code>{' '}
+          Runtime image optimization via <code>/_gio/image</code>: <a href="/docs/components/gio-image"><code>GioImage</code></a>{' '}
           renders its plain <code>src</code> in an export (no <code>srcset</code>), so ship
           pre-sized images
         </li>

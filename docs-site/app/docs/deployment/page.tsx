@@ -21,7 +21,7 @@ export default function DeploymentPage(): React.JSX.Element {
       </p>
 
       <p>
-        A GioJS server is two kinds of process: the <code>giojs-server</code> Rust binary
+        A GioJS server is two kinds of process: the <a href="/docs/cli/giojs-server"><code>giojs-server</code></a> Rust binary
         (HTTP, routing, caching, compression) and the Node.js worker(s) it spawns for React
         rendering. Starting the server starts everything. For step-by-step setups - Docker,
         Fly.io, Railway, Render, or a Linux server with systemd and nginx or Caddy - follow{' '}
@@ -45,7 +45,7 @@ export default function DeploymentPage(): React.JSX.Element {
 
       <p>
         Ship either a <a href="/docs/standalone">standalone folder</a> (
-        <code>gio build standalone</code>: the server binary and a bundled worker that run with{' '}
+        <a href="/docs/cli/build-standalone"><code>gio build standalone</code></a>: the server binary and a bundled worker that run with{' '}
         <code>node run.mjs</code> on any host with Node 20+) or the project itself (
         <code>npm ci --omit=dev</code> and <code>npm start</code> - no build step, and{' '}
         <code>npm update</code> stays your upgrade path). Either way, run with{' '}
@@ -55,7 +55,7 @@ export default function DeploymentPage(): React.JSX.Element {
 
       <h2 id="static-files">Static files</h2>
       <p>
-        Ship <code>public/</code> next to <code>app/</code>. Rust serves its files at the
+        Ship <a href="/docs/file-conventions/public-folder"><code>public/</code></a> next to <code>app/</code>. Rust serves its files at the
         site root (<code>/robots.txt</code>, <code>/favicon.ico</code>,{' '}
         <code>/.well-known/...</code>) and under <code>/public/*</code>, ahead of the page cache
         and the Node worker. Dotfiles (other than <code>.well-known/</code>), symlinks, and a
@@ -66,8 +66,8 @@ export default function DeploymentPage(): React.JSX.Element {
         if your assets live outside the project.
       </p>
       <p>
-        Guards, header rules, and <code>[[rate_limits]]</code> for <code>/public/*</code> paths
-        cover the root URL of the same file as well. A static export (<code>gio export</code>)
+        Guards, header rules, and <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a> for <code>/public/*</code> paths
+        cover the root URL of the same file as well. A static export (<a href="/docs/cli/export"><code>gio export</code></a>)
         copies <code>public/</code> into <code>out/</code> at both places, so static hosts serve
         the same URLs.
       </p>
@@ -84,7 +84,7 @@ export default function DeploymentPage(): React.JSX.Element {
         <code>{'{'}&quot;status&quot;:&quot;ok&quot;,&quot;nodeReady&quot;:...{'}'}</code>; with{' '}
         <code>[health] enabled = false</code> it is a <code>404</code>, and probes must use
         a page of your own (the port only opens once a worker is ready, so{' '}
-        <code>gio start</code> and the testing kit treat that <code>404</code> as ready):
+        <a href="/docs/cli/start"><code>gio start</code></a> and the testing kit treat that <code>404</code> as ready):
       </p>
       <CodeBlock lang="json" code={`{
   "status": "ok",
@@ -123,7 +123,7 @@ idle_timeout_secs = 65`} />
         in nginx): CSRF protection and the WebSocket origin check compare the browser&apos;s{' '}
         <code>Origin</code> with it, so a proxy that rewrites it makes same-origin form posts
         and WebSockets fail with 403. And when the proxy terminates TLS, GioJS does not send{' '}
-        <code>Strict-Transport-Security</code> by itself - set <code>[security] hsts = true</code>.
+        <code>Strict-Transport-Security</code> by itself - set <a href="/docs/configuration/security"><code>[security] hsts = true</code></a>.
         See <a href="/docs/security">Security</a>.
       </p>
 
@@ -229,7 +229,7 @@ accept_request_id = false   # the LB would pass a client's X-Request-Id through`
       <p>
         One GioJS server is two processes: the Rust server (the one your supervisor -
         systemd, Docker, Kubernetes, PM2 - starts) and the Node worker it spawns and
-        restarts on its own (one worker per <code>[server] workers</code>, each
+        restarts on its own (one worker per <a href="/docs/configuration/server"><code>[server] workers</code></a>, each
         supervised on its own). Send the server <code>SIGTERM</code> to stop: it stops
         accepting, closes idle keep-alive connections at once, lets in-flight requests
         finish (8 seconds at most), then gives every worker a few seconds to run its
@@ -259,7 +259,7 @@ accept_request_id = false   # the LB would pass a client's X-Request-Id through`
         By default a server renders on one Node worker, which keeps memory low and is
         plenty for sites where most traffic is cache hits and static files - Rust serves
         those on all cores without touching Node. When renders are the bottleneck (many
-        uncached or personalized pages, slow <code>getServerSideProps</code>, CPU-heavy
+        uncached or personalized pages, slow <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>, CPU-heavy
         route handlers), run a worker pool:
       </p>
       <CodeBlock lang="toml" code={`[server]

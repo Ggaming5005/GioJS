@@ -664,3 +664,104 @@ test('the endpoints page states the revalidation limits and the health fields th
     assert.match(page, new RegExp(`name: '${key}'`), `/_gio/health field ${key} is not documented`);
   }
 });
+
+/** The body of `fn name` in a Rust source file, up to the next top-level `}`. */
+function rustFnBody(file, name) {
+  const source = read(file);
+  const start = source.indexOf(`fn ${name}(`);
+  assert.ok(start >= 0, `fn ${name} not found in ${file} - update this test if it moved`);
+  return source.slice(start, source.indexOf('\n}\n', start) + 2);
+}
+
+/** The number a `fn name() -> T { N }` default returns (`2 * 1024 * 1024` is evaluated). */
+function rustDefault(file, name) {
+  const m = /\{\s*([\d_ *]+?)\s*\}\s*$/.exec(rustFnBody(file, name));
+  assert.ok(m, `fn ${name} in ${file} does not return a plain number - update this test`);
+  return m[1].split('*').reduce((product, factor) => product * Number(factor.replace(/_/g, '').trim()), 1);
+}
+
+test('the protections page names every key startup warns about', () => {
+  const body = rustFnBody('crates/giojs-server/src/config_check.rs', 'protections_off_warnings');
+  const keys = new Set([
+    ...[...body.matchAll(/"\[[a-z.]+\] ([a-z_]+)/g)].map((m) => m[1]),
+    ...[...body.matchAll(/\(\s*"([a-z_]+)",\s*images\./g)].map((m) => m[1]),
+    ...[...body.matchAll(/([a-z_]+) = 0 - one client/g)].map((m) => m[1]),
+  ]);
+  assert.ok(keys.size >= 15, `parsed only ${[...keys].join(', ')} - update this test`);
+  const page = docsPage('guides/security-switches');
+  const missing = [...keys].filter((key) => !page.includes(`<code>${key}`) && !page.includes(`] ${key} = `));
+  assert.deepEqual(missing, [], 'keys protections_off_warnings warns about that the page does not list');
+});
+
+test('the protections page states the server defaults', () => {
+  const config = 'crates/giojs-server/src/config.rs';
+  const page = docsPage('guides/security-switches');
+  const stated = {
+    max_body_bytes: rustDefault(config, 'default_max_body_bytes'),
+    max_connections: rustDefault(config, 'default_max_connections_server'),
+    tls_handshake_timeout_secs: rustDefault(config, 'default_tls_handshake_timeout_secs'),
+    header_read_timeout_secs: rustDefault(config, 'default_header_read_timeout_secs'),
+    request_body_timeout_secs: rustDefault(config, 'default_request_body_timeout_secs'),
+    idle_timeout_secs: rustDefault(config, 'default_idle_timeout_secs'),
+    http2_max_concurrent_streams: rustDefault(config, 'default_http2_max_concurrent_streams'),
+    http2_keep_alive_interval_secs: rustDefault(config, 'default_http2_keep_alive_interval_secs'),
+    max_concurrent: rustDefault(config, 'default_prefetch_max_concurrent'),
+    max_per_second: rustDefault(config, 'default_prefetch_max_per_second'),
+    swr_multiplier: rustDefault(config, 'default_cache_swr_multiplier'),
+    max_remote_bytes: rustDefault(config, 'default_image_max_remote_bytes'),
+  };
+  for (const [key, value] of Object.entries(stated)) {
+    assert.ok(
+      page.includes(`<code>${key} = ${value}</code>`) || page.includes(`] ${key} = ${value}</code>`),
+      `the page should state ${key} = ${value}`,
+    );
+  }
+  assert.equal(rustDefault(config, 'default_max_connections'), 1000);
+  assert.ok(page.includes('<code>[websocket] max_connections = 1000</code>'));
+});
+
+test('the i18n guide states the default detection order and the cookie name', () => {
+  const body = rustFnBody('crates/giojs-server/src/config.rs', 'default_detect_from');
+  const order = [...body.matchAll(/"([a-z-]+)"\.to_string\(\)/g)].map((m) => m[1]);
+  assert.deepEqual(order, ['path', 'accept-language', 'cookie'], 'update the i18n guide and this test');
+  const page = docsPage('i18n');
+  assert.ok(page.includes(`detect_from = ${JSON.stringify(order).replace(/,/g, ', ')}   # the default order`));
+  assert.match(read('crates/giojs-i18n/src/lib.rs'), /strip_prefix\("gio_locale="\)/, 'the cookie is gio_locale');
+});
+
+test('the streaming guide states the shutdown drain, render deadline and event buffer', () => {
+  const page = docsPage('guides/streaming');
+  const drain = rustSeconds('crates/giojs-server/src/main.rs', 'SHUTDOWN_DRAIN_TIMEOUT');
+  assert.ok(page.includes(`up to ${drain} seconds to finish`), `the drain is ${drain}s`);
+  const render = rustSeconds('crates/giojs-server/src/ipc.rs', 'DEFAULT_RENDER_TIMEOUT');
+  assert.ok(page.includes(`render_timeout_secs</code> (${render} seconds)`), `the render deadline is ${render}s`);
+  const buffered = /MAX_BUFFERED_FRAME_BYTES = (\d+) \* 1024 \* 1024/.exec(read('packages/giojs-core/src/ipc.ts'));
+  assert.ok(buffered, 'MAX_BUFFERED_FRAME_BYTES moved - update this test');
+  assert.ok(page.includes(`more than ${buffered[1]} MiB is waiting`), `events drop past ${buffered[1]} MiB`);
+});
+
+test('the redirecting guide states the redirect statuses each API accepts', () => {
+  const action = read('packages/giojs-core/src/action.ts');
+  assert.match(action, /new Set\(\[301, 302, 303, 307, 308\]\)/);
+  assert.match(action, /const \{ status = 303, headers \}/);
+  const rules = read('crates/giojs-server/src/rules.rs');
+  assert.match(rules, /301 \| 302 \| 307 \| 308 =>/);
+  assert.equal(rustDefault('crates/giojs-server/src/rules.rs', 'default_redirect_status'), 302);
+  assert.match(docsPage('guides/redirecting'), /accept all of those but\{' '\}\s*<code>303<\/code>/);
+});
+
+test('the streaming guide states the route-body buffer and the backpressure threshold', () => {
+  const page = docsPage('guides/streaming');
+  assert.match(read('packages/giojs-core/src/ssr.ts'), /ROUTE_BUFFER_LIMIT_BYTES = 1024 \* 1024;/, 'update the guide and this test');
+  assert.match(read('crates/giojs-server/src/ipc.rs'), /const STREAM_PAUSE_BYTES: usize = 1024 \* 1024;/, 'update the guide and this test');
+  assert.ok(page.includes('at most 1 MiB crosses from the worker in one'));
+  assert.ok(page.includes('once about 1 MiB is waiting'));
+});
+
+test('the protections page states the request-id and revalidation-token rules', () => {
+  const page = docsPage('guides/security-switches');
+  assert.match(read('crates/giojs-server/src/client_identity.rs'), /const MAX_REQUEST_ID_LEN: usize = 128;/);
+  assert.ok(page.includes('must be 1 to 128 characters'));
+  assert.match(read('crates/giojs-server/src/revalidate.rs'), /pub const MIN_TOKEN_BYTES: usize = 32;/);
+  assert.ok(page.includes('must be at least 32 bytes'));
+});

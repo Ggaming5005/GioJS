@@ -22,8 +22,8 @@ export default function Page(): React.JSX.Element {
 
       <p>
         Every variable is <strong>server-only</strong> unless its name starts with{' '}
-        <code>GIO_PUBLIC_</code>. Server code - <code>getServerSideProps</code>, page
-        actions, <code>route.ts</code> handlers, anything they import - reads{' '}
+        <code>GIO_PUBLIC_</code>. Server code - <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>, page
+        actions, <a href="/docs/file-conventions/route"><code>route.ts</code></a> handlers, anything they import - reads{' '}
         <code>process.env</code> as usual. Code that also runs in the browser (pages,
         layouts, components) sees only the <code>GIO_PUBLIC_*</code> values, inlined when the
         client bundles are built. This page walks through the whole flow; the{' '}
@@ -148,8 +148,8 @@ export default function Orders({ orders }) { /* ... */ }`} />
         method (in development, the import error itself). The server log carries the file and
         the error under the same digest, and a <code>route.ts</code> that fails to import is
         also logged once at startup. The server still starts, so the rest of the app keeps
-        serving; <code>npx gio routes</code> marks such a route <code>(failed to load)</code>.
-        The same applies to <code>createSessionStorage()</code> at module scope with no{' '}
+        serving; <a href="/docs/cli/routes"><code>npx gio routes</code></a> marks such a route <code>(failed to load)</code>.
+        The same applies to <a href="/docs/functions/create-session-storage"><code>createSessionStorage()</code></a> at module scope with no{' '}
         <code>GIO_SESSION_SECRET</code> in production.
       </p>
       <div className="callout">
@@ -190,7 +190,7 @@ export default function Orders({ orders }) { /* ... */ }`} />
       <p>
         A component that imports a module holding secrets would pull that module into the
         browser bundle. Mark such modules server-only and the mistake becomes a build error
-        instead of a leak: import <code>@gio.js/core/server-only</code> at the top, or name
+        instead of a leak: import <a href="/docs/functions/server-only"><code>@gio.js/core/server-only</code></a> at the top, or name
         the file <code>*.server.ts</code> (<code>.tsx</code>, <code>.js</code>,{' '}
         <code>.jsx</code>). A route whose client bundle reaches one is rejected - it still
         server-renders but does not hydrate - and the error names the import chain, in the
@@ -221,7 +221,7 @@ export default function Orders({ orders }) { /* ... */ }`} />
       <p>
         <code>gio.toml</code> has no variable substitution, and it is usually committed.
         Keep secrets out of it: prefer <code>GIO_REVALIDATE_TOKEN</code> over{' '}
-        <code>[revalidate] token</code>, and protect <code>/_gio/metrics</code> with{' '}
+        <a href="/docs/configuration/revalidate"><code>[revalidate] token</code></a>, and protect <code>/_gio/metrics</code> with{' '}
         <code>ip_allowlist</code> - its <code>token</code> can only be set in the file, so
         if you use one, keep that <code>gio.toml</code> out of public repositories.
       </p>

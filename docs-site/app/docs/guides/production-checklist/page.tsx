@@ -48,8 +48,8 @@ export default function Page(): React.JSX.Element {
           are released in lockstep.
         </li>
         <li>
-          <strong>Check where fonts come from.</strong> A <code>[[fonts]]</code> file in{' '}
-          <code>public/</code> (the starter&apos;s) is copied at every start and needs no
+          <strong>Check where fonts come from.</strong> A <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a> file in{' '}
+          <a href="/docs/file-conventions/public-folder"><code>public/</code></a> (the starter&apos;s) is copied at every start and needs no
           network - make sure it is in the image or standalone folder, since a missing file
           stops startup. An <code>https://</code> font <code>url</code> is downloaded into{' '}
           <code>.gio/fonts/</code> on a fresh host&apos;s first start, and a failed download
@@ -64,10 +64,10 @@ export default function Page(): React.JSX.Element {
         <li>
           <strong>Set <code>GIO_SESSION_SECRET</code></strong> (32+ bytes) if you use{' '}
           <a href="/docs/authentication">sessions</a> or <code>require_session</code>{' '}
-          guards. Without it, <code>createSessionStorage()</code> throws, so every page and{' '}
-          <code>route.ts</code> importing your session module answers 500 (the log names the
+          guards. Without it, <a href="/docs/functions/create-session-storage"><code>createSessionStorage()</code></a> throws, so every page and{' '}
+          <a href="/docs/file-conventions/route"><code>route.ts</code></a> importing your session module answers 500 (the log names the
           file and the missing secret under the response&apos;s digest), and guards deny every
-          request. The server still starts - check <code>npx gio routes</code> with the
+          request. The server still starts - check <a href="/docs/cli/routes"><code>npx gio routes</code></a> with the
           production environment for routes marked <code>(failed to load)</code>.
         </li>
         <li>
@@ -77,9 +77,9 @@ export default function Page(): React.JSX.Element {
         </li>
         <li>
           <strong>Keep secrets out of the browser.</strong> Nothing secret is named{' '}
-          <code>GIO_PUBLIC_*</code>, <code>getServerSideProps</code> returns only what the
+          <code>GIO_PUBLIC_*</code>, <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> returns only what the
           page shows (props are sent to the browser), and modules holding secrets import{' '}
-          <code>@gio.js/core/server-only</code>.
+          <a href="/docs/functions/server-only"><code>@gio.js/core/server-only</code></a>.
         </li>
         <li>
           <strong>Keep secrets out of git</strong>: <code>.env*.local</code> is ignored, and
@@ -100,13 +100,13 @@ export default function Page(): React.JSX.Element {
           <strong>Add a Content-Security-Policy.</strong> Start with{' '}
           <code>csp_report_only</code>, watch the browser console on every page, then switch
           to <code>csp</code>. Nonces are fresh per response, cache hits included; nonce your
-          own inline and third-party scripts with <code>cspNonce()</code>. See{' '}
-          <a href="/docs/security#csp">Content-Security-Policy</a>.
+          own inline and third-party scripts with <a href="/docs/functions/csp-nonce"><code>cspNonce()</code></a>. See the{' '}
+          <a href="/docs/guides/content-security-policy">Content Security Policy</a> guide.
         </li>
         <li>
           <strong>HSTS.</strong> GioJS sends <code>Strict-Transport-Security</code> on its own
           only when it terminates TLS. Behind a TLS proxy or a platform, set{' '}
-          <code>[security] hsts = true</code> once the whole site is HTTPS.
+          <a href="/docs/configuration/security"><code>[security] hsts = true</code></a> once the whole site is HTTPS.
         </li>
       </ul>
       <CodeBlock lang="toml" code={`[security]
@@ -125,7 +125,7 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         </li>
         <li>
           <strong>List other origins of yours</strong> that post to this app (an admin
-          subdomain, a marketing site) in <code>[security.csrf] trusted_origins</code>.
+          subdomain, a marketing site) in <a href="/docs/configuration/security-csrf"><code>[security.csrf] trusted_origins</code></a>.
         </li>
         <li>
           <strong>Exempt cross-site callbacks</strong> - OAuth/OIDC{' '}
@@ -143,7 +143,7 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
       <h2 id="reverse-proxy-and-client-ips">Reverse proxy and client IPs</h2>
       <ul>
         <li>
-          <strong>Trust exactly your proxy</strong> in <code>[server] trusted_proxies</code>,
+          <strong>Trust exactly your proxy</strong> in <a href="/docs/configuration/server"><code>[server] trusted_proxies</code></a>,
           so rate limits, the metrics allowlist and <code>req.ip</code> see visitors instead of
           the proxy. Leave it empty when GioJS faces the internet directly.
         </li>
@@ -171,7 +171,7 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
       <ul>
         <li>
           <strong>Rate-limit what attackers hammer</strong>: login and signup actions,
-          password resets, expensive APIs. <code>[[rate_limits]]</code> run in Rust before
+          password resets, expensive APIs. <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a> run in Rust before
           routing. See <a href="/docs/configuration#rate-limits">Rate limits</a>.
         </li>
         <li>
@@ -194,20 +194,20 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
       <ul>
         <li>
           <strong>Cache what can be shared.</strong> Pages without{' '}
-          <code>export const revalidate</code> render on every request. Check what each route
-          does with <code>gio cache explain &lt;url&gt;</code> or the{' '}
+          <a href="/docs/page-exports/revalidate"><code>export const revalidate</code></a> render on every request. Check what each route
+          does with <a href="/docs/cli/cache-explain"><code>gio cache explain &lt;url&gt;</code></a> or the{' '}
           <code>X-Gio-Cache</code> header. Personalized pages are never cached - see{' '}
           <a href="/docs/caching">Caching &amp; Revalidating</a>.
         </li>
         <li>
-          <strong>Size the cache</strong>: <code>[cache] memory_max_entries</code> (1000
+          <strong>Size the cache</strong>: <a href="/docs/configuration/cache"><code>[cache] memory_max_entries</code></a> (1000
           pages) and <code>disk_max_bytes</code> (512 MiB). Put <code>disk_path</code> (or{' '}
           <code>GIO_CACHE_DIR</code>) on a persistent volume if a restart should come back
           warm.
         </li>
         <li>
-          <strong>Purge on change</strong> with <code>revalidateTag()</code> /{' '}
-          <code>revalidatePath()</code> or a CMS webhook to <code>/_gio/revalidate</code>.
+          <strong>Purge on change</strong> with <a href="/docs/functions/revalidate-tag"><code>revalidateTag()</code></a> /{' '}
+          <a href="/docs/functions/revalidate-path"><code>revalidatePath()</code></a> or a CMS webhook to <code>/_gio/revalidate</code>.
           The cache is per instance: with several instances, purge each one.
         </li>
         <li>

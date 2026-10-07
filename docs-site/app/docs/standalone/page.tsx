@@ -53,7 +53,7 @@ export default function Page(): React.JSX.Element {
   .gio/            manifest (deployment ID input) and generated route types`} />
       <p>
         <code>worker.js</code> is generated from your discovered app modules - every page,
-        layout, <code>route.ts</code> handler, <code>gio.config</code>, and{' '}
+        layout, <a href="/docs/file-conventions/route"><code>route.ts</code></a> handler, <code>gio.config</code>, and{' '}
         <code>middleware</code> file is bundled, so boot performs no filesystem discovery and
         no TypeScript transform. Modules are evaluated when <code>gio</code> evaluates them
         from source: <code>gio.config</code>, <code>middleware</code> and{' '}

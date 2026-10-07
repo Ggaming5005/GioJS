@@ -34,7 +34,7 @@ npx create-giojs add db                    # an existing app`} />
         compile or download. The native drivers (<code>better-sqlite3</code>,{' '}
         <code>@libsql/client</code>) ship prebuilt binaries for common platforms, but a native
         addon cannot be bundled into the single <code>worker.js</code> that{' '}
-        <code>gio build standalone</code> produces, so they would not survive a{' '}
+        <a href="/docs/cli/build-standalone"><code>gio build standalone</code></a> produces, so they would not survive a{' '}
         <a href="/docs/standalone">standalone</a> or <a href="/docs/guides/docker">Docker</a>{' '}
         deploy. <code>node:sqlite</code> needs Node 22.16 or newer (the feature sets{' '}
         <code>engines</code>); Node still labels it experimental and prints one warning at
@@ -54,7 +54,7 @@ npx create-giojs add db                    # an existing app`} />
       <p>
         <code>lib/db.server.ts</code> opens the database, applies pending migrations, and
         exports <code>db</code> plus the queries the page uses. The <code>.server</code> name
-        keeps it out of client bundles; use it from <code>getServerSideProps</code>, actions and
+        keeps it out of client bundles; use it from <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>, actions and
         route handlers.
       </p>
       <CodeBlock lang="ts" code={`export async function listNotes(): Promise<NoteItem[]> {
@@ -106,7 +106,7 @@ npm run db:migrate    # optional: apply now, without starting the server`} />
           <code>data/</code> is git-ignored.
         </li>
         <li>
-          <code>gio.toml</code> lists it in <code>[dev] watch_ignore</code>, so writes never
+          <code>gio.toml</code> lists it in <a href="/docs/configuration/dev"><code>[dev] watch_ignore</code></a>, so writes never
           restart the dev server:
         </li>
       </ul>

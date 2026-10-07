@@ -81,7 +81,7 @@ export default function BenchmarksPage(): React.JSX.Element {
 
       <h2 id="load-testing-with-gio-bench">Load testing with gio bench</h2>
       <p>
-        <code>gio bench</code> ships with <code>@gio.js/server</code>: a zero-dependency
+        <a href="/docs/cli/bench"><code>gio bench</code></a> ships with <code>@gio.js/server</code>: a zero-dependency
         HTTP load generator (plain <code>node:http</code>, keep-alive connections). It
         opens N concurrent connection loops for a fixed duration and reports requests/s,
         latency p50/p90/p99/max (nearest-rank, no sampling), non-200 count, errors, and

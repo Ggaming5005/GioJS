@@ -17,7 +17,7 @@ export default function Page(): React.JSX.Element {
 
       <p>Two special files control the non-happy paths. Both may sit in any folder of <code>app/</code>:</p>
       <ul>
-        <li><strong>not-found.tsx</strong> - rendered with status 404 when a page calls <code>notFound()</code>; the one in <code>app/</code> also answers unmatched URLs</li>
+        <li><strong>not-found.tsx</strong> - rendered with status 404 when a page calls <a href="/docs/functions/not-found"><code>notFound()</code></a>; the one in <code>app/</code> also answers unmatched URLs</li>
         <li><strong>error.tsx</strong> - rendered with status 500 when a render throws, and an error boundary in the browser</li>
       </ul>
       <p>
@@ -29,7 +29,7 @@ export default function Page(): React.JSX.Element {
       <h2 id="not-found">Not found</h2>
       <p>
         Call <code>notFound()</code> from <code>@gio.js/core</code> in{' '}
-        <code>getServerSideProps</code> or while rendering, or return{' '}
+        <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> or while rendering, or return{' '}
         <code>{'{ notFound: true }'}</code> from <code>getServerSideProps</code> (see{' '}
         <a href="/docs/fetching-data">Fetching Data</a>). The response is a 404 with the
         nearest <code>not-found.tsx</code>:
@@ -44,13 +44,13 @@ export default function Page(): React.JSX.Element {
   return <div><h1>404</h1><p>Page not found.</p></div>;
 }`} />
       <p>
-        URLs that match no route always get the <code>app/not-found.tsx</code> - they belong
+        URLs that match no route always get the <a href="/docs/file-conventions/not-found"><code>app/not-found.tsx</code></a> - they belong
         to no folder. A 404 is never cached, even on a page that exports{' '}
         <code>revalidate</code>: it can depend on anything <code>getServerSideProps</code>{' '}
         read, and a cached 404 would outlive the content appearing. When a cached page starts
         answering 404 - its data was deleted - the background revalidation that sees the 404
         evicts the cached copy, so the deleted page is not served for the rest of the
-        stale-while-revalidate window. A <code>route.ts</code> handler that calls{' '}
+        stale-while-revalidate window. A <a href="/docs/file-conventions/route"><code>route.ts</code></a> handler that calls{' '}
         <code>notFound()</code> answers <code>{'{ "error": "Not Found" }'}</code> with
         status 404.
       </p>
@@ -62,7 +62,7 @@ export default function Page(): React.JSX.Element {
         renders with status 500. An <code>error.tsx</code> does <em>not</em> catch errors of
         the layout in its own folder - it renders inside that layout - so those go to the{' '}
         <code>error.tsx</code> of a parent folder (the Next.js rule). An error in{' '}
-        <code>app/layout.tsx</code> itself gets the built-in error page.
+        <a href="/docs/file-conventions/layout"><code>app/layout.tsx</code></a> itself gets the built-in error page.
       </p>
       <p>
         The error page receives the failure via props as{' '}
@@ -109,7 +109,7 @@ export default function Error({ error, reset }: ErrorPageProps) {
       </p>
       <div className="callout">
         <strong>Upgrading:</strong> <code>error.tsx</code> used to render only on the server.
-        It is now client code, bundled into every page below its folder (<code>app/error.tsx</code>{' '}
+        It is now client code, bundled into every page below its folder (<a href="/docs/file-conventions/error"><code>app/error.tsx</code></a>{' '}
         into every page) - so it must be browser-safe like a page component. An existing{' '}
         <code>error.tsx</code> that imports server-only code (a <code>*.server.ts</code>{' '}
         module, <code>server-only</code>, a Node builtin, a server-side logger) costs those
@@ -125,7 +125,7 @@ export default function Error({ error, reset }: ErrorPageProps) {
       <h3 id="streaming-and-loadingtsx">Streaming and loading.tsx</h3>
       <p>
         A failure is answered with a 404 or 500 page only while nothing has been sent yet.
-        Under a <code>loading.tsx</code> that means: if the page throws (or calls{' '}
+        Under a <a href="/docs/file-conventions/loading"><code>loading.tsx</code></a> that means: if the page throws (or calls{' '}
         <code>notFound()</code>) before it suspends, the response is still the error or
         not-found page, exactly as without the <code>loading.tsx</code>. Once the page has
         suspended, the status and the loading UI are on their way; an error after that is
@@ -138,7 +138,8 @@ export default function Error({ error, reset }: ErrorPageProps) {
         boundaries always get that client-side recovery; only a <code>notFound()</code>{' '}
         there still answers 404 while nothing has been sent. A render that recovered this
         way is never cached, even on a page with <code>revalidate</code> - with partial
-        prerendering, its shell is not stored either.
+        prerendering, its shell is not stored either. See{' '}
+        <a href="/docs/guides/streaming#status-codes-and-errors">Streaming</a>.
       </p>
 
       <h2 id="production-error-responses">Production error responses</h2>
@@ -194,7 +195,7 @@ GIO_EDITOR="subl -w" npm run dev`} />
         <code>POST</code> only. The SSR error page follows the same rule: for
         any other host it leaves out the error message and stack (the
         terminal still logs them). If you open the dev server through a LAN
-        IP or hostname, add it to <code>[dev] allowed_hosts</code> in{' '}
+        IP or hostname, add it to <a href="/docs/configuration/dev"><code>[dev] allowed_hosts</code></a> in{' '}
         <code>gio.toml</code> (see{' '}
         <a href="/docs/configuration">Configuration</a>) or error details,
         codeframes and editor links will not work from there.
@@ -202,7 +203,7 @@ GIO_EDITOR="subl -w" npm run dev`} />
 
       <h2 id="static-export">Static export</h2>
       <p>
-        <code>gio export</code> writes your <code>app/not-found.tsx</code> (or the built-in
+        <a href="/docs/cli/export"><code>gio export</code></a> writes your <code>app/not-found.tsx</code> (or the built-in
         default) to <code>out/404.html</code>, which static hosts like Cloudflare Pages,
         GitHub Pages, and Netlify serve with a real 404 status for unknown URLs - without
         it, many hosts fall back to the home page with a 200. Pages that call{' '}

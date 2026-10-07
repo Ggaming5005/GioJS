@@ -65,7 +65,7 @@ npm install`} />
       </p>
       <p>
         Start development with <code>npm run dev</code>, not <code>gio dev</code> (or{' '}
-        <code>npx gio dev</code>): those start only the GioJS server, so in a fresh clone{' '}
+        <a href="/docs/cli/dev"><code>npx gio dev</code></a>): those start only the GioJS server, so in a fresh clone{' '}
         <code>app/tailwind.out.css</code> - git-ignored - does not exist yet, and nothing
         rebuilds it as you edit. Run <code>npm run css:build</code> once if you start the
         server another way.
@@ -91,7 +91,7 @@ npm install`} />
       <CodeBlock lang="css" code={`@import "tailwindcss";
 @import "./globals.css" layer(base);`} />
       <p>
-        A server app&apos;s fonts still come from <code>[[fonts]]</code> in{' '}
+        A server app&apos;s fonts still come from <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a> in{' '}
         <code>gio.toml</code>; a static site&apos;s <code>@font-face</code> rules live in{' '}
         <code>globals.css</code> and come along with it. A layout that imports no{' '}
         <code>globals.css</code> just gets the generated stylesheet&apos;s import.
@@ -107,9 +107,9 @@ npm install`} />
       <h2 id="builds-and-deploys">Builds and deploys</h2>
       <p>
         <code>npm run build</code>, <code>npm start</code> and (for a static site){' '}
-        <code>gio export</code> through <code>npm run build</code> run a minified one-off build
+        <a href="/docs/cli/export"><code>gio export</code></a> through <code>npm run build</code> run a minified one-off build
         first, so the output is never stale. The <a href="/docs/guides/docker">Docker</a> and
-        CI features run <code>npm run build</code> before <code>gio build standalone</code> for
+        CI features run <code>npm run build</code> before <a href="/docs/cli/build-standalone"><code>gio build standalone</code></a> for
         the same reason, and a project without a <code>build</code> script (an app from{' '}
         <code>create-giojs migrate</code>) gets one that builds the stylesheet: the output is
         git-ignored, so a clean checkout has to build it.

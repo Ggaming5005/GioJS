@@ -35,6 +35,11 @@ export default function Page(): React.JSX.Element {
         <li><strong>gio.toml</strong> - static rules in your server config</li>
         <li><strong>middleware.ts</strong> - a file at the project root (sibling of <code>app/</code>)</li>
       </ul>
+      <p>
+        For every way to redirect - rules, guards, page actions and{' '}
+        <code>getServerSideProps</code> - and which status code to use, see{' '}
+        <a href="/docs/guides/redirecting">Redirecting</a>.
+      </p>
 
       <h2 id="giotoml-rules">gio.toml rules</h2>
       <CodeBlock lang="toml" code={`[[redirects]]
@@ -63,7 +68,7 @@ redirect_to     = "/login"`} />
       <h2 id="middlewarets">middleware.ts</h2>
       <p>
         The same four rule kinds, typed. Export the result of{' '}
-        <code>defineMiddleware</code> as the default export (guard fields are
+        <a href="/docs/functions/define-middleware"><code>defineMiddleware</code></a> as the default export (guard fields are
         camelCase here):
       </p>
       <CodeBlock lang="ts" code={`// middleware.ts (project root, next to app/)
@@ -87,7 +92,7 @@ export default defineMiddleware({
         These rules travel to the Rust server inside the worker&apos;s READY
         frame and refresh whenever the worker restarts. In development the
         watcher restarts the worker on source changes anywhere in the project,
-        including <code>middleware.ts</code>, <code>gio.toml</code>, and{' '}
+        including <a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a>, <code>gio.toml</code>, and{' '}
         <code>gio.config.*</code>, so middleware edits are picked up with the
         next restart. <code>gio.toml</code> rules are compiled once at server
         startup.
@@ -124,7 +129,7 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         segment (raw or escaped), or a <code>%</code> that does not start a
         valid escape (<code>/%zz</code>, <code>/a%</code>), is rejected with{' '}
         <code>400</code> before any rule or route runs.{' '}
-        <code>[[rate_limits]]</code> use the same canonical form.
+        <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a> use the same canonical form.
       </p>
       <p>
         Every rule is validated when it is loaded, never at request time: a
@@ -177,7 +182,7 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         <li>
           <strong><code>require_session = true</code></strong>{' '}
           (<code>requireSession: true</code>) - the <code>gio_session</code> cookie
-          must hold a session from <code>createSessionStorage</code> whose
+          must hold a session from <a href="/docs/functions/create-session-storage"><code>createSessionStorage</code></a> whose
           signature verifies with <code>GIO_SESSION_SECRET</code> (any rotated
           secret) and that has not expired. Rust checks both before routing;
           anything else is treated like a missing cookie. Add{' '}
@@ -189,7 +194,7 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
           <strong><code>require_cookie = &quot;name&quot;</code></strong> alone - a
           presence check: any non-empty cookie of that name passes. It keeps
           anonymous traffic out cheaply but proves nothing, so validate the cookie
-          itself in <code>getServerSideProps</code> or a route handler.
+          itself in <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> or a route handler.
         </li>
       </ul>
       <p>
@@ -221,7 +226,7 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
 
       <h2 id="public-files-at-the-site-root">public/ files at the site root</h2>
       <p>
-        A file in <code>public/</code> answers at its root URL as well as under{' '}
+        A file in <a href="/docs/file-conventions/public-folder"><code>public/</code></a> answers at its root URL as well as under{' '}
         <code>/public/*</code> - <code>public/members/report.pdf</code> is both{' '}
         <code>/members/report.pdf</code> and <code>/public/members/report.pdf</code>. Rules
         written for the <code>/public/...</code> URL follow the file to its root URL:

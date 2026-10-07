@@ -39,14 +39,14 @@ export default function Page(): React.JSX.Element {
         <li>
           <strong>Server app or Static site</strong> - a server app has everything (SSR,
           caching, route handlers, actions, WebSockets); a static site builds to plain HTML
-          with <code>gio export</code> (see <a href="/docs/static-export">Static Export</a>)
+          with <a href="/docs/cli/export"><code>gio export</code></a> (see <a href="/docs/static-export">Static Export</a>)
         </li>
         <li>
           <strong>Add features</strong> - optional{' '}
           <a href="/docs/starter-features">starter features</a>: Tailwind CSS, an API route,
           authentication, a SQLite database, Docker and GitHub Actions CI (a static site is
           offered the two that work without a server: Tailwind and CI). Add more later with{' '}
-          <code>gio add &lt;feature&gt;</code>
+          <a href="/docs/cli/add"><code>gio add &lt;feature&gt;</code></a>
         </li>
         <li>
           <strong>Install dependencies</strong> - with the package manager you ran it with,
@@ -128,8 +128,8 @@ npm create giojs@latest -- --help           # every option`} />
       <h3 id="what-you-get">What you get</h3>
       <p>
         A small app that uses the framework&apos;s own features: file-based routes with a dynamic{' '}
-        <code>posts/[id]</code> route (<code>getServerSideProps</code> plus{' '}
-        <code>getStaticPaths</code>), the <a href="/docs/metadata">metadata API</a> for titles and
+        <code>posts/[id]</code> route (<a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> plus{' '}
+        <a href="/docs/page-exports/get-static-paths"><code>getStaticPaths</code></a>), the <a href="/docs/metadata">metadata API</a> for titles and
         descriptions, global CSS imported from <code>app/layout</code> through the{' '}
         <a href="/docs/css">CSS pipeline</a>, fonts self-hosted from <code>public/fonts/</code>{' '}
         with <a href="/docs/font-optimization"><code>[[fonts]]</code></a>, a{' '}
@@ -140,7 +140,7 @@ npm create giojs@latest -- --help           # every option`} />
         A static site is the same app with <code>npm run build</code> wired to{' '}
         <code>gio export</code> and its fonts declared with <code>@font-face</code> in{' '}
         <code>app/globals.css</code>, since an export has no server to apply{' '}
-        <code>[[fonts]]</code>.
+        <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a>.
       </p>
 
       <h3 id="starter-recipes">Starter recipes</h3>
@@ -192,7 +192,8 @@ export default function Home() {
         <code>include</code> list of your <code>tsconfig.json</code> (the server writes it
         at startup), and add <code>.gio/</code> to <code>.gitignore</code>. Coming from
         Next.js? <code>npm create giojs@latest -- migrate</code> converts the project - see{' '}
-        <a href="/docs/migration">Migrating from Next.js</a>.
+        <a href="/docs/migration">Migrating from Next.js</a>. Upgrading an app from an
+        earlier GioJS beta? Follow <a href="/docs/upgrading">Upgrading</a>.
       </p>
     </>
   );

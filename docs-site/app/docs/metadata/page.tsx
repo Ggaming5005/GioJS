@@ -25,7 +25,7 @@ export default function Page(): React.JSX.Element {
         <code>metadata</code> export. GioJS merges the root layout, the nested layouts and the
         page into one set of tags and renders them into the document head - on the server
         (streamed pages included) and again in the browser, so a{' '}
-        <code>&lt;GioLink&gt;</code> navigation swaps the title and every tag for the next
+        <a href="/docs/components/gio-link"><code>&lt;GioLink&gt;</code></a> navigation swaps the title and every tag for the next
         page&apos;s.
       </p>
       <CodeBlock lang="tsx" code={`// app/layout.tsx
@@ -66,10 +66,10 @@ export const metadata: Metadata = {
 
       <h2 id="generatemetadata">generateMetadata</h2>
       <p>
-        When the head depends on data, export <code>generateMetadata</code> instead (or as
+        When the head depends on data, export <a href="/docs/page-exports/generate-metadata"><code>generateMetadata</code></a> instead (or as
         well - its result is merged over the static <code>metadata</code> of the same
         file). It receives the <strong>same context</strong>{' '}
-        <code>getServerSideProps</code> gets - <code>params</code>, <code>query</code>,{' '}
+        <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> gets - <code>params</code>, <code>query</code>,{' '}
         <code>path</code>, <code>locale</code>, ... - and, on pages, the props the page
         renders with as <code>{`{ props }`}</code>, so nothing is fetched twice:
       </p>
@@ -107,7 +107,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
           makes the render personal exactly like it does in{' '}
           <code>getServerSideProps</code>: a page exporting <code>revalidate</code> is not
           cached, with a warning. Unlike in <code>getServerSideProps</code>, this also holds
-          for <code>shell = &apos;cache&apos;</code> (PPR) pages: the head is part of the
+          for <a href="/docs/page-exports/shell"><code>shell = &apos;cache&apos;</code></a> (PPR) pages: the head is part of the
           shell every visitor shares. Derive metadata from params and query.
         </li>
         <li>
@@ -123,7 +123,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
           <code>props</code> freely.
         </li>
         <li>
-          <code>notFound()</code> answers 404; a throw answers 500 like a failing render.
+          <a href="/docs/functions/not-found"><code>notFound()</code></a> answers 404; a throw answers 500 like a failing render.
         </li>
       </ul>
 
@@ -215,7 +215,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
           layout&apos;s <code>metadata</code> as well.
         </li>
         <li>
-          Special pages (<code>not-found.tsx</code>, <code>error.tsx</code>) resolve metadata
+          Special pages (<a href="/docs/file-conventions/not-found"><code>not-found.tsx</code></a>, <a href="/docs/file-conventions/error"><code>error.tsx</code></a>) resolve metadata
           the same way, so a 404 can say <code>{`robots: 'noindex'`}</code>. Their layouts&apos;{' '}
           <code>generateMetadata</code> get the params of the route that was not found or
           failed (none for a URL no route matches). Metadata never stops them rendering: when a{' '}
@@ -242,7 +242,7 @@ export default function Post({ post }: { post: Post }) {
   );
 }`} />
       <p>
-        <code>&lt;JsonLd&gt;</code> renders a{' '}
+        <a href="/docs/components/json-ld"><code>&lt;JsonLd&gt;</code></a> renders a{' '}
         <code>&lt;script type=&quot;application/ld+json&quot;&gt;</code>. The JSON is written
         with <code>&lt;</code>, <code>&gt;</code>, <code>&amp;</code>, U+2028 and U+2029
         escaped, so a value containing <code>&lt;/script&gt;</code> cannot end the element.
@@ -257,9 +257,9 @@ export default function Post({ post }: { post: Post }) {
       <table>
         <thead><tr><th>File</th><th>Serves</th><th>Content type</th></tr></thead>
         <tbody>
-          <tr><td><code>app/sitemap.ts</code></td><td><code>/sitemap.xml</code></td><td><code>application/xml</code></td></tr>
-          <tr><td><code>app/robots.ts</code></td><td><code>/robots.txt</code></td><td><code>text/plain</code></td></tr>
-          <tr><td><code>app/manifest.ts</code></td><td><code>/manifest.webmanifest</code></td><td><code>application/manifest+json</code></td></tr>
+          <tr><td><a href="/docs/file-conventions/sitemap"><code>app/sitemap.ts</code></a></td><td><code>/sitemap.xml</code></td><td><code>application/xml</code></td></tr>
+          <tr><td><a href="/docs/file-conventions/robots"><code>app/robots.ts</code></a></td><td><code>/robots.txt</code></td><td><code>text/plain</code></td></tr>
+          <tr><td><a href="/docs/file-conventions/manifest"><code>app/manifest.ts</code></a></td><td><code>/manifest.webmanifest</code></td><td><code>application/manifest+json</code></td></tr>
         </tbody>
       </table>
       <CodeBlock lang="ts" code={`// app/sitemap.ts
@@ -307,9 +307,9 @@ export default function robots(): MetadataRoute.Robots {
           the output until the next deploy.
         </li>
         <li>
-          A file of the same name in <code>public/</code> wins: the server serves it before
+          A file of the same name in <a href="/docs/file-conventions/public-folder"><code>public/</code></a> wins: the server serves it before
           the request reaches the worker, and logs a startup warning naming the module that
-          never runs. A <code>page.tsx</code> or <code>route.ts</code> answering the same URL
+          never runs. A <code>page.tsx</code> or <a href="/docs/file-conventions/route"><code>route.ts</code></a> answering the same URL
           fails startup.
         </li>
         <li>

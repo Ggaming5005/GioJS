@@ -43,7 +43,7 @@ export const revalidate = false;
       <h3 id="tagging-pages">Tagging pages</h3>
       <p>
         Give a page tags to purge it by. Static tags apply to every render of the page;
-        tags returned next to <code>props</code> from <code>getServerSideProps</code> are
+        tags returned next to <code>props</code> from <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> are
         added per render:
       </p>
       <CodeBlock lang="tsx" title="app/posts/[id]/page.tsx" code={`export const revalidate = 3600;
@@ -80,9 +80,9 @@ export async function PUT(req) {
   return { ok: true };
 }`} />
       <ul>
-        <li><code>revalidateTag(tag)</code> purges every cached page carrying the tag.</li>
+        <li><a href="/docs/functions/revalidate-tag"><code>revalidateTag(tag)</code></a> purges every cached page carrying the tag.</li>
         <li>
-          <code>revalidatePath(path)</code> purges the page at that URL path - all of its
+          <a href="/docs/functions/revalidate-path"><code>revalidatePath(path)</code></a> purges the page at that URL path - all of its
           query strings and locales. With <code>{"{ type: 'prefix' }"}</code> it purges the
           path and everything below it, at segment boundaries (<code>/blog</code> covers{' '}
           <code>/blog/a</code>, not <code>/blogger</code>). A query or fragment in the path is
@@ -90,7 +90,7 @@ export async function PUT(req) {
           <code>/about</code> in every locale - pages are cached under their locale-free
           path, so a bare <code>/fr</code> with <code>{"{ type: 'prefix' }"}</code> purges
           every page of the site, and the server logs a warning when it does). The path is
-          the one the page renders at - after any <code>[[rewrites]]</code>.
+          the one the page renders at - after any <a href="/docs/configuration/rewrites"><code>[[rewrites]]</code></a>.
         </li>
         <li>
           Paths may be given decoded or percent-encoded: <code>/blog/café</code> and{' '}
@@ -113,7 +113,7 @@ export async function PUT(req) {
         unpaired surrogate, a <code>.</code> or <code>..</code> segment, a <code>%</code>{' '}
         that does not start an escape, a path under <code>/_gio</code> - is a programming
         error and rejects with a <code>TypeError</code>. Under{' '}
-        <code>gio export</code> (and in unit tests) there is no cache to purge: they do
+        <a href="/docs/cli/export"><code>gio export</code></a> (and in unit tests) there is no cache to purge: they do
         nothing and warn once.
       </p>
       <p>
@@ -147,7 +147,7 @@ export GIO_REVALIDATE_TOKEN=<token>     # or [revalidate] token = "..." in gio.t
         missing or wrong token. The token is compared in constant time, and a client that
         sends 10 wrong tokens within a minute gets <code>429</code> for the rest of that
         minute - even with the right token (behind a reverse proxy, list it in{' '}
-        <code>[server] trusted_proxies</code> so clients are told apart by their own
+        <a href="/docs/configuration/server"><code>[server] trusted_proxies</code></a> so clients are told apart by their own
         address, not the proxy&apos;s). The endpoint is authenticated by its bearer
         token, not by cookies, so the cross-site request checks of{' '}
         <a href="/docs/security">[security.csrf]</a> do not apply to it; call it over HTTPS.
@@ -157,7 +157,7 @@ export GIO_REVALIDATE_TOKEN=<token>     # or [revalidate] token = "..." in gio.t
         With several instances behind a load balancer, call the endpoint on every instance
         (by its own address, not through the balancer); <code>revalidateTag()</code> and{' '}
         <code>revalidatePath()</code> only purge the instance whose worker runs them.
-        Instances that share a disk cache directory (<code>[cache] disk_path</code> or{' '}
+        Instances that share a disk cache directory (<a href="/docs/configuration/cache"><code>[cache] disk_path</code></a> or{' '}
         <code>GIO_CACHE_DIR</code>) serve the
         pages each other stored, but each keeps its own memory cache - purge every one of
         them all the same.
@@ -186,7 +186,7 @@ export GIO_REVALIDATE_TOKEN=<token>     # or [revalidate] token = "..." in gio.t
         To keep a personalized page fast, either drop <code>revalidate</code> (it renders per
         request, streamed) or cache the shared part with{' '}
         <a href="/docs/caching-layers">partial prerendering</a>:{' '}
-        <code>shell = &apos;cache&apos;</code> plus <code>&lt;Suspense&gt;</code> holes for the
+        <a href="/docs/page-exports/shell"><code>shell = &apos;cache&apos;</code></a> plus <code>&lt;Suspense&gt;</code> holes for the
         personalized parts.
       </p>
       <h2 id="browser-and-cdn-caching">Browser and CDN caching</h2>
@@ -227,7 +227,7 @@ ETag: W/"4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
       <p>
         A <code>Cache-Control</code> you set yourself always wins - from{' '}
         <code>getServerSideProps</code> <code>headers</code>, a route handler&apos;s{' '}
-        <code>Response</code>, or a <code>[[headers]]</code> rule. Route handler responses
+        <code>Response</code>, or a <a href="/docs/configuration/headers"><code>[[headers]]</code></a> rule. Route handler responses
         get no default at all, whatever their content type and whether or not their body
         streams - only an event stream gets <code>no-cache</code> (see{' '}
         <a href="/docs/route-handlers">Route Handlers</a>). In these cases GioJS never makes
@@ -236,19 +236,19 @@ ETag: W/"4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
       </p>
       <ul>
         <li>
-          A page behind a <a href="/docs/middleware">guard</a> (<code>[[guards]]</code> in
+          A page behind a <a href="/docs/middleware">guard</a> (<a href="/docs/configuration/guards"><code>[[guards]]</code></a> in
           gio.toml or <code>guards</code> in middleware.ts), and any page requested with an{' '}
           <code>Authorization</code> header, is <code>private, no-cache</code>. A CDN keys
           by URL and never runs the guard: storing the page for an admitted visitor would
           serve it to everyone the guard turns away.
         </li>
         <li>
-          With <code>[i18n]</code> detecting the locale from <code>accept-language</code> or
+          With <a href="/docs/configuration/i18n"><code>[i18n]</code></a> detecting the locale from <code>accept-language</code> or
           a cookie, an unprefixed URL is <code>private, no-cache</code> (locale-prefixed URLs
           like <code>/de/about</code> stay public).
         </li>
         <li>
-          With CSP nonces (<code>{'{nonce}'}</code> in <code>[security] csp</code>) every
+          With CSP nonces (<code>{'{nonce}'}</code> in <a href="/docs/configuration/security"><code>[security] csp</code></a>) every
           response is unique, so even cached pages are <code>private, no-cache</code> - a CDN
           replaying one would hand every visitor the same nonce.
         </li>

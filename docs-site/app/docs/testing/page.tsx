@@ -30,30 +30,30 @@ export default function TestingPage(): React.JSX.Element {
         </thead>
         <tbody>
           <tr>
-            <td><code>renderPage(path, options)</code></td>
+            <td><a href="/docs/functions/render-page"><code>renderPage(path, options)</code></a></td>
             <td>The worker&apos;s own render pipeline, in your test process - no server</td>
-            <td><code>getServerSideProps</code>, props, cookies, redirects, 404s, error pages, cacheability</td>
+            <td><a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>, props, cookies, redirects, 404s, error pages, cacheability</td>
           </tr>
           <tr>
-            <td><code>callRoute(path, options)</code></td>
-            <td>Your <code>route.ts</code> handler (or a page <code>action</code>), in your test process</td>
+            <td><a href="/docs/functions/call-route"><code>callRoute(path, options)</code></a></td>
+            <td>Your <a href="/docs/file-conventions/route"><code>route.ts</code></a> handler (or a page <code>action</code>), in your test process</td>
             <td>API handlers and form posts: JSON/form bodies, status codes, cookies, event streams</td>
           </tr>
           <tr>
-            <td><code>createTestServer(options)</code></td>
-            <td>The real <code>giojs-server</code> binary plus its Node worker, on a free port</td>
-            <td>Everything Rust does: <code>gio.toml</code> and <code>middleware.ts</code> rules, guards, CSRF, security headers, the page cache, rate limits</td>
+            <td><a href="/docs/functions/create-test-server"><code>createTestServer(options)</code></a></td>
+            <td>The real <a href="/docs/cli/giojs-server"><code>giojs-server</code></a> binary plus its Node worker, on a free port</td>
+            <td>Everything Rust does: <code>gio.toml</code> and <a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a> rules, guards, CSRF, security headers, the page cache, rate limits</td>
           </tr>
         </tbody>
       </table>
       <p>
         <code>renderPage</code> and <code>callRoute</code> discover your <code>app/</code>{' '}
         routes, layouts, <code>route.ts</code> handlers, <code>not-found</code> and{' '}
-        <code>error</code> files, <code>app/sitemap.ts</code>, <code>app/robots.ts</code>{' '}
-        and <code>app/manifest.ts</code> (<code>{"callRoute('/sitemap.xml')"}</code>) and{' '}
-        <code>gio.config.ts</code> plugins once per app
+        <code>error</code> files, <a href="/docs/file-conventions/sitemap"><code>app/sitemap.ts</code></a>, <a href="/docs/file-conventions/robots"><code>app/robots.ts</code></a>{' '}
+        and <a href="/docs/file-conventions/manifest"><code>app/manifest.ts</code></a> (<code>{"callRoute('/sitemap.xml')"}</code>) and{' '}
+        <a href="/docs/gio-config"><code>gio.config.ts</code></a> plugins once per app
         directory, then answer exactly like the worker answers the server -{' '}
-        <code>notFound()</code>, redirects and error pages included. What the Rust layer adds
+        <a href="/docs/functions/not-found"><code>notFound()</code></a>, redirects and error pages included. What the Rust layer adds
         in front of the worker (rules, guards, CSRF, headers, caching, locale detection) is
         not applied; test that through <code>createTestServer</code>.
       </p>
@@ -81,7 +81,7 @@ export default function TestingPage(): React.JSX.Element {
       <p>
         vitest does not read tsconfig <code>paths</code>, so mirror the scaffold&apos;s{' '}
         <code>@/*</code> alias. It also names CSS Module classes its own way (
-        <code>_card_80010d</code>); the <code>gioVitest()</code> plugin from{' '}
+        <code>_card_80010d</code>); the <a href="/docs/functions/gio-vitest"><code>gioVitest()</code></a> plugin from{' '}
         <code>@gio.js/core/vitest</code> makes <code>*.module.css</code> imports - in your
         pages and in your tests - evaluate to the class names the server renders:
       </p>
@@ -146,7 +146,7 @@ describe('/posts/[id]', () => {
         <code>./app</code>), <code>method</code> (<code>GET</code> or <code>HEAD</code>),{' '}
         <code>headers</code>, <code>cookies</code> (sent as the <code>Cookie</code> header),{' '}
         <code>query</code> (merged over the path&apos;s query string) and <code>locale</code>{' '}
-        (what <code>[i18n]</code> detection would have picked).
+        (what <a href="/docs/configuration/i18n"><code>[i18n]</code></a> detection would have picked).
       </p>
       <p>
         The path goes to the worker the way the server forwards it: never parsed as a URL (
@@ -171,8 +171,8 @@ describe('/posts/[id]', () => {
         <li><code>props</code> - the hydration props exactly as serialized into the page; <code>null</code> for redirects, 404s, errors, or props that are not JSON-serializable (that page renders but never hydrates).</li>
         <li><code>redirect</code> - <code>{`{ destination, permanent }`}</code> for 3xx answers.</li>
         <li><code>cacheable</code> / <code>cacheMaxAge</code> - whether the Rust page cache would store this response, by the server&apos;s own rule: <code>revalidate</code> set, no cookies or per-request headers sent, and no credentials read (a page that reads <code>ctx.cookies</code> is never shared).</li>
-        <li><code>cacheTags</code> - the tags a cacheable page is stored under for <code>revalidateTag()</code>: <code>export const tags</code> plus the ones <code>getServerSideProps</code> returns, validated and de-duplicated (empty when the page is not cacheable). The server also tags the page with its path for <code>revalidatePath()</code>.</li>
-        <li><code>error</code> - set when the render failed and no <code>error.tsx</code> answered: <code>message</code> (generic in production), <code>digest</code>, and <code>stack</code> in development.</li>
+        <li><code>cacheTags</code> - the tags a cacheable page is stored under for <a href="/docs/functions/revalidate-tag"><code>revalidateTag()</code></a>: <code>export const tags</code> plus the ones <code>getServerSideProps</code> returns, validated and de-duplicated (empty when the page is not cacheable). The server also tags the page with its path for <a href="/docs/functions/revalidate-path"><code>revalidatePath()</code></a>.</li>
+        <li><code>error</code> - set when the render failed and no <a href="/docs/file-conventions/error"><code>error.tsx</code></a> answered: <code>message</code> (generic in production), <code>digest</code>, and <code>stack</code> in development.</li>
       </ul>
       <div className="callout">
         Tests run in production mode unless <code>NODE_ENV=development</code>: error pages
@@ -218,7 +218,7 @@ it('rejects a form post to a JSON endpoint', async () => {
 });`} />
       <p id="sessions">
         <strong>Sessions:</strong> tests run in production mode, where{' '}
-        <code>createSessionStorage()</code> needs <code>GIO_SESSION_SECRET</code>. When neither
+        <a href="/docs/functions/create-session-storage"><code>createSessionStorage()</code></a> needs <code>GIO_SESSION_SECRET</code>. When neither
         the environment nor a <code>.env</code> file sets it, the kit sets a random secret for
         the test process before it imports any app module, so session modules load and the
         example above works as is. It is not passed to a <code>createTestServer</code> server,
@@ -250,7 +250,7 @@ it('rejects a form post to a JSON endpoint', async () => {
       </p>
       <h3 id="event-streams">Event streams</h3>
       <p>
-        A handler returning a <code>GioEventStream</code> answers with{' '}
+        A handler returning a <a href="/docs/functions/gio-event-stream"><code>GioEventStream</code></a> answers with{' '}
         <code>res.stream</code>: the events exactly as a client receives them (
         <code>{'id: / event: / data: '}</code> frames). <code>text()</code> waits until the
         handler closes the stream; for a stream that stays open, read what you need and
@@ -300,7 +300,7 @@ it('blocks cross-site posts', async () => {
         <li><strong>The binary</strong> is <code>GIO_SERVER_BIN</code> if set, else the platform binary <code>@gio.js/server</code> installed. Without one it throws, naming the package to install.</li>
         <li><strong><code>close()</code></strong> kills the server and its worker&apos;s whole process group (the worker runs in its own group). Call it in <code>afterAll</code> / <code>after</code>: it frees the port and the processes right away.</li>
         <li><strong>A forgotten <code>close()</code></strong> leaves nothing behind either. A running server never keeps the test process alive, so the run still ends, and exit hooks take the servers down with it - also on a crash or Ctrl+C. Where no hook gets to run - the test process killed with <code>SIGKILL</code>, a vitest worker thread (<code>pool: &apos;threads&apos;</code>) torn down - each server&apos;s small watchdog process kills it as soon as the process or thread that started it is gone.</li>
-        <li>The server speaks plain HTTP; a <code>gio.toml</code> with <code>[server.tls]</code> enabled needs a test copy of the project without it.</li>
+        <li>The server speaks plain HTTP; a <code>gio.toml</code> with <a href="/docs/configuration/server-tls"><code>[server.tls]</code></a> enabled needs a test copy of the project without it.</li>
       </ul>
 
       <h2 id="nodetest-2">node:test</h2>
@@ -331,7 +331,7 @@ test('served through Rust', async () => {
       <h2 id="module-caching">Module caching</h2>
       <p>
         Page, layout and route modules are imported once per process, like in the worker.
-        Discovery is cached per app directory too; <code>resetTestApp(appDir?)</code> drops
+        Discovery is cached per app directory too; <a href="/docs/functions/reset-test-app"><code>resetTestApp(appDir?)</code></a> drops
         it (and runs plugin <code>onShutdown</code> hooks), so the next render sees added or
         removed files. A change to a module that was already imported only shows up in a
         fresh process: vitest&apos;s watch mode and <code>node --test</code> start one per run

@@ -61,8 +61,8 @@ token = "a-long-random-secret"   # secure it for production`} />
         process or container tools.
       </p>
       <p>
-        Besides patterns - and the fixed paths of <code>app/sitemap.ts</code>,{' '}
-        <code>app/robots.ts</code> and <code>app/manifest.ts</code> (<code>/sitemap.xml</code>,
+        Besides patterns - and the fixed paths of <a href="/docs/file-conventions/sitemap"><code>app/sitemap.ts</code></a>,{' '}
+        <a href="/docs/file-conventions/robots"><code>app/robots.ts</code></a> and <a href="/docs/file-conventions/manifest"><code>app/manifest.ts</code></a> (<code>/sitemap.xml</code>,
         ...) - <code>route</code> takes three reserved values:{' '}
         <code>static</code> (public/ files, hashed chunks, app CSS), <code>internal</code>{' '}
         (the server&apos;s own <code>/_gio/*</code> endpoints) and <code>unmatched</code>{' '}
@@ -102,9 +102,9 @@ ERROR giojs_server::ipc: Node render error [RENDER_ERROR]: Internal Server Error
       <p>
         So a user&apos;s error reference leads to the worker line with the real error, and
         its <code>requestId</code> to everything else that request did. Route handlers and{' '}
-        <code>getServerSideProps</code> can read the id as <code>req.requestId</code> /{' '}
+        <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> can read the id as <code>req.requestId</code> /{' '}
         <code>ctx.requestId</code> to pass it to downstream services. Behind a trusted proxy
-        (<code>[server] trusted_proxies</code>), a valid incoming <code>X-Request-Id</code>{' '}
+        (<a href="/docs/configuration/server"><code>[server] trusted_proxies</code></a>), a valid incoming <code>X-Request-Id</code>{' '}
         - nginx&apos;s <code>$request_id</code>, say - is kept, so one id spans the
         proxy&apos;s access log too; from anyone else it is replaced. Many proxies pass a
         client&apos;s own header through rather than setting one; behind those, set{' '}
@@ -152,7 +152,7 @@ format = "json"   # or GIO_LOG_FORMAT=json; "text" is the default`} />
         websites cannot read them through DNS rebinding and other machines
         cannot reach them with a forged <code>Host</code>, and its state and
         stream endpoints also refuse cross-site requests. To open it through another
-        hostname or LAN IP, list that host under <code>[dev] allowed_hosts</code>{' '}
+        hostname or LAN IP, list that host under <a href="/docs/configuration/dev"><code>[dev] allowed_hosts</code></a>{' '}
         - see <a href="/docs/configuration">Configuration</a>.
       </p>
       <CodeBlock lang="toml" code={`[dev]

@@ -22,7 +22,7 @@ export default function Page(): React.JSX.Element {
 
       <h2 id="widths-and-quality-come-from-giotoml">Widths and quality come from gio.toml</h2>
       <p>
-        The optimizer only resizes to the widths listed in <code>[images] allowed_widths</code>{' '}
+        The optimizer only resizes to the widths listed in <a href="/docs/configuration/images"><code>[images] allowed_widths</code></a>{' '}
         (any other width is a 400), so GioImage builds its <code>srcset</code> from exactly that
         list and uses <code>quality</code> as the default. The server hands both to the renderer,
         and the page carries them to the browser, so the hydrated <code>srcset</code> is
@@ -93,7 +93,7 @@ pathname = "/uploads/*"`} />
         The optimizer bounds what one request can cost. Each limit is an <code>[images]</code>{' '}
         key, and <code>0</code> lifts it (the server warns at startup when one is lifted).
         Remote fetches never follow redirects, and a <code>src</code> outside{' '}
-        <code>public/</code> or the allowlist is refused, whatever the limits.
+        <a href="/docs/file-conventions/public-folder"><code>public/</code></a> or the allowlist is refused, whatever the limits.
       </p>
       <CodeBlock lang="toml" code={`[images]
 max_remote_bytes = 20971520     # largest remote source downloaded (20 MiB)
