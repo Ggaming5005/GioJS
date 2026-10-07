@@ -63,7 +63,7 @@ export async function POST(req: GioRequest) {
       <table>
         <thead><tr><th>The handler returns</th><th>The response</th></tr></thead>
         <tbody>
-          <tr><td>A <code>Response</code></td><td>Sent as it is: status, headers, body (a <code>ReadableStream</code> body streams).</td></tr>
+          <tr><td>A <code>Response</code></td><td>Sent as it is: status, headers, body (a <code>ReadableStream</code> body streams). Without a <code>Content-Type</code> it gets <code>text/plain</code>.</td></tr>
           <tr><td>A <code>GioEventStream</code> (<code>GET</code> only)</td><td>A <code>text/event-stream</code> connection.</td></tr>
           <tr><td><code>null</code> or <code>undefined</code></td><td><code>204</code> with no body.</td></tr>
           <tr><td>Any other value</td><td><code>200</code>, <code>application/json; charset=utf-8</code>, the value as JSON. A string becomes a JSON string (<code>&quot;hello&quot;</code>).</td></tr>
@@ -81,9 +81,12 @@ export async function POST(req: GioRequest) {
         </li>
         <li>
           <strong>Errors.</strong> <code>notFound()</code> answers <code>404</code>{' '}
-          <code>{'{"error":"Not Found"}'}</code>. <code>req.json()</code> on a body not sent as
-          JSON answers <code>415</code>, and a body that does not parse <code>400</code>. Any
-          other thrown error answers <code>500</code>{' '}
+          <code>{'{"error":"Not Found"}'}</code>. <code>req.json()</code> or{' '}
+          <code>req.formData()</code> on a body sent with another content type answers{' '}
+          <code>415</code>, and a form body that does not parse <code>400</code>. A JSON body
+          that does not parse makes <code>req.json()</code> throw a <code>SyntaxError</code>:
+          catch it to answer <code>400</code> yourself. Any other thrown error answers{' '}
+          <code>500</code>{' '}
           <code>{'{"error":"Internal Server Error","digest":"..."}'}</code>, with the details in
           the log under that digest.
         </li>
@@ -140,6 +143,26 @@ export const DELETE: RouteHandler<'/api/items/:id'> = async (req) => {
   await db.items.remove(req.params.id);
   return null; // 204
 };`} />
+
+      <h3 id="reject-a-malformed-json-body">Reject a malformed JSON body</h3>
+      <CodeBlock lang="ts" title="app/api/comments/route.ts" code={`import { isUnsupportedMediaTypeError } from '@gio.js/core';
+import type { GioRequest } from '@gio.js/core';
+
+export function POST(req: GioRequest) {
+  let input: unknown;
+  try {
+    input = req.json();
+  } catch (error) {
+    if (isUnsupportedMediaTypeError(error)) throw error; // GioJS answers 415
+    // A body that is not JSON, or no body at all.
+    return Response.json({ error: 'send a JSON body' }, { status: 400 });
+  }
+  const text = (input as { text?: unknown } | null)?.text;
+  if (typeof text !== 'string') {
+    return Response.json({ error: 'text is required' }, { status: 422 });
+  }
+  return Response.json({ saved: text }, { status: 201 });
+}`} />
 
       <h3 id="a-response-with-headers">A response with its own headers</h3>
       <CodeBlock lang="ts" title="app/api/export/route.ts" code={`export function GET() {

@@ -64,9 +64,9 @@ export default function RootLayout({ children }: LayoutProps) {
         </li>
         <li>
           When the worker starts, GioJS follows each route&apos;s imports and bundles the CSS
-          it reaches with esbuild. Every page links two stylesheets: one shared by all pages
-          with the root layout&apos;s CSS, and one for the route without what the shared one
-          already holds. The cascade follows the tree: root layout, then layouts outer to
+          it reaches with esbuild. Every page links up to two stylesheets: one shared by all
+          pages with the root layout&apos;s CSS, and one for the route without what the shared
+          one already holds (left out when there is nothing left). The cascade follows the tree: root layout, then layouts outer to
           inner, then the page, each file in import order.
         </li>
         <li>

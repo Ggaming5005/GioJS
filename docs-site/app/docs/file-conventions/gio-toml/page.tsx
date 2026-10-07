@@ -52,8 +52,10 @@ quality = 80`} />
       <h3 id="behavior">Behavior</h3>
       <ul>
         <li>
-          <strong>Read once, at startup,</strong> by the Rust server. A change takes effect on
-          the next start; in development the watcher restarts for you.
+          <strong>Read once, at startup,</strong> by the Rust server. A change takes effect
+          when the server starts again, in development too: the dev watcher notices the edit
+          but restarts only the Node worker, which does not read <code>gio.toml</code>. Stop{' '}
+          <code>gio dev</code> and start it again after editing the file.
         </li>
         <li>
           <strong>Strict.</strong> An unknown section or key anywhere stops startup, with the

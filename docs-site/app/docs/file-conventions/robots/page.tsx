@@ -94,7 +94,7 @@ export default function robots(): MetadataRoute.Robots {
       </ul>
 
       <h2 id="examples">Examples</h2>
-      <h3 id="several-crawlers">Different rules per crawler</h3>
+      <h3 id="different-rules-per-crawler">Different rules per crawler</h3>
       <CodeBlock lang="ts" title="app/robots.ts" code={`import type { MetadataRoute } from '@gio.js/core';
 
 export const revalidate = false;

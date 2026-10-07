@@ -81,6 +81,16 @@ export default function DashboardError({ error, reset }: ErrorPageProps) {
         Type them with <code>ErrorPageProps</code> from <code>@gio.js/core</code>.
       </p>
 
+      <h3 id="module-exports">Module exports</h3>
+      <p>
+        <code>default</code> (required), and optionally{' '}
+        <a href="/docs/page-exports/metadata"><code>metadata</code></a> or{' '}
+        <a href="/docs/page-exports/generate-metadata"><code>generateMetadata</code></a> for
+        the head of the server-rendered <code>500</code> page. If{' '}
+        <code>generateMetadata</code> throws (often the same outage the page reports), the
+        static <code>metadata</code> exports are used instead.
+      </p>
+
       <h3 id="behavior">Behavior</h3>
       <p><strong>On the server.</strong> When <code>getServerSideProps</code>, the page or a layout throws before the response has started:</p>
       <ul>

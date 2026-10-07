@@ -109,8 +109,10 @@ export const requestTimer: GioNodePlugin = {
           response answers the request without rendering.
         </li>
         <li>
-          A plugin that throws answers <code>500</code> for that request; it never takes the
-          worker down.
+          An <code>onRequest</code> hook that throws answers that request with{' '}
+          <code>500</code> and the body <code>Internal Server Error (plugin: &lt;name&gt;)</code>.
+          An <code>onResponse</code> hook that throws is logged and skipped: the response
+          goes out as it was before that hook. Neither takes the worker down.
         </li>
       </ul>
 

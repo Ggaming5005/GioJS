@@ -159,7 +159,7 @@ export default function Page(): React.JSX.Element {
           <tr><td><code>template.tsx</code></td><td>Not supported. Layouts keep their state across navigations; key a subtree yourself to reset it.</td></tr>
           <tr><td><code>default.tsx</code></td><td>Not supported (it belongs to parallel routes).</td></tr>
           <tr><td>Parallel routes (<code>@slot</code> folders)</td><td>Not supported. <code>@slot</code> is a literal URL segment.</td></tr>
-          <tr><td>Intercepting routes (<code>(.)</code>, <code>(..)</code>, <code>(...)</code> folders)</td><td>Not supported. Such a folder is a literal URL segment.</td></tr>
+          <tr><td>Intercepting routes (<code>(.)photo</code>, <code>(..)photo</code>, <code>(...)photo</code> folders)</td><td>Not supported. Such a folder is a literal URL segment. A folder named only <code>(.)</code> or <code>(..)</code> is a route group.</td></tr>
           <tr><td><code>forbidden.tsx</code>, <code>unauthorized.tsx</code></td><td>Not supported. Answer <code>401</code>/<code>403</code> with a <code>Response</code> from a <code>route.ts</code> or a page action, or redirect with a guard.</td></tr>
           <tr><td><code>opengraph-image.tsx</code>, <code>icon.png</code>, <code>apple-icon.png</code></td><td>Not supported. Use the <code>openGraph</code> and <code>icons</code> metadata fields with files from <code>public/</code>.</td></tr>
           <tr><td><code>instrumentation.ts</code></td><td>Not supported. Use a plugin&apos;s <code>onStartup</code> in <code>gio.config.ts</code>.</td></tr>

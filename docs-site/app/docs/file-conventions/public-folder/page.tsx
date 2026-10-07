@@ -43,7 +43,7 @@ export default function Page(): React.JSX.Element {
           </tr>
           <tr>
             <td><code>/public/</code> + the path: <code>/public/a/b.png</code></td>
-            <td>Every file in the folder, dotfiles included</td>
+            <td>Every file in the folder, dotfiles and symlinks included; a folder URL (<code>/public/docs/</code>) serves that folder&apos;s <code>index.html</code></td>
             <td><code>Last-Modified</code>, no <code>Cache-Control</code></td>
           </tr>
         </tbody>
@@ -133,8 +133,9 @@ export default function RootLayout({ children }: LayoutProps) {
           name) or put a version in the file name.
         </li>
         <li>
-          Directory listings are never served, and <code>public/index.html</code> does not
-          answer <code>/</code>.
+          Directory listings are never served. <code>public/index.html</code> does not
+          answer <code>/</code> (only <code>/public/</code> and <code>/index.html</code>), so
+          it never competes with <code>app/page.tsx</code>.
         </li>
         <li>
           <code>gio export</code> copies the folder to <code>out/</code> and{' '}

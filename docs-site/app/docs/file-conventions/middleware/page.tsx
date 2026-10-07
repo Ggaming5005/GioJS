@@ -45,7 +45,7 @@ export default defineMiddleware({
         { name: 'redirects', type: '{ from: string; to: string; status?: 301 | 302 | 307 | 308 }[]', description: <>Answer with a redirect. <code>status</code> defaults to <code>302</code>.</> },
         { name: 'rewrites', type: '{ from: string; to: string }[]', description: 'Serve another path while the browser URL stays the same.' },
         { name: 'headers', type: '{ path: string; headers: Record<string, string> }[]', description: 'Add or override response headers on matching paths.' },
-        { name: 'guards', type: 'MiddlewareGuard[]', description: <>Redirect requests without a cookie (<code>requireCookie</code>) or without a valid session (<code>requireSession: true</code>) to <code>redirectTo</code>, a path starting with <code>/</code>.</> },
+        { name: 'guards', type: 'MiddlewareGuard[]', description: <>Redirect requests without a cookie (<code>requireCookie</code>) or without a valid session (<code>requireSession: true</code>, checking the <code>gio_session</code> cookie or the one <code>requireCookie</code> names) to <code>redirectTo</code>, a path starting with <code>/</code>, with a <code>302</code>.</> },
       ]} />
       <p>
         Patterns are the routing ones: literal segments, <code>:param</code> for one segment
@@ -92,9 +92,18 @@ export default defineMiddleware({
           also skips, with a warning, a rule whose pattern or header it cannot compile.
         </li>
         <li>
-          A malformed guard is <strong>not</strong> dropped: it denies every request to its
-          path, redirecting to its <code>redirectTo</code> (or <code>/</code>), until it is
-          fixed. A typo can close a path but never open it.
+          A guard with a misspelled key, no requirement or a bad <code>redirectTo</code> is{' '}
+          <strong>not</strong> dropped: it denies every request to its path, redirecting to
+          its <code>redirectTo</code> (or <code>/</code>), until it is fixed. A{' '}
+          <code>requireSession</code> guard does the same while{' '}
+          <code>GIO_SESSION_SECRET</code> is missing or invalid.
+        </li>
+        <li>
+          A guard whose <code>path</code> is missing or is not a valid pattern (no leading{' '}
+          <code>/</code>, a <code>*rest</code> that is not the last segment) has nothing to
+          close: it is skipped with a warning (<code>invalid guard rule skipped</code>), and
+          the path it meant to protect stays open. Check the startup log after editing
+          guards.
         </li>
       </ul>
 
@@ -140,7 +149,8 @@ export default defineMiddleware({
         </li>
         <li>
           Unlike <code>gio.toml</code>, an invalid guard here does not stop startup: it closes
-          its path and logs why. Watch the startup log after editing guards.
+          its path and logs why, or, when its <code>path</code> itself is invalid, is skipped
+          with a warning. Watch the startup log after editing guards.
         </li>
         <li>
           Rules see the canonical path: repeated and trailing slashes collapsed, escapes of

@@ -53,9 +53,12 @@ export default function Loading() {
       ...deeper layouts, then the page`} />
       <ul>
         <li>
-          <strong>Streamed pages</strong> (every page that is rendered per request) send the
-          layouts and the loading UI first and the content when it resolves, in the same
-          response.
+          <strong>Streamed pages</strong> (a <code>GET</code> of a page rendered per request)
+          send the layouts and the loading UI first and the content when it resolves, in the
+          same response. A <code>HEAD</code> request, and every page while an{' '}
+          <code>onResponse</code> plugin is registered in{' '}
+          <a href="/docs/file-conventions/gio-config">gio.config.ts</a>, is rendered
+          completely before it is sent.
         </li>
         <li>
           <strong>What it covers.</strong> Only what suspends while rendering: React&apos;s{' '}

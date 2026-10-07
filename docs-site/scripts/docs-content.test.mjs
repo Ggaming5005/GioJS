@@ -180,3 +180,28 @@ test('the file-convention pages state the router and metadata-route facts the co
     .map((s) => envPage.indexOf(s));
   assert.ok(shown.every((at, n) => at > 0 && (n === 0 || at > shown[n - 1])), `the .env files page shows another order: ${shown}`);
 });
+
+test('the public/ and route.ts pages state the limits the server decides', () => {
+  // public/: the root files' Cache-Control and the size of the root index.
+  const publicFiles = read('crates/giojs-server/src/public_files.rs');
+  const cacheControl = /PUBLIC_ROOT_CACHE_CONTROL: &str = "([^"]+)";/.exec(publicFiles)?.[1];
+  const maxIndexed = /MAX_INDEXED_FILES: usize = ([\d_]+);/.exec(publicFiles)?.[1];
+  assert.ok(cacheControl && maxIndexed, 'public_files.rs constants not found - update this test');
+  const publicPage = docsPage('file-conventions/public-folder');
+  assert.ok(publicPage.includes(`<code>Cache-Control: ${cacheControl}</code>`), 'public/ page: root Cache-Control');
+  const indexSize = Number(maxIndexed.replace(/_/g, '')).toLocaleString('en-US');
+  assert.ok(publicPage.includes(`holds up to ${indexSize} files`), 'public/ page: root index size');
+
+  // route.ts: the default [server] max_body_bytes.
+  const config = read('crates/giojs-server/src/config.rs');
+  const body = /fn default_max_body_bytes\(\) -> usize \{\s*(\d+) \* 1024 \* 1024\s*\}/.exec(config)?.[1];
+  assert.ok(body, 'default_max_body_bytes not found - update this test');
+  assert.match(docsPage('file-conventions/route'), new RegExp(`${body} MiB by default`));
+
+  // route.ts and page.tsx: the 405 body.
+  const ssr = read('packages/giojs-core/src/ssr.ts');
+  assert.match(ssr, /body: JSON\.stringify\(\{ error: 'Method Not Allowed' \}\)/, 'the 405 body changed - update the route.ts and page.tsx pages');
+  for (const page of ['file-conventions/route', 'file-conventions/page']) {
+    assert.ok(docsPage(page).includes(`{'{"error":"Method Not Allowed"}'}`), `${page}: 405 body`);
+  }
+});
