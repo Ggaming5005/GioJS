@@ -517,6 +517,41 @@ test('a directory without Next.js is refused', async () => {
   }
 });
 
+test('usage errors exit 2, as create-giojs\'s own and gio\'s do', async () => {
+  for (const argv of [['--force'], ['a', 'b'], ['--config']]) {
+    const io = fakeIO();
+    assert.equal(await runMigrate(argv, io), 2, argv.join(' '));
+    assert.match(io.err.join('\n'), /^create-giojs migrate: /);
+    assert.match(io.err.join('\n'), /Usage: create-giojs migrate/);
+  }
+});
+
+test('--config names the app after package.json, as the full migration does', async () => {
+  const config = 'module.exports = { async redirects() { return [{ source: \'/old\', destination: \'/new\', permanent: true }]; } };\n';
+  const named = await writeTree({ 'package.json': '{"name":"shop-front","dependencies":{"next":"15.0.0"}}\n', 'next.config.js': config });
+  const unnamed = await writeTree({ 'next.config.js': config });
+  try {
+    // What the full migration would write, planned before anything exists.
+    const plan = await planMigration(named);
+    const dry = fakeIO();
+    assert.equal(await runMigrate(['--config', join(named, 'next.config.js'), '--dry-run'], dry), 0);
+    assert.match(dry.out.join('\n'), /\+name = "shop-front"/);
+    assert.doesNotMatch(dry.out.join('\n'), /my-app/);
+
+    assert.equal(await runMigrate(['--config', join(named, 'next.config.js')], fakeIO()), 0);
+    const toml = await readFile(join(named, 'gio.toml'), 'utf8');
+    assert.match(toml, /^\[app\]\nname = "shop-front"$/m);
+    assert.equal(plan.config?.toml.content, toml);
+
+    // No package.json: the full migration's fallback.
+    assert.equal(await runMigrate(['--config', join(unnamed, 'next.config.js')], fakeIO()), 0);
+    assert.match(await readFile(join(unnamed, 'gio.toml'), 'utf8'), /^name = "my-app"$/m);
+  } finally {
+    await rm(named, { recursive: true, force: true });
+    await rm(unnamed, { recursive: true, force: true });
+  }
+});
+
 test('parseMigrateArgs reads the directory and flags', () => {
   assert.deepEqual(parseMigrateArgs(['--dry-run', 'site'], '/work'), { dir: '/work/site', dryRun: true, yes: false, help: false });
   assert.deepEqual(parseMigrateArgs(['-y'], '/work'), { dir: '/work', dryRun: false, yes: true, help: false });

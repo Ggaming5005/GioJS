@@ -196,9 +196,13 @@ CMD ["node", "run.mjs"]`} />
           URLs that import it (<code>500</code>), not the whole worker.
         </li>
         <li>
-          Errors exit with code <code>1</code>, including an unknown argument or{' '}
-          <code>--target</code> value (it does not use the <code>2</code> that other{' '}
-          <code>gio</code> usage errors exit with).
+          A usage error - an unknown argument, a missing value, an unknown{' '}
+          <code>--target</code> - exits with code <code>2</code>, as every <code>gio</code>{' '}
+          usage error does. A build that fails exits with <code>1</code>.
+        </li>
+        <li>
+          Options take their value as the next argument or after <code>=</code>:{' '}
+          <code>--out dist/app</code> and <code>--out=dist/app</code> are the same.
         </li>
         <li>
           The deployment id is derived from <code>.gio/manifest.json</code>, which includes a
@@ -219,7 +223,7 @@ CMD ["node", "run.mjs"]`} />
       <VersionHistory entries={[
         {
           version: 'v0.1.0-beta.8',
-          changes: <>Refuses an <code>--out</code> it could not safely empty (before, <code>--out .</code> deleted the project). Loads <code>.env</code> files and inlines <code>GIO_PUBLIC_*</code>. Ships CSS imports and CSS Modules, following <code>[css] minify</code>. Modules evaluate lazily, so one failing module no longer stops the worker.</>,
+          changes: <>Refuses an <code>--out</code> it could not safely empty (before, <code>--out .</code> deleted the project). Usage errors exit with <code>2</code> instead of <code>1</code>, and options also take <code>--option=value</code>. Loads <code>.env</code> files and inlines <code>GIO_PUBLIC_*</code>. Ships CSS imports and CSS Modules, following <code>[css] minify</code>. Modules evaluate lazily, so one failing module no longer stops the worker.</>,
         },
         { version: 'v0.1.0-beta.7', changes: 'Introduced.' },
       ]} />

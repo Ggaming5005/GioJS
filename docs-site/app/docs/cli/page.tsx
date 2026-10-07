@@ -69,9 +69,10 @@ gio --version          # CLI, server binary and @gio.js/core versions (-v)`} />
         </tbody>
       </table>
       <p>
-        <code>gio build standalone</code>, <code>gio bench</code> and{' '}
-        <code>gio migrate</code> parse their own options and exit with <code>1</code> on a
-        usage error.
+        Every command keeps this contract, including the ones that parse their own options
+        (<code>gio build standalone</code>, <code>gio bench</code>, <code>gio migrate</code>{' '}
+        and <code>gio add</code>): a usage error exits with <code>2</code> before the command
+        does anything.
       </p>
 
       <h2 id="dev">gio dev</h2>

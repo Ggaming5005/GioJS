@@ -103,6 +103,32 @@ describe('parseBenchArgs', () => {
     assert.equal(parsed.ok, false);
   });
 
+  test('flags also take --flag=value, as every gio command does', () => {
+    const parsed = parseBenchArgs(['/', '--duration=5', '--connections=4', '--warmup=0', '--base=http://localhost:4000/']);
+    assert.equal(parsed.ok, true, parsed.error);
+    assert.equal(parsed.value.duration, 5);
+    assert.equal(parsed.value.connections, 4);
+    assert.equal(parsed.value.warmup, 0);
+    assert.equal(parsed.value.url, 'http://localhost:4000/');
+    assert.deepEqual(parseBenchArgs(['--suite=/,/a']).value.suite, ['/', '/a']);
+    assert.equal(parseBenchArgs(['/', '--duration=']).ok, false);
+  });
+
+  test('connections must be a whole number', () => {
+    const parsed = parseBenchArgs(['/', '--connections', '1.5']);
+    assert.equal(parsed.ok, false);
+    assert.match(parsed.error, /--connections requires a positive whole number/);
+  });
+
+  test('a target that is neither a path nor an http(s) URL is rejected before any request', () => {
+    for (const target of ['localhost:3000', 'posts/1', 'ftp://example.com/']) {
+      const parsed = parseBenchArgs([target]);
+      assert.equal(parsed.ok, false, target);
+      assert.match(parsed.error, /expected a path \(\/posts\/1\) or an http\(s\) URL/);
+    }
+    assert.equal(parseBenchArgs(['--suite', '/', '--base', 'localhost:3000']).ok, false);
+  });
+
   test('suite splits comma-separated paths and trims blanks', () => {
     const parsed = parseBenchArgs(['--suite', '/, /public/logo.svg ,', '--base', 'http://localhost:4000/']);
     assert.equal(parsed.ok, true);

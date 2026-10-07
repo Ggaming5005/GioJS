@@ -57,26 +57,40 @@ function fail(message) {
   process.exit(1);
 }
 
+/** A bad flag or value: exit code 2, as every `gio` usage error. */
+function usageError(message) {
+  console.error(`gio build standalone: ${message}\nRun \`gio build standalone --help\` for usage.`);
+  process.exit(2);
+}
+
 function parseArgs(argv) {
   const options = { out: resolve('standalone'), target: null };
   for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
+    let arg = argv[i];
+    // `--out=dir` as well as `--out dir`, like every other gio command.
+    let inline;
+    const equals = /^--(out|target)=/.exec(arg);
+    if (equals) {
+      inline = arg.slice(equals[0].length);
+      arg = `--${equals[1]}`;
+    }
+    const value = () => (inline !== undefined ? inline : argv[++i]);
     if (arg === '--help' || arg === '-h') {
       console.log(USAGE);
       process.exit(0);
     } else if (arg === '--out') {
-      const value = argv[++i];
-      if (!value) fail('--out requires a directory argument');
-      options.out = resolve(value);
+      const dir = value();
+      if (!dir) usageError('--out requires a directory argument');
+      options.out = resolve(dir);
     } else if (arg === '--target') {
-      const value = argv[++i];
-      if (!value) fail('--target requires a platform argument');
-      if (!TARGETS.includes(value)) {
-        fail(`unknown target "${value}" - expected one of: ${TARGETS.join(', ')}`);
+      const target = value();
+      if (!target) usageError('--target requires a platform argument');
+      if (!TARGETS.includes(target)) {
+        usageError(`unknown target "${target}" - expected one of: ${TARGETS.join(', ')}`);
       }
-      options.target = value;
+      options.target = target;
     } else {
-      fail(`unknown argument "${arg}"\n\n${USAGE}`);
+      usageError(`unknown argument "${arg}"`);
     }
   }
   return options;

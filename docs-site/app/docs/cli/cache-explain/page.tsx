@@ -30,13 +30,13 @@ export default function Page(): React.JSX.Element {
           name: '<url-or-path>',
           type: 'string',
           required: true,
-          description: <>An absolute URL (<code>https://example.com/blog</code>) is requested as given. A path (<code>/posts/1</code>) is requested from <code>--base</code>, else from the local server.</>,
+          description: <>An absolute <code>http</code> or <code>https</code> URL (<code>https://example.com/blog</code>) is requested as given. A path (<code>/posts/1</code>) is requested from <code>--base</code>, else from the local server. Anything else (<code>posts/1</code>, <code>localhost:3000/</code>) is a usage error.</>,
         },
         {
           name: '--base <url>',
           type: 'string',
           default: 'local server',
-          description: <>The server a path is requested from, such as <code>https://staging.example.com</code>.</>,
+          description: <>The server a path is requested from: an <code>http</code> or <code>https</code> URL such as <code>https://staging.example.com</code>.</>,
         },
         {
           name: '-h, --help',
@@ -125,7 +125,8 @@ GIO_PORT=4000 gio cache explain /   # another`} />
         <li>
           Exit codes: <code>0</code> whenever the server answered, whatever the status;{' '}
           <code>1</code> when it could not be reached (<code>is the server running?</code>);{' '}
-          <code>2</code> for a usage error.
+          <code>2</code> for a usage error, including a target or <code>--base</code> that is
+          not a path or an http(s) URL (no request is sent).
         </li>
         <li>
           Each request counts: running it twice on a <code>miss</code> stores the entry, and a
@@ -142,7 +143,7 @@ GIO_PORT=4000 gio cache explain /   # another`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Paths go to the address the server listens on (<code>GIO_PORT</code> / <code>PORT</code>, <code>.env</code> files, <code>gio.toml</code>) instead of port 3000; <code>--base &lt;url&gt;</code>; explains <code>ppr</code> responses and names <code>[cache] enabled = false</code> as a reason for <code>bypass</code>.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Paths go to the address the server listens on (<code>GIO_PORT</code> / <code>PORT</code>, <code>.env</code> files, <code>gio.toml</code>) instead of port 3000; <code>--base &lt;url&gt;</code>; explains <code>ppr</code> responses and names <code>[cache] enabled = false</code> as a reason for <code>bypass</code>. A target or <code>--base</code> that is not a path or an http(s) URL is a usage error (exit <code>2</code>), not an unreachable server.</> },
         { version: 'v0.1.0-beta.6', changes: 'Introduced.' },
       ]} />
     </>

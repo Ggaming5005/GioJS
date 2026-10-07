@@ -75,6 +75,15 @@ function parseHost(value, command) {
   usageError(`--host expects an IP address such as 0.0.0.0 (every interface), 127.0.0.1 (this machine only) or [::] (every IPv6 interface), got "${value}"`, command);
 }
 
+function isHttpUrl(value) {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch (_) {
+    return false;
+  }
+}
+
 function runNodeScript(script, args, env = process.env) {
   const result = spawnSync(process.execPath, [join(__dirname, script), ...args], { stdio: 'inherit', env });
   process.exit(result.status == null ? 1 : result.status);
@@ -181,7 +190,14 @@ function cmdCache(args) {
   if (positionals.length === 0) {
     usageError('usage: gio cache explain <url-or-path>   (e.g. gio cache explain /posts/1)', 'cache');
   }
-  return require('./lib/cache-explain').runCacheExplain(positionals[0], { base: values.base || null });
+  const target = positionals[0];
+  if (!target.startsWith('/') && !isHttpUrl(target)) {
+    usageError(`expected a path (/posts/1) or an http(s) URL, got "${target}"`, 'cache');
+  }
+  if (values.base !== undefined && !isHttpUrl(values.base)) {
+    usageError(`--base expects an http(s) URL such as https://staging.example.com, got "${values.base}"`, 'cache');
+  }
+  return require('./lib/cache-explain').runCacheExplain(target, { base: values.base || null });
 }
 
 // `gio bench` runs the zero-dependency load generator (ESM, so a child
@@ -191,7 +207,8 @@ function cmdBench(args) {
     console.log(commandHelp('bench'));
     process.exit(0);
   }
-  const needsBase = !args.includes('--base') && (args.includes('--suite') || args.some((arg) => arg.startsWith('/')));
+  const given = (flag) => args.some((arg) => arg === flag || arg.startsWith(`${flag}=`));
+  const needsBase = !given('--base') && (given('--suite') || args.some((arg) => arg.startsWith('/')));
   const extra = needsBase ? ['--base', require('./lib/cache-explain').localBaseUrl()] : [];
   runNodeScript('bench.mjs', [...args, ...extra]);
 }

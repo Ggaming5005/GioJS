@@ -781,7 +781,9 @@ first.
   `gio <command> --help` show the command table and each command's options,
   and `gio --version` prints the CLI, server binary and `@gio.js/core`
   versions. A mistyped command or option is a did-you-mean error. Exit codes:
-  0 success, 1 failure, 2 usage error.
+  0 success, 1 failure, 2 usage error - in every command, including those
+  that parse their own options (`gio bench`, `gio build standalone`,
+  `gio migrate`, `gio add`).
 - **`gio dev` and `gio start`** run the server in development or production
   mode, whatever `NODE_ENV` says. `-p/--port` and `-H/--host` (IPv4 or IPv6)
   set `GIO_PORT` / `GIO_HOST`, `--open` opens a browser, and the local and
@@ -808,7 +810,9 @@ first.
   npx, pnpm dlx or bunx.
 - `gio cache explain` and `gio bench` use the address the server listens on
   (`GIO_PORT` / `PORT`, `.env` files, `gio.toml`) instead of port 3000;
-  `gio cache explain` also takes `--base <url>`.
+  `gio cache explain` also takes `--base <url>`. Both reject a target that is
+  neither a path nor an `http(s)` URL as a usage error, before any request.
+  `gio bench` and `gio build standalone` also take `--flag=value`.
 - A missing platform binary prints which package to install for your platform
   and package manager, never a stack trace. `GIO_SERVER_BIN` points the CLI at
   a binary you built yourself.
@@ -908,9 +912,10 @@ first.
   moves to `app/`; `.js` files with JSX become `.jsx`. A file is never moved
   onto an existing one.
 - `next.config` becomes `gio.toml`: redirects, rewrites and headers (`:path*`
-  to `*path`), images and i18n. Rules GioJS would match differently are
-  skipped with a TODO, and an existing `gio.toml` is merged into only when
-  safe (otherwise `gio.migrated.toml`).
+  to `*path`), images and i18n, with `[app] name` from `package.json`
+  (`--config <file>` converts just that file, the same way). Rules GioJS would
+  match differently are skipped with a TODO, and an existing `gio.toml` is
+  merged into only when safe (otherwise `gio.migrated.toml`).
 - `package.json` swaps `next` for `@gio.js/*` and gets `"type": "module"`
   (CommonJS `.js` configs become `.cjs`), `tsconfig.json` gets
   `"jsx": "react-jsx"`, and `MIGRATION_REPORT.md` lists every move, change and
@@ -978,6 +983,10 @@ first.
   `--out .` deleted the whole project. It now refuses the project directory,
   an ancestor of it, anything under `app/`, and a non-empty directory that is
   not a previous standalone build.
+- `gio bench` and `gio build standalone` exited with `1` on a usage error (a
+  bad flag or value), like a failed run; they now exit with `2`, as `gio`
+  documents. `gio bench` also rejects a fractional `--connections` (it was
+  rounded down), and says what a target must be instead of `Invalid URL`.
 - Every production start warned that `/_gio/metrics` is unauthenticated, even
   with metrics off (no `[metrics]` section, or `enabled = false`), where the
   endpoint answers `404`. Metrics without a `token` or `ip_allowlist` now

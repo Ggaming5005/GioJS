@@ -142,6 +142,36 @@ describe('unknown commands and options', () => {
     assert.match(cache.stderr, /did you mean `gio cache explain`\?/);
     assert.equal(run(['cache']).status, 2);
     assert.equal(run(['cache', 'explain']).status, 2);
+    const notUrl = run(['cache', 'explain', 'posts/1']);
+    assert.equal(notUrl.status, 2);
+    assert.match(notUrl.stderr, /expected a path \(\/posts\/1\) or an http\(s\) URL, got "posts\/1"/);
+    const badBase = run(['cache', 'explain', '/posts/1', '--base', 'staging']);
+    assert.equal(badBase.status, 2);
+    assert.match(badBase.stderr, /--base expects an http\(s\) URL/);
+  });
+
+  // Commands that parse their own arguments in a child script keep the
+  // contract too: a usage error is exit 2, never 1 (a failed run).
+  test('gio bench and gio build standalone usage errors exit 2', () => {
+    for (const args of [
+      ['bench'],
+      ['bench', '--connections', '0', '/'],
+      ['bench', '--connections', '1.5', '/'],
+      ['bench', '--bogus', '/'],
+      ['bench', 'localhost:3000'],
+      ['bench', '/', '--base', 'nope'],
+      ['bench', '--suite', '/', 'http://localhost:1/'],
+      ['build', 'standalone', '--target', 'foo'],
+      ['build', 'standalone', '--target=foo'],
+      ['build', 'standalone', '--out'],
+      ['build', 'standalone', '--bogus'],
+    ]) {
+      const result = run(args);
+      assert.equal(result.status, 2, `gio ${args.join(' ')}: ${result.stderr}`);
+      const help = args[0] === 'bench' ? 'gio bench --help' : 'gio build standalone --help';
+      assert.match(result.stderr, new RegExp(`Run \`${help}\` for usage\\.`), args.join(' '));
+      assert.ok(!hasStackTrace(result.stderr), result.stderr);
+    }
   });
 
   test('plain gio build still explains deploys', () => {
