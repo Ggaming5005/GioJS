@@ -335,6 +335,15 @@ export async function action() { return { marker: 'GIO_TEST_ACTION_DO_NOT_BUNDLE
     'npm-sdk': page('FORM_NPM_SDK', `import '../../lib/polyfill.ts';
 import { Sdk } from 'gio-test-server-sdk';
 export async function getServerSideProps() { return { props: { sdk: String(new Sdk()) } }; }`),
+    // A helper gSSP loads with import(): esbuild splits it into a chunk of
+    // its own before it shakes out the gSSP that imported it.
+    'dynamic-import': page('FORM_DYNAMIC_IMPORT', `export async function getServerSideProps() {
+  const { readSecret, SECRET_MARKER } = await import('../../lib/secret.ts');
+  return { props: { s: readSecret() + SECRET_MARKER } };
+}`),
+    // A dynamic import() client code still makes ships as its own chunk.
+    'client-lazy': page('FORM_CLIENT_LAZY', `export const loadWidget = () => import('../../lib/widget.ts');
+(globalThis as Record<string, unknown>).__gioLoadWidget = loadWidget;`),
   };
 
   beforeAll(async () => {
@@ -349,6 +358,10 @@ export const DB_MARKER = 'GIO_TEST_DB_DO_NOT_BUNDLE';
 export function query(): string { return readSecret() + DB_MARKER; }
 `,
       'lib/polyfill.ts': `(globalThis as Record<string, unknown>).__gioPolyfill = 'POLYFILL_SIDE_EFFECT_KEPT';\n`,
+      'lib/widget.ts': `export const WIDGET = 'CLIENT_LAZY_WIDGET_KEPT';
+export const loadMore = () => import('./more.ts');
+`,
+      'lib/more.ts': `export const MORE = 'CLIENT_LAZY_NESTED_KEPT';\n`,
       'node_modules/gio-test-server-sdk/package.json': JSON.stringify({
         name: 'gio-test-server-sdk',
         version: '1.0.0',
@@ -398,6 +411,21 @@ export class Sdk { toString() { return 'GIO_TEST_SDK_CLASS'; } }
     expect(clientBuildErrorFor('/action')).toBeUndefined();
     expect(chunks).not.toContain('GIO_TEST_ACTION_DO_NOT_BUNDLE');
     expect(chunks).not.toContain('GIO_TEST_DB_DO_NOT_BUNDLE');
+  });
+
+  it('never ships a module only a shaken-out import() loads, but keeps live ones', async () => {
+    expect(manifest.get('/dynamic-import')).toBeDefined();
+    expect(chunks).toContain('FORM_DYNAMIC_IMPORT');
+    expect(chunks).toContain('CLIENT_LAZY_WIDGET_KEPT');
+    expect(chunks).toContain('CLIENT_LAZY_NESTED_KEPT');
+    expect(chunks).not.toContain('gio-dynamic-import:');
+    // Source maps included: nothing in the public chunk directory holds it.
+    const chunksDir = join(root, '.gio', 'build', 'static', 'chunks');
+    for (const file of await readdir(chunksDir)) {
+      expect(await readFile(join(chunksDir, file), 'utf8'), file).not.toContain(
+        'GIO_TEST_SECRET_DO_NOT_BUNDLE',
+      );
+    }
   });
 
   it('drops npm packages that only gSSP uses but keeps bare side-effect imports', () => {
@@ -476,6 +504,12 @@ export default function Page() { return React.createElement('p', null, API_KEY);
       'app/ok/page.tsx': page('OK_PAGE', `import { query } from '../../lib/db.ts';
 import { API_KEY } from '../../lib/keys.server.ts';
 export async function getServerSideProps() { return { props: { q: query() + API_KEY } }; }`),
+      // ...loaded with import() too.
+      'app/dynamic/page.tsx': page('DYNAMIC_OK_PAGE', `export async function getServerSideProps() {
+  const { query } = await import('../../lib/db.ts');
+  const { API_KEY } = await import('../../lib/keys.server.ts');
+  return { props: { q: query() + API_KEY } };
+}`),
     });
     manifest = await buildPages(root, [
       'leaky',
@@ -486,6 +520,7 @@ export async function getServerSideProps() { return { props: { q: query() + API_
       'enum',
       'constenum',
       'enumok',
+      'dynamic',
     ]);
   }, 60_000);
 
@@ -506,6 +541,8 @@ export async function getServerSideProps() { return { props: { q: query() + API_
     expect(clientBuildErrorFor('/ok')).toBeUndefined();
     expect(clientBuildErrorFor('/enumok')).toBeUndefined();
     expect(manifest.get('/enumok')).toBeDefined();
+    expect(clientBuildErrorFor('/dynamic')).toBeUndefined();
+    expect(manifest.get('/dynamic')).toBeDefined();
   });
 
   it('rejects client reads of enums declared in server-only modules', () => {
@@ -547,6 +584,7 @@ export async function getServerSideProps() { return { props: { q: query() + API_
     const chunks = await allChunks(root);
     expect(chunks).toContain('OK_PAGE');
     expect(chunks).toContain('ENUM_OK_PAGE');
+    expect(chunks).toContain('DYNAMIC_OK_PAGE');
     expect(chunks).not.toContain('GIO_TEST_DB_DO_NOT_BUNDLE');
     expect(chunks).not.toContain('GIO_TEST_SERVER_FILE_DO_NOT_BUNDLE');
     expect(chunks).not.toContain('GIO_TEST_ENUM_DO_NOT_BUNDLE');

@@ -156,13 +156,14 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
     discoverLayouts(appDir),
     discoverSegmentFiles(appDir),
   ]);
-  // Pages render inside their loading.* and error.* boundaries, as served.
-  // A failure is reported (with its digest) rather than exported as an
-  // error page - one inside a Suspense boundary included, since an exported
-  // page never hydrates to recover from it - and notFound() pages are
-  // skipped: nothing is written.
+  // Pages render inside their loading.* and error.* boundaries, as served -
+  // the same segment tree the client bundles below hydrate. A failure is
+  // reported (with its digest) rather than exported as an error page
+  // (staticExport) - one inside a Suspense boundary included, since an
+  // exported page never hydrates to recover from it - and notFound() pages
+  // are skipped: nothing is written.
   const pageExtras: RenderExtras = {
-    segmentFiles: { ...segmentFiles, error: new Map() },
+    segmentFiles,
     staticExport: true,
   };
 
@@ -192,6 +193,7 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
   const clientScripts = await buildClientBundles({
     routes,
     layouts,
+    segmentFiles,
     projectRoot: dirname(resolve(appDir)),
     dev: false,
     staticExportDir: outDir,

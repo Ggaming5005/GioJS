@@ -275,6 +275,10 @@ describe('patternToPath', () => {
   });
 });
 
+const SEGMENT_ERROR = `import React from 'react';
+export default function SegmentError() { return React.createElement('p', null, 'EXPORT_ERROR_UI'); }
+`;
+
 const THROWS = `import React from 'react';
 export default function Broken() { throw new Error('EXPORT_RENDER_SECRET'); }
 `;
@@ -382,6 +386,21 @@ export async function getServerSideProps() {
 describe('exportSite errors', () => {
   afterAll(async () => {
     await rm(fixtureRoot, { recursive: true, force: true });
+  });
+
+  it('reports a failed render under an error.* instead of exporting the error page', async () => {
+    const appDir = join(fixtureRoot, 'throws-error-file', 'app');
+    const outDir = join(fixtureRoot, 'throws-error-file', 'out');
+    await mkdir(join(appDir, 'broken'), { recursive: true });
+    await writeFile(join(appDir, 'page.tsx'), PAGE);
+    await writeFile(join(appDir, 'broken', 'page.tsx'), THROWS);
+    await writeFile(join(appDir, 'broken', 'error.tsx'), SEGMENT_ERROR);
+
+    const { written, skipped } = await exportSite(appDir, outDir);
+    expect(written).toEqual(['/']);
+    expect(skipped[0]?.route).toBe('/broken');
+    expect(skipped[0]?.reason).toMatch(/^render error: Internal Server Error \(ref [0-9a-f]{12}, details in the error log\)$/);
+    expect(await exists(join(outDir, 'broken', 'index.html'))).toBe(false);
   });
 
   it('reports a failed render with the digest of its logged details', async () => {
@@ -633,6 +652,39 @@ async function readChunks(outDir: string): Promise<string[]> {
   const chunksDir = join(outDir, '_next', 'static', 'chunks');
   return Promise.all((await readdir(chunksDir)).map(name => readFile(join(chunksDir, name), 'utf8')));
 }
+
+// The exported HTML renders the page inside its loading.* Suspense boundary;
+// the bundle that hydrates it must build the same tree - and carry the
+// error.* client boundaries, as served pages do.
+describe('exportSite segment boundaries', () => {
+  const base = join(fixtureRoot, 'segments');
+  const appDir = join(base, 'app');
+  const outDir = join(base, 'out');
+
+  afterAll(async () => {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  });
+
+  it("bundles the loading.* and error.* boundaries the exported HTML was rendered in", async () => {
+    await mkdir(appDir, { recursive: true });
+    await writeFile(join(appDir, 'page.tsx'), PAGE);
+    await writeFile(join(appDir, 'loading.tsx'), `import React from 'react';
+export default function Loading() { return React.createElement('p', null, 'EXPORT_LOADING_UI'); }
+`);
+    await writeFile(join(appDir, 'error.tsx'), SEGMENT_ERROR);
+
+    const result = await exportSite(appDir, outDir);
+    expect(result.written).toEqual(['/']);
+    expect(result.unhydrated).toEqual([]);
+    const html = await readFile(join(outDir, 'index.html'), 'utf8');
+    // The page completed inside the loading boundary...
+    expect(html).toMatch(/<div id="__gio"><!--\$--><h1>EXPORT_HOME<\/h1><!--\/\$--><\/div>/);
+    // ...which the hydrating bundle builds too, with the error boundary around it.
+    const chunks = await readChunks(outDir);
+    expect(chunks.some(js => js.includes('EXPORT_LOADING_UI'))).toBe(true);
+    expect(chunks.some(js => js.includes('EXPORT_ERROR_UI'))).toBe(true);
+  }, 60_000);
+});
 
 describe('exportSite hydration', () => {
   const base = join(fixtureRoot, 'hydration');

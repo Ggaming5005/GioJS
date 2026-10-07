@@ -86,9 +86,13 @@ responsibility:
 
 - An `IPCResponse` returned from `onRequest` is sent as-is, including its `cacheable` /
   `cacheMaxAge`. Set `cacheable: false` on anything that depends on the visitor.
-- Rewriting `req.path` or `req.query` per visitor (A/B buckets, per-user redirects) is invisible
-  to the cache key; a page reached that way that exports `revalidate` would be cached under the
-  original URL for everyone. Route per visitor with a redirect, or keep such pages uncached.
+- Rewriting `req.path`, `req.query` or `req.locale` per visitor is invisible to the cache key,
+  which is the URL as requested. GioJS catches a plugin that reads the `cookie`, `authorization`,
+  client-address or host headers (including spreading or enumerating `req.headers`) and then
+  rewrites: that render is not cached. A rewrite driven by anything else (`req.ip`, a random A/B
+  bucket) is not detected, and a page reached that way that exports `revalidate` would be cached
+  under the original URL for everyone. Route per visitor with a redirect, or keep such pages
+  uncached.
 
 ---
 
