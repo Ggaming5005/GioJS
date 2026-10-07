@@ -533,13 +533,20 @@ impl Default for WebsocketConfig {
     }
 }
 
-/// `[css]`: the Lightning CSS pipeline for app stylesheets.
+/// `[css]`: the CSS pipeline. Imported CSS (`import './x.css'`, CSS
+/// Modules) is part of the module graph and always bundled by the worker;
+/// these keys shape how it and path-served stylesheets are processed.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub struct CssConfig {
+    /// Serve `app/*.css` files requested by path from a startup cache
+    /// processed by Lightning CSS. false: they are not served that way.
+    /// Imported CSS is unaffected.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Minify production CSS: path-served stylesheets (Lightning CSS) and
+    /// the bundled route stylesheets (esbuild). Development never minifies.
     #[serde(default = "default_true")]
     pub minify: bool,
     /// Inline the CSS a page's first paint needs.
@@ -921,12 +928,24 @@ impl Default for ImageConfig {
 /// Env var the Node worker reads its `[images]` settings from.
 pub const WORKER_IMAGE_CONFIG_ENV: &str = "GIO_IMAGE_CONFIG";
 
+/// Env var the Node worker reads its `[css]` settings from.
+pub const WORKER_CSS_CONFIG_ENV: &str = "GIO_CSS_CONFIG";
+
 /// Worker env vars whose values change the rendered HTML. They are hashed
 /// into the derived deployment ID, so a restart with different values never
 /// serves persisted pages rendered with the old ones. Never list a secret or
 /// a per-boot value here: the ID is public, and must stay stable across
 /// restarts of the same build and config.
-pub const WORKER_RENDER_SETTINGS_ENV: &[&str] = &[WORKER_IMAGE_CONFIG_ENV];
+pub const WORKER_RENDER_SETTINGS_ENV: &[&str] = &[WORKER_IMAGE_CONFIG_ENV, WORKER_CSS_CONFIG_ENV];
+
+impl CssConfig {
+    /// The `[css]` settings the worker's stylesheet build follows, as JSON:
+    /// `minify`. The others are the server's own (path-served stylesheets,
+    /// critical CSS inlining).
+    pub fn worker_json(&self) -> String {
+        serde_json::json!({ "minify": self.minify }).to_string()
+    }
+}
 
 impl ImageConfig {
     /// The `[images]` settings `<GioImage>` renders with, as JSON for the
@@ -1712,6 +1731,19 @@ mod tests {
             .images;
         assert_eq!(raised.decode_limits().max_dimension, 20_000);
         assert_eq!(raised.remote_timeout(), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn css_worker_json_carries_minify_and_feeds_the_deployment_id() {
+        let defaults: serde_json::Value =
+            serde_json::from_str(&parse("").unwrap().css.worker_json()).unwrap();
+        assert_eq!(defaults, serde_json::json!({ "minify": true }));
+        let unminified = parse("[css]\nminify = false\n").unwrap().css;
+        let json: serde_json::Value = serde_json::from_str(&unminified.worker_json()).unwrap();
+        assert_eq!(json, serde_json::json!({ "minify": false }));
+        // It changes the stylesheets pages link, so persisted pages must not
+        // outlive a change to it.
+        assert!(WORKER_RENDER_SETTINGS_ENV.contains(&WORKER_CSS_CONFIG_ENV));
     }
 
     #[test]

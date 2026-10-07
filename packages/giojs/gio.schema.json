@@ -286,7 +286,7 @@
       "additionalProperties": false
     },
     "CssConfig": {
-      "description": "`[css]`: the Lightning CSS pipeline for app stylesheets.",
+      "description": "`[css]`: the CSS pipeline. Imported CSS (`import './x.css'`, CSS\nModules) is part of the module graph and always bundled by the worker;\nthese keys shape how it and path-served stylesheets are processed.",
       "type": "object",
       "properties": {
         "critical_extraction": {
@@ -295,10 +295,12 @@
           "default": true
         },
         "enabled": {
+          "description": "Serve `app/*.css` files requested by path from a startup cache\nprocessed by Lightning CSS. false: they are not served that way.\nImported CSS is unaffected.",
           "type": "boolean",
           "default": true
         },
         "minify": {
+          "description": "Minify production CSS: path-served stylesheets (Lightning CSS) and\nthe bundled route stylesheets (esbuild). Development never minifies.",
           "type": "boolean",
           "default": true
         }

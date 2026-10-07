@@ -22,8 +22,9 @@
  * anything the root stylesheet already holds - cascade order is root
  * layout, then layouts outer to inner, then the page. not-found.* and
  * error.* pages get the same treatment. CSS Modules compile with the shared
- * naming scheme (css-modules.ts); production output is minified, but local
- * names never are.
+ * naming scheme (css-modules.ts); production output is minified (unless
+ * gio.toml says `[css] minify = false`, which Rust hands over in
+ * GIO_CSS_CONFIG), but local names never are.
  *
  * A failing build is logged and costs only the entries that fail: their
  * pages render without their own stylesheet. Never throws.
@@ -71,6 +72,31 @@ export interface CssBuildOptions {
    * Default true.
    */
   write?: boolean;
+  /** false: production output stays unminified (`[css] minify`). Default true; dev never minifies. */
+  minify?: boolean;
+}
+
+export interface CssRenderConfig {
+  /** `[css] minify`: minify production stylesheets. */
+  minify: boolean;
+}
+
+/**
+ * The `[css]` settings Rust hands the worker in GIO_CSS_CONFIG. Unset or
+ * malformed (a worker started without the server, a static export) means
+ * the defaults.
+ */
+export function cssConfigFromEnv(env: NodeJS.ProcessEnv): CssRenderConfig {
+  const raw = env.GIO_CSS_CONFIG;
+  if (raw === undefined || raw === '') return { minify: true };
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const minify = (parsed as Record<string, unknown> | null)?.['minify'];
+    return { minify: minify !== false };
+  } catch {
+    logger.warn('GIO_CSS_CONFIG is malformed - stylesheets use the [css] defaults');
+    return { minify: true };
+  }
 }
 
 /** Files CSS may reference with url() - emitted next to the stylesheet, content-hashed. */
@@ -252,6 +278,7 @@ async function runCssBuild(
   const projectRoot = resolve(options.projectRoot);
   const modules = new Map<string, string>();
   const tsconfig = projectTsconfig(projectRoot);
+  const minify = !options.dev && options.minify !== false;
   const result = await build({
     entryPoints: Object.fromEntries(entries.map(e => [e.name, e.file])),
     bundle: true,
@@ -263,8 +290,8 @@ async function runCssBuild(
     assetNames: '[name]-[hash]',
     // Never minifyIdentifiers: it would rename CSS Module classes away from
     // the names SSR and the client bundle use.
-    minifyWhitespace: !options.dev,
-    minifySyntax: !options.dev,
+    minifyWhitespace: minify,
+    minifySyntax: minify,
     // Every import of every module counts: a component's CSS Module import
     // must not be dropped because the root layout's JS is unused here.
     treeShaking: false,

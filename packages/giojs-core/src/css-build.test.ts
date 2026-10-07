@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { buildRouteStylesheets } from './css-build.ts';
+import { buildRouteStylesheets, cssConfigFromEnv } from './css-build.ts';
 import { buildClientBundles } from './client-build.ts';
 import { cssModuleClasses, compileCssModuleClasses } from './css-modules.ts';
 import { logger } from './logger.ts';
@@ -225,6 +225,45 @@ describe('buildRouteStylesheets in production', () => {
       await rm(root, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it('leaves stylesheets unminified with [css] minify = false', async () => {
+    const root = await writeProject('gio-css-unminified-', FIXTURE);
+    try {
+      const manifest = await buildRouteStylesheets({
+        ...(await discover(root)),
+        projectRoot: root,
+        dev: false,
+        minify: false,
+      });
+      const url = manifest.routes.get('/')?.[1] ?? '';
+      const css = await readFile(join(root, '.gio', 'build', 'static', 'css', url.split('/').pop() ?? ''), 'utf8');
+      const classes = await compileCssModuleClasses(join(root, 'app', 'home.module.css'));
+      expect(css).toContain(`.${classes['title']} {\n  color: green;\n}`);
+      expect((await readdir(join(root, '.gio', 'build', 'static', 'css'))).some(f => f.endsWith('.map'))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+describe('cssConfigFromEnv', () => {
+  it('reads [css] minify from GIO_CSS_CONFIG and defaults to minifying', () => {
+    expect(cssConfigFromEnv({ GIO_CSS_CONFIG: '{"minify":false}' })).toEqual({ minify: false });
+    expect(cssConfigFromEnv({ GIO_CSS_CONFIG: '{"minify":true}' })).toEqual({ minify: true });
+    for (const raw of [undefined, '', '{}', 'null', '[]']) {
+      expect(cssConfigFromEnv({ GIO_CSS_CONFIG: raw })).toEqual({ minify: true });
+    }
+  });
+
+  it('falls back to the defaults on a malformed value', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      expect(cssConfigFromEnv({ GIO_CSS_CONFIG: 'not json' })).toEqual({ minify: true });
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 // The shape of Tailwind v4 CLI output: cascade layers, @property, nesting,

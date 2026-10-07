@@ -573,10 +573,17 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     // the HTML depends on are listed in config::WORKER_RENDER_SETTINGS_ENV,
     // which hashes them into the derived deployment ID: changing them drops
     // persisted pages.
-    let worker_env = vec![(
-        config::WORKER_IMAGE_CONFIG_ENV.to_string(),
-        cfg.images.worker_json(),
-    )];
+    let worker_env = vec![
+        (
+            config::WORKER_IMAGE_CONFIG_ENV.to_string(),
+            cfg.images.worker_json(),
+        ),
+        // [css] minify reaches the worker's esbuild stylesheet build too.
+        (
+            config::WORKER_CSS_CONFIG_ENV.to_string(),
+            cfg.css.worker_json(),
+        ),
+    ];
 
     // Every refusal that depends on more than gio.toml's syntax, before
     // anything is created or spawned. Shared with --check-config, so the
