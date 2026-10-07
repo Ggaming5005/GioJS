@@ -1019,6 +1019,11 @@ first.
   `Connection: keep-alive, keep-alive`. They now carry `Cache-Control` once
   and no `Connection` header, which is connection-specific and not allowed on
   HTTP/2.
+- The server's own refusals - the rate-limit `429`, the deployment-skew
+  `409`, a refused prefetch's `429` - were labeled `X-Gio-Cache: static`; they
+  now say `bypass`. `static` is for files only (`public/`, `/_next/static`,
+  the CSS compiled at startup), and the self-hosted fonts under
+  `/_gio/fonts/` now carry it too.
 
 ### Known limitations
 

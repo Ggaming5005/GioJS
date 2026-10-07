@@ -2152,6 +2152,8 @@ async function main() {
         const res = await rawGet(path);
         assert.equal(res.status, 429, `${path} must draw from the exhausted bucket`);
         assert.ok(res.headers['retry-after'], path);
+        // The server's own refusal: no static file answered it.
+        assert.equal(res.headers['x-gio-cache'], 'bypass', path);
       }
     });
 
@@ -3622,6 +3624,7 @@ async function buildChangeCachePhase() {
             const skewed = await fetch(`${BASE}/cached`, { headers: { 'x-deployment-id': before.deploymentId } });
             assert.equal(skewed.status, 409);
             assert.equal(skewed.headers.get('x-gio-action'), 'hard-reload');
+            assert.equal(skewed.headers.get('x-gio-cache'), 'bypass');
             await skewed.arrayBuffer();
           });
           // The entry file is rewritten in place, stamped with the new ID.
@@ -5535,6 +5538,8 @@ async function featureSwitchesPhase() {
           const res = await fetch(`${BASE}${path}`, { headers: { purpose: 'prefetch' } });
           await res.arrayBuffer();
           assert.equal(res.status, 429, path);
+          assert.equal(res.headers.get('x-gio-cache'), 'bypass', path);
+        }
         }
         const plain = await fetch(`${BASE}/gio-test.png`);
         await plain.arrayBuffer();
@@ -5586,8 +5591,14 @@ async function featureSwitchesPhase() {
         assert.equal(preloads.length, 1, `${preloads}`);
         assert.match(preloads[0], /^preloaded/i);
         assert.match(html, /<link rel="stylesheet" href="\/_gio\/fonts\/fonts\.css">/);
-        const css = await (await fetch(`${BASE}/_gio/fonts/fonts.css`)).text();
+        const fontsCss = await fetch(`${BASE}/_gio/fonts/fonts.css`);
+        assert.equal(fontsCss.headers.get('x-gio-cache'), 'static');
+        const css = await fontsCss.text();
         assert.match(css, /font-family: ?['"]?Lazy/, 'the lazy font keeps its @font-face');
+        const font = await fetch(`${BASE}/_gio/fonts/${preloads[0]}`);
+        assert.equal(font.status, 200);
+        assert.equal(font.headers.get('x-gio-cache'), 'static');
+        await font.arrayBuffer();
       });
 
       await test('[websocket] max_connections = 0 and ping_interval_secs = 0 accept and keep sockets', async () => {

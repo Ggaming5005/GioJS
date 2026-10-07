@@ -366,9 +366,12 @@ fn varies_by(headers: &axum::http::HeaderMap, field: &str) -> bool {
         .any(|listed| listed == "*" || listed.eq_ignore_ascii_case(field))
 }
 
-/// Stamps `X-Gio-Cache: static` on responses the dynamic pipeline never saw
-/// (public/ assets, chunks, fonts). Internal /_gio endpoints and protocol
-/// upgrades stay unstamped.
+/// Stamps `X-Gio-Cache: bypass` on app-path responses nothing else labeled:
+/// the server's own refusals (a rate-limit 429, a skew 409, a guard or a
+/// prefetch refusal) never reached the page cache. `static` is stamped only
+/// where a file is served (`stamp_static_file`), never by default: it also
+/// exempts a body from CSP nonce substitution. Internal /_gio endpoints and
+/// protocol upgrades stay unstamped.
 async fn cache_status_stamp_middleware(req: Request, next: Next) -> Response {
     let internal = req.uri().path().starts_with("/_gio/");
     let mut resp = next.run(req).await;
@@ -376,9 +379,25 @@ async fn cache_status_stamp_middleware(req: Request, next: Next) -> Response {
         && resp.status() != StatusCode::SWITCHING_PROTOCOLS
         && !resp.headers().contains_key("x-gio-cache")
     {
-        insert_cache_status_header(&mut resp, "static");
+        insert_cache_status_header(&mut resp, "bypass");
     }
     resp
+}
+
+/// `X-Gio-Cache: static` for a response a static file layer answered:
+/// public/ files, build assets, the startup CSS and self-hosted fonts (304s
+/// and 404s from those layers included).
+fn stamp_static_file(mut resp: Response) -> Response {
+    insert_cache_status_header(&mut resp, "static");
+    resp
+}
+
+/// `stamp_static_file` as a layer, for the ServeDir mounts.
+fn static_file_stamp_layer() -> SetResponseHeaderLayer<HeaderValue> {
+    SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("x-gio-cache"),
+        HeaderValue::from_static("static"),
+    )
 }
 
 /// Headers that must never be stored in the shared cache: set-cookie is
@@ -1042,6 +1061,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             static_metrics.clone(),
             fixed_route_metrics_middleware,
         ))
+        .layer(static_file_stamp_layer())
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
             HeaderValue::from_static(css_assets::IMMUTABLE_CACHE_CONTROL),
@@ -1053,6 +1073,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             internal_metrics.clone(),
             fixed_route_metrics_middleware,
         ))
+        .layer(static_file_stamp_layer())
         .layer(axum::middleware::from_fn(font_cache_control_middleware))
         .service(ServeDir::new(fonts_dir));
 
@@ -1061,6 +1082,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             static_metrics,
             fixed_route_metrics_middleware,
         ))
+        .layer(static_file_stamp_layer())
         .service(ServeDir::new(public_dir));
 
     install_compression_config(cfg.compression);
@@ -2194,6 +2216,7 @@ async fn root_fallback_handler(
     {
         let start = std::time::Instant::now();
         if let Some(resp) = state.public_files.serve(&req).await {
+            let resp = stamp_static_file(resp);
             state.metrics.record_request(
                 req.method().as_str(),
                 resp.status().as_u16(),
@@ -2298,7 +2321,7 @@ async fn dynamic_handler(
     // Serve pre-transformed CSS directly from startup cache
     if path.ends_with(".css") {
         if let Some(css) = state.css_cache.get(&path) {
-            let resp = css_assets::css_response(&css, req.headers());
+            let resp = stamp_static_file(css_assets::css_response(&css, req.headers()));
             state.metrics.record_request(
                 &method,
                 resp.status().as_u16(),
@@ -8737,6 +8760,41 @@ Z1uis5x6LpdQ/f48fePWB4bJazo1nu0iiDgI5KKq1gGbWFFjVjMISa/m
         for name in ["connection", "keep-alive", "transfer-encoding"] {
             assert!(all(name).is_empty(), "{name} must not be forwarded");
         }
+    }
+
+    #[tokio::test]
+    async fn refusals_are_not_labeled_static_and_files_are() {
+        async fn refused() -> Response {
+            StatusCode::TOO_MANY_REQUESTS.into_response()
+        }
+        async fn file() -> Response {
+            stamp_static_file("body".into_response())
+        }
+        let app = Router::new()
+            .route("/api/limited", get(refused))
+            .route("/robots.txt", get(file))
+            .nest_service(
+                "/_gio/fonts",
+                Router::new()
+                    .fallback(|| async { "font" })
+                    .layer(static_file_stamp_layer()),
+            )
+            .layer(axum::middleware::from_fn(cache_status_stamp_middleware));
+        let label = |path: &'static str| {
+            let mut app = app.clone();
+            async move {
+                let resp = app
+                    .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                resp.headers()
+                    .get("x-gio-cache")
+                    .map(|value| value.to_str().unwrap().to_string())
+            }
+        };
+        assert_eq!(label("/api/limited").await.as_deref(), Some("bypass"));
+        assert_eq!(label("/robots.txt").await.as_deref(), Some("static"));
+        assert_eq!(label("/_gio/fonts/a.woff2").await.as_deref(), Some("static"));
     }
 
 }
