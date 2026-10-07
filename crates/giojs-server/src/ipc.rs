@@ -374,7 +374,9 @@ struct IpcClientInner {
 }
 
 /// Queued worker purges. A worker flooding purges past this gets "busy"
-/// acks instead of growing an unbounded queue.
+/// acks instead of growing an unbounded queue. The worker keeps at most
+/// MAX_REVALIDATIONS_IN_FLIGHT (16, giojs-core/src/revalidate.ts) unacked,
+/// so a burst of parallel revalidateTag calls never gets here.
 const REVALIDATE_QUEUE: usize = 64;
 
 /// A `revalidate` frame from the worker (`revalidateTag` / `revalidatePath`

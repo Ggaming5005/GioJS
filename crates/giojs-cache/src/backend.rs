@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::disk::DiskLayer;
 use crate::memory::MemoryLayer;
-use crate::tags::{DiskAdmission, FillTicket, Invalidation, TagIndex};
+use crate::tags::{unix_secs, DiskAdmission, FillTicket, Invalidation, TagIndex};
 use crate::{CacheEntry, CacheError};
 
 /// Raw entry storage. Holds no TTL / deployment-ID / SWR policy - that lives in
@@ -97,16 +97,17 @@ impl LocalBackend {
     pub(crate) async fn index_disk(&self, deployment_id: &str) {
         let index = &self.index;
         self.disk
-            .scan_tags(|key, entry_deployment, tags| {
+            .scan_tags(|key, entry_deployment, tags, written_secs| {
                 entry_deployment == deployment_id
-                    && lock(index).admit_disk_entry(key, tags, false) == DiskAdmission::Live
+                    && lock(index).admit_disk_entry(key, tags, written_secs, false)
+                        == DiskAdmission::Live
             })
             .await;
         lock(index).mark_disk_indexed();
     }
 
     fn insert_locked(&self, index: &mut TagIndex, key: &str, entry: CacheEntry) -> u64 {
-        let generation = index.insert(key, &entry.tags);
+        let generation = index.insert(key, &entry.tags, unix_secs(entry.created_at));
         if let Some(evicted) = self.memory.put(key.to_string(), entry) {
             index.evicted_from_memory(&evicted);
         }
@@ -152,7 +153,12 @@ impl LocalBackend {
                 _ => match self.memory.get(key) {
                     // Another lookup promoted the same file meanwhile.
                     Some(promoted) => Promotion::Superseded(Some(promoted)),
-                    None => match index.admit_disk_entry(key, &entry.tags, true) {
+                    None => match index.admit_disk_entry(
+                        key,
+                        &entry.tags,
+                        unix_secs(entry.created_at),
+                        true,
+                    ) {
                         DiskAdmission::Live => {
                             if let Some(evicted) = self.memory.put(key.to_string(), entry.clone()) {
                                 index.evicted_from_memory(&evicted);
@@ -227,12 +233,13 @@ impl CacheBackend for LocalBackend {
     }
 
     async fn remove(&self, key: &str) {
-        {
-            let mut index = self.index();
-            index.remove(key);
-            self.memory.remove(key);
-        }
+        // The file first: a removal is not logged like an invalidation, so a
+        // file still on disk after its key left the index would read as one
+        // another instance wrote, and be promoted back.
         self.disk.remove(key).await;
+        let mut index = self.index();
+        index.remove(key);
+        self.memory.remove(key);
     }
 
     fn stats(&self) -> (usize, usize) {

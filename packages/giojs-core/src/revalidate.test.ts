@@ -21,6 +21,7 @@ import {
   attachRevalidationChannel,
   settleRevalidateAck,
   REVALIDATE_TIMEOUT_MS,
+  MAX_REVALIDATIONS_IN_FLIGHT,
   type RevalidateFrame,
 } from './revalidate.ts';
 
@@ -216,6 +217,89 @@ describe('frames and acks', () => {
     void revalidateTag('posts');
     await flush();
     expect(frames).toHaveLength(1);
+  });
+
+  it('a burst of calls waits its turn instead of overflowing the server queue', async () => {
+    // Rust queues a worker's purges in 64 slots (REVALIDATE_QUEUE in
+    // giojs-server/src/ipc.rs), refuses the overflow at once, and runs one
+    // purge at a time - emulated here.
+    const RUST_QUEUE = 64;
+    enableRevalidation();
+    const queued: RevalidateFrame[] = [];
+    let mostQueued = 0;
+    attachRevalidationChannel(frame => {
+      if (queued.length >= RUST_QUEUE) {
+        setImmediate(() => settleRevalidateAck({
+          type: 'revalidate_ack', id: frame.id, ok: false, purged: 0,
+          error: 'too many revalidations queued',
+        }));
+        return;
+      }
+      queued.push(frame);
+      mostQueued = Math.max(mostQueued, queued.length);
+    });
+    let done = false;
+    const executor = (async () => {
+      while (!done) {
+        const next = queued.shift();
+        if (next !== undefined) {
+          settleRevalidateAck({ type: 'revalidate_ack', id: next.id, ok: true, purged: 1 });
+        }
+        await new Promise(resolve => setImmediate(resolve));
+      }
+    })();
+
+    // revalidateTag takes one tag: purging a batch is N parallel calls.
+    const results = await Promise.all(
+      Array.from({ length: 200 }, (_, i) => revalidateTag(`post:${i}`)),
+    );
+    done = true;
+    await executor;
+    expect(results.filter(result => !result.ok)).toEqual([]);
+    expect(mostQueued).toBeLessThanOrEqual(MAX_REVALIDATIONS_IN_FLIGHT);
+  });
+
+  it('calls waiting for their turn time out without sending', async () => {
+    vi.useFakeTimers();
+    const { frames } = connect();
+    const calls = Array.from(
+      { length: MAX_REVALIDATIONS_IN_FLIGHT + 1 },
+      (_, i) => revalidateTag(`post:${i}`),
+    );
+    await flush();
+    expect(frames).toHaveLength(MAX_REVALIDATIONS_IN_FLIGHT);
+    await vi.advanceTimersByTimeAsync(REVALIDATE_TIMEOUT_MS);
+    const results = await Promise.all(calls);
+    expect(results.every(result => !result.ok)).toBe(true);
+    expect(results.at(-1)).toMatchObject({ error: /behind earlier revalidations/ });
+    expect(frames).toHaveLength(MAX_REVALIDATIONS_IN_FLIGHT);
+
+    // The window is free again afterwards.
+    const later = revalidateTag('posts');
+    await flush();
+    expect(frames).toHaveLength(MAX_REVALIDATIONS_IN_FLIGHT + 1);
+    settleRevalidateAck({ type: 'revalidate_ack', id: frames.at(-1)!.id, ok: true, purged: 0 });
+    await expect(later).resolves.toEqual({ ok: true, purged: 0 });
+  });
+
+  it('a respawned worker never reuses the ids of the one before it', async () => {
+    const crashed = connect();
+    void revalidateTag('posts');
+    await flush();
+    const oldId = crashed.frames[0]!.id;
+    crashed.detach();
+
+    resetBridge(); // a new worker process starts from a fresh bridge
+    const respawned = connect();
+    const pending = revalidateTag('users');
+    await flush();
+    const newId = respawned.frames[0]!.id;
+    expect(newId).not.toBe(oldId);
+    // Rust finishes the purge the crashed worker queued and acks it on the
+    // new connection: it must not settle the new worker's call.
+    settleRevalidateAck({ type: 'revalidate_ack', id: oldId, ok: true, purged: 7 });
+    settleRevalidateAck({ type: 'revalidate_ack', id: newId, ok: true, purged: 1 });
+    await expect(pending).resolves.toEqual({ ok: true, purged: 1 });
   });
 
   it('works across module instances (app code loads its own copy)', async () => {

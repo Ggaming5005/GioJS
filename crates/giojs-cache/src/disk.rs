@@ -133,16 +133,21 @@ impl DiskLayer {
         remove_file_logged(&self.path_for(key), key).await;
     }
 
-    /// Visit the key, deployment id and tags of every entry file without
-    /// keeping the bodies around (index rebuild at startup). Files `visit`
-    /// returns false for are deleted; unreadable files are skipped.
-    pub(crate) async fn scan_tags(&self, mut visit: impl FnMut(&str, &str, &[String]) -> bool) {
+    /// Visit the key, deployment id, tags and write time (`created_at_secs`)
+    /// of every entry file without keeping the bodies around (index rebuild
+    /// at startup). Files `visit` returns false for are deleted; unreadable
+    /// files are skipped.
+    pub(crate) async fn scan_tags(
+        &self,
+        mut visit: impl FnMut(&str, &str, &[String], u64) -> bool,
+    ) {
         /// Only what the index needs; serde skips the rest of the file.
         #[derive(Deserialize)]
         struct EntryTags {
             deployment_id: String,
             #[serde(default)]
             tags: Vec<String>,
+            created_at_secs: u64,
         }
 
         let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
@@ -159,7 +164,7 @@ impl DiskLayer {
             let Ok(meta) = serde_json::from_slice::<EntryTags>(&bytes) else {
                 continue;
             };
-            if !visit(&key, &meta.deployment_id, &meta.tags) {
+            if !visit(&key, &meta.deployment_id, &meta.tags, meta.created_at_secs) {
                 remove_file_logged(&path, &key).await;
             }
         }

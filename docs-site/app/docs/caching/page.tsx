@@ -101,7 +101,10 @@ export async function PUT(req) {
         query-string and locale variant counts). If the confirmation does not arrive within
         5 seconds, or the server connection drops, they resolve with <code>ok: false</code>{' '}
         and an <code>error</code>, and log a warning - they do not throw, so a write that
-        already succeeded is not failed over its cache refresh. An invalid tag or path - an
+        already succeeded is not failed over its cache refresh. To purge a batch, call them
+        in parallel - <code>{'await Promise.all(ids.map(id => revalidateTag(`post:${id}`)))'}</code>:
+        the worker sends at most 16 at a time and the rest wait their turn, within the same
+        5 seconds. An invalid tag or path - an
         unpaired surrogate, a <code>.</code> or <code>..</code> segment, a <code>%</code>{' '}
         that does not start an escape, a path under <code>/_gio</code> - is a programming
         error and rejects with a <code>TypeError</code>. Under{' '}
@@ -149,6 +152,9 @@ export GIO_REVALIDATE_TOKEN=<token>     # or [revalidate] token = "..." in gio.t
         With several instances behind a load balancer, call the endpoint on every instance
         (by its own address, not through the balancer); <code>revalidateTag()</code> and{' '}
         <code>revalidatePath()</code> only purge the instance whose worker runs them.
+        Instances that share a disk cache directory (<code>GIO_CACHE_DIR</code>) serve the
+        pages each other stored, but each keeps its own memory cache - purge every one of
+        them all the same.
       </div>
 
       <h2>Personalized pages are never shared</h2>

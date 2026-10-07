@@ -161,6 +161,25 @@ describe('cache tags', () => {
     expect(cacheTagsOf(result)).toBeUndefined();
   });
 
+  it('an uncached page exporting a `tags` of its own logs no cache-tag warning', async () => {
+    const logs = captureLogs();
+    try {
+      // Tags are only read for cached pages; this one renders its tag cloud.
+      for (const revalidate of [undefined, 0]) {
+        const routes = makeRoute('/tag-cloud', {
+          ...(revalidate !== undefined ? { revalidate } : {}),
+          tags: [{ name: 'react' }] as unknown as string[],
+        });
+        const result = await renderRoute(makeRequest('/tag-cloud'), routes, noLayouts);
+        expect('status' in result && result.status).toBe(200);
+        expect(cacheTagsOf(result)).toBeUndefined();
+      }
+      expect(logs.lines().filter(l => String(l['msg']).includes('cache tags ignored'))).toEqual([]);
+    } finally {
+      logs.restore();
+    }
+  });
+
   it('a PPR shell head carries the tags its cached shell is stored with', async () => {
     const routes = makeRoute('/', { shell: 'cache', revalidate: 60, tags: ['feed'] });
     const result = await renderRoute(

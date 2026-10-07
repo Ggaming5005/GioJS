@@ -13,6 +13,7 @@
  * mirror giojs-server/src/revalidate.rs.
  */
 import { Buffer } from 'node:buffer';
+import { randomUUID } from 'node:crypto';
 import { logger } from './logger.ts';
 
 export const MAX_CACHE_TAGS = 64;
@@ -22,9 +23,18 @@ const MAX_PATH_BYTES = 2048;
 const RESERVED_TAG_PREFIX = '_gio:';
 /**
  * How long a call waits for Rust to confirm the purge (or for the server
- * connection, while the worker is between connections).
+ * connection, while the worker is between connections, or for its turn
+ * behind earlier calls).
  */
 export const REVALIDATE_TIMEOUT_MS = 5_000;
+/**
+ * Frames sent and not yet acked, per worker process. Rust queues a worker's
+ * purges in 64 slots (REVALIDATE_QUEUE in giojs-server/src/ipc.rs) and
+ * refuses the overflow, so `Promise.all(ids.map(id => revalidateTag(...)))`
+ * must not send them all at once: the rest wait here for their turn. Well
+ * under 64, leaving room for frames a previous connection left queued.
+ */
+export const MAX_REVALIDATIONS_IN_FLIGHT = 16;
 
 /** What a revalidateTag / revalidatePath call achieved. */
 export interface RevalidateResult {
@@ -71,6 +81,16 @@ interface RevalidationBridge {
   pending: Map<string, (result: RevalidateResult) => void>;
   /** Calls waiting for a server connection. */
   connectWaiters: Set<() => void>;
+  /** Calls holding one of the MAX_REVALIDATIONS_IN_FLIGHT slots. */
+  inFlight: number;
+  /** Calls waiting for a slot, oldest first (Sets iterate in insertion order). */
+  slotWaiters: Set<() => void>;
+  /**
+   * Unique to this process. Rust's ack for a frame a crashed worker sent can
+   * reach its respawned successor; with ids restarting at 1 there, it would
+   * settle an unrelated call of the new worker as purged.
+   */
+  idPrefix: string;
   nextId: number;
   warnedOutsideServer: boolean;
 }
@@ -89,6 +109,9 @@ function bridge(): RevalidationBridge {
       send: null,
       pending: new Map(),
       connectWaiters: new Set(),
+      inFlight: 0,
+      slotWaiters: new Set(),
+      idPrefix: `rv-${randomUUID()}`,
       nextId: 0,
       warnedOutsideServer: false,
     };
@@ -268,12 +291,27 @@ async function sendRevalidation(
     return { ok: false, purged: 0, error: 'not running behind the GioJS server' };
   }
   const deadline = Date.now() + REVALIDATE_TIMEOUT_MS;
-  const send = state.send ?? (await waitForConnection(state, REVALIDATE_TIMEOUT_MS));
+  if (!(await acquireSlot(state, REVALIDATE_TIMEOUT_MS))) {
+    return unconfirmed(targets, 'timed out behind earlier revalidations');
+  }
+  try {
+    return await sendInSlot(state, targets, deadline);
+  } finally {
+    releaseSlot(state);
+  }
+}
+
+async function sendInSlot(
+  state: RevalidationBridge,
+  targets: Pick<RevalidateFrame, 'tags' | 'paths' | 'prefix'>,
+  deadline: number,
+): Promise<RevalidateResult> {
+  const send = state.send ?? (await waitForConnection(state, Math.max(0, deadline - Date.now())));
   if (send === null) {
     return unconfirmed(targets, 'no connection to the server');
   }
   state.nextId += 1;
-  const id = `rv-${state.nextId}`;
+  const id = `${state.idPrefix}-${state.nextId}`;
   const result = await new Promise<RevalidateResult>(resolve => {
     const timer = setTimeout(
       () => {
@@ -309,6 +347,40 @@ function unconfirmed(
 ): RevalidateResult {
   logger.warn('cache revalidation not confirmed', { ...targets, error });
   return { ok: false, purged: 0, error };
+}
+
+/**
+ * Take one of the MAX_REVALIDATIONS_IN_FLIGHT slots, waiting in line behind
+ * earlier calls for at most `timeoutMs`. Resolves false when the wait timed
+ * out - the call then never sends its frame.
+ */
+function acquireSlot(state: RevalidationBridge, timeoutMs: number): Promise<boolean> {
+  if (state.inFlight < MAX_REVALIDATIONS_IN_FLIGHT && state.slotWaiters.size === 0) {
+    state.inFlight += 1;
+    return Promise.resolve(true);
+  }
+  return new Promise(resolve => {
+    const onSlot = (): void => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      state.slotWaiters.delete(onSlot);
+      resolve(false);
+    }, timeoutMs);
+    state.slotWaiters.add(onSlot);
+  });
+}
+
+/** Hand the slot to the longest-waiting call, or free it. */
+function releaseSlot(state: RevalidationBridge): void {
+  const next = state.slotWaiters.values().next();
+  if (next.done === true) {
+    state.inFlight -= 1;
+    return;
+  }
+  state.slotWaiters.delete(next.value);
+  next.value();
 }
 
 function waitForConnection(

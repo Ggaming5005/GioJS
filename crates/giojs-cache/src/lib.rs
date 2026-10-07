@@ -592,6 +592,47 @@ mod tests {
         assert!(cache.get("b", "deploy-1").await.is_some());
     }
 
+    /// Two instances on one cache directory (the default `.gio/cache/pages`
+    /// for every process started in the project): files one writes after
+    /// the other's startup scan are served by both, not deleted as purged.
+    #[tokio::test]
+    async fn instances_sharing_a_cache_directory_keep_each_others_files() {
+        let dir = TempDir::new("inv-shared");
+        let a = dir.cache(100);
+        let b = dir.cache(100);
+        a.index_disk("deploy-1").await;
+        b.index_disk("deploy-1").await;
+
+        a.put("k", tagged(&["posts"])).await.unwrap();
+        dir.wait_for_file("k").await;
+        assert!(
+            b.get("k", "deploy-1").await.is_some(),
+            "B serves the file A wrote"
+        );
+        assert!(dir.has_file("k"), "and leaves it for A");
+
+        // A purge on B still reaches A's files written before it - even
+        // one B never read, so never indexed.
+        a.put("unseen", tagged(&["posts"])).await.unwrap();
+        dir.wait_for_file("unseen").await;
+        assert_eq!(b.invalidate_tags(&["posts"]).await, 1, "k, which B indexed");
+        assert!(b.get("unseen", "deploy-1").await.is_none());
+        assert!(!dir.has_file("unseen"));
+
+        // Rendered after B's purge (the next second): fresh for B too.
+        a.put("after", make_entry_tagged(3600, -2, &["posts"]))
+            .await
+            .unwrap();
+        dir.wait_for_file("after").await;
+        assert!(b.get("after", "deploy-1").await.is_some());
+    }
+
+    fn make_entry_tagged(max_age_secs: u64, age_offset_secs: i64, tags: &[&str]) -> CacheEntry {
+        let mut entry = make_entry(max_age_secs, age_offset_secs);
+        entry.tags = tags.iter().map(|tag| tag.to_string()).collect();
+        entry
+    }
+
     #[tokio::test]
     async fn invalidate_paths_exact_and_prefix() {
         let dir = TempDir::new("inv-paths");

@@ -42,7 +42,7 @@ The HTTP port is not an environment variable - it comes from the `[server]` sect
 
 Each instance keeps its own page cache (memory + disk) - there is no shared/distributed cache yet; cross-instance cache coherence is on the roadmap. To keep caches and version-skew detection consistent across instances of the same build, set `GIO_DEPLOYMENT_ID` to the same value (e.g. the release SHA) on every instance.
 
-On-demand purges are per instance too: `revalidateTag()` / `revalidatePath()` purge only the instance whose worker calls them, so a CMS webhook should call `POST /_gio/revalidate` on every instance by its own address, not once through the load balancer.
+On-demand purges are per instance too: `revalidateTag()` / `revalidatePath()` purge only the instance whose worker calls them, so a CMS webhook should call `POST /_gio/revalidate` on every instance by its own address, not once through the load balancer. That holds even for instances sharing one disk cache directory (`GIO_CACHE_DIR`, default `.gio/cache/pages`): they serve the pages each other stored, but each keeps its own memory cache.
 
 ## Behind a reverse proxy or load balancer
 

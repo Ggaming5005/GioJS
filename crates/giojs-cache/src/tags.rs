@@ -16,8 +16,13 @@
 //! when any later invalidation matches the entry's tags. The log is bounded:
 //! a ticket older than the oldest retained event is treated as stale (the
 //! write is dropped, the next request renders again - never wrong content).
+//!
+//! The log also judges entry files the index does not know: such a file is
+//! stale when an invalidation logged since it was written matches it, so
+//! each event carries the second it was logged (see `admit_disk_entry`).
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Prefix of the implicit per-path tag. `_gio:` is reserved: the worker
 /// refuses user tags that start with it.
@@ -30,6 +35,14 @@ const LOG_CAP: usize = 1024;
 /// every invalidation since boot; past this many events that check gives up
 /// and treats un-indexed files as stale.
 const BOOT_LOG_CAP: usize = 65_536;
+
+/// Whole seconds since the epoch - the resolution entry files record their
+/// write time in (`created_at_secs`).
+pub(crate) fn unix_secs(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 /// The implicit tag every cached page carries for its path.
 pub fn path_tag(path: &str) -> String {
@@ -115,13 +128,29 @@ pub(crate) enum DiskAdmission {
     Stale,
 }
 
+#[derive(Debug)]
+struct LoggedInvalidation {
+    seq: u64,
+    /// When it was logged, in `unix_secs` - never before the write time of
+    /// an entry this index stored earlier (see `TagIndex::clock_secs`).
+    at_secs: u64,
+    invalidation: Invalidation,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct TagIndex {
     /// Sequence number of the latest invalidation (0 = none yet).
     seq: u64,
-    log: VecDeque<(u64, Invalidation)>,
+    log: VecDeque<LoggedInvalidation>,
     /// Every event with a sequence number <= floor was dropped from the log.
     floor: u64,
+    /// `at_secs` of the newest dropped event.
+    floor_secs: u64,
+    /// The latest wall-clock second seen by a put or an invalidation. Events
+    /// are stamped with it, so their times never go backwards, nor fall
+    /// before the write time of an entry stored earlier - even when the
+    /// system clock steps back in between.
+    clock_secs: u64,
     by_tag: HashMap<String, HashSet<String>>,
     records: HashMap<String, KeyRecord>,
     next_generation: u64,
@@ -143,13 +172,39 @@ impl TagIndex {
         self.log
             .iter()
             .rev()
-            .take_while(|(seq, _)| *seq > since)
-            .any(|(_, invalidation)| invalidation.matches(tags))
+            .take_while(|event| event.seq > since)
+            .any(|event| event.invalidation.matches(tags))
     }
 
-    /// Record a put: the entry is now in memory, and its disk write is on
-    /// the way. Returns the generation the disk write must carry.
-    pub(crate) fn insert(&mut self, key: &str, tags: &[String]) -> u64 {
+    /// True when an invalidation logged at or after `written_secs` (an entry
+    /// file's write time) matches `tags`, or when the log no longer reaches
+    /// back that far. The same second counts as after: the resolution is
+    /// coarse, and a needless miss is the safe side.
+    fn invalidated_after(&self, written_secs: u64, tags: &[String]) -> bool {
+        if self.floor > 0 && self.floor_secs >= written_secs {
+            return true;
+        }
+        self.log
+            .iter()
+            .rev()
+            .take_while(|event| event.at_secs >= written_secs)
+            .any(|event| event.invalidation.matches(tags))
+    }
+
+    /// Advance the clock to now (or to `at_least`, if later) and return it.
+    fn tick(&mut self, at_least: u64) -> u64 {
+        self.clock_secs = self
+            .clock_secs
+            .max(unix_secs(SystemTime::now()))
+            .max(at_least);
+        self.clock_secs
+    }
+
+    /// Record a put of an entry written at `written_secs`: the entry is now
+    /// in memory, and its disk write is on the way. Returns the generation
+    /// the disk write must carry.
+    pub(crate) fn insert(&mut self, key: &str, tags: &[String], written_secs: u64) -> u64 {
+        self.tick(written_secs);
         self.unlink(key);
         self.next_generation += 1;
         let generation = self.next_generation;
@@ -219,15 +274,20 @@ impl TagIndex {
         indexed && !self.invalidated_since(since, tags)
     }
 
-    /// A file of `key` was read from disk (promotion or the startup scan).
-    /// A key the index knows is live only while its record says so. An
-    /// unknown key is either a file from a previous run that the scan has
-    /// not reached yet - live unless an invalidation since boot matches it -
-    /// or, once the scan is done, a file whose entry was purged.
+    /// A file of `key`, written at `written_secs`, was read from disk
+    /// (promotion or the startup scan). A key the index knows is live only
+    /// while its record says so. An unknown key is either a file from a
+    /// previous run that the scan has not reached yet - live unless an
+    /// invalidation since boot matches it - or, once the scan is done, a
+    /// file written since: by another instance sharing the cache directory,
+    /// or by this one for an entry a purge is still deleting. That one is
+    /// live unless an invalidation logged since it was written matches it,
+    /// which a purge still deleting it always does.
     pub(crate) fn admit_disk_entry(
         &mut self,
         key: &str,
         tags: &[String],
+        written_secs: u64,
         promote: bool,
     ) -> DiskAdmission {
         if let Some(record) = self.records.get_mut(key) {
@@ -239,7 +299,12 @@ impl TagIndex {
             }
             return DiskAdmission::Live;
         }
-        if self.disk_indexed || self.invalidated_since(0, tags) {
+        let stale = if self.disk_indexed {
+            self.invalidated_after(written_secs, tags)
+        } else {
+            self.invalidated_since(0, tags)
+        };
+        if stale {
             return DiskAdmission::Stale;
         }
         self.next_generation += 1;
@@ -292,7 +357,12 @@ impl TagIndex {
             }
         };
         self.seq += 1;
-        self.log.push_back((self.seq, invalidation));
+        let at_secs = self.tick(0);
+        self.log.push_back(LoggedInvalidation {
+            seq: self.seq,
+            at_secs,
+            invalidation,
+        });
         self.trim_log();
         for key in &keys {
             self.unlink(key);
@@ -342,8 +412,9 @@ impl TagIndex {
             BOOT_LOG_CAP
         };
         while self.log.len() > cap {
-            if let Some((seq, _)) = self.log.pop_front() {
-                self.floor = seq;
+            if let Some(event) = self.log.pop_front() {
+                self.floor = event.seq;
+                self.floor_secs = event.at_secs;
             }
         }
     }
@@ -359,6 +430,10 @@ mod tests {
 
     fn tag_set(list: &[&str]) -> Invalidation {
         Invalidation::Tags(list.iter().map(|tag| tag.to_string()).collect())
+    }
+
+    fn now() -> u64 {
+        unix_secs(SystemTime::now())
     }
 
     #[test]
@@ -385,8 +460,8 @@ mod tests {
     #[test]
     fn insert_and_invalidate_maintain_both_maps() {
         let mut index = TagIndex::default();
-        index.insert("k1", &tags(&["posts", "_gio:path:/a"]));
-        index.insert("k2", &tags(&["posts"]));
+        index.insert("k1", &tags(&["posts", "_gio:path:/a"]), now());
+        index.insert("k2", &tags(&["posts"]), now());
         assert_eq!(index.tagged_keys("posts"), vec!["k1", "k2"]);
 
         let mut purged = index.invalidate(tag_set(&["posts"]));
@@ -403,8 +478,8 @@ mod tests {
     #[test]
     fn reinserting_a_key_replaces_its_old_tags() {
         let mut index = TagIndex::default();
-        index.insert("k", &tags(&["old"]));
-        index.insert("k", &tags(&["new"]));
+        index.insert("k", &tags(&["old"]), now());
+        index.insert("k", &tags(&["new"]), now());
         assert!(index.tagged_keys("old").is_empty());
         assert_eq!(index.tagged_keys("new"), vec!["k"]);
     }
@@ -412,13 +487,13 @@ mod tests {
     #[test]
     fn a_key_stays_indexed_until_it_leaves_both_layers() {
         let mut index = TagIndex::default();
-        index.insert("k", &tags(&["t"]));
+        index.insert("k", &tags(&["t"]), now());
         index.evicted_from_memory("k");
         assert_eq!(index.tagged_keys("t"), vec!["k"], "still on disk");
         index.removed_from_disk("k", None);
         assert!(index.tagged_keys("t").is_empty());
 
-        index.insert("k", &tags(&["t"]));
+        index.insert("k", &tags(&["t"]), now());
         index.removed_from_disk("k", None);
         assert_eq!(index.tagged_keys("t"), vec!["k"], "still in memory");
         index.evicted_from_memory("k");
@@ -428,8 +503,8 @@ mod tests {
     #[test]
     fn a_stale_disk_write_does_not_clear_a_newer_record() {
         let mut index = TagIndex::default();
-        let first = index.insert("k", &tags(&["t"]));
-        index.insert("k", &tags(&["t"]));
+        let first = index.insert("k", &tags(&["t"]), now());
+        index.insert("k", &tags(&["t"]), now());
         index.removed_from_disk("k", Some(first));
         index.evicted_from_memory("k");
         assert_eq!(
@@ -466,33 +541,104 @@ mod tests {
     }
 
     #[test]
-    fn unknown_disk_files_are_admitted_until_the_scan_completes() {
+    fn unknown_disk_files_from_a_previous_run_are_checked_against_every_invalidation() {
         let mut index = TagIndex::default();
+        let previous_run = now() - 3600;
         assert_eq!(
-            index.admit_disk_entry("prev-run", &tags(&["t"]), true),
+            index.admit_disk_entry("prev-run", &tags(&["t"]), previous_run, true),
             DiskAdmission::Live
         );
         assert_eq!(index.tagged_keys("t"), vec!["prev-run"]);
 
         index.invalidate(tag_set(&["gone"]));
         assert_eq!(
-            index.admit_disk_entry("prev-run-2", &tags(&["gone"]), false),
+            index.admit_disk_entry("prev-run-2", &tags(&["gone"]), previous_run, false),
             DiskAdmission::Stale,
             "a file predating an invalidation that matches it is stale"
         );
+        assert_eq!(
+            index.admit_disk_entry("prev-run-3", &tags(&["gone"]), now() + 3600, false),
+            DiskAdmission::Stale,
+            "before the scan, a file's own clock is not trusted: any purge since boot counts"
+        );
+    }
 
+    /// Another instance sharing the cache directory writes files this index
+    /// never saw. They are served, not deleted - unless an invalidation
+    /// logged here since they were written matches them.
+    #[test]
+    fn files_written_after_the_scan_are_live_unless_a_later_invalidation_matches() {
+        let mut index = TagIndex::default();
         index.mark_disk_indexed();
         assert_eq!(
-            index.admit_disk_entry("never-indexed", &tags(&["t"]), true),
+            index.admit_disk_entry("other-instance", &tags(&["t"]), now(), true),
+            DiskAdmission::Live,
+            "a file this instance never indexed is not a purged one"
+        );
+        assert_eq!(index.tagged_keys("t"), vec!["other-instance"]);
+
+        let earlier = now() - 60;
+        index.invalidate(tag_set(&["posts"]));
+        let purged_at = index.clock_secs;
+        assert_eq!(
+            index.admit_disk_entry("before-purge", &tags(&["posts"]), earlier, false),
             DiskAdmission::Stale,
-            "after the scan, an unknown file belongs to a purged entry"
+            "written before a purge that matches it"
+        );
+        assert_eq!(
+            index.admit_disk_entry("same-second", &tags(&["posts"]), purged_at, false),
+            DiskAdmission::Stale,
+            "the same second may be before the purge"
+        );
+        assert_eq!(
+            index.admit_disk_entry("unrelated", &tags(&["users"]), earlier, false),
+            DiskAdmission::Live
+        );
+        assert_eq!(
+            index.admit_disk_entry("after-purge", &tags(&["posts"]), purged_at + 1, false),
+            DiskAdmission::Live,
+            "rendered after the purge: fresh"
+        );
+    }
+
+    #[test]
+    fn files_older_than_the_log_are_stale_newer_ones_are_judged() {
+        let mut index = TagIndex::default();
+        index.mark_disk_indexed();
+        for _ in 0..=LOG_CAP {
+            index.invalidate(tag_set(&["noise"]));
+        }
+        assert_eq!(
+            index.admit_disk_entry("old", &tags(&["t"]), now() - 60, false),
+            DiskAdmission::Stale,
+            "a dropped invalidation may have matched it"
+        );
+        assert_eq!(
+            index.admit_disk_entry("new", &tags(&["t"]), index.clock_secs + 1, false),
+            DiskAdmission::Live,
+            "every invalidation since it was written is still logged"
+        );
+    }
+
+    /// The clock steps back after a put: a purge of that entry is still
+    /// stamped no earlier than its write, so its file stays stale.
+    #[test]
+    fn invalidations_are_never_stamped_before_an_earlier_put() {
+        let mut index = TagIndex::default();
+        index.mark_disk_indexed();
+        let ahead = now() + 3600;
+        index.insert("k", &tags(&["t"]), ahead);
+        index.invalidate(tag_set(&["t"]));
+        assert_eq!(
+            index.admit_disk_entry("k", &tags(&["t"]), ahead, false),
+            DiskAdmission::Stale
         );
     }
 
     #[test]
     fn disk_writes_after_an_invalidation_are_refused() {
         let mut index = TagIndex::default();
-        let generation = index.insert("k", &tags(&["t"]));
+        let generation = index.insert("k", &tags(&["t"]), now());
         let since = index.ticket().0;
         assert!(index.disk_write_is_live("k", generation, since, &tags(&["t"])));
         index.invalidate(tag_set(&["t"]));

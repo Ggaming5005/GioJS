@@ -774,14 +774,19 @@ export async function renderRoute(
       ...(gsspHeaders?.headers ?? {}),
     };
     // Rust stores them with the cached page (plus its path) for
-    // revalidateTag() / revalidatePath() and POST /_gio/revalidate.
-    const cacheTags = sanitizeCacheTags(
-      [
-        { source: 'export const tags', value: pageModule.tags },
-        { source: 'getServerSideProps tags', value: gsspTags },
-      ],
-      match.module.urlPattern,
-    );
+    // revalidateTag() / revalidatePath() and POST /_gio/revalidate. Only
+    // read for a render Rust will store: an uncached page's `tags` export
+    // is its own business, not worth a warning.
+    const cacheTagsField = (): { cacheTags?: string[] } => {
+      const cacheTags = sanitizeCacheTags(
+        [
+          { source: 'export const tags', value: pageModule.tags },
+          { source: 'getServerSideProps tags', value: gsspTags },
+        ],
+        match.module.urlPattern,
+      );
+      return cacheTags.length > 0 ? { cacheTags } : {};
+    };
     const pageCookies = setCookiesField(gsspHeaders?.setCookies ?? []);
 
     // Streaming applies only to non-shareable renders (mirrors Rust's
@@ -928,8 +933,7 @@ export async function renderRoute(
           cacheable: skipShell ? false : cacheable,
           cacheMaxAge: skipShell ? 0 : cacheMaxAge,
           streaming: true,
-          ...(storeShell ? { pprShell: true } : {}),
-          ...(storeShell && cacheTags.length > 0 ? { cacheTags } : {}),
+          ...(storeShell ? { pprShell: true, ...cacheTagsField() } : {}),
           ...pageCookies,
         },
         stream,
@@ -977,7 +981,7 @@ export async function renderRoute(
       body,
       cacheable,
       cacheMaxAge,
-      ...(cacheable && cacheTags.length > 0 ? { cacheTags } : {}),
+      ...(cacheable && cacheMaxAge > 0 ? cacheTagsField() : {}),
       ...pageCookies,
     };
 

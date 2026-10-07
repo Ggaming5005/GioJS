@@ -806,6 +806,19 @@ async function main() {
       assert.match((await getArticle('/articles/2')).cache, /^hit/, 'other tags are untouched');
     });
 
+    await test('a burst of parallel revalidateTag calls is confirmed in full, none refused', async () => {
+      // revalidateTag takes one tag, so a batch is N parallel calls; Rust
+      // queues 64 purges per worker, and the worker must pace the rest.
+      await getArticle('/articles/burst');
+      for (let round = 0; round < 3; round++) {
+        assert.match((await getArticle('/articles/burst')).cache, /^hit/);
+        const res = await fetch(`${BASE}/api/revalidate-burst?n=300&id=burst`, { method: 'POST' });
+        assert.equal(res.status, 200);
+        assert.deepEqual(await res.json(), { ok: 300, failed: 0, errors: [], purged: 1 }, `round ${round}`);
+        assert.equal((await getArticle('/articles/burst')).cache, 'miss; stored', 'the real purge among them happened');
+      }
+    });
+
     await test('revalidatePath purges every query string of the page; the static tag purges the route', async () => {
       await getArticle('/articles/1?ref=feed');
       assert.match((await getArticle('/articles/1?ref=feed')).cache, /^hit/);
