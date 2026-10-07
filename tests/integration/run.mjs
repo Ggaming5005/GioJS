@@ -779,6 +779,35 @@ async function main() {
       assert.match(rest, /data: second/, 'the stream ends after its last event');
     });
 
+    await test('a streamed route.ts HTML body without a head arrives chunk by chunk', async () => {
+      // No </head> to find: a head-injecting scan would hold the first token
+      // back until the stream ended (1.5s later).
+      const started = Date.now();
+      const res = await fetch(`${BASE}/api/html-report?stream=tokens`, {
+        headers: { 'accept-encoding': 'identity' },
+      });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/html/);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let html = '';
+      while (!html.includes('TOKEN_0')) {
+        const { done, value } = await reader.read();
+        assert.ok(!done, 'the stream ended before its first token');
+        html += decoder.decode(value, { stream: true });
+      }
+      const firstMs = Date.now() - started;
+      assert.doesNotMatch(html, /TOKEN_1/, 'the first token arrives while the stream is still open');
+      assert.ok(firstMs < 1200, `first token took ${firstMs}ms`);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        html += decoder.decode(value, { stream: true });
+      }
+      // The handler owns its body: nothing is spliced into it.
+      assert.equal(html, '<p>INTEGRATION_FIXTURE_TOKEN_0</p><p>INTEGRATION_FIXTURE_TOKEN_1</p>');
+    });
+
     await test('a client disconnect cancels a streamed route.ts body in the worker', async () => {
       const cancelled = async () =>
         (await (await fetch(`${BASE}/api/stream-endless?state=1`)).json()).cancelled;
@@ -1014,7 +1043,7 @@ async function main() {
       assert.match(secondRes.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/);
     });
 
-    await test('cached pages: CDN Cache-Control, a strong ETag, and 304 for If-None-Match', async () => {
+    await test('cached pages: CDN Cache-Control, a weak ETag, and 304 for If-None-Match', async () => {
       const hit = await fetch(`${BASE}/cached`);
       const body = await hit.text();
       assert.match(hit.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/);
@@ -1023,7 +1052,9 @@ async function main() {
         /^public, max-age=0, s-maxage=\d+, stale-while-revalidate=\d+$/,
       );
       const etag = hit.headers.get('etag');
-      assert.match(etag ?? '', /^"[0-9a-f]{32}"$/, 'strong ETag');
+      // Weak: the compression layer serves gzip, br and identity bytes
+      // under it, and a strong tag must differ per content coding.
+      assert.match(etag ?? '', /^W\/"[0-9a-f]{32}"$/, 'weak ETag');
 
       const revalidated = await rawGet('/cached', { 'if-none-match': etag });
       assert.equal(revalidated.status, 304);
@@ -1045,6 +1076,12 @@ async function main() {
       const largeRevalidated = await rawGet('/cached-large', { 'if-none-match': large.headers.get('etag') });
       assert.equal(largeRevalidated.status, 304);
       assert.equal(largeRevalidated.headers.vary, 'accept-encoding');
+      for (const coding of ['gzip', 'br', 'identity']) {
+        const variant = await rawGet('/cached-large', { 'accept-encoding': coding });
+        assert.equal(variant.status, 200, coding);
+        assert.equal(variant.headers['content-encoding'], coding === 'identity' ? undefined : coding);
+        assert.match(variant.headers.etag ?? '', /^W\//, `${coding} bytes carry a weak ETag`);
+      }
 
       const changed = await rawGet('/cached', { 'if-none-match': '"0123456789abcdef0123456789abcdef"' });
       assert.equal(changed.status, 200);
@@ -1072,7 +1109,7 @@ async function main() {
       const open = await fetch(`${BASE}/cached`);
       await open.text();
       const etag = open.headers.get('etag');
-      assert.match(etag ?? '', /^"[0-9a-f]{32}"$/);
+      assert.match(etag ?? '', /^W\/"[0-9a-f]{32}"$/);
       const authorized = await rawGet('/cached', {
         authorization: 'Basic YWxpY2U6c2VjcmV0',
         'if-none-match': etag,
@@ -1522,6 +1559,56 @@ async function main() {
         html.indexOf('id="__gio_props"') > html.indexOf('PPR_FIXTURE_SHELL'),
         'the envelope streams after the shell',
       );
+    });
+
+    await test('PPR: a per-visitor redirect() or notFound() on a shell hit still reaches the visitor', async () => {
+      const get = (cookie) =>
+        fetch(`${BASE}/ppr-gate`, {
+          redirect: 'manual',
+          headers: { 'accept-encoding': 'identity', ...(cookie ? { cookie } : {}) },
+        });
+      // Before any shell is stored: the plain redirect, nothing cached.
+      const anonMiss = await get();
+      assert.equal(anonMiss.status, 303);
+      assert.equal(anonMiss.headers.get('location'), '/login?next=/ppr-gate');
+      assert.equal(anonMiss.headers.get('x-gio-cache'), 'bypass');
+      const stored = await get('who=alice');
+      assert.equal(stored.headers.get('x-gio-cache'), 'ppr; shell=stored');
+      assert.match(await stored.text(), /PPR_GATE_HOLE who=alice/);
+      await sleep(250);
+
+      // The shell's 200 is out before gSSP redirects this visitor: the page
+      // finishes itself with a redirect to the real Location.
+      const anonHit = await get();
+      assert.equal(anonHit.status, 200);
+      assert.equal(anonHit.headers.get('x-gio-cache'), 'ppr; shell=hit');
+      const redirected = await anonHit.text();
+      assert.match(redirected, /PPR_GATE_SHELL/);
+      assert.doesNotMatch(redirected, /PPR_GATE_HOLE/);
+      assert.match(redirected, /<script>location\.replace\("\/login\?next=\/ppr-gate"\)<\/script>/);
+      assert.match(redirected, /<noscript><meta http-equiv="refresh" content="0;url=\/login\?next=\/ppr-gate"><\/noscript>/);
+      assert.ok(redirected.endsWith('</body></html>'), 'the document is closed');
+
+      // notFound() for this visitor: reload past the shell to the real 404.
+      const ghostHit = await get('who=ghost');
+      assert.equal(ghostHit.headers.get('x-gio-cache'), 'ppr; shell=hit');
+      const reloading = await ghostHit.text();
+      assert.doesNotMatch(reloading, /location\.replace/);
+      assert.match(reloading, /__gio_ppr_bypass=1/);
+      assert.match(reloading, /location\.reload\(\)/);
+      assert.ok(reloading.endsWith('</body></html>'), 'the document is closed');
+      // The reload carries the bypass cookie: the whole page renders, with
+      // its real status - never the shell again, so it cannot loop.
+      const ghostReload = await get('who=ghost; __gio_ppr_bypass=1');
+      assert.equal(ghostReload.status, 404);
+      assert.doesNotMatch(ghostReload.headers.get('x-gio-cache') ?? '', /^ppr/);
+      const anonReload = await get('__gio_ppr_bypass=1');
+      assert.equal(anonReload.status, 303);
+      assert.equal(anonReload.headers.get('location'), '/login?next=/ppr-gate');
+      // Visitors the page renders for still get the shell and their holes.
+      const bob = await get('who=bob');
+      assert.equal(bob.headers.get('x-gio-cache'), 'ppr; shell=hit');
+      assert.match(await bob.text(), /PPR_GATE_HOLE who=bob/);
     });
 
     await test('X-Gio-Cache labels bypass and static tiers', async () => {
@@ -2481,10 +2568,71 @@ async function main() {
       );
     });
 
-    await test('stopping the server leaves no orphaned worker', async () => {
+    await test('stopping the server ends open event streams at once, finishes in-flight renders and downloads, and leaves no orphaned worker', async () => {
       const worker = workerPids().at(-1);
+      // Streams that never end on their own: a GioEventStream and an
+      // endless route.ts event stream. Without ending them the drain would
+      // wait out its 8s timeout and then reset both connections.
+      const readToEnd = async (res) => {
+        const reader = res.body.getReader();
+        await reader.read();
+        for (;;) {
+          const { done } = await reader.read();
+          if (done) return;
+        }
+      };
+      const sseEnded = readToEnd(await fetch(`${BASE}/stream`));
+      const routeEnded = readToEnd(await fetch(`${BASE}/api/stream-endless`));
+      // A page render in flight when the signal lands (its hole resolves
+      // ~800ms later): it still completes.
+      const slow = await fetch(`${BASE}/slow`, { headers: { 'accept-encoding': 'identity' } });
+      const slowHtml = slow.text();
+      // A finite route.ts download in flight (~1.5s of 30ms pieces): it is a
+      // byte stream, not an event stream, so it must either arrive whole or
+      // fail visibly - never end cleanly short, which curl, wget and fetch
+      // all accept as a complete file. http.request reports both: `complete`
+      // is false and 'aborted'/'error' fire when the body is cut.
+      const download = new Promise((resolve, reject) => {
+        const req = httpRequest(
+          { host: '127.0.0.1', port: 39517, path: '/api/download?slow=1', headers: { 'accept-encoding': 'identity' } },
+          (res) => {
+            const chunks = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('error', reject);
+            res.on('aborted', () => reject(new Error('download aborted')));
+            res.on('end', () =>
+              resolve({
+                complete: res.complete,
+                total: Number(res.headers['x-download-bytes']),
+                body: Buffer.concat(chunks),
+              }),
+            );
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+      // Headers out and the body under way before the signal lands.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const stoppedAt = Date.now();
       server.kill();
+      await Promise.all([sseEnded, routeEnded]);
+      const streamsEndedMs = Date.now() - stoppedAt;
+      assert.ok(streamsEndedMs < 2000, `open streams ended ${streamsEndedMs}ms after SIGTERM`);
+      const html = await slowHtml;
+      assert.match(html, /SLOW_FIXTURE_LATE_CONTENT/);
+      assert.match(html, /<\/html>/);
+      const downloaded = await download;
+      assert.ok(downloaded.complete, 'the download ended with its final chunk');
+      assert.equal(downloaded.body.length, downloaded.total, 'the download drained in full');
+      const expected = Buffer.alloc(downloaded.total);
+      for (let i = 0; i < downloaded.total; i++) expected[i] = (i * 31 + (i >> 8)) & 0xff;
+      assert.ok(downloaded.body.equals(expected), 'every byte of the download arrived');
+      assert.match(log, /shutdown: ended open event streams/);
       await waitFor('server exit', () => Promise.resolve(serverGone), 10_000);
+      const exitMs = Date.now() - stoppedAt;
+      assert.ok(exitMs < 5000, `server exited ${exitMs}ms after SIGTERM`);
+      assert.doesNotMatch(log, /shutdown drain timed out/);
       // kill(pid, 0) probes liveness; the worker tree must die with the server.
       await waitFor('worker reaped', async () => {
         try {
@@ -2828,7 +2976,7 @@ async function opsPhase() {
       assert.match(hit.headers.get('x-gio-cache') ?? '', /^hit/);
       assert.match(hit.headers.get('cache-control') ?? '', /^public, max-age=0, s-maxage=\d+/);
       const etag = hit.headers.get('etag');
-      assert.match(etag ?? '', /^"[0-9a-f]{32}"$/);
+      assert.match(etag ?? '', /^W\/"[0-9a-f]{32}"$/);
       const revalidated = await rawGet('/de/hello', { 'if-none-match': etag });
       assert.equal(revalidated.status, 304);
       assert.equal(revalidated.body, '', 'a 304 carries no body');
@@ -4641,6 +4789,18 @@ export function GET(): Response {
             nonces.add(assertNoncedResponse(hit.res, hit.html, `ppr hit ${who}`));
           }
           assert.equal(nonces.size, 3);
+        });
+
+        await test('CSP: the script finishing a redirected PPR shell hit is nonced', async () => {
+          const stored = await fetchHtml('/ppr-gate', { headers: { cookie: 'who=csp1' } });
+          assert.equal(stored.res.headers.get('x-gio-cache'), 'ppr; shell=stored');
+          await sleep(250);
+          for (const cookie of [undefined, 'who=ghost']) {
+            const hit = await fetchHtml('/ppr-gate', cookie ? { headers: { cookie } } : {});
+            assert.equal(hit.res.headers.get('x-gio-cache'), 'ppr; shell=hit');
+            assert.match(hit.html, /location\.(replace|reload)\(/);
+            assertNoncedResponse(hit.res, hit.html, `ppr-gate ${cookie ?? 'anonymous'}`);
+          }
         });
 
         await test('CSP: streamed and error pages are nonced as well', async () => {

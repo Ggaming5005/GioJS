@@ -167,6 +167,21 @@ export async function getServerSideProps(ctx: GsspContext) {
         after the shell and the Suspense fallbacks remain visible - the user gets the cached
         page with "Loading…" states instead of an error.
       </p>
+      <p>
+        <code>getServerSideProps</code> may still answer a visitor with something other than
+        holes - <code>redirect(&apos;/login&apos;)</code> for a visitor who is not signed in,{' '}
+        <code>notFound()</code>, an error. On a shell hit that answer comes after the
+        shell&apos;s <code>200</code> has been sent, so the page finishes itself and takes the
+        visitor there. A redirect to an <code>http(s)</code> or relative URL that sets no
+        cookies becomes <code>location.replace(url)</code> (plus a{' '}
+        <code>&lt;meta http-equiv=&quot;refresh&quot;&gt;</code> for visitors without
+        JavaScript). Anything else - a 404, an error page, a redirect that sets cookies -
+        reloads the page once with a short-lived <code>__gio_ppr_bypass</code> cookie, and
+        that request skips the cached shell: the whole page renders, with its real status,{' '}
+        <code>Location</code> and cookies. The scripts carry the CSP nonce. The visitor still
+        sees the shell for a moment first, so for pages most visitors are redirected away from,
+        prefer a <a href="/docs/middleware">guard</a>, which answers before any shell is sent.
+      </p>
       <p><code>X-Gio-Cache</code> labels PPR responses distinctly:</p>
       <ul>
         <li><code>ppr; shell=stored</code> - full render served, and its shell was captured and cached</li>

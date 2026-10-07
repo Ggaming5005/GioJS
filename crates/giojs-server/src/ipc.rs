@@ -395,6 +395,12 @@ impl Drop for TrackedChunk {
 struct RenderStreamTx {
     tx: mpsc::UnboundedSender<RenderFrame>,
     flow: Arc<StreamFlow>,
+    /// A route.ts event stream (`routeStream` with a `text/event-stream`
+    /// content type): endless by contract, so server shutdown ends it
+    /// cleanly (see `end_endless_streams`) and the EventSource reconnects.
+    /// Every other body - page renders, and route.ts byte streams such as
+    /// downloads, which may be finite - drains like any request.
+    endless: bool,
     _load: InFlight,
 }
 
@@ -710,6 +716,9 @@ struct WorkerInner {
     in_flight: Arc<AtomicUsize>,
     /// Times the supervisor respawned this worker's process.
     restarts: AtomicU64,
+    /// Set at server shutdown: SSE and route.ts streams are ended, and one
+    /// that opens from then on is ended as soon as it registers.
+    streams_closing: AtomicBool,
 }
 
 /// Queued worker purges, per worker. A worker flooding purges past this gets
@@ -882,7 +891,47 @@ impl WorkerInner {
             revalidate_tx,
             in_flight: Arc::new(AtomicUsize::new(0)),
             restarts: AtomicU64::new(0),
+            streams_closing: AtomicBool::new(false),
         }
+    }
+
+    /// Server shutdown: end every event stream that would otherwise hold
+    /// its connection open past the drain - SSE streams and route.ts
+    /// `text/event-stream` bodies, which end only when their handler or
+    /// client says so. Each ends cleanly on the Rust side (an EventSource
+    /// simply reconnects, to the next instance) and the worker is told to
+    /// stop producing it. Page renders and other route.ts bodies are left to
+    /// finish like any other in-flight request: a download ended cleanly
+    /// here would reach the client as a short body that looks complete, so
+    /// it drains, and one that outlives the drain timeout is cut with its
+    /// connection (no final chunk - the client sees the truncation; see
+    /// `stream_ends_at_shutdown`). Idempotent; later registrations are
+    /// ended too (see the reader loop). Returns how many streams it ended.
+    fn end_endless_streams(&self) -> usize {
+        self.streams_closing.store(true, Ordering::SeqCst);
+        let mut ended = 0;
+        let sse: Vec<String> = self.sse_streams.iter().map(|e| e.key().clone()).collect();
+        for id in sse {
+            if let Some((_, stream)) = self.sse_streams.remove(&id) {
+                let _ = stream.tx.send(None);
+                send_sse_close_frame(self, &id);
+                ended += 1;
+            }
+        }
+        let routes: Vec<String> = self
+            .render_streams
+            .iter()
+            .filter(|e| e.endless)
+            .map(|e| e.key().clone())
+            .collect();
+        for id in routes {
+            if let Some((_, stream)) = self.render_streams.remove_if(&id, |_, s| s.endless) {
+                let _ = stream.tx.send(RenderFrame::End);
+                send_cancel_like_frame(self, "cancel", &id);
+                ended += 1;
+            }
+        }
+        ended
     }
 
     fn load(&self) -> WorkerLoad {
@@ -1139,6 +1188,22 @@ impl IpcClient {
                 worker_connected: worker.generation.subscribe(),
             })
             .collect()
+    }
+
+    /// Server shutdown is starting: end the SSE and route.ts event streams
+    /// that would hold their connections past the drain (see
+    /// `WorkerInner::end_endless_streams`). Requests, page renders and other
+    /// streamed route.ts bodies (downloads) in flight are untouched.
+    pub fn end_endless_streams(&self) {
+        let ended: usize = self
+            .pool
+            .workers
+            .iter()
+            .map(|worker| worker.end_endless_streams())
+            .sum();
+        if ended > 0 {
+            info!(streams = ended, "shutdown: ended open event streams");
+        }
     }
 
     /// Server shutdown: every worker gets to exit on its own (its stdin pipe
@@ -2031,6 +2096,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<WorkerInner>) {
                                 RenderStreamTx {
                                     tx,
                                     flow,
+                                    endless: stream_ends_at_shutdown(&resp),
                                     _load: InFlight::new(&inner.in_flight),
                                 },
                             );
@@ -2041,6 +2107,16 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<WorkerInner>) {
                         } else {
                             IpcSendResult::Response(resp)
                         };
+
+                        // Opened while the server shuts down (its request was
+                        // in flight when the drain began): end it at once, or
+                        // it would hold its connection for the whole drain.
+                        // Checked after the insert, so a concurrent
+                        // end_endless_streams sees the entry or this sees
+                        // its flag.
+                        if inner.streams_closing.load(Ordering::SeqCst) {
+                            inner.end_endless_streams();
+                        }
 
                         // Receiver dropped between remove and send: undo the
                         // stream registration and tell Node to stop.
@@ -2213,6 +2289,21 @@ fn drain_render_streams(inner: &WorkerInner) {
             let _ = stream.tx.send(RenderFrame::End);
         }
     }
+}
+
+/// Whether server shutdown may end a streamed body cleanly: only a route.ts
+/// event stream, which is endless by contract and whose EventSource client
+/// reconnects after a clean end. Any other streamed route.ts body (a large
+/// download, an export, a proxied response) may well be finite, and ending
+/// it cleanly mid-way would deliver a truncated file that curl, wget and
+/// fetch all accept as complete - those drain like any request instead.
+fn stream_ends_at_shutdown(resp: &IpcResponse) -> bool {
+    resp.route_stream
+        && resp.headers.get("content-type").is_some_and(|ct| {
+            ct.split(';')
+                .next()
+                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+        })
 }
 
 /// Why the serve loop stopped.
@@ -3345,12 +3436,211 @@ mod tests {
             RenderStreamTx {
                 tx,
                 flow,
+                endless: false,
                 _load: InFlight::new(&worker.in_flight),
             },
         );
         drain_render_streams(client.worker(0));
         assert_eq!(rx.recv().await, Some(RenderFrame::End));
         assert!(client.worker(0).render_streams.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_event_streams_but_lets_page_renders_and_downloads_finish() {
+        let (client, mut write_rx) = test_client_with_write_channel();
+        let worker = client.worker(0);
+        let register = |id: &str, endless: bool| {
+            let (tx, rx) = mpsc::unbounded_channel::<RenderFrame>();
+            worker.render_streams.insert(
+                id.into(),
+                RenderStreamTx {
+                    tx,
+                    flow: StreamFlow::new(id, &worker.write_tx),
+                    endless,
+                    _load: InFlight::new(&worker.in_flight),
+                },
+            );
+            rx
+        };
+        let mut route = register("req-route", true);
+        let mut page = register("req-page", false);
+        let (sse_tx, mut sse_rx) = mpsc::unbounded_channel::<Option<Bytes>>();
+        worker.sse_streams.insert(
+            "req-sse".into(),
+            SseStreamTx {
+                tx: sse_tx,
+                _load: InFlight::new(&worker.in_flight),
+            },
+        );
+
+        client.end_endless_streams();
+
+        // Both endless bodies end cleanly on the Rust side...
+        assert_eq!(sse_rx.recv().await, Some(None));
+        assert_eq!(route.recv().await, Some(RenderFrame::End));
+        assert!(worker.sse_streams.is_empty());
+        // ...the page render keeps streaming until its own chunk_end...
+        assert!(worker.render_streams.contains_key("req-page"));
+        assert!(page.try_recv().is_err());
+        // ...and the worker is told to stop producing both.
+        let mut frames = Vec::new();
+        for _ in 0..2 {
+            let frame: serde_json::Value =
+                serde_json::from_slice(&write_rx.recv().await.unwrap()).unwrap();
+            frames.push((
+                frame["type"].as_str().unwrap().to_string(),
+                frame["id"].as_str().unwrap().to_string(),
+            ));
+        }
+        frames.sort();
+        assert_eq!(
+            frames,
+            [
+                ("cancel".to_string(), "req-route".to_string()),
+                ("sse_close".to_string(), "req-sse".to_string()),
+            ]
+        );
+        assert!(write_rx.try_recv().is_err());
+        assert_eq!(worker.status().in_flight, 1, "only the page render is load");
+    }
+
+    #[tokio::test]
+    async fn a_stream_opening_during_shutdown_ends_at_once() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client, mut write_rx) = test_client_with_write_channel();
+        client.end_endless_streams();
+        let (tx, rx) = oneshot::channel();
+        client.worker(0).pending.insert("req-late".into(), tx);
+        let (read_half, _keep_write_open) = tokio::io::split(server_io);
+        let reader_task = tokio::spawn(run_reader_loop(
+            Box::new(read_half),
+            client.worker(0).clone(),
+        ));
+        let (_r, mut node_writer) = tokio::io::split(client_io);
+        let head = serde_json::json!({
+            "id": "req-late", "status": 200,
+            "headers": {"content-type": "text/event-stream"},
+            "body": "", "cacheable": false, "cacheMaxAge": 0,
+        });
+        write_frame(&mut node_writer, &serde_json::to_vec(&head).unwrap())
+            .await
+            .unwrap();
+        let IpcSendResult::SseStream { mut body_rx, .. } = rx.await.unwrap() else {
+            panic!("an event-stream head resolves to SseStream");
+        };
+        assert_eq!(
+            body_rx.recv().await,
+            Some(None),
+            "ended right after its head"
+        );
+        let frame: serde_json::Value =
+            serde_json::from_slice(&write_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(frame["type"], "sse_close");
+        assert_eq!(frame["id"], "req-late");
+        assert!(client.worker(0).sse_streams.is_empty());
+        reader_task.abort();
+    }
+
+    #[test]
+    fn only_route_event_streams_end_at_shutdown() {
+        let head = |content_type: &str, route_stream: bool| {
+            let mut resp: IpcResponse = serde_json::from_value(serde_json::json!({
+                "id": "r", "status": 200, "headers": {"content-type": content_type},
+                "body": "", "cacheable": false, "streaming": true,
+            }))
+            .unwrap();
+            resp.route_stream = route_stream;
+            resp
+        };
+        assert!(stream_ends_at_shutdown(&head("text/event-stream", true)));
+        assert!(stream_ends_at_shutdown(&head(
+            "Text/Event-Stream; charset=utf-8",
+            true
+        )));
+        // A download, an export, NDJSON, streamed HTML: possibly finite, so
+        // never ended cleanly short at shutdown.
+        for ct in [
+            "application/octet-stream",
+            "application/x-ndjson",
+            "text/html; charset=utf-8",
+            "text/plain",
+            "text/event-streamish",
+        ] {
+            assert!(!stream_ends_at_shutdown(&head(ct, true)), "{ct}");
+        }
+        // Page renders always finish.
+        assert!(!stream_ends_at_shutdown(&head("text/event-stream", false)));
+    }
+
+    #[tokio::test]
+    async fn shutdown_lets_a_streamed_route_download_drain_but_ends_its_event_streams() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client, mut write_rx) = test_client_with_write_channel();
+        let (dl_tx, dl_rx) = oneshot::channel();
+        let (ev_tx, ev_rx) = oneshot::channel();
+        client.worker(0).pending.insert("req-dl".into(), dl_tx);
+        client.worker(0).pending.insert("req-ev".into(), ev_tx);
+        let (read_half, _keep_write_open) = tokio::io::split(server_io);
+        let reader_task = tokio::spawn(run_reader_loop(
+            Box::new(read_half),
+            client.worker(0).clone(),
+        ));
+        let (_r, mut node_writer) = tokio::io::split(client_io);
+        for (id, ct) in [
+            ("req-dl", "application/octet-stream"),
+            ("req-ev", "text/event-stream"),
+        ] {
+            let head = serde_json::json!({
+                "id": id, "status": 200, "headers": {"content-type": ct},
+                "body": "", "cacheable": false, "streaming": true, "routeStream": true,
+            });
+            write_frame(&mut node_writer, &serde_json::to_vec(&head).unwrap())
+                .await
+                .unwrap();
+        }
+        let IpcSendResult::RenderStream {
+            body_rx: mut download,
+            ..
+        } = dl_rx.await.unwrap()
+        else {
+            panic!("a streamed route head resolves to RenderStream");
+        };
+        let IpcSendResult::RenderStream {
+            body_rx: mut events,
+            ..
+        } = ev_rx.await.unwrap()
+        else {
+            panic!("a streamed route head resolves to RenderStream");
+        };
+
+        client.end_endless_streams();
+
+        // The event stream ends cleanly and its producer is cancelled...
+        assert_eq!(events.recv().await, Some(RenderFrame::End));
+        let frame: serde_json::Value =
+            serde_json::from_slice(&write_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(frame["type"], "cancel");
+        assert_eq!(frame["id"], "req-ev");
+        // ...but the download is neither ended nor cancelled: it keeps
+        // streaming to its real end. Ending it cleanly here would hand the
+        // client a short file that looks complete.
+        assert!(download.try_recv().is_err());
+        assert!(client.worker(0).render_streams.contains_key("req-dl"));
+        assert!(write_rx.try_recv().is_err());
+        let chunk = serde_json::json!({"type": "chunk", "id": "req-dl", "data": "rest"});
+        write_frame(&mut node_writer, &serde_json::to_vec(&chunk).unwrap())
+            .await
+            .unwrap();
+        let end = serde_json::json!({"type": "chunk_end", "id": "req-dl"});
+        write_frame(&mut node_writer, &serde_json::to_vec(&end).unwrap())
+            .await
+            .unwrap();
+        match download.recv().await {
+            Some(RenderFrame::Chunk(bytes)) => assert_eq!(&bytes[..], b"rest"),
+            other => panic!("expected the download's next chunk, got {other:?}"),
+        }
+        assert_eq!(download.recv().await, Some(RenderFrame::End));
+        reader_task.abort();
     }
 
     #[tokio::test]
@@ -3364,6 +3654,7 @@ mod tests {
             RenderStreamTx {
                 tx,
                 flow,
+                endless: false,
                 _load: InFlight::new(&worker.in_flight),
             },
         );
@@ -3919,6 +4210,7 @@ mod tests {
             RenderStreamTx {
                 tx,
                 flow: StreamFlow::new("req-s", &owner.write_tx),
+                endless: false,
                 _load: InFlight::new(&owner.in_flight),
             },
         );

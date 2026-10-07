@@ -7,6 +7,9 @@ import type { GioRequest } from '../../../../../../packages/giojs-core/src/conte
 // `?endless=1` never ends and counts the bytes it produced, which
 // `?state=1` reports: a client that stops reading must stop the producer
 // (backpressure), not let the server buffer without bound.
+//
+// `?slow=1` paces the same finite download at one piece per 30ms (~1.5s in
+// all), so it is still in flight when the server is told to stop.
 const TOTAL = 3 * 1024 * 1024;
 const PIECE = 64 * 1024;
 const counters = globalThis as { __fixtureEndlessBytes?: number };
@@ -25,11 +28,14 @@ export function GET(req: GioRequest): Response {
     return Response.json({ produced: counters.__fixtureEndlessBytes ?? 0 });
   }
   const endless = req.query['endless'] === '1';
+  const pieceDelayMs = req.query['slow'] === '1' ? 30 : 0;
   if (endless) counters.__fixtureEndlessBytes = 0;
   let offset = 0;
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
-      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) =>
+        pieceDelayMs > 0 ? setTimeout(resolve, pieceDelayMs) : setImmediate(resolve),
+      );
       const length = endless ? PIECE : Math.min(PIECE, TOTAL - offset);
       controller.enqueue(piece(offset, length));
       offset += length;

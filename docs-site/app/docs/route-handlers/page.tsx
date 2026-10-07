@@ -214,8 +214,17 @@ export function GET() {
         </li>
         <li>
           A streamed body has no time limit: it ends when you close the stream or the client
-          leaves. If your stream errors midway, the response ends early (the status is already
-          sent).
+          leaves. When the server shuts down, a <code>text/event-stream</code> body is ended and
+          cancelled at once (an <code>EventSource</code> reconnects), so it never holds up a
+          deploy. Any other streamed body - a download, an export - is left to finish within the
+          8-second shutdown drain; one still running after it has its connection reset, so the
+          client sees a failed download, never a short file that looks complete. If your stream
+          errors midway, the response ends early (the status is already sent).
+        </li>
+        <li>
+          A streamed <code>text/html</code> body is sent exactly as you write it - an htmx
+          fragment or a page without a <code>&lt;head&gt;</code> arrives chunk by chunk. GioJS
+          injects its head scripts into page streams only.
         </li>
         <li>
           <code>HEAD</code> requests cancel a streaming body instead of sending it. While a

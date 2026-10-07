@@ -289,6 +289,12 @@ fn stored_body_is_served(
 /// Stamp a cache hit's ETag, and turn the response into a 304 - the same
 /// headers, no body - when the client already holds that version. Returns
 /// true for a 304.
+///
+/// The tag goes out weak (`W/"..."`): it hashes the stored, uncompressed
+/// page, and CompressionLayer then serves gzip, br and identity bytes under
+/// it. A strong validator must differ per content coding (RFC 9110 8.8.1),
+/// so a shared cache could otherwise revalidate or range-combine the wrong
+/// variant. If-None-Match uses weak comparison, so 304s are unaffected.
 fn apply_entry_etag(
     resp: &mut Response,
     etag: Option<&str>,
@@ -298,7 +304,7 @@ fn apply_entry_etag(
     if resp.status() != StatusCode::OK {
         return false;
     }
-    let Some(value) = etag.and_then(|etag| HeaderValue::from_str(etag).ok()) else {
+    let Some(value) = etag.and_then(|etag| HeaderValue::from_str(&weak_etag(etag)).ok()) else {
         return false;
     };
     let not_modified = if_none_match
@@ -319,6 +325,15 @@ fn apply_entry_etag(
         }
     }
     not_modified
+}
+
+/// `etag` as a weak validator (unchanged if it already is one).
+fn weak_etag(etag: &str) -> String {
+    if etag.starts_with("W/") {
+        etag.to_string()
+    } else {
+        format!("W/{etag}")
+    }
 }
 
 /// Whether the Vary headers already name `field` (or are `*`).
@@ -1140,13 +1155,18 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
 
     info!(http2 = %http2, tls = %tls_enabled, port_from = cfg.port_source, "GioJS listening on {bind_addr}");
     let conn_settings = conn::ConnSettings::from_config(&cfg.server);
-    serve_connections(
-        listener,
-        app,
-        conn_settings,
-        tls_acceptor,
-        shutdown_signal(),
-    )
+    let streams_for_shutdown = ipc_for_shutdown.clone();
+    serve_connections(listener, app, conn_settings, tls_acceptor, async move {
+        shutdown_signal().await;
+        // An open event stream (SSE, or a route.ts text/event-stream body)
+        // never ends on its own: end them now, or one dashboard tab holds
+        // the drain to its timeout. Requests, page renders and other
+        // route.ts bodies (downloads) still drain: ending one of those
+        // cleanly would pass a short file off as complete. One that
+        // outlives the drain is cut with its connection (no final chunk),
+        // which the client sees as a failed transfer.
+        streams_for_shutdown.end_endless_streams();
+    })
     .await?;
     ws_registry_for_shutdown.close_all();
     // Connections are drained: let every worker exit on its own (plugin
@@ -2191,7 +2211,15 @@ async fn dynamic_handler(
     }
 
     // ── Cache lookup ──────────────────────────────────────────────────────────
-    match state.cache.get(&cache_key, &state.cache_epoch).await {
+    // A PPR hit's reload script asks for the whole page (see
+    // ppr_holes_fallback): its shell entry counts as a miss.
+    let ppr_bypass = ppr_bypass_requested(req.headers());
+    let cached = state
+        .cache
+        .get(&cache_key, &state.cache_epoch)
+        .await
+        .filter(|(entry, _)| !(ppr_bypass && entry.ppr_shell));
+    match cached {
         // PPR shell entries never serve alone: the shell goes out instantly
         // and a skipShell render (with this requester's cookies) streams the
         // holes behind it. Stale shells follow SWR like any other entry.
@@ -3062,7 +3090,7 @@ fn respond_stream(
 
     let is_html = is_html_content_type(&response.headers);
     let lang = stream_lang(state, locale);
-    let injector = if is_html {
+    let injector = if injects_into_stream(&response) {
         let head_snippets = stream_head_snippets(state, deployment_id, default_locale);
         let body_snippet = state
             .dev_mode
@@ -3470,6 +3498,14 @@ async fn feed_ppr_holes(
     path: String,
 ) {
     match ipc.send_request(holes_req).await {
+        Ok(IpcSendResult::RenderStream { response, .. })
+            if !(200..300).contains(&response.status) =>
+        {
+            // A streamed answer with a non-2xx status cannot be holes either.
+            ipc.send_render_close(&response.id);
+            warn!(path = %path, status = response.status, "PPR holes render answered without holes - the page redirects or reloads to the real answer");
+            let _ = tx.send(ppr_holes_fallback(&response));
+        }
         Ok(IpcSendResult::RenderStream {
             response,
             mut body_rx,
@@ -3491,8 +3527,13 @@ async fn feed_ppr_holes(
                 }
             }
         },
-        Ok(IpcSendResult::Response(_)) => {
-            warn!(path = %path, "PPR holes render came back buffered - body ends after the shell");
+        Ok(IpcSendResult::Response(response)) => {
+            // getServerSideProps answered this visitor with something other
+            // than holes - a redirect(), notFound(), an error page. The
+            // shell's 200 is already out, so the page itself has to take
+            // the visitor there.
+            warn!(path = %path, status = response.status, "PPR holes render answered without holes - the page redirects or reloads to the real answer");
+            let _ = tx.send(ppr_holes_fallback(&response));
         }
         Ok(IpcSendResult::SseStream { response, .. }) => {
             ipc.send_sse_close(&response.id);
@@ -3502,6 +3543,116 @@ async fn feed_ppr_holes(
             warn!(path = %path, error = %e, "PPR holes render failed - body ends after the shell");
         }
     }
+}
+
+/// The cookie a PPR hit's reload script sets so the reloaded request skips
+/// the cached shell and renders whole - its real status, Location and
+/// cookies included. Short-lived, and harmless if a visitor sets it by hand:
+/// it only costs them the shell's head start.
+const PPR_BYPASS_COOKIE: &str = "__gio_ppr_bypass";
+
+/// Whether the request carries `PPR_BYPASS_COOKIE` (see `ppr_holes_fallback`).
+fn ppr_bypass_requested(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .any(|pair| {
+            pair.split_once('=')
+                .is_some_and(|(name, _)| name.trim() == PPR_BYPASS_COOKIE)
+        })
+}
+
+/// What a PPR hit's body ends with when the holes render answered with
+/// something other than holes: a redirect() from getServerSideProps, a
+/// notFound(), an error page. The cached shell's 200 and headers are already
+/// sent, so the document is finished with a script that takes the visitor to
+/// the real answer:
+///
+/// - a redirect whose Location a browser would follow from a header too
+///   (http(s) or relative) and that sets no cookies: `location.replace` to
+///   it, with a `<meta refresh>` for visitors without JavaScript;
+/// - anything else (404, 5xx, a redirect setting cookies or with another
+///   scheme): a reload carrying `PPR_BYPASS_COOKIE`, which renders the page
+///   whole - status, Location and Set-Cookie as the non-PPR path sends them.
+///   It cannot loop: the bypassed request never serves the shell, and the
+///   script reloads only once the cookie took and at most once per URL in
+///   ten seconds.
+fn ppr_holes_fallback(response: &ipc::IpcResponse) -> Bytes {
+    let nonce_attr = security::nonce_attr();
+    let sets_cookies = !response.set_cookies.is_empty()
+        || response
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("set-cookie"));
+    let location = response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+        .map(|(_, value)| value.as_str())
+        .filter(|location| {
+            (300..400).contains(&response.status)
+                && !sets_cookies
+                && script_followable_location(location)
+        });
+    let html = match location {
+        Some(location) => format!(
+            "<script{nonce_attr}>location.replace({})</script>\
+             <noscript><meta http-equiv=\"refresh\" content=\"0;url={}\"></noscript>\
+             </body></html>",
+            script_json_string(location),
+            escape_html_attr(location),
+        ),
+        None => format!(
+            "<script{nonce_attr}>(function(){{\
+             var c=\"{PPR_BYPASS_COOKIE}=1\";\
+             document.cookie=c+\"; path=/; max-age=10; samesite=lax\";\
+             if(document.cookie.indexOf(c)<0)return;\
+             try{{var s=sessionStorage,k=\"{PPR_BYPASS_COOKIE}:\"+location.pathname+location.search,t=+s.getItem(k)||0;\
+             if(Date.now()-t<10000)return;s.setItem(k,String(Date.now()))}}catch(e){{}}\
+             location.reload()}})()</script></body></html>"
+        ),
+    };
+    Bytes::from(html)
+}
+
+/// Whether a redirect's Location may be followed by script: what a browser
+/// follows from a Location header - an http(s) URL (any origin, as the
+/// header would be) or a relative reference - and never another scheme
+/// (`javascript:` would run instead of navigating).
+fn script_followable_location(location: &str) -> bool {
+    if location.is_empty() || location.chars().any(char::is_control) {
+        return false;
+    }
+    match location.find([':', '/', '?', '#']) {
+        Some(i) if location.as_bytes()[i] == b':' => {
+            let scheme = &location[..i];
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        }
+        _ => true,
+    }
+}
+
+/// `value` as a JS string literal safe inside an inline `<script>`.
+fn script_json_string(value: &str) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+/// `value` escaped for a double-quoted HTML attribute.
+fn escape_html_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Body of a PPR cache hit: the cached shell first, then hole chunks fed by
@@ -4226,6 +4377,15 @@ fn is_html_content_type(headers: &std::collections::HashMap<String, String>) -> 
 /// They end when the handler or the client says so.
 fn has_render_idle_gap(response: &ipc::IpcResponse) -> bool {
     !response.route_stream && is_html_content_type(&response.headers)
+}
+
+/// Whether a streamed body gets the head snippets (fonts, deployment script,
+/// dev overlay) spliced in: page renders only. A route.ts body is the
+/// handler's own, and may have no `</head>` at all (htmx fragments, LLM
+/// tokens, a progress page) - the injector's head scan would hold all of it
+/// back until the stream ended.
+fn injects_into_stream(response: &ipc::IpcResponse) -> bool {
+    is_html_content_type(&response.headers) && !response.route_handler && !response.route_stream
 }
 
 fn is_event_stream_content_type(headers: &std::collections::HashMap<String, String>) -> bool {
@@ -6757,7 +6917,8 @@ mod tests {
             Some(&if_none_match)
         ));
         assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
-        assert_eq!(resp.headers()[header::ETAG], etag);
+        // Weak: one tag covers the gzip, br and identity bytes of the page.
+        assert_eq!(resp.headers()[header::ETAG], r#"W/"abc123""#);
         assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=0");
         assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/html");
         assert!(resp.headers().get(header::CONTENT_LENGTH).is_none());
@@ -6772,11 +6933,17 @@ mod tests {
             Some(&stale_tag)
         ));
         assert_eq!(changed.status(), StatusCode::OK);
-        assert_eq!(changed.headers()[header::ETAG], etag);
+        assert_eq!(changed.headers()[header::ETAG], r#"W/"abc123""#);
 
         let mut unconditional = html_response(None, "text/html");
         assert!(!apply_entry_etag(&mut unconditional, Some(etag), None));
-        assert_eq!(unconditional.headers()[header::ETAG], etag);
+        assert_eq!(unconditional.headers()[header::ETAG], r#"W/"abc123""#);
+
+        // A client echoing the weak tag it was sent still gets its 304.
+        let mut echoed = html_response(None, "text/html");
+        let weak = HeaderValue::from_static(r#"W/"abc123""#);
+        assert!(apply_entry_etag(&mut echoed, Some(etag), Some(&weak)));
+        assert_eq!(echoed.status(), StatusCode::NOT_MODIFIED);
 
         // Skipped entries (nonces, negotiated locale) carry no ETag at all.
         let mut skipped = html_response(None, "text/html");
@@ -7017,6 +7184,137 @@ mod tests {
         }))
         .unwrap();
         assert!(parsed.route_stream);
+    }
+
+    #[test]
+    fn only_page_streams_are_injected_into() {
+        let head = |content_type: &str, route_stream: bool, route_handler: bool| {
+            let mut resp = ipc_response(false, 0);
+            resp.streaming = true;
+            resp.route_stream = route_stream;
+            resp.route_handler = route_handler;
+            resp.headers
+                .insert("content-type".into(), content_type.into());
+            resp
+        };
+        let html = "text/html; charset=utf-8";
+        assert!(injects_into_stream(&head(html, false, false)));
+        // A streamed route.ts HTML body passes through untouched: no head
+        // scan holding back a body that has no </head>.
+        assert!(!injects_into_stream(&head(html, true, true)));
+        assert!(!injects_into_stream(&head(html, false, true)));
+        assert!(!injects_into_stream(&head("text/plain", false, false)));
+    }
+
+    fn holes_answer(status: u16, location: Option<&str>) -> ipc::IpcResponse {
+        let mut resp = ipc_response(false, 0);
+        resp.status = status;
+        if let Some(location) = location {
+            resp.headers.insert("location".into(), location.into());
+        }
+        resp
+    }
+
+    fn fallback_text(resp: &ipc::IpcResponse) -> String {
+        String::from_utf8(ppr_holes_fallback(resp).to_vec()).unwrap()
+    }
+
+    #[test]
+    fn a_ppr_holes_redirect_finishes_the_page_with_a_script_redirect() {
+        let html = fallback_text(&holes_answer(303, Some("/login?next=/a&b=</script>")));
+        assert!(
+            html.starts_with(
+                r#"<script>location.replace("/login?next=/a\u0026b=\u003c/script\u003e")</script>"#
+            ),
+            "{html}"
+        );
+        assert!(html.contains(
+            r#"<noscript><meta http-equiv="refresh" content="0;url=/login?next=/a&amp;b=&lt;/script&gt;"></noscript>"#
+        ));
+        assert!(
+            html.ends_with("</body></html>"),
+            "the document is closed: {html}"
+        );
+        assert!(!html.contains(PPR_BYPASS_COOKIE));
+        // Off-origin http(s) redirects are followed, as a Location header
+        // would be.
+        let html = fallback_text(&holes_answer(302, Some("https://id.example.com/sso")));
+        assert!(html.contains(r#"location.replace("https://id.example.com/sso")"#));
+    }
+
+    #[test]
+    fn other_ppr_holes_answers_reload_past_the_shell() {
+        for resp in [
+            holes_answer(404, None),
+            holes_answer(500, None),
+            // A scheme no Location header would navigate to.
+            holes_answer(302, Some("javascript:alert(1)")),
+            holes_answer(302, Some(" JavaScript:alert(1)")),
+            holes_answer(302, Some("data:text/html,x")),
+            // No Location at all.
+            holes_answer(302, None),
+            // A redirect setting cookies: only the real response carries them.
+            {
+                let mut resp = holes_answer(303, Some("/dashboard"));
+                resp.set_cookies = vec!["session=x; Path=/".into()];
+                resp
+            },
+        ] {
+            let html = fallback_text(&resp);
+            assert!(!html.contains("location.replace"), "{html}");
+            assert!(!html.contains("javascript:"), "{html}");
+            assert!(html.contains(PPR_BYPASS_COOKIE), "{html}");
+            assert!(html.contains("location.reload()"), "{html}");
+            assert!(html.ends_with("</script></body></html>"), "{html}");
+        }
+    }
+
+    #[test]
+    fn script_followable_locations_are_what_a_location_header_follows() {
+        for ok in [
+            "/login",
+            "login",
+            "?a=1",
+            "#x",
+            "//cdn.example.com/x",
+            "HTTPS://a.b/c",
+            "http://a/b:c",
+        ] {
+            assert!(script_followable_location(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "javascript:x",
+            "vbscript:x",
+            "data:x",
+            "java\nscript:x",
+            "blob:x",
+            "/a\u{7f}",
+        ] {
+            assert!(!script_followable_location(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_ppr_bypass_cookie_is_found_among_others() {
+        let headers = |values: &[&'static str]| {
+            let mut map = axum::http::HeaderMap::new();
+            for value in values {
+                map.append(header::COOKIE, HeaderValue::from_static(value));
+            }
+            map
+        };
+        assert!(ppr_bypass_requested(&headers(&["__gio_ppr_bypass=1"])));
+        assert!(ppr_bypass_requested(&headers(&[
+            "who=a; __gio_ppr_bypass=1"
+        ])));
+        assert!(ppr_bypass_requested(&headers(&[
+            "who=a",
+            "__gio_ppr_bypass=1"
+        ])));
+        assert!(!ppr_bypass_requested(&headers(&[])));
+        assert!(!ppr_bypass_requested(&headers(&["who=__gio_ppr_bypass=1"])));
+        assert!(!ppr_bypass_requested(&headers(&["x__gio_ppr_bypass=1"])));
     }
 
     #[test]

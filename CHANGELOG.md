@@ -383,8 +383,9 @@ first.
   constant time, and 10 failed attempts in a minute get `429`.
 - **HTTP caching for pages.** Cached pages send
   `Cache-Control: public, max-age=0, s-maxage=..., stale-while-revalidate=...`
-  and a strong `ETag`, and a matching `If-None-Match` gets a `304` that keeps
-  the page's `Vary`. Personal, streamed, PPR, error and guarded pages,
+  and a weak `ETag` (one tag covers the page's gzip, br and uncompressed
+  bytes), and a matching `If-None-Match` gets a `304` that keeps the page's
+  `Vary`. Personal, streamed, PPR, error and guarded pages,
   requests with an `Authorization` header and header-negotiated locales get
   `private, no-cache`. A `Cache-Control` set by the app or a header rule
   always wins.
@@ -393,6 +394,15 @@ first.
   answers `404` is evicted instead of served stale.
 - PPR pages hydrate as soon as their props arrive, without waiting for the
   remaining Suspense holes.
+- **A per-visitor `redirect()` or `notFound()` on a PPR shell hit reaches
+  the visitor.** The shell's `200` is already sent when `getServerSideProps`
+  answers, so the page finishes itself: an `http(s)` or relative redirect
+  that sets no cookies becomes a nonced `location.replace()` (with a
+  `<meta refresh>` fallback), and anything else (a 404, an error, a redirect
+  setting cookies) reloads once with a short-lived `__gio_ppr_bypass` cookie
+  that skips the cached shell, so the real status, `Location` and cookies
+  arrive. It used to end the body after the shell: a `200` that never
+  hydrated.
 - Instances that share a disk cache directory serve each other's pages instead
   of deleting them, and the page cache only ever deletes its own entry files.
 - **Static exports hydrate.** `gio export` builds the client bundles, so
@@ -558,7 +568,8 @@ first.
   large downloads, a hand-written `text/event-stream`, streamed HTML) reaches
   the client chunk by chunk, with backpressure and no idle cutoff. When the
   client disconnects, the stream's `cancel()` runs. Small complete bodies stay
-  buffered.
+  buffered. A streamed HTML body is passed through as the handler wrote it:
+  the server injects its head scripts into page streams only.
 - Server shutdown and worker restarts close sockets with `1001`, and
   connections over `[websocket] max_connections` close with `1013` instead of
   being dropped.
@@ -585,7 +596,14 @@ first.
   frees the port.
 - **Graceful shutdown** closes idle keep-alive connections at once instead of
   waiting out the 8-second drain, and gives every worker a few seconds to run
-  plugin shutdown hooks.
+  plugin shutdown hooks. Open event streams (SSE, and route handlers
+  answering `text/event-stream`) are ended cleanly when shutdown starts
+  (their producers are cancelled in the worker; `EventSource` reconnects),
+  so one open dashboard tab no longer holds every stop for the full drain.
+  Requests, page renders and other streamed route-handler bodies (downloads,
+  exports) in flight still finish; one still running when the drain times
+  out has its connection reset, so the client sees the download fail
+  instead of receiving a short file that looks complete.
 - **JSON logs.** `[logging] format = "json"` or `GIO_LOG_FORMAT=json` makes
   the server write one JSON object per line in the worker's shape (`ts`,
   `level`, `msg`, plus `target`), with span fields such as `request_id`
