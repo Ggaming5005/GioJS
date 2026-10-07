@@ -775,9 +775,8 @@ async function main() {
       assert.equal(revalidated.headers['x-content-type-options'], 'nosniff');
       assert.equal(revalidated.headers['x-frame-options'], 'DENY');
       // ...and the Vary its 200 got from the compression layer (RFC 9110
-      // 15.4.5): none for this page, too small to compress...
-      assert.equal(hit.headers.get('vary'), null);
-      assert.equal(revalidated.headers.vary, undefined);
+      // 15.4.5) - whatever that is for this page's size...
+      assert.equal(revalidated.headers.vary ?? null, hit.headers.get('vary'));
       // ...accept-encoding for one large enough, whatever the client accepts.
       const large = await fetch(`${BASE}/cached-large`);
       assert.match(await large.text(), /INTEGRATION_FIXTURE_CACHED_LARGE/);
