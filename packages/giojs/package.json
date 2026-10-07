@@ -4,7 +4,13 @@
   "description": "GioJS - Rust-powered React framework",
   "bin": {
     "gio": "bin/gio.js",
-    "giojs-server": "bin/gio.js"
+    "giojs-server": "bin/giojs-server.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "files": [
     "bin",

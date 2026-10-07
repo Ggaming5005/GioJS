@@ -115,8 +115,13 @@ function findServerBinary(requireFromHere, target) {
     if (!existsSync(bin)) fail(`platform package ${pkgName} has no binary at ${bin}`);
     return bin;
   }
-  const { path } = requireFromHere('./find-binary.js');
-  return path;
+  const { locateBinary, missingBinaryMessage } = requireFromHere('./find-binary.js');
+  const binary = locateBinary();
+  if (!binary.found) {
+    console.error(missingBinaryMessage(binary, { version: requireFromHere('../package.json').version }));
+    process.exit(1);
+  }
+  return binary.path;
 }
 
 /** Pick app/<base>.<ext> by the same precedence discovery uses, or null. */

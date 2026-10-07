@@ -1,0 +1,286 @@
+/**
+ * giojs/test/lib.test.mjs
+ *
+ * The CLI's pure helpers: did-you-mean, binary lookup and the missing-binary
+ * message for every platform situation, the lenient gio.toml / .env reader
+ * behind the listen-address fallback, URL building, the server environment
+ * and browser command, and create-giojs delegation details.
+ */
+import { test, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { tempProject } from './helpers.mjs';
+
+const require = createRequire(import.meta.url);
+const { didYouMean } = require('../bin/lib/commands.js');
+const findBinary = require('../bin/find-binary.js');
+const { parseTomlLite, fallbackReport, serverUrls, connectBaseUrl } = require('../bin/lib/config.js');
+const { serverEnv, browserCommand, formatBanner } = require('../bin/lib/server.js');
+const { execCommand, supportsSubcommand, shellQuote } = require('../bin/lib/delegate.js');
+const { targetUrl } = require('../bin/lib/cache-explain.js');
+const { detectPackageManager } = require('../bin/lib/project.js');
+
+describe('didYouMean', () => {
+  const commands = ['dev', 'start', 'build', 'routes', 'doctor', 'typegen'];
+  test('finds typos, swaps and unambiguous prefixes', () => {
+    assert.equal(didYouMean('strat', commands), 'start');
+    assert.equal(didYouMean('buidl', commands), 'build');
+    assert.equal(didYouMean('DEV', commands), 'dev');
+    assert.equal(didYouMean('typgen', commands), 'typegen');
+    assert.equal(didYouMean('doc', commands), 'doctor');
+  });
+  test('stays quiet when nothing is close', () => {
+    assert.equal(didYouMean('xyzzy', commands), null);
+    assert.equal(didYouMean('ab', commands), null);
+  });
+});
+
+describe('locateBinary', () => {
+  const noFiles = () => false;
+  const base = { env: {}, workspaceRoot: null, exists: noFiles, resolvePackage: () => null };
+
+  test('GIO_SERVER_BIN wins, and a missing one is reported as such', () => {
+    const found = findBinary.locateBinary({ ...base, env: { GIO_SERVER_BIN: '/bin/x' }, exists: () => true });
+    assert.equal(found.found, true);
+    assert.equal(found.source, 'env');
+    const missing = findBinary.locateBinary({ ...base, env: { GIO_SERVER_BIN: '/bin/x' } });
+    assert.equal(missing.reason, 'env-missing');
+  });
+
+  test('the platform package binary, with its version', () => {
+    const dir = tempProject({ 'package.json': '{"version":"9.9.9"}', 'bin/giojs-server': '' });
+    const result = findBinary.locateBinary({
+      ...base, key: 'linux-x64', platform: 'linux', resolvePackage: () => dir, exists: () => true,
+    });
+    assert.deepEqual(
+      { found: result.found, source: result.source, version: result.version, path: result.path },
+      { found: true, source: 'package', version: '9.9.9', path: join(dir, 'bin', 'giojs-server') },
+    );
+  });
+
+  test('each missing case has its own reason', () => {
+    const reason = (options) => findBinary.locateBinary({ ...base, ...options }).reason;
+    assert.equal(reason({ key: 'linux-x64' }), 'not-installed');
+    assert.equal(reason({ key: 'linux-arm64' }), 'unpublished');
+    assert.equal(reason({ key: 'freebsd-x64' }), 'unsupported');
+    assert.equal(reason({ key: 'win32-x64', resolvePackage: () => '/pkg' }), 'empty-package');
+  });
+
+  test('the musl build is picked on musl Linux', () => {
+    assert.equal(findBinary.platformKey('linux', 'x64', true), 'linux-x64-musl');
+    assert.equal(findBinary.platformKey('darwin', 'arm64', false), 'darwin-arm64');
+  });
+});
+
+describe('missingBinaryMessage', () => {
+  const message = (result, options = {}) => findBinary.missingBinaryMessage(
+    { key: 'linux-x64', packageName: '@gio.js/server-linux-x64', ...result },
+    { version: '1.2.3', ...options },
+  );
+
+  test('not installed: the pinned optional install and why it is usually missing', () => {
+    const text = message({ reason: 'not-installed' });
+    assert.match(text, /npm install --save-optional @gio\.js\/server-linux-x64@1\.2\.3/);
+    assert.match(text, /--omit=optional/);
+    assert.match(text, /lockfile was written on another OS/);
+    assert.match(message({ reason: 'not-installed' }, { packageManager: 'yarn' }), /yarn add --optional/);
+  });
+
+  test('linux-arm64 is not shipped yet: build from source', () => {
+    const text = message({ reason: 'unpublished', key: 'linux-arm64', packageName: '@gio.js/server-linux-arm64' });
+    assert.match(text, /not published yet/);
+    assert.match(text, /cargo build --release -p giojs-server/);
+    assert.match(text, /GIO_SERVER_BIN/);
+  });
+
+  test('unsupported platforms list the prebuilt ones', () => {
+    const text = message({ reason: 'unsupported', key: 'freebsd-x64', packageName: null });
+    assert.match(text, /no prebuilt server binary for this platform \(freebsd-x64\)/);
+    assert.match(text, /linux-x64, linux-x64-musl, win32-x64/);
+    assert.doesNotMatch(text, /linux-arm64,/);
+  });
+
+  test('the path getter throws the message, not a lookup error', () => {
+    const saved = process.env.GIO_SERVER_BIN;
+    process.env.GIO_SERVER_BIN = '/nonexistent/giojs-server';
+    try {
+      assert.throws(() => findBinary.path, (err) => err.code === 'GIO_BINARY_NOT_FOUND' &&
+        /GIO_SERVER_BIN points at/.test(err.message));
+    } finally {
+      if (saved === undefined) delete process.env.GIO_SERVER_BIN;
+      else process.env.GIO_SERVER_BIN = saved;
+    }
+  });
+});
+
+describe('parseTomlLite', () => {
+  test('reads the keys the CLI needs and ignores the rest', () => {
+    const parsed = parseTomlLite(`
+# comment
+[server]
+host = "127.0.0.1" # trailing comment
+port = 8_080
+trusted_proxies = [
+  "10.0.0.0/8", # private
+  "::1",
+]
+[server.tls]
+enabled = true
+
+[[guards]]
+path = "/admin/*rest"
+require_session = true
+redirect_to = "/login#top"
+
+[[guards]]
+path = "/x"
+require_cookie = 'token'
+redirect_to = "/"
+
+[headers.inline]
+value = { a = 1 }
+`);
+    assert.equal(parsed.server.host, '127.0.0.1');
+    assert.equal(parsed.server.port, 8080);
+    assert.deepEqual(parsed.server.trusted_proxies, ['10.0.0.0/8', '::1']);
+    assert.equal(parsed.server.tls.enabled, true);
+    assert.equal(parsed.guards.length, 2);
+    assert.equal(parsed.guards[0].redirect_to, '/login#top');
+    assert.equal(parsed.guards[1].require_cookie, 'token');
+    assert.equal(parsed.headers.inline.value, undefined);
+  });
+
+  test('never throws on garbage', () => {
+    assert.deepEqual(parseTomlLite('[[[\n= = =\n"unterminated'), {});
+  });
+});
+
+describe('fallbackReport', () => {
+  test('resolves the listen address env > .env files > gio.toml > default', () => {
+    const project = tempProject({
+      'gio.toml': '[server]\nport = 4000\nhost = "127.0.0.1"\n',
+      '.env': 'GIO_PORT=5000\n',
+      '.env.development': 'export GIO_PORT="6000" # dev\n',
+    });
+    assert.equal(fallbackReport({}, project).listen.port, 5000);
+    assert.equal(fallbackReport({}, project).listen.portSource, 'GIO_PORT');
+    assert.equal(fallbackReport({ NODE_ENV: 'development' }, project).listen.port, 6000);
+    assert.equal(fallbackReport({ GIO_PORT: '7000' }, project).listen.port, 7000);
+    assert.equal(fallbackReport({}, project).listen.host, '127.0.0.1');
+    const bare = fallbackReport({}, tempProject({}));
+    assert.deepEqual(bare.listen, { host: '0.0.0.0', port: 3000, portSource: 'default', tls: false });
+    assert.equal(bare.configFile, null);
+    assert.equal(bare.fallback, true);
+  });
+
+  test('reads guards, the session secret and the cache directory', () => {
+    const project = tempProject({
+      'gio.toml': '[[guards]]\npath = "/a"\nrequire_session = true\nredirect_to = "/"\n' +
+        '[cache]\ndisk_path = "data/cache"\n',
+    });
+    const report = fallbackReport({}, project);
+    assert.equal(report.sessionGuards, 1);
+    assert.equal(report.sessionSecret, 'unset');
+    assert.equal(report.cacheDir, join(project, 'data/cache'));
+    assert.equal(fallbackReport({ GIO_SESSION_SECRET: 'short' }, project).sessionSecret, 'invalid');
+    assert.equal(fallbackReport({ GIO_SESSION_SECRET: 'x'.repeat(32) }, project).sessionSecret, 'valid');
+  });
+});
+
+describe('URLs', () => {
+  const interfaces = {
+    lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+    eth0: [
+      { address: '192.168.1.20', family: 'IPv4', internal: false },
+      { address: 'fe80::1', family: 'IPv6', internal: false },
+    ],
+  };
+
+  test('a wildcard host prints localhost plus every LAN address', () => {
+    assert.deepEqual(serverUrls({ host: '0.0.0.0', port: 3000, tls: false }, interfaces), {
+      local: 'http://localhost:3000',
+      network: ['http://192.168.1.20:3000'],
+    });
+  });
+
+  test('loopback hosts are not exposed; a specific address is its own network URL', () => {
+    assert.deepEqual(serverUrls({ host: '127.0.0.1', port: 80, tls: false }, interfaces).network, []);
+    assert.deepEqual(serverUrls({ host: '10.0.0.5', port: 443, tls: true }, interfaces), {
+      local: 'https://10.0.0.5:443',
+      network: ['https://10.0.0.5:443'],
+    });
+  });
+
+  test('requests go to loopback for wildcard hosts', () => {
+    assert.equal(connectBaseUrl({ host: '0.0.0.0', port: 3000, tls: false }), 'http://127.0.0.1:3000');
+    assert.equal(connectBaseUrl({ host: '::', port: 3000, tls: true }), 'https://[::1]:3000');
+    assert.equal(connectBaseUrl({ host: '10.1.2.3', port: 8080, tls: false }), 'http://10.1.2.3:8080');
+  });
+
+  test('cache explain targets', () => {
+    assert.equal(targetUrl('/posts/1', 'http://127.0.0.1:4000/'), 'http://127.0.0.1:4000/posts/1');
+    assert.equal(targetUrl('https://example.com/a', 'http://127.0.0.1:4000'), 'https://example.com/a');
+  });
+});
+
+describe('server launch helpers', () => {
+  test('serverEnv sets the mode, listen overrides and orphan protection', () => {
+    const env = serverEnv({ base: { NODE_ENV: 'test', PATH: '/bin' }, mode: 'production', port: 0, host: '::1' });
+    assert.equal(env.NODE_ENV, 'production');
+    assert.equal(env.GIO_PORT, '0');
+    assert.equal(env.GIO_HOST, '::1');
+    assert.equal(env.GIO_EXIT_ON_STDIN_EOF, '1');
+    assert.equal(env.PATH, '/bin');
+    const kept = serverEnv({ base: { NODE_ENV: 'development', GIO_TSX_PKG: '/mine' }, worker: { tsxPkg: '/found' } });
+    assert.equal(kept.NODE_ENV, 'development');
+    assert.equal(kept.GIO_TSX_PKG, '/mine', 'an explicit GIO_TSX_PKG wins');
+    assert.equal('GIO_PORT' in kept, false);
+  });
+
+  test('browserCommand per platform', () => {
+    assert.deepEqual(browserCommand('http://localhost:3000', 'darwin'), { command: 'open', args: ['http://localhost:3000'] });
+    assert.deepEqual(browserCommand('http://localhost:3000', 'linux'), { command: 'xdg-open', args: ['http://localhost:3000'] });
+    assert.equal(browserCommand('http://localhost:3000', 'win32').command, 'cmd');
+  });
+
+  test('the banner lists every URL', () => {
+    const banner = formatBanner({
+      mode: 'development',
+      version: '1.2.3',
+      urls: { local: 'http://localhost:3000', network: ['http://192.168.1.20:3000'] },
+    });
+    assert.match(banner, /GioJS 1\.2\.3 \(dev\)/);
+    assert.match(banner, /- Local: {4}http:\/\/localhost:3000/);
+    assert.match(banner, /- Network: {2}http:\/\/192\.168\.1\.20:3000/);
+  });
+});
+
+describe('create-giojs delegation', () => {
+  test('subcommand detection reads create-giojs --help', () => {
+    const help = 'Usage:\n  npm create giojs@latest [name] -- [options]\n  npm create giojs@latest -- migrate [dir]   Migrate';
+    assert.equal(supportsSubcommand(help, 'migrate'), true);
+    assert.equal(supportsSubcommand(help, 'add'), false);
+    assert.equal(supportsSubcommand('  add <feature>  Add a feature', 'add'), true);
+    assert.equal(supportsSubcommand('address the issue', 'add'), false);
+  });
+
+  test('runs create-giojs@<version> through the detected package manager', () => {
+    assert.deepEqual(execCommand('npm', '1.2.3', 'linux'), {
+      command: 'npx', args: ['create-giojs@1.2.3'], label: 'npx create-giojs@1.2.3', shell: false,
+    });
+    assert.equal(execCommand('pnpm', '1.2.3', 'linux').label, 'pnpm dlx create-giojs@1.2.3');
+    assert.equal(execCommand('bun', '1.2.3', 'linux').command, 'bunx');
+    assert.equal(execCommand('npm', '1.2.3', 'win32').shell, true);
+    assert.equal(shellQuote('./my app'), '"./my app"');
+    assert.equal(shellQuote('--dry-run'), '--dry-run');
+  });
+
+  test('package manager detection: user agent, then lockfile', () => {
+    assert.deepEqual(detectPackageManager({ npm_config_user_agent: 'pnpm/9.1.0 npm/? node/v22' }, '/x'),
+      { name: 'pnpm', version: '9.1.0' });
+    const exists = (path) => path.endsWith('yarn.lock');
+    assert.equal(detectPackageManager({}, '/x', exists).name, 'yarn');
+    assert.equal(detectPackageManager({}, '/x', () => false).name, 'npm');
+  });
+});
