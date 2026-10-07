@@ -76,6 +76,20 @@ test('Ctrl+C at the language picker exits cleanly and writes nothing', { skip: !
   }
 });
 
+test('Ctrl+C at the feature picker exits cleanly and writes nothing', { skip: !hasScript && 'needs util-linux script' }, async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'gio-interactive-'));
+  try {
+    const session = startOnTerminal(cwd, ['my-app', '--ts', '--server']);
+    await session.waitFor(/Add features/);
+    session.type('\x03');
+    assert.equal(await session.exit, 130, session.output());
+    assert.match(session.output(), /Cancelled - nothing was written/);
+    assert.deepEqual(await readdir(cwd), []);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('the prompts ask for what the flags leave open, and sanitize the package name', { skip: !hasScript && 'needs util-linux script' }, async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'gio-interactive-'));
   try {
@@ -88,6 +102,10 @@ test('the prompts ask for what the flags leave open, and sanitize the package na
     session.type('\r');
     await session.waitFor(/What are you building/);
     session.type('\x1b[B\r'); // down arrow: Static site
+    // A static site is offered only the features that work without a server.
+    await session.waitFor(/Add features[\s\S]*GitHub Actions CI/);
+    assert.doesNotMatch(session.output(), /Authentication|Docker/);
+    session.type(' \r'); // space: Tailwind CSS (the first choice)
     await session.waitFor(/Install dependencies with npm\?/);
     session.type('n\r');
     assert.equal(await session.exit, 0, session.output());
@@ -96,7 +114,7 @@ test('the prompts ask for what the flags leave open, and sanitize the package na
       scripts: Record<string, string>;
     };
     assert.equal(pkg.name, 'my-app');
-    assert.match(pkg.scripts['build'] ?? '', /^tsc --noEmit && .*export$/);
+    assert.match(pkg.scripts['build'] ?? '', /^tailwindcss .* --minify && tsc --noEmit && .*export$/);
     assert.match(session.output(), /npm install/);
   } finally {
     await rm(cwd, { recursive: true, force: true });

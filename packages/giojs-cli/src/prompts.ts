@@ -10,6 +10,8 @@
 import { basename, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { UsageError, type CliArgs, type Language, type Mode } from './args.js';
+import { chooseFeatures } from './overlays/cli.js';
+import type { FeatureName } from './overlays/types.js';
 import { detectPackageManager, type PackageManager } from './package-manager.js';
 import { DEFAULT_PROJECT_NAME, sanitizePackageName, validatePackageName } from './project-name.js';
 import { CancelledError, select } from './select.js';
@@ -30,6 +32,8 @@ export interface ProjectConfig {
   installDeps: boolean;
   git: boolean;
   packageManager: PackageManager;
+  /** Starter features to add (overlays/), in no particular order. */
+  features: FeatureName[];
 }
 
 export interface PromptEnv {
@@ -169,6 +173,11 @@ export async function gatherConfig(args: CliArgs, env: PromptEnv): Promise<Proje
     )
     : 'server');
 
+  // overlays: the "Add features" multi-select, skipped when flags chose (and
+  // without a terminal: none). Server-only features on a static site are a
+  // usage error here, before anything is written.
+  const features = await chooseFeatures(args.features, mode, interactive);
+
   const packageManager = args.packageManager ?? detectPackageManager(env.userAgent);
   const installDeps = args.installDeps
     ?? (interactive ? await askConfirm(`Install dependencies with ${packageManager}?`, true) : true);
@@ -183,5 +192,6 @@ export async function gatherConfig(args: CliArgs, env: PromptEnv): Promise<Proje
     installDeps,
     git: args.git ?? true,
     packageManager,
+    features,
   };
 }

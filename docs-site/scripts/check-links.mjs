@@ -29,17 +29,13 @@ import { fileURLToPath } from 'node:url';
 
 const scriptFile = fileURLToPath(import.meta.url);
 
-// Pages other workstreams add under app/docs/guides/ (the create-giojs
-// starter recipes). Linking them early from a page body is deliberate; until
-// they exist they are reported as warnings, and once they do the entry here
-// should go (the check warns) and the page needs its sidebar entry (an error
-// until it has one).
-export const PENDING = new Set([
-  '/docs/guides/tailwind',
-  '/docs/guides/authentication-example',
-  '/docs/guides/database',
-  '/docs/guides/docker',
-]);
+// Pages another workstream is adding. Linking them early from a page body is
+// deliberate; until they exist they are reported as warnings, and once they
+// do the entry here should go (the check warns) and the page needs its
+// sidebar entry (an error until it has one). The create-giojs starter guides
+// (/docs/guides/{tailwind,authentication-example,database,docker}) have
+// landed, so nothing is pending.
+export const PENDING = new Set([]);
 
 // Written by build.mjs next to the exported pages, not by a page module.
 const GENERATED = new Set(['/llms.txt', '/llms-full.txt', '/sitemap.xml', '/robots.txt']);

@@ -14,13 +14,21 @@ function version(): string {
 
 async function main(rawArgv: string[]): Promise<void> {
   // pnpm, yarn and bun pass on the npm-style `--` separator:
-  // `pnpm create giojs -- migrate ./app` reaches us as ['--', 'migrate', ...].
+  // `pnpm create giojs -- migrate ./app` reaches us as ['--', 'migrate', ...]
+  // (and `-- add tailwind` as ['--', 'add', ...]).
   const argv = rawArgv[0] === '--' ? rawArgv.slice(1) : rawArgv;
   if (argv[0] === 'migrate') {
     // Loaded on demand: the migration pulls in the TypeScript compiler,
     // which scaffolding never needs.
     const { runMigrate } = await import('./migrate-command.js');
     process.exitCode = await runMigrate(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'add') {
+    // `create-giojs add <feature...>`, also run by `gio add`: starter feature
+    // overlays for an existing project.
+    const { runAdd } = await import('./overlays/add.js');
+    process.exitCode = await runAdd(argv.slice(1));
     return;
   }
   const args = parseArgs(argv);

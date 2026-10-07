@@ -1,0 +1,18 @@
+# Rebuilt inside the image
+node_modules
+.gio
+standalone
+out
+
+# Local state and secrets: never bake them into an image
+data
+.env*.local
+.git
+.github
+
+# Editor and OS clutter
+.DS_Store
+*.log
+Dockerfile
+docker-compose.yml
+.dockerignore

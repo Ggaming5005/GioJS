@@ -83,13 +83,17 @@ test('the package manager comes from npm_config_user_agent', () => {
     ['npm run dev', 'pnpm dev', 'yarn dev', 'bun run dev']);
 });
 
-test('--help prints the usage, flags and migrate subcommand, and writes nothing', async () => {
+test('--help prints the usage, flags, features and subcommands, and writes nothing', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'gio-create-help-'));
   try {
     for (const flag of ['--help', '-h']) {
       const result = runCli([flag], { cwd });
       assert.equal(result.status, 0, result.stderr);
-      for (const text of ['--static', '--pm <name>', '--no-git', '--force', '--version', 'migrate', 'Examples:']) {
+      for (const text of [
+        '--static', '--pm <name>', '--no-git', '--force', '--version', 'migrate', 'Examples:',
+        // The starter feature flags and the add subcommand (`gio add` runs it).
+        '--tailwind', '--api', '--auth', '--db', '--docker', '--ci', '--features a,b,c', 'add <feature...>',
+      ]) {
         assert.ok(result.stdout.includes(text), `${flag} output lacks ${text}:\n${result.stdout}`);
       }
     }

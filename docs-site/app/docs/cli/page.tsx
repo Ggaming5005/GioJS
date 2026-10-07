@@ -270,11 +270,15 @@ gio bench --suite /,/posts/1 [--base <url>]`} />
       </p>
 
       <h2 id="add">gio add</h2>
-      <CodeBlock lang="bash" code={`gio add <feature>
+      <CodeBlock lang="bash" code={`gio add <feature...> [--dry-run] [--force]
+gio add tailwind auth  # add two starter features
 gio add --help         # the features this create-giojs offers`} />
       <p>
-        Adds a feature to the current app by running <code>create-giojs add</code>, resolved
-        and checked like <code>gio migrate</code>.
+        Adds <a href="/docs/starter-features">starter features</a> (<code>tailwind</code>,{' '}
+        <code>api</code>, <code>auth</code>, <code>db</code>, <code>docker</code>,{' '}
+        <code>ci</code>) to the current app by running <code>create-giojs add</code>, resolved
+        and checked like <code>gio migrate</code>. Its options are those of{' '}
+        <a href="#create-giojs-add"><code>create-giojs add</code></a>.
       </p>
 
       <h2 id="environment">Environment variables</h2>
@@ -339,10 +343,63 @@ gio add --help         # the features this create-giojs offers`} />
       </p>
 
       <h2 id="create-giojs">create-giojs</h2>
-      <p>Scaffold a new project. Runs an interactive prompt, or accepts flags for non-interactive use.</p>
-      <CodeBlock lang="bash" code={`npm create giojs@latest my-app -- --ts   # or --js
-#   --no-install   skip dependency install
-#   -y / --yes     accept all defaults`} />
+      <p>
+        Scaffolds a new project. On a terminal it asks for whatever the flags leave open;
+        without one (CI, piped input) or with <code>--yes</code> nothing is asked and every
+        unanswered option takes its default.
+      </p>
+      <CodeBlock lang="bash" code={`npm create giojs@latest [directory] -- [options]
+
+  [directory]          where the app goes ('.' = the current directory); the npm
+                       package name is derived from its name
+  --ts, --typescript   TypeScript (default)
+  --js, --javascript   JavaScript
+  --server             server app: SSR, ISR caching, images, route handlers (default)
+  --static             static site: npm run build exports plain HTML to out/
+  --pm <name>          package manager: npm, pnpm, yarn or bun
+                       (default: the one running create-giojs)
+  --install            install dependencies (default)
+  --no-install         skip installing dependencies
+  --git                create a git repository with an initial commit (default)
+  --no-git             skip git init
+  -f, --force          scaffold into a directory that is not empty
+  -y, --yes            accept the defaults for everything not given
+  -h, --help           show this help
+  -v, --version        print the create-giojs version
+
+Starter features (any combination; asked for when none is given):
+  --tailwind --api --auth --db --docker --ci
+  --features a,b,c     the same, as a list`} />
+      <p>
+        An unknown option is an error (exit code <code>2</code>) with a suggestion (
+        <code>--statc</code> → <em>did you mean <code>--static</code>?</em>), never ignored. A
+        directory that is not empty is refused, with a list of what is in it, unless{' '}
+        <code>--force</code>; <code>.git</code>, <code>README.md</code>, <code>LICENSE</code>{' '}
+        and editor files do not count. pnpm, yarn and bun pass the npm-style <code>--</code>{' '}
+        separator on, and it is skipped. Ctrl+C at a question exits with code{' '}
+        <code>130</code> and nothing written.
+      </p>
+      <p>
+        Without feature flags the prompt asks which{' '}
+        <a href="/docs/starter-features">starter features</a> to add (none without a
+        terminal). A static site takes <code>--tailwind</code> and <code>--ci</code>; the
+        others need the server, and asking for them is a usage error before anything is
+        written. The features&apos; generated commands (Dockerfile, CI workflow, next steps)
+        use the package manager the app is installed with.
+      </p>
+
+      <h3 id="create-giojs-add">create-giojs add</h3>
+      <p>
+        Adds starter features to an existing project (<code>gio add</code> runs it). A file
+        you changed is never overwritten: a feature that is already set up keeps your edits,
+        so running it again is safe, and a file in the way of a new feature stops the run
+        before anything is written, with a diff. The package manager comes from the
+        project&apos;s lockfile.
+      </p>
+      <CodeBlock lang="bash" code={`npx create-giojs add tailwind auth
+#   --dry-run      show what would change, write nothing
+#   --force        overwrite files and scripts that differ from the feature's
+#   --cwd <dir>    the project directory (default: the current one)`} />
     </>
   );
 }

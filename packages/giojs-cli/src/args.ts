@@ -5,6 +5,8 @@
  * did-you-mean hint rather than being ignored: a mistyped `--statc` that
  * silently scaffolds a server app is worse than a one-line failure.
  */
+import { FEATURE_ALIASES, featureByName } from './overlays/registry.js';
+import { FEATURE_NAMES, type FeatureName } from './overlays/types.js';
 import { PACKAGE_MANAGERS, type PackageManager } from './package-manager.js';
 
 export type Language = 'ts' | 'js';
@@ -18,6 +20,11 @@ export interface CliArgs {
   installDeps?: boolean;
   git?: boolean;
   packageManager?: PackageManager;
+  /**
+   * Starter features to add (--tailwind, --features a,b ...); undefined when
+   * no feature flag was given, so an interactive run asks.
+   */
+  features?: FeatureName[];
   /** Scaffold into a non-empty directory. */
   force: boolean;
   /** Skip interactive prompts and accept defaults for anything not provided. */
@@ -51,9 +58,39 @@ const BOOLEAN_FLAGS: Record<string, (args: CliArgs) => void> = {
   '-v': args => { args.version = true; },
 };
 
-const VALUE_FLAGS = ['--pm'] as const;
+/** `--tailwind`, `--db`, ... plus their aliases (`--database`, `--github-actions`). */
+const FEATURE_FLAGS: Record<string, FeatureName> = Object.fromEntries(
+  Object.entries(FEATURE_ALIASES).map(([alias, feature]) => [`--${alias}`, feature]),
+);
 
-export const KNOWN_FLAGS: readonly string[] = [...Object.keys(BOOLEAN_FLAGS), ...VALUE_FLAGS];
+const VALUE_FLAGS = ['--pm', '--features'] as const;
+
+function addFeatures(args: CliArgs, features: readonly FeatureName[]): void {
+  args.features = [...new Set([...(args.features ?? []), ...features])];
+}
+
+/** `--features a,b,c`: every name must be a known feature (or alias). */
+function parseFeatureList(value: string | undefined): FeatureName[] {
+  if (value === undefined || value.startsWith('-')) {
+    throw new UsageError(`--features needs a comma-separated list: ${FEATURE_NAMES.join(',')}`);
+  }
+  return value
+    .split(',')
+    .filter(name => name.trim() !== '')
+    .map(name => {
+      const feature = featureByName(name);
+      if (feature === undefined) {
+        throw new UsageError(`Unknown feature "${name.trim()}" - choose from: ${FEATURE_NAMES.join(', ')}`);
+      }
+      return feature;
+    });
+}
+
+export const KNOWN_FLAGS: readonly string[] = [
+  ...Object.keys(BOOLEAN_FLAGS),
+  ...Object.keys(FEATURE_FLAGS),
+  ...VALUE_FLAGS,
+];
 
 export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = { force: false, yes: false, help: false, version: false };
@@ -72,6 +109,16 @@ export function parseArgs(argv: string[]): CliArgs {
     if (setter !== undefined) {
       if (inlineValue !== undefined) throw new UsageError(`${flag} does not take a value`);
       setter(args);
+      continue;
+    }
+    const feature = Object.hasOwn(FEATURE_FLAGS, flag) ? FEATURE_FLAGS[flag] : undefined;
+    if (feature !== undefined) {
+      if (inlineValue !== undefined) throw new UsageError(`${flag} does not take a value`);
+      addFeatures(args, [feature]);
+      continue;
+    }
+    if (flag === '--features') {
+      addFeatures(args, parseFeatureList(inlineValue ?? argv[++i]));
       continue;
     }
     if (flag === '--pm') {
@@ -138,6 +185,8 @@ export const USAGE = `Create a new GioJS app.
 Usage:
   npm create giojs@latest [directory] -- [options]
   npm create giojs@latest -- migrate [dir]     Migrate a Next.js app (see migrate --help)
+  npm create giojs@latest -- add <feature...>  Add starter features to an existing app
+                                               (see add --help; also \`gio add\`)
 
   [directory] is where the app goes ('.' = the current directory, which
   must then be empty). The npm package name is derived from its name.
@@ -158,6 +207,16 @@ Options:
   -h, --help           show this help
   -v, --version        print the create-giojs version
 
+Starter features (any combination; asked for when none is given):
+  --tailwind           Tailwind CSS v4, rebuilt as you edit
+  --api                a JSON route.ts and a <GioForm> page action
+  --auth               cookie sessions, login/logout, a guarded /dashboard
+  --db                 SQLite + Drizzle ORM (Node 22.16+)
+  --docker             production Dockerfile + docker-compose.yml
+  --ci                 GitHub Actions workflow
+  --features a,b,c     the same, as a list (--features= adds none)
+  A static site takes --tailwind and --ci; the others need the server.
+
 Without a terminal (CI, piped input) the defaults are used and nothing is asked.
 
 Examples:
@@ -165,5 +224,7 @@ Examples:
   npm create giojs@latest my-app -- --js --static
   pnpm create giojs my-app --no-git
   npm create giojs@latest my-app -- --pm bun --no-install
+  npm create giojs@latest my-app -- --tailwind --features auth,db,docker
+  npx create-giojs add ci --dry-run
   npm create giojs@latest . -- --yes
   npm create giojs@latest -- migrate ./my-next-app`;

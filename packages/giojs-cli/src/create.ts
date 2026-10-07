@@ -6,6 +6,8 @@ import { fileURLToPath } from 'url';
 import type { CliArgs } from './args.js';
 import { copyTemplate, scaffoldFileName, templateDir } from './copy-template.js';
 import { initGitRepository } from './git.js';
+import { applyCreateFeatures } from './overlays/cli.js';
+import { packageManager as overlayPackageManager } from './overlays/package-manager.js';
 import { installCommand, runCommand, type PackageManager } from './package-manager.js';
 import { gatherConfig, type Mode, type ProjectConfig } from './prompts.js';
 import { applyStaticVariant } from './static-variant.js';
@@ -61,16 +63,19 @@ async function patchPackageJson(destDir: string, mode: Mode, typescript: boolean
 
 /**
  * Undoes a scaffold that stopped partway: the whole directory when this run
- * created it, the template's top-level entries when it was empty (harmless
- * files like .git never clash with them). Files a --force run overwrote
- * cannot be restored, so that case is left as it is.
+ * created it, the template's top-level entries (and those of the feature
+ * overlays' files, `extra`) when it was empty - harmless files like .git
+ * never clash with them. Files a --force run overwrote cannot be restored,
+ * so that case is left as it is.
  */
-async function rollback(config: ProjectConfig): Promise<boolean> {
+async function rollback(config: ProjectConfig, extra: readonly string[]): Promise<boolean> {
   if (config.targetState === 'missing') {
     await rm(config.targetDir, { recursive: true, force: true });
   } else if (config.targetState === 'empty') {
-    for (const name of await readdir(templateDir(config.template))) {
-      await rm(join(config.targetDir, scaffoldFileName(name)), { recursive: true, force: true });
+    const names = new Set((await readdir(templateDir(config.template))).map(scaffoldFileName));
+    for (const path of extra) names.add(path.split('/')[0] ?? path);
+    for (const name of names) {
+      await rm(join(config.targetDir, name), { recursive: true, force: true });
     }
   }
   return config.targetState !== 'not-empty';
@@ -78,8 +83,10 @@ async function rollback(config: ProjectConfig): Promise<boolean> {
 
 interface WrittenProject {
   linksMonorepo: boolean;
-  /** The template files written, relative and '/'-separated. */
+  /** The template and feature files written, relative and '/'-separated. */
   files: string[];
+  /** The chosen features' next steps (empty without features). */
+  featureSteps: string;
 }
 
 async function writeProject(config: ProjectConfig): Promise<WrittenProject> {
@@ -89,14 +96,35 @@ async function writeProject(config: ProjectConfig): Promise<WrittenProject> {
   const controller = new AbortController();
   const onSigint = (): void => controller.abort();
   process.once('SIGINT', onSigint);
+  const featureFiles: string[] = [];
   try {
     const typescript = config.language === 'ts';
     const files = await copyTemplate(config.template, config.targetDir, config.packageName, controller.signal);
     const linksMonorepo = await patchPackageJson(config.targetDir, config.mode, typescript);
     if (config.mode === 'static') await applyStaticVariant(config.targetDir, typescript);
-    return { linksMonorepo, files };
+    console.log('Template copied.');
+    // overlays: after the static variant (tailwind wraps its build script)
+    // and before the install, so their dependencies are installed too. They
+    // write the commands of the package manager this flow installs with.
+    const features = await applyCreateFeatures(
+      config.targetDir,
+      {
+        projectName: config.packageName,
+        language: config.language,
+        mode: config.mode,
+        packageManager: overlayPackageManager(config.packageManager),
+      },
+      config.features,
+      {
+        force: config.targetState === 'not-empty',
+        signal: controller.signal,
+        planned: paths => featureFiles.push(...paths),
+      },
+    );
+    controller.signal.throwIfAborted();
+    return { linksMonorepo, files: [...new Set([...files, ...features.files])], featureSteps: features.steps };
   } catch (err) {
-    const removed = await rollback(config);
+    const removed = await rollback(config, featureFiles);
     if (!controller.signal.aborted) throw err;
     console.error(removed
       ? '\nCancelled - the partly written project was removed.'
@@ -170,8 +198,7 @@ export async function create(args: CliArgs): Promise<void> {
   const preexisting = config.git && config.targetState === 'not-empty'
     ? new Set(await readdir(config.targetDir))
     : undefined;
-  const { linksMonorepo, files } = await writeProject(config);
-  console.log('Template copied.');
+  const { linksMonorepo, files, featureSteps } = await writeProject(config);
 
   const installed = config.installDeps && install(config.targetDir, config.packageManager);
   // After the install, so the initial commit includes the lockfile. Over
@@ -198,4 +225,5 @@ export async function create(args: CliArgs): Promise<void> {
       `this app links: run it again after changing them.\n`
     : '';
   console.log(`\nDone! To get started:\n\n${steps}${deploy}\n${rebuild}`);
+  if (featureSteps !== '') console.log(`Your features:\n${featureSteps}\n`);
 }
