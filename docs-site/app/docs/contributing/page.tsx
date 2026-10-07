@@ -25,9 +25,9 @@ GIO_SERVER_BIN=target/debug/giojs-server node tests/integration/run.mjs
 # Docs site: typecheck and dead-link check
 cd docs-site && npm install && npm run typecheck && npm run check-links`} />
       <p>
-        Every docs page lives under <code>docs-site/app/docs/</code> and must be listed in{' '}
-        <code>docs-site/components/Sidebar.tsx</code> - the link checker fails on pages
-        nobody can navigate to and on links to pages that do not exist. Report security
+        Every docs page lives under <code>docs-site/app/docs/</code> and must be listed in the
+        nav file of its area under <code>docs-site/components/nav/</code> - the link checker
+        fails on pages nobody can navigate to and on links to pages that do not exist. Report security
         issues as described in <code>SECURITY.md</code>, not in public issues.
       </p>
       <p>

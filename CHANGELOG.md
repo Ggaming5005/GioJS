@@ -848,6 +848,16 @@ first.
 - The sidebar is regrouped by topic. In `docs-site/`, `npm run check-links`
   fails on dead links, missing anchors and pages left out of the sidebar, and
   `npm test` checks facts the docs state against the code.
+- The docs site is rebuilt around finding things. **Search** (Ctrl+K, Cmd+K
+  or `/`) covers every page section by section, ranks an exact API name
+  first, tolerates typos and unfinished words, and runs in the browser
+  with no third-party service. The sidebar has four sections (Getting
+  Started, Guides, API Reference, Architecture) with collapsible groups, and
+  every page gets breadcrumbs, an "On this page" outline, `#` links on its
+  headings, previous/next links, "Edit this page on GitHub", "Copy page" as
+  Markdown (each page is also served as `.md`), its own `<title>` and
+  canonical URL, and a light/dark/system theme switch. `/docs` is a new
+  index page.
 - "Known Issues" is now **Known Limitations**: what GioJS does not do yet and
   what to use instead.
 - The README's comparison with self-hosted Next.js is corrected and expanded,

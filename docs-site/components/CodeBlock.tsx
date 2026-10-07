@@ -12,14 +12,14 @@ interface CodeBlockProps {
   lang?: string;
 }
 
-let _id = 0;
-
-export function CodeBlock({ code, lang = 'bash' }: CodeBlockProps): React.JSX.Element {
-  const id = `cb-${++_id}`;
-  const script = `
+// The script finds its own block (document.currentScript) instead of ids:
+// the page hydrates, and ids from a render counter would differ between
+// the server and the browser.
+const COPY_SCRIPT = `
 (function() {
-  var btn = document.getElementById('${id}-btn');
-  var pre = document.getElementById('${id}-pre');
+  var block = document.currentScript && document.currentScript.parentNode;
+  var btn = block && block.querySelector('.code-block-copy');
+  var pre = block && block.querySelector('pre');
   if (!btn || !pre) return;
   btn.addEventListener('click', function() {
     navigator.clipboard.writeText(pre.textContent || '').then(function() {
@@ -34,16 +34,18 @@ export function CodeBlock({ code, lang = 'bash' }: CodeBlockProps): React.JSX.El
 })();
 `.trim();
 
+export function CodeBlock({ code, lang = 'bash' }: CodeBlockProps): React.JSX.Element {
   return (
     <div className="code-block">
-      <div className="code-block-header">
+      {/* data-no-index: the language and "Copy" are not page text (lib/text.mjs). */}
+      <div className="code-block-header" data-no-index="">
         <span className="code-block-lang">{lang}</span>
-        <button id={`${id}-btn`} className="code-block-copy" type="button">Copy</button>
+        <button className="code-block-copy" type="button">Copy</button>
       </div>
-      <pre id={`${id}-pre`}>
+      <pre data-lang={lang}>
         <code>{code}</code>
       </pre>
-      <script dangerouslySetInnerHTML={{ __html: script }} />
+      <script dangerouslySetInnerHTML={{ __html: COPY_SCRIPT }} />
     </div>
   );
 }

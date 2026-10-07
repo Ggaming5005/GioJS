@@ -8,6 +8,9 @@
  * served on its own.
  */
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
+
+export const metadata: Metadata = { title: 'Page not found', robots: { index: false } };
 
 const btnBase: React.CSSProperties = {
   display: 'inline-flex',

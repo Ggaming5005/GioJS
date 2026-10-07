@@ -6,6 +6,12 @@
  * gradient-sheen headline) so it works under pure SSR with no client runtime.
  */
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
+
+export const metadata: Metadata = {
+  title: { absolute: 'GioJS - the Rust-powered React framework' },
+  alternates: { canonical: '/' },
+};
 
 export const revalidate = false;
 
@@ -50,7 +56,7 @@ export default function Home(): React.JSX.Element {
           GioJS
         </a>
         <div className="lp-nav__links">
-          <a href="/docs/getting-started">Docs</a>
+          <a href="/docs">Docs</a>
           <a href="/releases">Releases</a>
           <a href="https://github.com/Ggaming5005/GioJS">GitHub ↗</a>
         </div>
@@ -140,14 +146,14 @@ export default function Home(): React.JSX.Element {
         <h2>Ship it on a <span className="lp-grad">$5 VPS</span>.</h2>
         <p>No CDN tax. No vendor lock-in. Just a binary and the React you already write.</p>
         <div className="lp-cta">
-          <a className="lp-btn lp-btn--primary" href="/docs/getting-started">Read the docs <span className="lp-btn__arrow">→</span></a>
+          <a className="lp-btn lp-btn--primary" href="/docs">Read the docs <span className="lp-btn__arrow">→</span></a>
         </div>
       </section>
 
       <footer className="lp-footer">
         <span>© {new Date().getFullYear()} GioJS</span>
         <div className="lp-footer__links">
-          <a href="/docs/getting-started">Docs</a>
+          <a href="/docs">Docs</a>
           <a href="https://github.com/Ggaming5005/GioJS">GitHub</a>
           <a href="https://www.npmjs.com/package/create-giojs">npm</a>
         </div>

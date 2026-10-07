@@ -7,18 +7,21 @@
  * error. Its tests (and the docs-content checks): `npm test` in docs-site/.
  *
  * - Every internal href in app/ and components/ (`href="/docs/..."`, and the
- *   sidebar's `href: '/docs/...'` entries) must name a page that exists, and a
+ *   nav's `href: '/docs/...'` entries) must name a page that exists, and a
  *   `#fragment` must name an `id` on that page.
- * - Every page under app/docs/ must be reachable from the sidebar
- *   (components/Sidebar.tsx) - a page nobody can navigate to is a bug.
+ * - Every page under app/docs/ must be in the docs nav - the files that
+ *   components/nav/index.ts aggregates - exactly once: a page nobody can
+ *   navigate to is a bug, and a page listed twice breaks prev/next. Every
+ *   nav file must be aggregated by index.ts, or its pages would be missing
+ *   from the sidebar while looking listed.
  * - https://giojs.com/docs/... links in README.md and docs/*.md must resolve
  *   too, so the repository's markdown cannot drift from the site.
  *
  * A page another workstream is adding (PENDING) may be linked early from the
  * body of a page - a forward reference, reported as a warning - but never
- * from components/ (the sidebar and the rest of the chrome on every page) or
+ * from components/ (the nav and the rest of the chrome on every page) or
  * the repository's markdown, where a link to it would be a dead link on every
- * page of the deployed site. Its sidebar entry lands with the page itself.
+ * page of the deployed site. Its nav entry lands with the page itself.
  *
  * Code samples are skipped: hrefs inside template literals (the CodeBlock
  * `code={`...`}` strings) are example app code, not links on this site.
@@ -32,18 +35,46 @@ const scriptFile = fileURLToPath(import.meta.url);
 // Pages another workstream is adding. Linking them early from a page body is
 // deliberate; until they exist they are reported as warnings, and once they
 // do the entry here should go (the check warns) and the page needs its
-// sidebar entry (an error until it has one). The create-giojs starter guides
+// nav entry (an error until it has one). The create-giojs starter guides
 // (/docs/guides/{tailwind,authentication-example,database,docker}) have
 // landed, so nothing is pending.
 export const PENDING = new Set([]);
 
 // Written by build.mjs next to the exported pages, not by a page module.
-const GENERATED = new Set(['/llms.txt', '/llms-full.txt', '/sitemap.xml', '/robots.txt']);
+const GENERATED = new Set(['/llms.txt', '/llms-full.txt', '/sitemap.xml', '/robots.txt', '/search-index.json']);
 
 const HREF = /\bhref\s*(?:=\s*\{?\s*|:\s*)(["'])(.*?)\1/g;
 const SITE_LINK = /https:\/\/giojs\.com(\/(?:docs|releases)[^\s)"'<>`*]*)/g;
 const PAGE_FILE = /^page\.(tsx|jsx|ts|js)$/;
 const SOURCE_FILE = /\.(tsx|jsx|ts|js)$/;
+
+/**
+ * The docs nav as components/nav/index.ts aggregates it, read statically
+ * (no TypeScript loader needed): the nav files index.ts imports, every
+ * `href: '...'` entry in them with the file and line it is on, and the nav
+ * files index.ts does not import.
+ */
+export function readNav(componentsDir) {
+  const navDir = join(componentsDir, 'nav');
+  const indexFile = join(navDir, 'index.ts');
+  if (!existsSync(indexFile)) return { files: [], entries: [], unaggregated: [] };
+  const index = readFileSync(indexFile, 'utf8');
+  const imported = new Set(
+    [...index.matchAll(/^import\s+(?!type\b)[^;]*?from\s+'\.\/([\w.-]+\.ts)'/gm)].map((m) => m[1]),
+  );
+  const files = [indexFile, ...[...imported].map((name) => join(navDir, name))].filter(existsSync);
+  const entries = [];
+  for (const file of files) {
+    const source = withoutTemplates(readFileSync(file, 'utf8'));
+    for (const match of source.matchAll(HREF)) {
+      entries.push({ href: match[2].split('#')[0], file, line: lineOf(source, match.index) });
+    }
+  }
+  const unaggregated = readdirSync(navDir)
+    .filter((name) => name.endsWith('.ts') && name !== 'index.ts' && name !== 'types.ts' && !imported.has(name))
+    .map((name) => join(navDir, name));
+  return { files, entries, unaggregated };
+}
 
 /** Recursively list files under `dir` whose name passes `keep`. */
 function walk(dir, keep) {
@@ -173,14 +204,27 @@ export function checkLinks({
     }
   }
 
-  // 2. Every docs page is in the sidebar.
-  const sidebarFile = join(componentsDir, 'Sidebar.tsx');
-  const sidebar = existsSync(sidebarFile) ? withoutTemplates(readFileSync(sidebarFile, 'utf8')) : '';
-  const navHrefs = new Set([...sidebar.matchAll(HREF)].map((m) => m[2].split('#')[0]));
+  // 2. Every docs page is in the nav, once; every nav file is aggregated.
+  const nav = readNav(componentsDir);
+  const navHrefs = new Map();
+  for (const entry of nav.entries) {
+    const first = navHrefs.get(entry.href);
+    if (first !== undefined) {
+      errors.push(
+        `${relative(siteDir, entry.file)}:${entry.line}: ${entry.href} is already in the nav ` +
+          `(${relative(siteDir, first.file)}:${first.line}) - each page appears once`,
+      );
+    } else {
+      navHrefs.set(entry.href, entry);
+    }
+  }
+  for (const file of nav.unaggregated) {
+    errors.push(`${relative(siteDir, file)}: nav file not imported by components/nav/index.ts`);
+  }
   for (const [route, file] of pages) {
     if (!route.startsWith('/docs/')) continue;
     if (!navHrefs.has(route)) {
-      errors.push(`${relative(siteDir, file)}: ${route} is not linked from components/Sidebar.tsx`);
+      errors.push(`${relative(siteDir, file)}: ${route} is not in the docs nav (components/nav/)`);
     }
   }
 

@@ -2,8 +2,21 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "paths": {
-      "giojs/react": ["../packages/giojs-react/src/index.ts"]
+      "giojs/react": ["../packages/giojs-react/src/index.ts"],
+      "@gio.js/core": ["../packages/giojs-core/src/public.ts"],
+      // One React for the whole render. The site runs the framework from
+      // source (../packages/giojs-core), which resolves react and react-dom
+      // from the workspace install; the site's own npm install has another
+      // copy, and a hook called through one copy while the other renders
+      // fails ("Cannot read properties of null (reading 'useState')"). tsx
+      // (build.mjs, the dev worker) and the client bundles (esbuild, handed
+      // this file) follow these paths; tsc finds no types there and falls
+      // back to node_modules/@types.
+      "react": ["../packages/giojs-core/node_modules/react"],
+      "react/*": ["../packages/giojs-core/node_modules/react/*"],
+      "react-dom": ["../packages/giojs-core/node_modules/react-dom"],
+      "react-dom/*": ["../packages/giojs-core/node_modules/react-dom/*"]
     }
   },
-  "include": ["app", "components"]
+  "include": ["app", "components", "lib"]
 }

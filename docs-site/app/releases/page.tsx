@@ -5,6 +5,13 @@
  * latest release glows. Standalone (root layout only), linked from the nav.
  */
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
+
+export const metadata: Metadata = {
+  title: 'Releases',
+  description: 'Every GioJS release: what changed, what to upgrade, and what is next.',
+  alternates: { canonical: '/releases' },
+};
 
 export const revalidate = false;
 
@@ -260,7 +267,7 @@ export default function ReleasesPage(): React.JSX.Element {
           GioJS
         </a>
         <div className="docs-header__right">
-          <a className="docs-header__link" href="/docs/getting-started">Docs</a>
+          <a className="docs-header__link" href="/docs">Docs</a>
           <a className="docs-header__link" href="/releases">Releases</a>
           <a className="docs-header__link" href="https://github.com/Ggaming5005/GioJS">GitHub ↗</a>
         </div>

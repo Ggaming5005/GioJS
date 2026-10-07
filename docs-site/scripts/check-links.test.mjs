@@ -25,8 +25,14 @@ function fixture(t, files) {
 }
 
 const page = (body) => `export default function Page() { return <>${body}</>; }\n`;
-const sidebar = (...hrefs) =>
-  `export const NAV = [\n${hrefs.map((h) => `  { href: '${h}', label: 'x' },`).join('\n')}\n];\n`;
+/** A docs nav: index.ts aggregating one area file that lists `hrefs` (from its line 2). */
+const nav = (...hrefs) => ({
+  'docs-site/components/nav/index.ts':
+    "import type { NavSection } from './types.ts';\nimport { areaGroups } from './area.ts';\n" +
+    "export const NAV: NavSection[] = [{ title: 'Area', description: '', groups: areaGroups }];\n",
+  'docs-site/components/nav/area.ts':
+    `export const areaGroups = [{ items: [\n${hrefs.map((h) => `  { href: '${h}', label: 'x' },`).join('\n')}\n] }];\n`,
+});
 const pending = new Set(['/docs/guides/soon']);
 
 test('the docs site has no dead links, orphans or nav links to pending pages', () => {
@@ -34,21 +40,21 @@ test('the docs site has no dead links, orphans or nav links to pending pages', (
   assert.deepEqual(errors, []);
 });
 
-test('a sidebar entry for a pending page is an error, not a warning', (t) => {
+test('a nav entry for a pending page is an error, not a warning', (t) => {
   const site = fixture(t, {
     'docs-site/app/docs/intro/page.tsx': page('<h1>Intro</h1>'),
-    'docs-site/components/Sidebar.tsx': sidebar('/docs/intro', '/docs/guides/soon'),
+    ...nav('/docs/intro', '/docs/guides/soon'),
   });
   const { errors, warnings } = checkLinks({ ...site, pending });
   assert.equal(errors.length, 1, errors.join('\n'));
-  assert.match(errors[0], /components\/Sidebar\.tsx:3: \/docs\/guides\/soon - pending page/);
+  assert.match(errors[0], /components\/nav\/area\.ts:3: \/docs\/guides\/soon - pending page/);
   assert.deepEqual(warnings, []);
 });
 
 test('a page body may forward-reference a pending page (warning only)', (t) => {
   const site = fixture(t, {
     'docs-site/app/docs/intro/page.tsx': page('<a href="/docs/guides/soon">Soon</a>'),
-    'docs-site/components/Sidebar.tsx': sidebar('/docs/intro'),
+    ...nav('/docs/intro'),
   });
   const { errors, warnings } = checkLinks({ ...site, pending });
   assert.deepEqual(errors, []);
@@ -60,22 +66,22 @@ test('repository markdown may not link a pending page', (t) => {
   const site = fixture(t, {
     'README.md': 'See [soon](https://giojs.com/docs/guides/soon).\n',
     'docs-site/app/docs/intro/page.tsx': page('<h1>Intro</h1>'),
-    'docs-site/components/Sidebar.tsx': sidebar('/docs/intro'),
+    ...nav('/docs/intro'),
   });
   const { errors } = checkLinks({ ...site, pending });
   assert.equal(errors.length, 1, errors.join('\n'));
   assert.match(errors[0], /^README\.md:1: \/docs\/guides\/soon - pending page/);
 });
 
-test('a pending page that landed: stale PENDING warns, a missing sidebar entry errors', (t) => {
+test('a pending page that landed: stale PENDING warns, a missing nav entry errors', (t) => {
   const site = fixture(t, {
     'docs-site/app/docs/intro/page.tsx': page('<a href="/docs/guides/soon">Soon</a>'),
     'docs-site/app/docs/guides/soon/page.tsx': page('<h1>Soon</h1>'),
-    'docs-site/components/Sidebar.tsx': sidebar('/docs/intro'),
+    ...nav('/docs/intro'),
   });
   const { errors, warnings } = checkLinks({ ...site, pending });
   assert.equal(errors.length, 1, errors.join('\n'));
-  assert.match(errors[0], /\/docs\/guides\/soon is not linked from components\/Sidebar\.tsx/);
+  assert.match(errors[0], /\/docs\/guides\/soon is not in the docs nav/);
   assert.equal(warnings.length, 1, warnings.join('\n'));
   assert.match(warnings[0], /\/docs\/guides\/soon exists now - remove it from PENDING/);
 });
@@ -87,11 +93,34 @@ test('dead links, missing anchors and orphan pages are errors; code samples are 
         '<a href="/docs/intro#missing">y</a><CodeBlock code={`<a href="/docs/sample">`} />',
     ),
     'docs-site/app/docs/orphan/page.tsx': page('<h1>Orphan</h1>'),
-    'docs-site/components/Sidebar.tsx': sidebar('/docs/intro'),
+    ...nav('/docs/intro'),
   });
   const { errors } = checkLinks({ ...site, pending });
   assert.equal(errors.length, 3, errors.join('\n'));
   assert.ok(errors.some((e) => /\/docs\/nope - no such page/.test(e)), errors.join('\n'));
   assert.ok(errors.some((e) => /page \/docs\/intro has no id="missing"/.test(e)), errors.join('\n'));
-  assert.ok(errors.some((e) => /\/docs\/orphan is not linked from components\/Sidebar\.tsx/.test(e)));
+  assert.ok(errors.some((e) => /\/docs\/orphan is not in the docs nav/.test(e)));
+});
+
+test('a page listed twice in the nav is an error', (t) => {
+  const site = fixture(t, {
+    'docs-site/app/docs/intro/page.tsx': page('<h1>Intro</h1>'),
+    ...nav('/docs/intro', '/docs/intro'),
+  });
+  const { errors } = checkLinks({ ...site, pending });
+  assert.equal(errors.length, 1, errors.join('\n'));
+  assert.match(errors[0], /area\.ts:3: \/docs\/intro is already in the nav \(components\/nav\/area\.ts:2\)/);
+});
+
+test('a nav file index.ts does not import is an error, and its pages count as missing', (t) => {
+  const site = fixture(t, {
+    'docs-site/app/docs/intro/page.tsx': page('<h1>Intro</h1>'),
+    'docs-site/app/docs/extra/page.tsx': page('<h1>Extra</h1>'),
+    ...nav('/docs/intro'),
+    'docs-site/components/nav/forgotten.ts': "export const forgottenGroups = [{ items: [{ href: '/docs/extra', label: 'x' }] }];\n",
+  });
+  const { errors } = checkLinks({ ...site, pending });
+  assert.equal(errors.length, 2, errors.join('\n'));
+  assert.ok(errors.some((e) => /nav\/forgotten\.ts: nav file not imported by components\/nav\/index\.ts/.test(e)));
+  assert.ok(errors.some((e) => /\/docs\/extra is not in the docs nav/.test(e)));
 });
