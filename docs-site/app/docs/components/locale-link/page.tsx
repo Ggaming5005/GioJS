@@ -30,13 +30,13 @@ export default function Page(): React.JSX.Element {
           name: 'href',
           type: 'string',
           required: true,
-          description: <>The path without a locale prefix, starting with <code>/</code>.</>,
+          description: <>The path without a locale prefix, starting with <code>/</code>. Other URLs pass through unchanged (see <a href="#behavior">Behavior</a>).</>,
         },
         {
           name: 'defaultLocale',
           type: 'string',
-          default: "'en'",
-          description: <>The locale that gets no prefix. Set it to your <code>[i18n] default_locale</code> when that is not <code>en</code>.</>,
+          default: '[i18n] default_locale',
+          description: <>The locale that gets no prefix. Leave it out: it is read from <code>gio.toml</code>. Pass it only to override that for one link.</>,
         },
         {
           name: 'className',
@@ -54,11 +54,18 @@ export default function Page(): React.JSX.Element {
       <h3 id="behavior">Behavior</h3>
       <p>
         The locale comes from <a href="/docs/hooks/use-locale"><code>useLocale()</code></a>.
-        When it is not empty and differs from <code>defaultLocale</code>, the link points at{' '}
-        <code>/&lt;locale&gt;&lt;href&gt;</code>; otherwise at <code>href</code> unchanged. The
-        result is a <a href="/docs/components/gio-link"><code>&lt;GioLink&gt;</code></a> with its
-        defaults: client-side navigation and hover prefetch. The locale is known during server
-        rendering, so the prefixed <code>href</code> is already in the HTML.
+        When it is not empty and differs from <code>defaultLocale</code>, a path that starts with{' '}
+        <code>/</code> gets <code>/&lt;locale&gt;</code> in front. Everything else is used as
+        written: absolute URLs (<code>https:</code>, <code>mailto:</code>), protocol-relative ones
+        (<code>//cdn.example.com</code>), relative paths, <code>?query</code> and{' '}
+        <code>#hash</code> hrefs, and paths whose first segment already is one of your{' '}
+        <code>locales</code>. The result is a{' '}
+        <a href="/docs/components/gio-link"><code>&lt;GioLink&gt;</code></a> with its defaults:
+        client-side navigation and hover prefetch. The locale is known during server rendering, so
+        the prefixed <code>href</code> is already in the HTML.
+      </p>
+      <p>
+        With <code>default_locale = &quot;en&quot;</code>:
       </p>
       <table>
         <thead><tr><th>Request locale</th><th><code>href</code></th><th>Rendered</th></tr></thead>
@@ -67,8 +74,18 @@ export default function Page(): React.JSX.Element {
           <tr><td><code>en</code> (the default)</td><td><code>/pricing</code></td><td><code>/pricing</code></td></tr>
           <tr><td><code>fr</code></td><td><code>/pricing</code></td><td><code>/fr/pricing</code></td></tr>
           <tr><td><code>fr</code></td><td><code>/</code></td><td><code>/fr/</code></td></tr>
+          <tr><td><code>fr</code></td><td><code>/de/preise</code></td><td><code>/de/preise</code></td></tr>
+          <tr><td><code>fr</code></td><td><code>https://example.com/</code></td><td><code>https://example.com/</code></td></tr>
         </tbody>
       </table>
+      <p>
+        The default locale is <code>[i18n] default_locale</code>. The server hands the{' '}
+        <code>[i18n]</code> settings to the worker, and every hydration envelope of an app with{' '}
+        <code>locales</code> carries them to the browser, so the server HTML and the hydrated link
+        agree. A <code>LocaleLink</code> rendered outside a GioJS page tree (in a React root of your
+        own) reads <code>window.__GIO_DEFAULT_LOCALE__</code>, which the server puts in every page,
+        and falls back to <code>en</code> without it.
+      </p>
       <p>
         The request locale is what the server detected: the URL prefix, the{' '}
         <code>Accept-Language</code> header or the <code>gio_locale</code> cookie, in the order{' '}
@@ -87,8 +104,8 @@ default_locale = "de"`} />
 export function Nav() {
   return (
     <nav>
-      <LocaleLink href="/" defaultLocale="de">Start</LocaleLink>
-      <LocaleLink href="/preise" defaultLocale="de">Preise</LocaleLink>
+      <LocaleLink href="/">Start</LocaleLink>
+      <LocaleLink href="/preise">Preise</LocaleLink>
     </nav>
   );
 }`} />
@@ -128,15 +145,19 @@ export function LanguageSwitcher() {
       <h2 id="good-to-know">Good to know</h2>
       <ul>
         <li>
-          <code>defaultLocale</code> is not read from <code>gio.toml</code>. With{' '}
-          <code>default_locale = &quot;de&quot;</code> and no prop, German pages link to{' '}
-          <code>/de/...</code>: it still works, but every link carries a prefix.
+          German pages of a site with <code>default_locale = &quot;de&quot;</code> link to{' '}
+          <code>/preise</code>, English ones to <code>/en/preise</code> - no prop needed.
         </li>
         <li>
-          Pass a path without a prefix. An <code>href</code> that already has one, a relative
-          path or another site&apos;s URL is prefixed all the same (<code>/fr/fr/...</code>,{' '}
-          <code>/frhttps://...</code>). Use <code>&lt;GioLink&gt;</code> or{' '}
-          <code>&lt;a&gt;</code> for those.
+          A path that already starts with a locale is left alone, so{' '}
+          <code>&lt;LocaleLink href=&quot;/de/preise&quot;&gt;</code> always points at the German
+          page. Matching is exact, as for the URL prefix itself: <code>/english</code> is a path,
+          not the <code>en</code> locale.
+        </li>
+        <li>
+          <a href="/docs/functions/render-page"><code>renderPage</code></a> runs no <code>[i18n]</code>: there
+          the default locale is <code>en</code>, so pass <code>defaultLocale</code> in tests of a
+          site whose default is another one.
         </li>
         <li>
           Only <code>href</code>, <code>defaultLocale</code>, <code>className</code> and{' '}
@@ -163,7 +184,7 @@ export function LanguageSwitcher() {
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>The prefixed <code>href</code> is rendered on the server, since <code>useLocale()</code> returns the request locale there.</> },
+        { version: 'v0.1.0-beta.8', changes: <>The prefixed <code>href</code> is rendered on the server, since <code>useLocale()</code> returns the request locale there. <code>defaultLocale</code> defaults to <code>[i18n] default_locale</code> instead of <code>&apos;en&apos;</code>. Absolute, protocol-relative and relative URLs, <code>?query</code> and <code>#hash</code> hrefs and paths that already start with a locale are no longer prefixed.</> },
         { version: 'v0.1.0-beta.1', changes: 'Introduced.' },
       ]} />
     </>

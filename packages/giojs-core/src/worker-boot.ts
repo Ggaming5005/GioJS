@@ -12,6 +12,7 @@ import { createWsIpcServer } from './ws-ipc.ts';
 import { NodePluginRegistry, type GioNodePlugin } from './plugin.ts';
 import { logger } from './logger.ts';
 import { imageConfigFromEnv, installImageConfig } from './image-config.ts';
+import { i18nConfigFromEnv, installI18nConfig } from './i18n-config.ts';
 import { parentWatchEnabled, watchParent } from './parent-watch.ts';
 import type net from 'node:net';
 import type {
@@ -135,6 +136,8 @@ export async function startPluginRegistry(
 export function startIpcServers(components: WorkerComponents): void {
   // GIO_IMAGE_CONFIG comes from Rust: the widths /_gio/image accepts.
   installImageConfig(imageConfigFromEnv(process.env));
+  // GIO_I18N_CONFIG: the default locale <LocaleLink> leaves unprefixed.
+  installI18nConfig(i18nConfigFromEnv(process.env));
   const httpServer = createIPCServer(
     components.routes,
     components.layouts,

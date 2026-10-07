@@ -591,6 +591,11 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             config::WORKER_CSS_CONFIG_ENV.to_string(),
             cfg.css.worker_json(),
         ),
+        // <LocaleLink> leaves [i18n] default_locale unprefixed.
+        (
+            config::WORKER_I18N_CONFIG_ENV.to_string(),
+            cfg.i18n.worker_json(),
+        ),
     ];
 
     // Every refusal that depends on more than gio.toml's syntax, before

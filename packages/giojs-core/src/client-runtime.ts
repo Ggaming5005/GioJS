@@ -52,6 +52,8 @@ export interface GioEnvelope {
   locale: string;
   /** image-config.ts ImageRenderConfig, opaque here. */
   images?: Record<string, unknown>;
+  /** i18n-config.ts I18nRenderConfig (apps with `[i18n] locales`), opaque here. */
+  i18n?: Record<string, unknown>;
   /** The page's head tags (metadata-tags.ts). */
   metadata?: MetadataTag[];
 }
@@ -116,6 +118,9 @@ function readEnvelope(): GioEnvelope | null {
       ...(typeof env['images'] === 'object' && env['images'] !== null
         ? { images: env['images'] as Record<string, unknown> }
         : {}),
+      ...(typeof env['i18n'] === 'object' && env['i18n'] !== null
+        ? { i18n: env['i18n'] as Record<string, unknown> }
+        : {}),
       ...(Array.isArray(env['metadata']) ? { metadata: sanitizeMetadataTags(env['metadata']) } : {}),
     };
   } catch {
@@ -136,11 +141,14 @@ function navigationState(envelope: GioEnvelope): GioNavigationState {
 /**
  * The route's tree with its metadata head tags in front, at the boundary's
  * useId tree position (`treeId`), inside the navigation provider, image
- * config installed.
+ * and i18n config installed.
  */
 function routeElement(envelope: GioEnvelope, build: BuildFn, treeId: string | null): React.ReactNode {
   if (envelope.images !== undefined) {
     (globalThis as Record<string, unknown>)['__GIO_IMAGES__'] = envelope.images;
+  }
+  if (envelope.i18n !== undefined) {
+    (globalThis as Record<string, unknown>)['__GIO_I18N__'] = envelope.i18n;
   }
   return withNavigation(
     navigationState(envelope),

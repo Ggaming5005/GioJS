@@ -19,7 +19,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'n
 import { createHmac, hkdfSync } from 'node:crypto';
 import { connect, createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -2932,12 +2932,34 @@ async function opsPhase() {
     "import React from 'react';\nexport const revalidate = 300;\n" +
       'export default function Hello() {\n  return <p>OPS_HELLO rendered_at={Date.now()}</p>;\n}\n',
   );
+  // A root layout that writes its own lang, as most do, and LocaleLinks
+  // with no defaultLocale prop.
+  await writeFile(
+    join(workDir, 'app', 'layout.tsx'),
+    "import React from 'react';\n" +
+      'export default function Root({ children }: { children: React.ReactNode }) {\n' +
+      '  return <html lang="en"><head><meta charSet="utf-8" /></head><body>{children}</body></html>;\n}\n',
+  );
+  await mkdir(join(workDir, 'app', 'links'), { recursive: true });
+  const localeLinkModule = relative(
+    join(workDir, 'app', 'links'),
+    join(repoRoot, 'packages', 'giojs-react', 'src', 'LocaleLink.tsx'),
+  ).split('\\').join('/');
+  await writeFile(
+    join(workDir, 'app', 'links', 'page.tsx'),
+    `import React from 'react';\nimport { LocaleLink } from '${localeLinkModule}';\n` +
+      'export default function Links() {\n' +
+      '  return <nav><LocaleLink href="/x">x</LocaleLink><LocaleLink href="/de/y">y</LocaleLink>' +
+      '<LocaleLink href="https://example.com/z">z</LocaleLink></nav>;\n}\n',
+  );
   await linkFixtureDeps(workDir);
   await writeFile(join(workDir, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
   await writeFile(
     join(workDir, 'gio.toml'),
     '[server]\nhost = "127.0.0.1"\nport = 39517\nhttp2 = false\n\n[logging]\nformat = "json"\n\n' +
-      '[i18n]\nlocales = ["en", "de"]\ndefault_locale = "en"\ndetect_from = ["path", "accept-language"]\n',
+      // Not `en`, and with a mixed-case locale: what LocaleLink and
+      // Accept-Language detection must get right.
+      '[i18n]\nlocales = ["en", "de", "pt-BR"]\ndefault_locale = "pt-BR"\ndetect_from = ["path", "accept-language"]\n',
   );
 
   let log = '';
@@ -3000,7 +3022,8 @@ async function opsPhase() {
       const hit = await fetch(`${BASE}/de/hello`);
       const body = await hit.text();
       assert.match(body, /OPS_HELLO/);
-      assert.match(body, /<html[^>]* lang="de"/);
+      // The locale replaces the root layout's lang="en" - never a second one.
+      assert.match(body, /<html lang="de">/);
       assert.match(hit.headers.get('x-gio-cache') ?? '', /^hit/);
       assert.match(hit.headers.get('cache-control') ?? '', /^public, max-age=0, s-maxage=\d+/);
       const etag = hit.headers.get('etag');
@@ -3018,6 +3041,37 @@ async function opsPhase() {
         assert.equal(negotiated.headers.get('cache-control'), 'private, no-cache', language);
         assert.equal(negotiated.headers.get('etag'), null, language);
       }
+    });
+
+    await test('i18n: LocaleLink defaults to [i18n] default_locale; Accept-Language q-values and spelling', async () => {
+      const links = async (path, headers = {}) => {
+        const res = await fetch(`${BASE}${path}`, { headers });
+        assert.equal(res.status, 200, path);
+        const html = await res.text();
+        return {
+          html,
+          hrefs: [...html.matchAll(/<a [^>]*href="([^"]*)"/g)].map((m) => m[1]),
+          htmlTag: /<html[^>]*>/.exec(html)?.[0],
+        };
+      };
+      // A non-default locale: prefixed, but not an href that has a locale
+      // already or is another site's URL.
+      const de = await links('/de/links');
+      assert.deepEqual(de.hrefs, ['/de/x', '/de/y', 'https://example.com/z']);
+      assert.equal(de.htmlTag, '<html lang="de">');
+      // The browser gets the same config, so hydration renders these hrefs.
+      assert.match(de.html, /"i18n":\{"locales":\["en","de","pt-BR"\],"defaultLocale":"pt-BR"\}/);
+      assert.match(de.html, /window\.__GIO_DEFAULT_LOCALE__="pt-BR"/);
+      // The default locale gets no prefix, though it is not `en`.
+      assert.deepEqual((await links('/pt-BR/links')).hrefs, ['/x', '/de/y', 'https://example.com/z']);
+      // Accept-Language: the configured spelling, whatever the header's case.
+      assert.deepEqual((await links('/links', { 'accept-language': 'pt-br' })).hrefs[0], '/x');
+      assert.equal((await links('/links', { 'accept-language': 'en' })).hrefs[0], '/en/x');
+      // ...and the highest q-value wins, not the first written.
+      const byQ = await links('/links', { 'accept-language': 'de;q=0.1, en;q=0.9' });
+      assert.equal(byQ.hrefs[0], '/en/x');
+      assert.equal(byQ.htmlTag, '<html lang="en">');
+      assert.equal((await links('/links', { 'accept-language': 'en;q=0, de' })).hrefs[0], '/de/x');
     });
 
     if (process.platform !== 'win32') {

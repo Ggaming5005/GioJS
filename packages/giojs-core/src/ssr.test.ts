@@ -22,6 +22,7 @@ import {
   UnsupportedMediaTypeError,
 } from './request-body.ts';
 import { installImageConfig, installedImageConfig } from './image-config.ts';
+import { installI18nConfig } from './i18n-config.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import { pumpRenderStream } from './ipc.ts';
 import type { IPCRequest } from './context.ts';
@@ -551,6 +552,27 @@ describe('hydration envelope', () => {
       expect(renderSaw).toEqual(images);
     } finally {
       installImageConfig(installed);
+    }
+  });
+
+  it('carries the [i18n] config of an app with locales, so LocaleLink hrefs hydrate unchanged', async () => {
+    const routes = makeRoute('/');
+    const render = async (): Promise<string> => {
+      const result = await renderRoute(
+        makeRequest('/'), routes, noLayouts, undefined, undefined, new Map([['/', '/e.js']]),
+      );
+      return 'body' in result ? result.body : '';
+    };
+    try {
+      installI18nConfig({ locales: ['de', 'pt-BR'], defaultLocale: 'de' });
+      expect(await render()).toContain('"i18n":{"locales":["de","pt-BR"],"defaultLocale":"de"}');
+      // i18n off: nothing to carry.
+      installI18nConfig({ locales: [], defaultLocale: 'en' });
+      expect(await render()).not.toContain('"i18n"');
+      installI18nConfig(null);
+      expect(await render()).not.toContain('"i18n"');
+    } finally {
+      installI18nConfig(null);
     }
   });
 

@@ -80,6 +80,7 @@ import {
 } from './action.ts';
 import { parseCookies } from './cookies.ts';
 import { installedImageConfig, type ImageRenderConfig } from './image-config.ts';
+import { installedI18nConfig, type I18nRenderConfig } from './i18n-config.ts';
 import { searchFromQuery, withNavigation, type GioNavigationState } from './navigation-context.ts';
 import {
   dedupeHeadTitles,
@@ -624,6 +625,8 @@ export function serializeEnvelope(envelope: {
   entry: string;
   /** The `<GioImage>` config the server rendered with, for identical srcsets. */
   images?: ImageRenderConfig;
+  /** The `<LocaleLink>` config (an app with `[i18n] locales` only). */
+  i18n?: I18nRenderConfig;
   /** Route info: the client runtime provides the same navigation context. */
   params?: Record<string, string>;
   search?: string;
@@ -1017,6 +1020,8 @@ async function answerRoute(
     const navigation = navigationStateFor(req, pattern, match.params);
     // Installed before rendering: <GioImage> reads it during the render.
     const images = installedImageConfig();
+    // The default locale <LocaleLink> leaves unprefixed, for the browser too.
+    const i18n = installedI18nConfig();
     // Static export passes the manifest of its own build (export.ts).
     const entryScript = clientScripts?.get(pattern);
     const envelopeJson =
@@ -1027,6 +1032,7 @@ async function answerRoute(
             pattern,
             entry: entryScript,
             images,
+            ...(i18n !== null ? { i18n } : {}),
             params: navigation.params,
             search: navigation.search,
             locale: navigation.locale,

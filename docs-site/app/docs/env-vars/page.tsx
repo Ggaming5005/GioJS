@@ -426,7 +426,7 @@ GIO_PORT=4000 GIO_LOG_FORMAT=json npx gio start`} />
         </thead>
         <tbody>
           <tr><td><code>GIO_IPC_TOKEN</code></td><td>The per-start secret the worker proves itself with on the IPC sockets.</td></tr>
-          <tr><td><code>GIO_IMAGE_CONFIG</code>, <code>GIO_CSS_CONFIG</code></td><td><code>[images]</code> and <code>[css]</code> as JSON, for <code>&lt;GioImage&gt;</code> srcsets and the stylesheet build. Both are hashed into the derived deployment ID.</td></tr>
+          <tr><td><code>GIO_IMAGE_CONFIG</code>, <code>GIO_CSS_CONFIG</code>, <code>GIO_I18N_CONFIG</code></td><td><code>[images]</code>, <code>[css]</code> and <code>[i18n]</code> as JSON, for <code>&lt;GioImage&gt;</code> srcsets, the stylesheet build and the default locale <code>&lt;LocaleLink&gt;</code> leaves unprefixed. All three are hashed into the derived deployment ID.</td></tr>
           <tr><td><code>GIO_CSP_NONCE_PLACEHOLDER</code></td><td>The secret placeholder the worker renders where a CSP nonce goes; the server swaps it for a fresh nonce per response.</td></tr>
           <tr><td><code>GIO_SESSION_SECRET_EPHEMERAL</code></td><td><code>1</code> when <code>GIO_SESSION_SECRET</code> is the dev server&apos;s generated one.</td></tr>
           <tr><td><code>GIO_BUILD_ID</code>, <code>GIO_REUSE_BUILD</code></td><td>Let pool workers load the first worker&apos;s client build instead of bundling again.</td></tr>

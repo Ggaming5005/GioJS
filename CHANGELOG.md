@@ -998,6 +998,15 @@ first.
 - Pages in a non-default locale rendered `<html lang="de" lang="en">`: the
   server added the request locale's `lang` next to the root layout's own,
   and browsers keep the first. The root layout's `lang` is now replaced.
+- `<LocaleLink>` left only `en` unprefixed unless every link passed
+  `defaultLocale`: with `[i18n] default_locale = "de"`, German pages linked
+  to `/de/...`. Its default is now `default_locale` - the server hands
+  `[i18n]` to the worker (`GIO_I18N_CONFIG`) and the hydration envelope
+  carries it to the browser, so both render the same `href` - and an
+  explicit `defaultLocale` still wins. It also prefixed every `href`
+  blindly (`/fr/fr/x`, `/frhttps://...`): absolute and protocol-relative
+  URLs, relative paths, `?query` and `#hash` hrefs and paths that already
+  start with a configured locale are now left as they are.
 - A standalone build whose app had a module that throws while it is imported
   (a missing `GIO_SESSION_SECRET`) never started: `worker.js` evaluated every
   module at load, the worker died and the server gave up with
