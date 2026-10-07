@@ -93,8 +93,8 @@ keep-alive: timeout=10`} />
           <tr><td><code>hit; ttl=&lt;secs&gt;</code></td><td>Served from the Rust page cache without Node; <code>ttl</code> is the seconds until the entry goes stale.</td></tr>
           <tr><td><code>stale; age=&lt;secs&gt;; revalidating</code></td><td>Served from the cache past its <code>revalidate</code> while one background render refreshes it; <code>age</code> is seconds since it was rendered.</td></tr>
           <tr><td><code>miss; stored</code></td><td>Rendered by the worker and stored; the next request is a hit.</td></tr>
-          <tr><td><code>bypass</code></td><td>Rendered (or refused) and not stored: no <code>revalidate</code>, not <code>GET</code>/<code>HEAD</code>, personal, a route handler, the page cache off (<code>[cache] enabled = false</code>), a worker error (<code>500</code>, <code>504</code>), a <code>400</code> for a malformed path, or a CSRF <code>403</code>.</td></tr>
-          <tr><td><code>static</code></td><td>Answered without the page pipeline: <code>public/</code> files, <code>/_next/static</code> assets, and the server&apos;s own early refusals (a rate-limit <code>429</code>, a skew <code>409</code>).</td></tr>
+          <tr><td><code>bypass</code></td><td>Rendered (or refused) and not stored: no <code>revalidate</code>, not <code>GET</code>/<code>HEAD</code>, personal, a route handler, the page cache off (<code>[cache] enabled = false</code>), a worker error (<code>500</code>, <code>504</code>), a rule redirect, or one of the server&apos;s own refusals (a <code>400</code> for a malformed path, a CSRF <code>403</code>, a rate-limit <code>429</code>, a refused prefetch&apos;s <code>429</code>, a skew <code>409</code>).</td></tr>
+          <tr><td><code>static</code></td><td>A file, answered without the page pipeline: <code>public/</code> files, <code>/_next/static</code> assets, the CSS compiled at startup, and the self-hosted fonts under <code>/_gio/fonts/</code>.</td></tr>
           <tr><td><code>ppr; shell=stored</code></td><td>A <a href="/docs/page-exports/shell">PPR</a> page rendered in full; its shell was captured and stored.</td></tr>
           <tr><td><code>ppr; shell=hit</code></td><td>The cached shell was sent at once and the holes streamed behind it.</td></tr>
           <tr><td><code>ppr; shell=stale; age=&lt;secs&gt;; revalidating</code></td><td>A stale shell sent while a background render refreshes it.</td></tr>
@@ -102,7 +102,8 @@ keep-alive: timeout=10`} />
         </tbody>
       </table>
       <p>
-        The other <code>/_gio</code> endpoints and <code>101</code> WebSocket upgrades carry no{' '}
+        The other <code>/_gio</code> endpoints (everything but <code>/_gio/fonts/</code>{' '}
+        and <code>/_gio/image</code>) and <code>101</code> WebSocket upgrades carry no{' '}
         <code>X-Gio-Cache</code>. The <code>cache</code> label of{' '}
         <code>gio_requests_total</code> uses similar words with its own meaning: there, a
         render the worker answered is a <code>miss</code> whether it was stored or not (see{' '}
@@ -240,17 +241,18 @@ referrer-policy: strict-origin-when-cross-origin`} />
       <h3 id="x-ratelimit-limit">X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After</h3>
       <p>
         On a request that a <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a>{' '}
-        rule covers, the response carries the rule&apos;s <code>per_ip</code> as{' '}
-        <code>X-RateLimit-Limit</code>, and in <code>X-RateLimit-Remaining</code> the
-        requests the client has left. Remaining counts the rule&apos;s <code>burst</code> too
-        (default <code>20</code>), so it can be higher than the limit: a fresh client of a{' '}
-        <code>per_ip = 3</code> rule sees <code>3</code> and <code>22</code>. Over the
-        limit, the server answers before any app code runs:
+        rule covers, the response carries the size of the client&apos;s bucket,{' '}
+        <code>per_ip + burst</code>, as <code>X-RateLimit-Limit</code>, and in{' '}
+        <code>X-RateLimit-Remaining</code> the requests the client has left right now (never
+        more than the limit), so <code>Limit - Remaining</code> is what it has used. A fresh
+        client of a <code>per_ip = 3</code> rule with the default <code>burst = 20</code> sees{' '}
+        <code>23</code> and <code>22</code>. Over the limit, the server answers before any app
+        code runs:
       </p>
       <CodeBlock lang="text" code={`HTTP/1.1 429 Too Many Requests
 content-type: application/json
 retry-after: 20
-x-ratelimit-limit: 3
+x-ratelimit-limit: 23
 x-ratelimit-remaining: 0
 x-gio-refused: unread
 
@@ -299,7 +301,10 @@ x-gio-refused: unread
       <p>
         <code>&lt;GioLink&gt;</code> and <code>router.prefetch()</code> send{' '}
         <code>Purpose: prefetch</code> and <code>Sec-Purpose: prefetch</code>. The server
-        treats a request with either as a prefetch: it counts against the client&apos;s{' '}
+        treats a request with either as a prefetch, and reads both as lists whose items may
+        carry parameters, so a browser&apos;s speculation-rules prerender (
+        <code>Sec-Purpose: prefetch;prerender</code>) counts too: it counts against the
+        client&apos;s{' '}
         <a href="/docs/configuration/prefetch"><code>[prefetch]</code></a> budget (
         <code>max_concurrent</code>, <code>max_per_second</code>), and over budget, or with{' '}
         <code>[prefetch] enabled = false</code>, it is refused with an empty{' '}
@@ -385,6 +390,14 @@ x-gio-refused: unread
         leaving out one set to <code>0</code>. With both at <code>0</code> the header is not
         sent. Clients that honor it stop reusing the socket first, instead of racing the
         server&apos;s close. Keep a proxy&apos;s upstream idle timeout below it.
+      </p>
+      <p>
+        The value is always the server&apos;s: a <code>Keep-Alive</code> or{' '}
+        <code>Connection</code> header a page or <code>route.ts</code> sets is dropped,
+        like the other connection-specific headers (<code>Transfer-Encoding</code>,{' '}
+        <code>Upgrade</code>, <code>TE</code>, <code>Trailer</code>,{' '}
+        <code>Proxy-Connection</code>), which describe one hop and are not allowed on
+        HTTP/2.
       </p>
 
       <h2 id="examples">Examples</h2>
@@ -476,7 +489,15 @@ export function GET(req: GioRequest) {
               router sends <code>x-deployment-id</code> on every navigation, prefetch,
               refresh and form post; <code>[server] skew_protection</code> turns the{' '}
               <code>409</code> off. Forwarding headers read only from{' '}
-              <code>trusted_proxies</code>.
+              <code>trusted_proxies</code>. <code>X-RateLimit-Limit</code> is the bucket
+              size, <code>per_ip + burst</code> (it was <code>per_ip</code>, below what{' '}
+              <code>X-RateLimit-Remaining</code> could show). The server&apos;s own
+              refusals carry <code>X-Gio-Cache: bypass</code> instead of{' '}
+              <code>static</code>, and self-hosted fonts carry <code>static</code>.{' '}
+              <code>Sec-Purpose: prefetch;prerender</code> counts as a prefetch. Server-sent
+              event streams no longer repeat <code>Cache-Control</code>, and no response
+              forwards a <code>Connection</code> or <code>Keep-Alive</code> header the app
+              set.
             </>
           ),
         },

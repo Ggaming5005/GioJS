@@ -45,7 +45,7 @@ const SWITCHES: { what: string; key: string; href: string; on: string; off: stri
   { what: 'Connection cap', key: '[server] max_connections', href: '/docs/configuration/server', on: '10000', off: '0', lose: 'A connection flood can exhaust file descriptors and memory.', warns: true },
   { what: 'Connection timeouts', key: '[server] *_timeout_secs', href: '/docs/configuration/server', on: '10 to 60', off: '0', lose: 'Slow or idle clients can hold connections open.', warns: false },
   { what: 'Render timeout', key: '[server] render_timeout_secs', href: '/docs/configuration/server', on: '30', off: '0', lose: 'A render that never answers holds its connection and a worker.', warns: true },
-  { what: 'HTTP/2', key: '[server] http2', href: '/docs/configuration/server', on: 'true', off: 'false', lose: 'Clients speak HTTP/1.1 only (keep it on with TLS: a known issue).', warns: false },
+  { what: 'HTTP/2', key: '[server] http2', href: '/docs/configuration/server', on: 'true', off: 'false', lose: 'Clients speak HTTP/1.1 only (with TLS, ALPN offers only http/1.1).', warns: false },
   { what: 'Skew protection', key: '[server] skew_protection', href: '/docs/configuration/server', on: 'true', off: 'false', lose: 'Old clients keep navigating softly against a new deployment.', warns: true },
   { what: 'Trusting no proxy', key: '[server] trusted_proxies', href: '/docs/configuration/server', on: '[]', off: '["0.0.0.0/0"]', lose: 'Any client can pick its own IP, rate-limit bucket and request id.', warns: true },
   { what: 'Rate-limit memory cap', key: '[server] rate_limit_max_buckets', href: '/docs/configuration/server', on: '100000', off: '0', lose: 'Clients rotating addresses grow memory without bound.', warns: true },

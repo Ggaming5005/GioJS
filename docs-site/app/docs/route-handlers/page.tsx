@@ -194,7 +194,9 @@ export function GET() {
         <li>
           A body that is already complete when you return it - a string, a buffer, JSON, a
           stream that closes without waiting - and is at most 1 MiB is sent buffered, with a{' '}
-          <code>Content-Length</code>. Anything else streams with chunked encoding. A{' '}
+          <code>Content-Length</code> (unless it is compressed: a compressed body&apos;s size is
+          only known once it is sent, so it goes out chunked). Anything else streams with chunked
+          encoding. A{' '}
           <code>text/event-stream</code> body always streams, is never compressed (compression
           would hold events back), and gets <code>Cache-Control: no-cache</code> unless you set
           one.

@@ -762,6 +762,22 @@ async function main() {
       controller.abort();
     });
 
+    await test('SSE heads carry Cache-Control once and no Connection header', async () => {
+      const head = await new Promise((resolve, reject) => {
+        const req = httpRequest({ host: '127.0.0.1', port: 39517, path: '/stream' }, (res) => {
+          resolve(res.rawHeaders);
+          res.destroy();
+        });
+        req.on('error', reject);
+        req.end();
+      });
+      const values = (name) => head.filter((_, i) => i % 2 === 1 && head[i - 1].toLowerCase() === name);
+      assert.deepEqual(values('content-type'), ['text/event-stream']);
+      assert.deepEqual(values('cache-control'), ['no-cache']);
+      // Connection-specific, and illegal on HTTP/2.
+      assert.deepEqual(values('connection'), []);
+    });
+
     await test('SSE streams outlive header_read_timeout_secs', async () => {
       // The fixture's 2s head deadline must never cut an established stream.
       const controller = new AbortController();
@@ -805,6 +821,19 @@ async function main() {
         rest += decoder.decode(value, { stream: true });
       }
       assert.match(rest, /data: second/, 'the stream ends after its last event');
+    });
+
+    await test('route.ts Connection and Keep-Alive headers never reach the client', async () => {
+      // The handler sets `keep-alive: timeout=99`: forwarded, it replaced the
+      // server's hint while the server still closed idle sockets on its own.
+      for (const path of ['/api/hop-headers', '/api/hop-headers?stream=1']) {
+        const res = await rawRequest('GET', path);
+        assert.equal(res.status, 200, path);
+        assert.equal(res.headers['x-app'], 'kept', path);
+        assert.equal(res.headers.connection, undefined, path);
+        assert.match(res.headers['keep-alive'] ?? '', /^timeout=\d+$/, path);
+        assert.notEqual(res.headers['keep-alive'], 'timeout=99', path);
+      }
     });
 
     await test('a streamed route.ts HTML body without a head arrives chunk by chunk', async () => {
@@ -1069,6 +1098,22 @@ async function main() {
       // X-Gio-Cache narrates the tier transitions.
       assert.match(firstRes.headers.get('x-gio-cache') ?? '', /^miss; stored$/);
       assert.match(secondRes.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/);
+    });
+
+    await test('buffered responses carry a Content-Length, compressed ones none', async () => {
+      // After the cache test above: /cached is stored.
+      const hit = await rawGet('/cached');
+      assert.match(hit.headers['x-gio-cache'] ?? '', /^hit/);
+      // A small route body, a cache hit and /_gio/health: each body is known
+      // in full, below the compression threshold or not asked to compress.
+      for (const res of [hit, await rawGet('/api/notes'), await rawGet('/_gio/health')]) {
+        assert.equal(res.headers['transfer-encoding'], undefined);
+        assert.equal(res.headers['content-length'], String(Buffer.byteLength(res.body)));
+      }
+      // Compressed, the length is unknown until the encoder finishes.
+      const compressed = await rawGet('/cached', { 'accept-encoding': 'gzip' });
+      assert.equal(compressed.headers['content-encoding'], 'gzip');
+      assert.equal(compressed.headers['content-length'], undefined);
     });
 
     await test('cached pages: CDN Cache-Control, a weak ETag, and 304 for If-None-Match', async () => {
@@ -2124,6 +2169,8 @@ async function main() {
         const res = await rawGet(path);
         assert.equal(res.status, 429, `${path} must draw from the exhausted bucket`);
         assert.ok(res.headers['retry-after'], path);
+        // The server's own refusal: no static file answered it.
+        assert.equal(res.headers['x-gio-cache'], 'bypass', path);
       }
     });
 
@@ -3594,6 +3641,7 @@ async function buildChangeCachePhase() {
             const skewed = await fetch(`${BASE}/cached`, { headers: { 'x-deployment-id': before.deploymentId } });
             assert.equal(skewed.status, 409);
             assert.equal(skewed.headers.get('x-gio-action'), 'hard-reload');
+            assert.equal(skewed.headers.get('x-gio-cache'), 'bypass');
             await skewed.arrayBuffer();
           });
           // The entry file is rewritten in place, stamped with the new ID.
@@ -5640,6 +5688,13 @@ async function featureSwitchesPhase() {
           const res = await fetch(`${BASE}${path}`, { headers: { purpose: 'prefetch' } });
           await res.arrayBuffer();
           assert.equal(res.status, 429, path);
+          assert.equal(res.headers.get('x-gio-cache'), 'bypass', path);
+        }
+        // Speculation rules send Sec-Purpose with parameters.
+        for (const purpose of ['prefetch;prerender', 'prefetch;anonymous-client-ip']) {
+          const res = await fetch(`${BASE}/cached`, { headers: { 'sec-purpose': purpose } });
+          await res.arrayBuffer();
+          assert.equal(res.status, 429, purpose);
         }
         const plain = await fetch(`${BASE}/gio-test.png`);
         await plain.arrayBuffer();
@@ -5691,8 +5746,14 @@ async function featureSwitchesPhase() {
         assert.equal(preloads.length, 1, `${preloads}`);
         assert.match(preloads[0], /^preloaded/i);
         assert.match(html, /<link rel="stylesheet" href="\/_gio\/fonts\/fonts\.css">/);
-        const css = await (await fetch(`${BASE}/_gio/fonts/fonts.css`)).text();
+        const fontsCss = await fetch(`${BASE}/_gio/fonts/fonts.css`);
+        assert.equal(fontsCss.headers.get('x-gio-cache'), 'static');
+        const css = await fontsCss.text();
         assert.match(css, /font-family: ?['"]?Lazy/, 'the lazy font keeps its @font-face');
+        const font = await fetch(`${BASE}/_gio/fonts/${preloads[0]}`);
+        assert.equal(font.status, 200);
+        assert.equal(font.headers.get('x-gio-cache'), 'static');
+        await font.arrayBuffer();
       });
 
       await test('[websocket] max_connections = 0 and ping_interval_secs = 0 accept and keep sockets', async () => {
@@ -5740,7 +5801,9 @@ async function featureSwitchesPhase() {
         '[prefetch]', 'max_concurrent = 0', 'max_per_second = 0', '',
         '[cache]', 'disk_enabled = false', 'etag = false', 'swr_multiplier = 0', '',
         '[[rate_limits]]', 'path = "/keyed-limit"', 'per_ip = 1', 'window_seconds = 3600',
-        'burst = 0', 'key_header = "x-api-key"', 'max_keys_per_client = 0',
+        'burst = 0', 'key_header = "x-api-key"', 'max_keys_per_client = 0', '',
+        '[[rate_limits]]', 'path = "/_gio/image"', 'per_ip = 1', 'window_seconds = 3600',
+        'burst = 0',
       ],
     }), async ({ cacheDir, env, log }) => {
       const expected = [
@@ -5823,6 +5886,18 @@ async function featureSwitchesPhase() {
         const html = await (await fetch(`${BASE}/styled`)).text();
         const sheets = await linkedStylesheets(html);
         assert.ok(sheets.every((css) => !css.includes('\n  color:')), 'production CSS is minified by default');
+      });
+
+      await test('a rate-limited /_gio/image answers 429 with X-Gio-Cache: bypass', async () => {
+        // per_ip = 1: the request above spent the budget (or this one does).
+        let res;
+        for (let i = 0; i < 2; i++) {
+          res = await fetch(`${BASE}/_gio/image?src=/gio-test.png&w=48`, { headers: { accept: 'image/webp' } });
+          await res.arrayBuffer();
+          if (res.status === 429) break;
+        }
+        assert.equal(res.status, 429);
+        assert.equal(res.headers.get('x-gio-cache'), 'bypass');
       });
 
       await test('[server] render_timeout_secs = 0 serves renders as usual', async () => {
@@ -6040,7 +6115,8 @@ async function switchesOffPhase() {
       ]) {
         const warning = warnings.find((w) => w.startsWith(key));
         assert.ok(warning, `${key} in ${JSON.stringify(warnings)}`);
-        assert.ok(run.log().split('\n').some((line) => line.includes('WARN') && line.includes(warning)), `${key} logged`);
+        const logged = run.log().split('\n').filter((line) => line.includes('WARN') && line.includes(warning));
+        assert.equal(logged.length, 1, `${key} logged once: ${logged.join('\n')}`);
       }
       assert.equal(warnings.length, 4, JSON.stringify(warnings));
       assert.equal(run.report.envFilesDisabledBy, '[env] files');

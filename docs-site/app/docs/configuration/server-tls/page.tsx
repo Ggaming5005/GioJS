@@ -117,9 +117,8 @@ hsts = true`} />
           redirects it. Put a redirecting proxy on port 80 if you need one.
         </li>
         <li>
-          Known issue in v0.1.0-beta.8: <code>[server] http2 = false</code> with TLS still offers
-          HTTP/2 in ALPN, and clients that choose it cannot connect. Keep{' '}
-          <code>http2 = true</code> while TLS is on.
+          The handshake offers <code>h2</code> and <code>http/1.1</code> in ALPN, or only{' '}
+          <code>http/1.1</code> with <a href="/docs/configuration/server"><code>[server] http2 = false</code></a>.
         </li>
         <li>
           Binding port 443 needs privileges: run behind a proxy, grant the binary{' '}
@@ -142,7 +141,7 @@ hsts = true`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>The certificate and key are checked at startup before the worker starts, every problem is reported at once, and <code>--check-config</code> runs the same check. HSTS is sent by default while TLS is on.</> },
+        { version: 'v0.1.0-beta.8', changes: <>The certificate and key are checked at startup before the worker starts, every problem is reported at once, and <code>--check-config</code> runs the same check. HSTS is sent by default while TLS is on. <code>[server] http2 = false</code> drops <code>h2</code> from ALPN (it used to be offered anyway, and clients that picked it could not connect).</> },
         { version: 'v0.1.0-beta.1', changes: 'Introduced.' },
       ]} />
     </>

@@ -201,7 +201,8 @@ export default function Page(): React.JSX.Element {
         link the stylesheet and preload each font (unless <code>preload = false</code>). Font
         files are immutable (<code>public, max-age=31536000, immutable</code>);{' '}
         <code>fonts.css</code> is rewritten at every start under the same URL, so it
-        revalidates (<code>public, max-age=0, must-revalidate</code>).
+        revalidates (<code>public, max-age=0, must-revalidate</code>). Both carry{' '}
+        <code>X-Gio-Cache: static</code>.
       </p>
 
       <h3 id="gio-devtools"><code>/_gio/devtools</code></h3>
@@ -377,7 +378,9 @@ ip_allowlist = ["10.0.0.0/8"]`} />
               allowlist, adds route labels and worker metrics; <code>/_gio/health</code> adds{' '}
               <code>workers</code>. Dev endpoints answer local hosts only, and open-in-editor
               is same-origin <code>POST</code>. Guards cover local <code>/_gio/image</code>{' '}
-              sources. <code>fonts.css</code> revalidates.
+              sources. <code>fonts.css</code> revalidates, and the fonts carry{' '}
+              <code>X-Gio-Cache: static</code>. <code>/_gio/health</code> sends a{' '}
+              <code>Content-Length</code> instead of a chunked body.
             </>
           ),
         },

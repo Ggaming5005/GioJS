@@ -69,12 +69,15 @@ disk_max_bytes = 536870912          # L2 cap; 0 = unbounded`} />
         <li><code>stale; age=&lt;secs&gt;; revalidating</code> - served instantly from the cache past its TTL while one background render refreshes the entry; <code>age</code> is seconds since it was rendered. A refresh that answers 404 (the page called <a href="/docs/functions/not-found"><code>notFound()</code></a>) evicts the entry instead</li>
         <li><code>miss; stored</code> - rendered by the Node worker and stored; the next request for this key is a hit</li>
         <li><code>bypass</code> - rendered (or redirected) but not cached: the page cache is off (<code>[cache] enabled = false</code>), the page did not declare <code>revalidate</code>, the request was not GET/HEAD, the response varies per user, it set per-request headers, or its <code>getServerSideProps</code> read the visitor&apos;s cookies, authorization header, IP (<code>ctx.ip</code>) or the host it asked for (<code>ctx.host</code>, <code>ctx.scheme</code>)</li>
-        <li><code>static</code> - served by the Rust static file layer (public/ assets at the site root or under /public/*, hashed chunks, fonts); never touches the cache or Node</li>
+        <li><code>static</code> - a file served by the Rust static file layer (public/ assets at the site root or under /public/*, hashed chunks, the CSS compiled at startup, the self-hosted fonts under /_gio/fonts/*); never touches the cache or Node</li>
       </ul>
       <p>
-        Internal <code>/_gio/*</code> endpoints are not stamped
-        (<code>/_gio/image</code> reports its own image cache as{' '}
-        <code>HIT</code>/<code>MISS</code>).
+        The server&apos;s own refusals - a rate-limit <code>429</code>, a refused prefetch, a
+        deployment-skew <code>409</code>, a CSRF <code>403</code> - never reach the cache and
+        carry <code>bypass</code>, also when they refuse a <code>/_gio/*</code> request (a
+        rate-limited <code>/_gio/image</code>). Otherwise the internal{' '}
+        <code>/_gio/*</code> endpoints are not stamped (<code>/_gio/image</code> reports its
+        own image cache as <code>HIT</code>/<code>MISS</code>).
       </p>
       <p>The CLI decodes the header for you:</p>
       <CodeBlock lang="bash" code={`$ gio cache explain /posts/1

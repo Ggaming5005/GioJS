@@ -65,10 +65,10 @@ export default function Page(): React.JSX.Element {
           <tr><td><code>hit; ttl=N</code></td><td>Served from the Rust page cache without touching Node. <code>ttl</code> is the seconds until the entry goes stale.</td></tr>
           <tr><td><code>stale; age=N; revalidating</code></td><td>Served from the cache past its TTL while one background render refreshes it. <code>age</code> is the seconds since it was rendered.</td></tr>
           <tr><td><code>miss; stored</code></td><td>Rendered by the Node worker and stored; the next request is a hit.</td></tr>
-          <tr><td><code>bypass</code></td><td>Rendered and not cached: the page has no <code>revalidate</code>, the request was not <code>GET</code> / <code>HEAD</code>, the render was personalized (cookies, credentials, client address), it set per-request headers, or <code>[cache] enabled = false</code>.</td></tr>
-          <tr><td><code>static</code></td><td>A file from <code>public/</code> or a hashed chunk under <code>/_next/static/</code>, served by Rust without the cache or Node.</td></tr>
+          <tr><td><code>bypass</code></td><td>Not served from the cache. Either rendered and not stored - the page has no <code>revalidate</code>, the request was not <code>GET</code> / <code>HEAD</code>, the render was personalized (cookies, credentials, client address), it set per-request headers, or <code>[cache] enabled = false</code> - or refused by the server itself before Node (a rate-limit <code>429</code>, a skew <code>409</code>, a CSRF <code>403</code>).</td></tr>
+          <tr><td><code>static</code></td><td>A file from <code>public/</code>, a hashed chunk under <code>/_next/static/</code> or a self-hosted font under <code>/_gio/fonts/</code>, served by Rust without the cache or Node.</td></tr>
           <tr><td><code>ppr; ...</code></td><td>Partial prerendering: the shared shell came from (or went into) the cache and the Suspense holes rendered for this request.</td></tr>
-          <tr><td>(absent)</td><td>An internal <code>/_gio</code> endpoint (the self-hosted fonts under <code>/_gio/fonts/</code> included), or a server older than <code>X-Gio-Cache</code>. The image optimizer, <code>/_gio/image</code>, answers <code>HIT</code> or <code>MISS</code> for its own cache instead; the command prints that value as it is.</td></tr>
+          <tr><td>(absent)</td><td>An internal <code>/_gio</code> endpoint, or a server older than <code>X-Gio-Cache</code>. The image optimizer, <code>/_gio/image</code>, answers <code>HIT</code> or <code>MISS</code> for its own cache instead; the command prints that value as it is.</td></tr>
         </tbody>
       </table>
 
@@ -93,10 +93,11 @@ GET http://127.0.0.1:3000/blog
 GET http://127.0.0.1:3000/about
   status       200
   x-gio-cache  bypass
-  → Rendered by the Node worker and NOT cached: the page cache is off
-    (\`[cache] enabled = false\`), the page did not declare \`revalidate\`, the
-    request was not GET/HEAD, the response varies per user, or it set
-    per-request headers.`} />
+  → NOT served from the cache. Either rendered by the Node worker but not
+    stored - the page cache is off (\`[cache] enabled = false\`), the page did
+    not declare \`revalidate\`, the request was not GET/HEAD, the response
+    varies per user, or it set per-request headers - or refused by the
+    server itself before Node (a rate-limit 429, a skew 409, a CSRF 403).`} />
       <p>
         When a page declares <code>revalidate</code> but its render is personalized (it
         read cookies or credentials, or set a cookie), the server logs a warning naming the
@@ -142,7 +143,7 @@ GIO_PORT=4000 gio cache explain /   # another`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Paths go to the address the server listens on (<code>GIO_PORT</code> / <code>PORT</code>, <code>.env</code> files, <code>gio.toml</code>) instead of port 3000; <code>--base &lt;url&gt;</code>; explains <code>ppr</code> responses and names <code>[cache] enabled = false</code> as a reason for <code>bypass</code>.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Paths go to the address the server listens on (<code>GIO_PORT</code> / <code>PORT</code>, <code>.env</code> files, <code>gio.toml</code>) instead of port 3000; <code>--base &lt;url&gt;</code>; explains <code>ppr</code> responses and names <code>[cache] enabled = false</code> and the server&apos;s own refusals as reasons for <code>bypass</code>. Self-hosted fonts answer <code>static</code>.</> },
         { version: 'v0.1.0-beta.6', changes: 'Introduced.' },
       ]} />
     </>

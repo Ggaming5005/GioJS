@@ -73,9 +73,11 @@ burst = 0`} />
           /64), after <code>[server] trusted_proxies</code> resolution.
         </li>
         <li>
-          <strong>Headers.</strong> An admitted response carries <code>X-RateLimit-Limit</code> (
-          <code>per_ip</code>) and <code>X-RateLimit-Remaining</code>. A refused one looks like
-          this (other headers left out):
+          <strong>Headers.</strong> An admitted response carries <code>X-RateLimit-Limit</code>,
+          the bucket&apos;s size (<code>per_ip + burst</code>), and{' '}
+          <code>X-RateLimit-Remaining</code>, the requests left in it (at most the limit). A
+          refused one looks like this, for a <code>per_ip = 3</code>, <code>burst = 0</code>{' '}
+          rule (other headers left out):
         </li>
       </ul>
       <CodeBlock lang="text" code={`HTTP/1.1 429 Too Many Requests
@@ -162,7 +164,7 @@ window_seconds = 60`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Added <code>max_keys_per_client</code>. <code>path</code> takes the rule pattern syntax (<code>:param</code>, <code>*rest</code>; a <code>/api/*rest</code> rule used to match nothing), and a path that cannot be parsed stops startup. Paths match the canonical request path, and <code>/api/*</code> also covers <code>/api</code>. Clients are resolved through trusted proxies, and the bucket store is capped by <code>[server] rate_limit_max_buckets</code>.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Added <code>max_keys_per_client</code>. <code>path</code> takes the rule pattern syntax (<code>:param</code>, <code>*rest</code>; a <code>/api/*rest</code> rule used to match nothing), and a path that cannot be parsed stops startup. Paths match the canonical request path, and <code>/api/*</code> also covers <code>/api</code>. Clients are resolved through trusted proxies, and the bucket store is capped by <code>[server] rate_limit_max_buckets</code>. <code>X-RateLimit-Limit</code> is <code>per_ip + burst</code> (it was <code>per_ip</code>, below what <code>X-RateLimit-Remaining</code> could show), and a refusal carries <code>X-Gio-Cache: bypass</code>.</> },
         { version: 'v0.1.0-beta.6', changes: <><code>/_gio/image</code> honors the rules.</> },
         { version: 'v0.1.0-beta.1', changes: <>Introduced with <code>path</code>, <code>per_ip</code>, <code>window_seconds</code>, <code>burst</code> and <code>key_header</code>.</> },
       ]} />

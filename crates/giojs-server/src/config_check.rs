@@ -119,7 +119,7 @@ pub fn validate(config: &GioConfig, env: &StartupEnv) -> Result<Validated, Vec<S
     errors.extend(local_font_errors(config, &env.public_dir));
 
     let tls_acceptor = if config.server.tls.enabled {
-        crate::load_tls_acceptor(&config.server.tls)
+        crate::load_tls_acceptor(&config.server.tls, config.server.http2)
             .map(Some)
             .map_err(|error| errors.push(format!("{error:#}")))
             .ok()

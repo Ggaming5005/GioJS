@@ -1061,6 +1061,42 @@ first.
   digest in production. A literal value (`export const revalidate = -5`) is
   refused at route discovery already: the worker does not boot, and
   `gio build standalone` fails, naming the file.
+- Every startup warning for a protection `gio.toml` turns off or loosens was
+  logged twice.
+- With `[server.tls]` on, `[server] http2 = false` still offered `h2` in the
+  TLS handshake (ALPN), and clients that picked it (browsers, curl) could not
+  connect. It now offers only `http/1.1`.
+- Server-sent event streams carried `Cache-Control: no-cache` twice and
+  `Connection: keep-alive, keep-alive`. They now carry `Cache-Control` once
+  and no `Connection` header, which is connection-specific and not allowed on
+  HTTP/2.
+- Connection-specific headers a page or `route.ts` set itself (`Connection`,
+  `Keep-Alive`, `Transfer-Encoding`, `Upgrade`, `TE`, `Trailer`,
+  `Proxy-Connection`) were forwarded over HTTP/1.1, and an app's
+  `Keep-Alive: timeout=N` replaced the server's own hint while the server
+  still closed idle sockets on its own schedule. They are now dropped from
+  every page, route and event-stream response; `Keep-Alive` always states
+  the server's idle timeout.
+- The server's own refusals - the rate-limit `429`, the deployment-skew
+  `409`, a refused prefetch's `429` - were labeled `X-Gio-Cache: static`; they
+  now say `bypass`, also on `/_gio/*` paths (a rate-limited `/_gio/image`).
+  `static` is for files only (`public/`, `/_next/static`,
+  the CSS compiled at startup), and the self-hosted fonts under
+  `/_gio/fonts/` now carry it too.
+- `X-RateLimit-Remaining` could be larger than `X-RateLimit-Limit`: the limit
+  was the rule's `per_ip`, the remaining count included its `burst`.
+  `X-RateLimit-Limit` is now the bucket's size, `per_ip + burst` (a fresh
+  client of `per_ip = 3` with the default `burst = 20` sees `23` and `22`),
+  and Remaining never exceeds it.
+- `Sec-Purpose: prefetch;prerender` (a browser's speculation-rules prerender)
+  and other parameterized `Purpose` / `Sec-Purpose` values did not count as
+  prefetches. Both headers are now read as lists, and an item `prefetch`
+  with or without parameters marks a prefetch.
+- Responses whose body is known in full - page cache hits, small route
+  handler bodies, `/_gio/health` - lost their `Content-Length` and went out
+  chunked over HTTP/1.1: the compression layer hid the body's size even when
+  it left the body uncompressed. They now carry one; a compressed body still
+  has none.
 
 ### Known limitations
 

@@ -366,9 +366,13 @@ fn varies_by(headers: &axum::http::HeaderMap, field: &str) -> bool {
         .any(|listed| listed == "*" || listed.eq_ignore_ascii_case(field))
 }
 
-/// Stamps `X-Gio-Cache: static` on responses the dynamic pipeline never saw
-/// (public/ assets, chunks, fonts). Internal /_gio endpoints and protocol
-/// upgrades stay unstamped.
+/// Stamps `X-Gio-Cache: bypass` on app-path responses nothing else labeled:
+/// the server's own refusals (a rate-limit 429, a skew 409, a guard or a
+/// prefetch refusal) never reached the page cache. `static` is stamped only
+/// where a file is served (`stamp_static_file`), never by default: it also
+/// exempts a body from CSP nonce substitution. Internal /_gio endpoints and
+/// protocol upgrades stay unstamped, except where the server refused the
+/// request itself (`server_refusal` and the rate-limit 429 label their own).
 async fn cache_status_stamp_middleware(req: Request, next: Next) -> Response {
     let internal = req.uri().path().starts_with("/_gio/");
     let mut resp = next.run(req).await;
@@ -376,7 +380,51 @@ async fn cache_status_stamp_middleware(req: Request, next: Next) -> Response {
         && resp.status() != StatusCode::SWITCHING_PROTOCOLS
         && !resp.headers().contains_key("x-gio-cache")
     {
-        insert_cache_status_header(&mut resp, "static");
+        insert_cache_status_header(&mut resp, "bypass");
+    }
+    resp
+}
+
+/// `X-Gio-Cache: static` for a response a static file layer answered:
+/// public/ files, build assets, the startup CSS and self-hosted fonts (304s
+/// and 404s from those layers included).
+fn stamp_static_file(mut resp: Response) -> Response {
+    insert_cache_status_header(&mut resp, "static");
+    resp
+}
+
+/// `stamp_static_file` as a layer, for the ServeDir mounts.
+fn static_file_stamp_layer() -> SetResponseHeaderLayer<HeaderValue> {
+    SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("x-gio-cache"),
+        HeaderValue::from_static("static"),
+    )
+}
+
+/// A `Content-Length` for every body whose size is known (buffered pages,
+/// cache hits, small route bodies, /_gio/health). hyper derives it from the
+/// body's size hint, but CompressionLayer wraps every body - also the ones
+/// it leaves uncompressed - in a type that drops the hint, so they went out
+/// chunked. A header survives the wrapper; a body the layer does compress
+/// loses it there, as it must. Streams have no exact size and stay chunked.
+async fn exact_length_middleware(req: Request, next: Next) -> Response {
+    use axum::body::HttpBody as _;
+    // A HEAD answer may carry a GET's length or none; hyper decides.
+    let head = req.method() == axum::http::Method::HEAD;
+    let mut resp = next.run(req).await;
+    let status = resp.status();
+    if head
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+        || resp.headers().contains_key(header::CONTENT_LENGTH)
+        || resp.headers().contains_key(header::TRANSFER_ENCODING)
+    {
+        return resp;
+    }
+    if let Some(length) = resp.body().size_hint().exact() {
+        resp.headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
     }
     resp
 }
@@ -402,9 +450,10 @@ fn cacheable_response_headers(headers: &HashMap<String, String>) -> HashMap<Stri
     headers
         .iter()
         .filter(|(name, _)| {
-            !NONCACHEABLE_RESPONSE_HEADERS
-                .iter()
-                .any(|blocked| name.eq_ignore_ascii_case(blocked))
+            !is_hop_by_hop(name)
+                && !NONCACHEABLE_RESPONSE_HEADERS
+                    .iter()
+                    .any(|blocked| name.eq_ignore_ascii_case(blocked))
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
@@ -619,7 +668,8 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         }
     };
     ipc::set_render_timeout(cfg.server.render_timeout());
-    // Protections gio.toml turns off or loosens: allowed, never silent.
+    // Protections gio.toml turns off or loosens: allowed, never silent, and
+    // logged once, in the words --check-config reports them with.
     for warning in config_check::protections_off_warnings(&cfg) {
         warn!("{warning}");
     }
@@ -710,11 +760,6 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         websocket_origin_check = security.websocket_origin_check(),
         "security policy"
     );
-    // Every protection gio.toml turns off or loosens, in the words
-    // --check-config reports them with.
-    for warning in config_check::protections_off_warnings(&cfg) {
-        warn!("{warning}");
-    }
     let security = Arc::new(security);
 
     let workers = render_worker_count(
@@ -1068,6 +1113,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             static_metrics.clone(),
             fixed_route_metrics_middleware,
         ))
+        .layer(static_file_stamp_layer())
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
             HeaderValue::from_static(css_assets::IMMUTABLE_CACHE_CONTROL),
@@ -1079,6 +1125,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             internal_metrics.clone(),
             fixed_route_metrics_middleware,
         ))
+        .layer(static_file_stamp_layer())
         .layer(axum::middleware::from_fn(font_cache_control_middleware))
         .service(ServeDir::new(fonts_dir));
 
@@ -1087,6 +1134,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             static_metrics,
             fixed_route_metrics_middleware,
         ))
+        .layer(static_file_stamp_layer())
         .service(ServeDir::new(public_dir));
 
     install_compression_config(cfg.compression);
@@ -1228,6 +1276,9 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             security,
             security::security_headers_middleware,
         ))
+        // Right inside compression, whose body wrapper hides the size of a
+        // body it leaves uncompressed.
+        .layer(axum::middleware::from_fn(exact_length_middleware))
         // Compression is added last so it is the outermost response transform:
         // it must run after i18n injects <html lang>, otherwise it compresses
         // the body first and the lang injection silently no-ops.
@@ -1683,12 +1734,21 @@ fn check_version_skew(req: &Request, server_id: &str, protection: bool) -> Optio
         path = %req.uri().path(),
         "version skew detected"
     );
-    let mut resp = StatusCode::CONFLICT.into_response();
+    let mut resp = server_refusal(StatusCode::CONFLICT);
     resp.headers_mut().insert(
         HeaderName::from_static("x-gio-action"),
         HeaderValue::from_static("hard-reload"),
     );
     Some(resp)
+}
+
+/// A refusal the server answers itself, labeled `X-Gio-Cache: bypass` here
+/// rather than by cache_status_stamp_middleware, which skips /_gio paths:
+/// a prefetch, a skewed client or a rate limit can be refused there too.
+fn server_refusal(status: StatusCode) -> Response {
+    let mut resp = status.into_response();
+    insert_cache_status_header(&mut resp, "bypass");
+    resp
 }
 
 async fn prefetch_budget_middleware(
@@ -1705,12 +1765,12 @@ async fn prefetch_budget_middleware(
         PrefetchAdmission::Admitted(slot) => slot,
         PrefetchAdmission::Disabled => {
             state.metrics.record_prefetch_rejected();
-            return StatusCode::TOO_MANY_REQUESTS.into_response();
+            return server_refusal(StatusCode::TOO_MANY_REQUESTS);
         }
         PrefetchAdmission::OverBudget => {
             warn!(ip = %ip, path = %req.uri().path(), "prefetch budget exceeded");
             state.metrics.record_prefetch_rejected();
-            return StatusCode::TOO_MANY_REQUESTS.into_response();
+            return server_refusal(StatusCode::TOO_MANY_REQUESTS);
         }
     };
     next.run(req).await
@@ -1886,8 +1946,10 @@ async fn rate_limit_middleware(
                 .metrics
                 .record_ratelimit_rejected(&path, &rule_pattern);
             warn!(ip = %ip, path = %path, rule = %rule_pattern, "rate limit exceeded");
+            // Labeled here like server_refusal: /_gio/image is rate-limited too.
             Response::builder()
                 .status(StatusCode::TOO_MANY_REQUESTS)
+                .header("x-gio-cache", "bypass")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("retry-after", retry_after_secs.to_string())
                 .header("x-ratelimit-limit", limit.to_string())
@@ -2220,6 +2282,7 @@ async fn root_fallback_handler(
     {
         let start = std::time::Instant::now();
         if let Some(resp) = state.public_files.serve(&req).await {
+            let resp = stamp_static_file(resp);
             state.metrics.record_request(
                 req.method().as_str(),
                 resp.status().as_u16(),
@@ -2324,7 +2387,7 @@ async fn dynamic_handler(
     // Serve pre-transformed CSS directly from startup cache
     if path.ends_with(".css") {
         if let Some(css) = state.css_cache.get(&path) {
-            let resp = css_assets::css_response(&css, req.headers());
+            let resp = stamp_static_file(css_assets::css_response(&css, req.headers()));
             state.metrics.record_request(
                 &method,
                 resp.status().as_u16(),
@@ -3178,24 +3241,65 @@ fn respond_sse(
         req_id,
         ipc,
     };
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header("x-gio-cache", "bypass")
-        .header("connection", "keep-alive");
-    for (k, v) in &response.headers {
-        if k != "content-type" {
-            if let Ok(val) = HeaderValue::from_str(v) {
-                builder = builder.header(k.as_str(), val);
-            }
-        }
-    }
-    let mut resp = builder
-        .body(axum::body::Body::from_stream(stream))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    let mut resp = Response::new(axum::body::Body::from_stream(stream));
+    *resp.headers_mut() = sse_response_headers(&response.headers);
     append_set_cookies(resp.headers_mut(), &response.set_cookies);
     resp
+}
+
+/// Connection-specific headers: they describe one hop, not the response,
+/// and HTTP/2 forbids them outright. The connection layer owns keep-alive
+/// and framing, so a worker's copy is never forwarded - on any page, route
+/// or event-stream response (`is_hop_by_hop`).
+const HOP_BY_HOP_HEADERS: [&str; 7] = [
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+/// True for a header name (any case) in `HOP_BY_HOP_HEADERS`. Without this
+/// filter an app's `Keep-Alive: timeout=99` replaced the server's own idle
+/// hint over HTTP/1.1 while the server still closed after its own timeout.
+fn is_hop_by_hop(name: &str) -> bool {
+    HOP_BY_HOP_HEADERS
+        .iter()
+        .any(|hop| name.eq_ignore_ascii_case(hop))
+}
+
+/// The head of an SSE response: the event-stream type and `no-cache` once
+/// each, then the worker's head - which repeats both - without them and
+/// without hop-by-hop headers.
+fn sse_response_headers(worker_headers: &HashMap<String, String>) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(
+        HeaderName::from_static("x-gio-cache"),
+        HeaderValue::from_static("bypass"),
+    );
+    for (name, value) in worker_headers {
+        let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) else {
+            continue;
+        };
+        if name == header::CONTENT_TYPE
+            || name == header::CACHE_CONTROL
+            || is_hop_by_hop(name.as_str())
+        {
+            continue;
+        }
+        headers.append(name, value);
+    }
+    headers
 }
 
 /// Response-extension marker: the body is a live SSR chunk stream. Downstream
@@ -3349,7 +3453,7 @@ fn respond_stream(
     for (name, value) in &response.headers {
         // A streamed body has no known length; a stale content-length would
         // corrupt framing.
-        if name.eq_ignore_ascii_case("content-length") {
+        if name.eq_ignore_ascii_case("content-length") || is_hop_by_hop(name) {
             continue;
         }
         if let Ok(header_value) = HeaderValue::from_str(value) {
@@ -4652,13 +4756,22 @@ fn is_event_stream_content_type(headers: &std::collections::HashMap<String, Stri
         .is_some_and(|ct| ct.starts_with("text/event-stream"))
 }
 
+/// Whether `Purpose` or `Sec-Purpose` names a prefetch. Both are lists
+/// whose items may carry parameters: browsers send
+/// `Sec-Purpose: prefetch;prerender` for speculation-rules prerenders and
+/// `prefetch;anonymous-client-ip` for private prefetches.
 fn is_prefetch(req: &Request) -> bool {
-    req.headers()
-        .get("purpose")
-        .or_else(|| req.headers().get("sec-purpose"))
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "prefetch")
-        .unwrap_or(false)
+    ["purpose", "sec-purpose"].into_iter().any(|name| {
+        req.headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|item| {
+                let token = item.split(';').next().unwrap_or_default().trim();
+                token.eq_ignore_ascii_case("prefetch")
+            })
+    })
 }
 
 /// Inspect Accept-Encoding and return the best encoding the CompressionLayer will apply.
@@ -4811,6 +4924,9 @@ fn build_html_response(
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder().status(status);
     for (k, v) in headers {
+        if is_hop_by_hop(k) {
+            continue;
+        }
         if let Ok(val) = HeaderValue::from_str(v) {
             builder = builder.header(k.as_str(), val);
         }
@@ -5082,7 +5198,8 @@ async fn devtools_stream_handler(State(state): State<AppState>) -> Response {
         .status(200)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
-        .header("connection", "keep-alive")
+        // No Connection header: the connection layer owns keep-alive
+        // (HOP_BY_HOP_HEADERS), and HTTP/2 forbids it.
         .body(axum::body::Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -5538,7 +5655,19 @@ fn stdin_is_pipe() -> bool {
 
 // ── TLS helpers ──────────────────────────────────────────────────────────────
 
-fn load_tls_acceptor(tls: &config::TlsConfig) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+fn load_tls_acceptor(
+    tls: &config::TlsConfig,
+    http2: bool,
+) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(
+        tls_server_config(tls, http2)?,
+    )))
+}
+
+fn tls_server_config(
+    tls: &config::TlsConfig,
+    http2: bool,
+) -> anyhow::Result<rustls::ServerConfig> {
     let cert_path = tls
         .cert_path
         .as_deref()
@@ -5556,10 +5685,21 @@ fn load_tls_acceptor(tls: &config::TlsConfig) -> anyhow::Result<tokio_rustls::Tl
         .with_single_cert(certs, key)
         .map_err(|e| anyhow::anyhow!("Invalid TLS certificate/key: {e}"))?;
 
-    // ALPN: prefer HTTP/2, fall back to HTTP/1.1
-    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    server_config.alpn_protocols = alpn_protocols(http2);
+    Ok(server_config)
+}
 
-    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
+/// The protocols TLS offers in ALPN: h2 first, then HTTP/1.1. Only
+/// HTTP/1.1 when `[server] http2 = false` - the connection is then served by
+/// the HTTP/1-only builder, and a client that negotiated h2 would send a
+/// preface it cannot parse.
+fn alpn_protocols(http2: bool) -> Vec<Vec<u8>> {
+    let mut protocols = Vec::with_capacity(2);
+    if http2 {
+        protocols.push(b"h2".to_vec());
+    }
+    protocols.push(b"http/1.1".to_vec());
+    protocols
 }
 
 /// rustls server config builder with an explicit crypto provider. Both
@@ -5698,11 +5838,12 @@ async fn run_connection<I>(
                 let mut resp = app.call(req).await.unwrap_or_else(|_| {
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
                 });
+                // The server's hint always wins: it states when this server
+                // closes an idle socket, which no handler or rule can change.
                 if let Some(hint) = keep_alive_hint {
                     if resp.status() != axum::http::StatusCode::SWITCHING_PROTOCOLS {
                         resp.headers_mut()
-                            .entry(axum::http::HeaderName::from_static("keep-alive"))
-                            .or_insert(hint);
+                            .insert(axum::http::HeaderName::from_static("keep-alive"), hint);
                     }
                 }
                 Ok::<_, Infallible>(resp.map(|body| conn::TrackedBody::new(body, guard)))
@@ -7068,6 +7209,8 @@ mod tests {
         let resp = check_version_skew(&req, "new_id", true).unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         assert_eq!(resp.headers().get("x-gio-action").unwrap(), "hard-reload");
+        // Labeled by the refusal itself: the stamp layer skips /_gio paths.
+        assert_eq!(resp.headers().get("x-gio-cache").unwrap(), "bypass");
     }
 
     #[test]
@@ -8657,5 +8800,237 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("TLS enabled but key not found"));
+    }
+
+    // A throwaway self-signed P-256 certificate for localhost, generated for
+    // these tests only (it secures nothing).
+    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBmzCCAUGgAwIBAgIUNyJeQb7k8UbVuc86JtU6jP4T6+YwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTAwNzE5MjYyOVoYDzIxMjYwOTEz
+MTkyNjI5WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAS7IWT5SzdlHHiV33c2IEtceeqriEg8Z1uis5x6LpdQ/f48fePWB4bJ
+azo1nu0iiDgI5KKq1gGbWFFjVjMISa/mo28wbTAdBgNVHQ4EFgQUdcsaLFfigEPz
+BcLt+i0B/EUV2BEwHwYDVR0jBBgwFoAUdcsaLFfigEPzBcLt+i0B/EUV2BEwDwYD
+VR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwCgYIKoZI
+zj0EAwIDSAAwRQIhAMhP9eBhd9BVSude5PIF9g8jB+LY6jOLUs1/DLXTQyevAiBy
+6cVdI/JK1+eV4e0cP/encbpZ6MW4vqw8QneqnH45mQ==
+-----END CERTIFICATE-----
+";
+    const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg4ueBBM1qbFXwB/NG
+unfYWiFnNHUmYsdTGk+ik2k1x+ShRANCAAS7IWT5SzdlHHiV33c2IEtceeqriEg8
+Z1uis5x6LpdQ/f48fePWB4bJazo1nu0iiDgI5KKq1gGbWFFjVjMISa/m
+-----END PRIVATE KEY-----
+";
+
+    #[test]
+    fn tls_offers_h2_in_alpn_only_when_http2_is_on() {
+        let dir = std::env::temp_dir().join(format!("giojs-tls-alpn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        std::fs::write(&cert, TEST_CERT_PEM).unwrap();
+        std::fs::write(&key, TEST_KEY_PEM).unwrap();
+        let tls = config::TlsConfig {
+            enabled: true,
+            cert_path: Some(cert.to_string_lossy().into_owned()),
+            key_path: Some(key.to_string_lossy().into_owned()),
+        };
+        let offered = |http2: bool| tls_server_config(&tls, http2).unwrap().alpn_protocols;
+        assert_eq!(offered(true), vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        // `[server] http2 = false` serves HTTP/1.1 only: a client that
+        // negotiated h2 would fail on its connection preface.
+        assert_eq!(offered(false), vec![b"http/1.1".to_vec()]);
+        assert!(load_tls_acceptor(&tls, false).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── response heads ────────────────────────────────────────────────────────
+
+    #[test]
+    fn sse_heads_carry_each_header_once_and_nothing_hop_by_hop() {
+        // What the worker's GioEventStream head sends, plus a header of its own.
+        let worker: HashMap<String, String> = [
+            ("content-type", "text/event-stream"),
+            ("cache-control", "no-cache"),
+            ("connection", "keep-alive"),
+            ("keep-alive", "timeout=5"),
+            ("transfer-encoding", "chunked"),
+            ("x-stream", "ticker"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        let headers = sse_response_headers(&worker);
+        let all = |name: &str| -> Vec<&str> {
+            headers
+                .get_all(name)
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect()
+        };
+        assert_eq!(all("content-type"), ["text/event-stream"]);
+        assert_eq!(all("cache-control"), ["no-cache"]);
+        assert_eq!(all("x-gio-cache"), ["bypass"]);
+        assert_eq!(all("x-stream"), ["ticker"]);
+        for name in ["connection", "keep-alive", "transfer-encoding"] {
+            assert!(all(name).is_empty(), "{name} must not be forwarded");
+        }
+    }
+
+    #[test]
+    fn page_and_route_heads_forward_nothing_hop_by_hop() {
+        // What a route.ts may set itself, in any case.
+        let worker: HashMap<String, String> = [
+            ("Connection", "keep-alive"),
+            ("keep-alive", "timeout=99"),
+            ("Transfer-Encoding", "chunked"),
+            ("proxy-connection", "keep-alive"),
+            ("upgrade", "h2c"),
+            ("content-type", "text/plain"),
+            ("x-app", "kept"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        let resp = buffered_response(&worker, &[]);
+        assert_eq!(resp.headers()["x-app"], "kept");
+        assert_eq!(resp.headers()["content-type"], "text/plain");
+        let cached = cacheable_response_headers(&worker);
+        for name in HOP_BY_HOP_HEADERS {
+            assert!(
+                !resp.headers().contains_key(name),
+                "{name} must not be forwarded"
+            );
+            assert!(
+                !cached.keys().any(|key| key.eq_ignore_ascii_case(name)),
+                "{name} must not be stored"
+            );
+        }
+    }
+
+    #[test]
+    fn prefetch_purposes_are_token_lists() {
+        let purpose = |name: &str, value: &str| {
+            Request::builder()
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap()
+        };
+        for (name, value) in [
+            ("purpose", "prefetch"),
+            ("sec-purpose", "prefetch"),
+            // Speculation rules and private prefetches add parameters.
+            ("sec-purpose", "prefetch;prerender"),
+            ("sec-purpose", "prefetch; anonymous-client-ip"),
+            ("purpose", "Prefetch"),
+            ("sec-purpose", "other, prefetch"),
+        ] {
+            assert!(is_prefetch(&purpose(name, value)), "{name}: {value}");
+        }
+        for (name, value) in [
+            ("purpose", "prerender"),
+            ("sec-purpose", "prefetcher"),
+            ("sec-purpose", "no-prefetch;prefetch"),
+        ] {
+            assert!(!is_prefetch(&purpose(name, value)), "{name}: {value}");
+        }
+        assert!(!is_prefetch(
+            &Request::builder().body(Body::empty()).unwrap()
+        ));
+        // Either header counts, whichever comes first.
+        let both = Request::builder()
+            .header("purpose", "prerender")
+            .header("sec-purpose", "prefetch;prerender")
+            .body(Body::empty())
+            .unwrap();
+        assert!(is_prefetch(&both));
+    }
+
+    #[tokio::test]
+    async fn refusals_are_not_labeled_static_and_files_are() {
+        async fn refused() -> Response {
+            StatusCode::TOO_MANY_REQUESTS.into_response()
+        }
+        async fn file() -> Response {
+            stamp_static_file("body".into_response())
+        }
+        let app = Router::new()
+            .route("/api/limited", get(refused))
+            .route("/robots.txt", get(file))
+            .nest_service(
+                "/_gio/fonts",
+                Router::new()
+                    .fallback(|| async { "font" })
+                    .layer(static_file_stamp_layer()),
+            )
+            .layer(axum::middleware::from_fn(cache_status_stamp_middleware));
+        let label = |path: &'static str| {
+            let mut app = app.clone();
+            async move {
+                let resp = app
+                    .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                resp.headers()
+                    .get("x-gio-cache")
+                    .map(|value| value.to_str().unwrap().to_string())
+            }
+        };
+        assert_eq!(label("/api/limited").await.as_deref(), Some("bypass"));
+        assert_eq!(label("/robots.txt").await.as_deref(), Some("static"));
+        assert_eq!(label("/_gio/fonts/a.woff2").await.as_deref(), Some("static"));
+    }
+
+    #[tokio::test]
+    async fn known_size_bodies_keep_their_content_length_through_compression() {
+        async fn page(req: Request<Body>) -> Response {
+            let len: usize = req.uri().query().unwrap().parse().unwrap();
+            ([(header::CONTENT_TYPE, "text/html")], "x".repeat(len)).into_response()
+        }
+        async fn streamed() -> Response {
+            Body::from_stream(tokio_stream::iter([Ok::<_, Infallible>(Bytes::from("x"))]))
+                .into_response()
+        }
+        async fn empty() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+        let app = Router::new()
+            .route("/page", get(page))
+            .route("/stream", get(streamed))
+            .route("/empty", get(empty))
+            .layer(axum::middleware::from_fn(exact_length_middleware))
+            .layer(compression_layer(config::CompressionConfig::default()));
+        let call = |method: &'static str, uri: &'static str| {
+            let mut app = app.clone();
+            async move {
+                app.call(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::ACCEPT_ENCODING, "gzip")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let length = |resp: &Response| {
+            resp.headers()
+                .get(header::CONTENT_LENGTH)
+                .map(|value| value.to_str().unwrap().to_string())
+        };
+        // Below the compression threshold: sent as is, with its size.
+        let small = call("GET", "/page?100").await;
+        assert_eq!(small.headers().get(header::CONTENT_ENCODING), None);
+        assert_eq!(length(&small).as_deref(), Some("100"));
+        // Compressed: the length is unknown until the encoder is done.
+        let large = call("GET", "/page?4096").await;
+        assert_eq!(large.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(length(&large), None);
+        assert_eq!(length(&call("GET", "/stream").await), None);
+        assert_eq!(length(&call("GET", "/empty").await), None);
+        assert_eq!(length(&call("HEAD", "/page?100").await), None);
     }
 }
