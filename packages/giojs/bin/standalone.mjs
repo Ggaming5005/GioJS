@@ -348,9 +348,12 @@ async function main() {
     ),
     'utf8',
   );
-  const routeTypes = join(projectRoot, '.gio', 'routes.d.ts');
-  if (existsSync(routeTypes)) {
-    await copyFile(routeTypes, join(options.out, '.gio', 'routes.d.ts'));
+  // routes.d.ts references css-modules.d.ts, so the two travel together.
+  for (const typesFile of ['routes.d.ts', 'css-modules.d.ts']) {
+    const source = join(projectRoot, '.gio', typesFile);
+    if (existsSync(source)) {
+      await copyFile(source, join(options.out, '.gio', typesFile));
+    }
   }
 
   await writeFile(

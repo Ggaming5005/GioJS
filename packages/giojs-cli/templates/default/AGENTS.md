@@ -56,6 +56,9 @@ renders React. Full docs: https://giojs.com/llms.txt
   `<head>` automatically: never add a `<link>` for an imported file. CSS
   an npm package ships is imported explicitly (`import 'pkg/styles.css'`).
   Tailwind: run the Tailwind CLI and import its generated `.css` file.
+  CSS import types come from the generated `.gio/css-modules.d.ts`
+  (referenced by `.gio/routes.d.ts`) - never add your own
+  `declare module '*.module.css'`: it clashes with the generated one.
 - WebSockets: export `wsHandler(socket)` from a `route.ts`.
 - Security runs in Rust: default headers (nosniff, `X-Frame-Options:
   SAMEORIGIN`, referrer policy) on every response, and cross-site

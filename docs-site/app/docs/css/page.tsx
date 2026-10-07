@@ -131,6 +131,28 @@ export default function Card({ title }: { title: string }) {
         </li>
       </ul>
 
+      <h3>TypeScript</h3>
+      <p>
+        At every server start GioJS writes <code>.gio/css-modules.d.ts</code> next to the
+        generated <code>.gio/routes.d.ts</code>, which references it. It types{' '}
+        <code>import styles from &apos;./x.module.css&apos;</code> as a map of class names to
+        strings and lets plain <code>.css</code> imports through:
+      </p>
+      <CodeBlock lang="ts" code={`declare module '*.module.css' {
+  const classes: { readonly [className: string]: string };
+  export default classes;
+}
+declare module '*.css' {}`} />
+      <p>
+        Projects scaffolded by <code>create-giojs</code> already include{' '}
+        <code>.gio/routes.d.ts</code> in their tsconfig. In an existing project, add{' '}
+        <code>&quot;.gio/routes.d.ts&quot;</code> to the <code>include</code> array of{' '}
+        <code>tsconfig.json</code>. Both files are written when the server starts, so on a fresh
+        checkout (in CI, for example) start it once before running <code>tsc</code>. With{' '}
+        <code>noUncheckedIndexedAccess</code> on, a class reads as{' '}
+        <code>string | undefined</code>, which <code>className</code> accepts.
+      </p>
+
       <h2>Tailwind CSS</h2>
       <p>
         GioJS doesn&apos;t process Tailwind directives itself. Run Tailwind v4&apos;s CLI next to

@@ -3,13 +3,17 @@
  *
  * generateRouteTypes must emit a declaration-merging .d.ts covering static,
  * :param, *catchall, and optional *catchall? patterns; writeRouteTypes must create .gio/routes.d.ts
- * and skip rewrites when the content is unchanged (tsc watch churn).
+ * and skip rewrites when the content is unchanged (tsc watch churn). The
+ * generated files also type CSS imports, so the default template's tsconfig
+ * typechecks `import styles from './x.module.css'`.
  */
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { afterAll, describe, expect, it } from 'vitest';
-import { generateRouteTypes, writeRouteTypes } from './typed-routes.ts';
+import { CSS_MODULE_TYPES, generateRouteTypes, writeRouteTypes } from './typed-routes.ts';
 import { discoverRoutes } from './router.ts';
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -92,6 +96,18 @@ describe('writeRouteTypes', () => {
     expect(content).toBe(generateRouteTypes(['/', '/posts/:id']));
   });
 
+  it('writes the CSS import types routes.d.ts references next to it', async () => {
+    const projectRoot = join(fixtureRoot, 'css-types-file');
+    await mkdir(projectRoot, { recursive: true });
+
+    await writeRouteTypes(projectRoot, ['/']);
+    const routes = await readFile(join(projectRoot, '.gio', 'routes.d.ts'), 'utf8');
+    expect(routes).toContain('/// <reference path="./css-modules.d.ts" />');
+    // A triple-slash directive only counts before the first statement.
+    expect(routes.indexOf('/// <reference')).toBeLessThan(routes.indexOf('declare module'));
+    expect(await readFile(join(projectRoot, '.gio', 'css-modules.d.ts'), 'utf8')).toBe(CSS_MODULE_TYPES);
+  });
+
   it('skips the write when content is unchanged', async () => {
     const projectRoot = join(fixtureRoot, 'unchanged');
     await mkdir(projectRoot, { recursive: true });
@@ -130,4 +146,50 @@ describe('writeRouteTypes', () => {
     const content = await readFile(join(gioDir, 'routes.d.ts'), 'utf8');
     expect(content).toContain("'/': Record<string, never>;");
   });
+});
+
+describe('CSS import types', () => {
+  const templateTsconfig = join(packageDir, '..', 'giojs-cli', 'templates', 'default', 'tsconfig.json');
+
+  /** Messages tsc reports for the project, as `tsc --noEmit` would. */
+  function typecheck(projectRoot: string): string[] {
+    const config = ts.getParsedCommandLineOfConfigFile(join(projectRoot, 'tsconfig.json'), {}, {
+      ...ts.sys,
+      onUnRecoverableConfigFileDiagnostic: diagnostic => {
+        throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
+      },
+    });
+    if (config === undefined) throw new Error('tsconfig.json did not parse');
+    const program = ts.createProgram(config.fileNames, config.options);
+    return ts.getPreEmitDiagnostics(program).map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n'));
+  }
+
+  it("let the default template's tsconfig typecheck CSS Module and global CSS imports", async () => {
+    // Outside the repo, so no node_modules/@types leak into the program.
+    const projectRoot = await mkdtemp(join(tmpdir(), 'gio-css-types-'));
+    try {
+      await mkdir(join(projectRoot, 'app'), { recursive: true });
+      await writeFile(join(projectRoot, 'tsconfig.json'), await readFile(templateTsconfig, 'utf8'));
+      await writeFile(join(projectRoot, 'app', 'card.module.css'), '.card { color: red; }\n');
+      await writeFile(join(projectRoot, 'app', 'globals.css'), 'body { margin: 0; }\n');
+      await writeFile(
+        join(projectRoot, 'app', 'page.ts'),
+        `import styles from './card.module.css';
+import './globals.css';
+export const card: string | undefined = styles.card;
+export const link: string | undefined = styles['nav-link'];
+// @ts-expect-error class names are strings, never numbers
+export const wrong: number = styles.card;
+`,
+      );
+      expect(typecheck(projectRoot)).toContain(
+        "Cannot find module './card.module.css' or its corresponding type declarations.",
+      );
+
+      await writeRouteTypes(projectRoot, ['/']);
+      expect(typecheck(projectRoot)).toEqual([]);
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
