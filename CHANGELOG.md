@@ -455,7 +455,10 @@ first.
   `async generateMetadata(ctx, { props })`. Segments merge from the root
   layout to the page, the deepest winning per field. Titles support
   `{ default, template: '%s | Site', absolute }`, and relative URLs resolve
-  against `metadataBase` or `GIO_SITE_URL`.
+  against `metadataBase` or `GIO_SITE_URL`. `og:title` and `og:description`
+  default to the page's resolved title and description, so a layout's
+  site-wide `openGraph` (images, site name) gives every page a card with its
+  own title.
 - The tags render into `<head>` on the server, streamed pages included, and
   are replaced on client-side navigation. Reading cookies, the IP or the host
   in `generateMetadata` makes the page uncached. A metadata title replaces a

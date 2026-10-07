@@ -189,6 +189,55 @@ test('an exact API name ranks first: "redirect" is the redirect() page, not the 
   assert.equal(urls('useRouter')[0], '/docs/hooks/use-router');
 });
 
+test('an API name only in an overview reference section\'s code still ranks above the guides', () => {
+  /** `[route, section, group, body]` pages, indexed with their nav place. */
+  const indexOf = (pages) => createSearch(buildSearchIndex(
+    pages.map(([route, , , body]) => ({ route, html: html(body) })),
+    (route) => {
+      const page = pages.find(([r]) => r === route);
+      return page && { section: page[1], group: page[2], label: 'label' };
+    },
+  ));
+  const overview = ['/docs/functions', 'API Reference', 'Functions', `
+    <h1>Functions</h1><p>Every function GioJS exports.</p>
+    <h2 id="router-hooks">Router hooks</h2><p><code>usePathname()</code> and <code>useRouter()</code>
+    from <code>@gio.js/react</code>.</p>
+    <h2 id="navigation">Navigation</h2><p>Call <code>useRouter()</code> to navigate, or
+    <code>redirect()</code> from a page.</p>`];
+  const pages = [
+    overview,
+    ['/docs/migration', 'Guides', 'Migrating', `
+      <h1>Migration Guide</h1><p>Move a Next.js app to GioJS.</p>
+      <h2 id="code-transforms">Code transforms</h2><p>The codemod rewrites the useRouter import:
+      useRouter from next/navigation becomes <code>useRouter</code> from @gio.js/react.</p>`],
+    ['/docs/examples', 'Guides', 'Starters', `
+      <h1>Examples</h1><p>Small apps.</p>
+      <h2 id="redirect">redirect</h2><p>An example that sends the browser elsewhere with a redirect.</p>`],
+    // Reference, but not the API's own: a passing mention gets the small bonus.
+    ['/docs/configuration', 'API Reference', 'gio.toml', `
+      <h1>gio.toml</h1><p>Server configuration.</p>
+      <h2 id="prefetch">Prefetch</h2><p>What <code>useRouter()</code> prefetches is capped here.</p>`],
+  ];
+  const before = indexOf(pages);
+  const first = (search, query) => search.search(query).pages[0];
+  assert.equal(first(before, 'useRouter').url, '/docs/functions');
+  assert.equal(first(before, 'useRouter').items[0].url, '/docs/functions#router-hooks');
+  assert.equal(first(before, 'useRouter()').url, '/docs/functions');
+  // Above an exact heading in a guide, too.
+  assert.equal(first(before, 'redirect').url, '/docs/functions');
+  assert.equal(before.search('redirect').pages[1].url, '/docs/examples');
+
+  // The per-item page, once it exists, beats the overview - however many
+  // of the overview's sections name it.
+  const after = indexOf([...pages, ['/docs/hooks/use-router', 'API Reference', 'Hooks', `
+    <h1>useRouter</h1><p>Navigate from code.</p>
+    <h2 id="reference">Reference</h2><p><code>router.push(href)</code>.</p>`]]);
+  assert.deepEqual(after.search('useRouter').pages.slice(0, 2).map((page) => page.url), [
+    '/docs/hooks/use-router',
+    '/docs/functions',
+  ]);
+});
+
 test('prefixes and typos still find the page', () => {
   assert.equal(urls('revalid')[0], '/docs/caching');
   assert.equal(urls('revalidte')[0], '/docs/caching');

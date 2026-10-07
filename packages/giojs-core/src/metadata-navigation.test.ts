@@ -195,6 +195,7 @@ describe('metadata across hydration and soft navigation', () => {
         `title=A${suffix}`,
         'description=about A',
         'og:title=OG A',
+        'og:description=about A',
         'og:image=https://example.com/a.png',
       ];
       // Server HTML: one title (the hand-written one is gone), A's tags in <head>.
@@ -239,7 +240,13 @@ describe('metadata across hydration and soft navigation', () => {
     expect(htmlB).not.toContain('__gio_props');
     loadDocument(htmlA);
     window.history.replaceState(null, '', '/a');
-    const expectedA = ['title=A | Site', 'description=about A', 'og:title=OG A', 'og:image=https://example.com/a.png'];
+    const expectedA = [
+      'title=A | Site',
+      'description=about A',
+      'og:title=OG A',
+      'og:description=about A',
+      'og:image=https://example.com/a.png',
+    ];
 
     const runtime = await import('./client-runtime.ts');
     await act(async () => {
@@ -333,6 +340,7 @@ describe('metadata across hydration and soft navigation', () => {
       'title=A',
       'description=about A',
       'og:title=OG A',
+      'og:description=about A',
       'og:image=https://example.com/a.png',
     ]);
     expect(document.title).toBe('A');

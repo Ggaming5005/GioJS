@@ -9,11 +9,12 @@
  * - Every internal href in app/ and components/ (`href="/docs/..."`, and the
  *   nav's `href: '/docs/...'` entries) must name a page that exists, and a
  *   `#fragment` must name an `id` on that page.
- * - Every page under app/docs/ must be in the docs nav - the files that
- *   components/nav/index.ts aggregates - exactly once: a page nobody can
- *   navigate to is a bug, and a page listed twice breaks prev/next. Every
- *   nav file must be aggregated by index.ts, or its pages would be missing
- *   from the sidebar while looking listed.
+ * - Every page under app/docs/ must be in the docs nav exactly once: a page
+ *   nobody can navigate to is a bug, and a page listed twice breaks
+ *   prev/next. "In the nav" means in the NAV that components/nav/index.ts
+ *   exports, loaded and walked like the sidebar does - not merely written
+ *   in a nav file, whose group index.ts might never spread into NAV. Every
+ *   nav file must be imported by index.ts too.
  * - https://giojs.com/docs/... links in README.md and docs/*.md must resolve
  *   too, so the repository's markdown cannot drift from the site.
  *
@@ -28,7 +29,7 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptFile = fileURLToPath(import.meta.url);
 
@@ -49,10 +50,10 @@ const PAGE_FILE = /^page\.(tsx|jsx|ts|js)$/;
 const SOURCE_FILE = /\.(tsx|jsx|ts|js)$/;
 
 /**
- * The docs nav as components/nav/index.ts aggregates it, read statically
- * (no TypeScript loader needed): the nav files index.ts imports, every
- * `href: '...'` entry in them with the file and line it is on, and the nav
- * files index.ts does not import.
+ * The docs nav's source, read statically: the nav files index.ts imports,
+ * every `href: '...'` entry in them with the file and line it is on (where
+ * errors point), and the nav files index.ts does not import. Whether an
+ * entry reaches NAV is loadNav's answer, not this one's.
  */
 export function readNav(componentsDir) {
   const navDir = join(componentsDir, 'nav');
@@ -74,6 +75,36 @@ export function readNav(componentsDir) {
     .filter((name) => name.endsWith('.ts') && name !== 'index.ts' && name !== 'types.ts' && !imported.has(name))
     .map((name) => join(navDir, name));
   return { files, entries, unaggregated };
+}
+
+/**
+ * Import a TypeScript module: natively where Node strips types (22.18 and
+ * later - the nav files use erasable syntax only), else through tsx, a
+ * devDependency of the docs site.
+ */
+async function importTs(file) {
+  const url = pathToFileURL(file).href;
+  try {
+    return await import(url);
+  } catch (error) {
+    if (error?.code !== 'ERR_UNKNOWN_FILE_EXTENSION') throw error;
+    const { tsImport } = await import('tsx/esm/api');
+    return tsImport(url, import.meta.url);
+  }
+}
+
+/**
+ * The hrefs of the NAV that components/nav/index.ts exports, in sidebar
+ * order (duplicates kept): exactly the pages the sidebar, the breadcrumbs
+ * and the prev/next pager know about.
+ */
+export async function loadNav(componentsDir) {
+  const indexFile = join(componentsDir, 'nav', 'index.ts');
+  if (!existsSync(indexFile)) return [];
+  const { NAV } = await importTs(indexFile);
+  if (!Array.isArray(NAV)) throw new Error('components/nav/index.ts does not export a NAV array');
+  return NAV.flatMap((section) =>
+    section.groups.flatMap((group) => group.items.map((item) => item.href.split('#')[0])));
 }
 
 /** Recursively list files under `dir` whose name passes `keep`. */
@@ -109,10 +140,10 @@ function lineOf(source, index) {
 
 /**
  * Check the docs site rooted at `siteDir` (app/, components/, public/) and
- * the markdown of the repository at `repoDir`. Returns the problems found
- * instead of printing them: `{ errors, warnings, checked, pageCount }`.
+ * the markdown of the repository at `repoDir`. Resolves to the problems
+ * found instead of printing them: `{ errors, warnings, checked, pageCount }`.
  */
-export function checkLinks({
+export async function checkLinks({
   siteDir = join(dirname(scriptFile), '..'),
   repoDir = join(siteDir, '..'),
   pending = PENDING,
@@ -204,26 +235,48 @@ export function checkLinks({
     }
   }
 
-  // 2. Every docs page is in the nav, once; every nav file is aggregated.
+  // 2. Every docs page is in NAV, once; every nav file is aggregated.
   const nav = readNav(componentsDir);
-  const navHrefs = new Map();
+  const navEntries = new Map(); // href -> its first entry in the source
   for (const entry of nav.entries) {
-    const first = navHrefs.get(entry.href);
+    const first = navEntries.get(entry.href);
     if (first !== undefined) {
       errors.push(
         `${relative(siteDir, entry.file)}:${entry.line}: ${entry.href} is already in the nav ` +
           `(${relative(siteDir, first.file)}:${first.line}) - each page appears once`,
       );
     } else {
-      navHrefs.set(entry.href, entry);
+      navEntries.set(entry.href, entry);
     }
   }
   for (const file of nav.unaggregated) {
     errors.push(`${relative(siteDir, file)}: nav file not imported by components/nav/index.ts`);
   }
+  let inNav;
+  try {
+    const hrefs = await loadNav(componentsDir);
+    inNav = new Set(hrefs);
+    // Twice in NAV but once in the source (reported above otherwise): the
+    // group holding it is spread into NAV twice.
+    const listed = (href) => nav.entries.filter((entry) => entry.href === href).length;
+    for (const href of inNav) {
+      if (hrefs.filter((h) => h === href).length > 1 && listed(href) < 2) {
+        errors.push(`components/nav/index.ts: ${href} is in NAV twice - is its group spread twice?`);
+      }
+    }
+  } catch (error) {
+    errors.push(`components/nav/index.ts: cannot load the nav: ${error instanceof Error ? error.message : error}`);
+    inNav = new Set(navEntries.keys());
+  }
   for (const [route, file] of pages) {
-    if (!route.startsWith('/docs/')) continue;
-    if (!navHrefs.has(route)) {
+    if (!route.startsWith('/docs/') || inNav.has(route)) continue;
+    const entry = navEntries.get(route);
+    if (entry !== undefined) {
+      errors.push(
+        `${relative(siteDir, entry.file)}:${entry.line}: ${route} is listed here but never reaches NAV - ` +
+          'put it in the groups array its file exports and components/nav/index.ts spreads',
+      );
+    } else {
       errors.push(`${relative(siteDir, file)}: ${route} is not in the docs nav (components/nav/)`);
     }
   }
@@ -253,7 +306,7 @@ export function checkLinks({
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === scriptFile) {
-  const { errors, warnings, checked, pageCount } = checkLinks();
+  const { errors, warnings, checked, pageCount } = await checkLinks();
   for (const warning of warnings) console.warn(`warning: ${warning}`);
   for (const error of errors) console.error(`error: ${error}`);
   console.log(

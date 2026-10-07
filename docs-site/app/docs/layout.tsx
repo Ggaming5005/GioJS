@@ -22,7 +22,7 @@ import { OnThisPage } from '../../components/OnThisPage.tsx';
 import { CopyPageButton } from '../../components/CopyPageButton.tsx';
 import { Breadcrumbs, PageFooter } from '../../components/PageNav.tsx';
 import { locatePage, pageName } from '../../components/nav/index.ts';
-import { SITE_OPEN_GRAPH } from '../../components/site-metadata.ts';
+import { SHARE_CARD } from '../../components/site-metadata.ts';
 
 interface DocsLayoutProps {
   children: React.ReactNode;
@@ -32,7 +32,9 @@ interface DocsLayoutProps {
 /**
  * Per-page head defaults: the nav name as the title (templated by the root
  * layout, '%s | GioJS Docs'; a page's own `metadata.title` wins), and the
- * page's canonical URL.
+ * page's canonical URL. The share card carries no title or description, so
+ * og:title and og:description are the page's resolved ones - its own
+ * `metadata`, not the nav label or the site-wide strings.
  */
 export function generateMetadata(ctx: MetadataContext): Metadata {
   const location = locatePage(ctx.path);
@@ -40,7 +42,7 @@ export function generateMetadata(ctx: MetadataContext): Metadata {
   return {
     ...(title !== undefined ? { title } : {}),
     alternates: { canonical: ctx.path },
-    openGraph: { ...SITE_OPEN_GRAPH, url: ctx.path, ...(title !== undefined ? { title: `${title} | GioJS Docs` } : {}) },
+    openGraph: { ...SHARE_CARD, url: ctx.path },
   };
 }
 

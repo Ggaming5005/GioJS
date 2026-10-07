@@ -155,12 +155,14 @@ jobs:
       - name: Links and nav
         working-directory: docs-site
         run: npm run check-links
-      - name: Tests
-        working-directory: docs-site
-        run: npm test
+      # Before the tests: export.test.mjs checks the exported site (search
+      # anchors, share cards) and skips itself when out/ is missing.
       - name: Static build
         working-directory: docs-site
         run: npm run export
+      - name: Tests
+        working-directory: docs-site
+        run: npm test
 
   # Same reasoning as cargo-deny advisories: a fresh advisory in a transitive
   # npm dependency must not turn every unrelated PR red, so this reports as a

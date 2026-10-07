@@ -3,8 +3,11 @@
  *
  * The "Copy" button of a code block (CodeBlock, PmTabs): copies the text it
  * is given - the source string, never the highlighted DOM - and says
- * "Copied" for two seconds. It needs no id to find its block, so the
- * server and the hydrating client render the same markup.
+ * "Copied" for two seconds. It holds the text itself, so it needs no id to
+ * find its block (the old script-driven button looked its block up by a
+ * generated id, which differed between server and client); markup that
+ * does need ids, such as PmTabs' tab and panel pairs, takes them from
+ * React's useId.
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { writeClipboard } from './clipboard.ts';

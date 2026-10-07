@@ -33,9 +33,11 @@ const MAX_BLOCK_WORDS = 400;
 const HEADING = /<h([23])\b([^>]*)>([\s\S]*?)<\/h\1>/gi;
 
 /**
- * Split a rendered page into its title and sections. Headings without an
- * explicit id get the one the browser gives them (text.mjs uniqueSlug), so
- * every anchor in the index exists on the page.
+ * Split a rendered page into its title and sections. A heading without an
+ * explicit id gets the slug the docs layout gives it in the browser
+ * (OnThisPage, text.mjs uniqueSlug) - a stand-in for pages being written in
+ * dev: build.mjs refuses to export an indexed page with such a heading, so
+ * in the exported index every anchor is an id the page itself renders.
  */
 export function extractSections(html) {
   const article = articleHtml(html);

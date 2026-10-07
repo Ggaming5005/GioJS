@@ -6,7 +6,8 @@
  * HTML: llms.txt/llms-full.txt, a Markdown copy of every page (`/docs/x` →
  * `/docs/x.md`, what "Copy page as Markdown" fetches) and the search index
  * (`/search-index.json`, split per h2/h3 section - lib/search-index.mjs).
- * Fails when a docs page has a heading without an id or an id used twice.
+ * Fails when a page in the search index has a heading without an id or an
+ * id used twice.
  * Run via `npm run export`.
  */
 import { tsImport } from 'tsx/esm/api';
@@ -39,10 +40,14 @@ const { written, skipped, unhydrated } = await exportSite(join(here, 'app'), out
 // favicon set and manifest already sit where browsers request them.
 
 const pages = await readPages(outDir);
-// Every docs heading carries its own id (search results and shared links
-// land on it), and no id repeats on a page: fail the build otherwise.
-const idErrors = pages
-  .filter((page) => page.route.startsWith('/docs'))
+// The landing page is marketing, not documentation: llms.txt lists it, the
+// .md copies and the search index leave it out.
+const docsPages = pages.filter((page) => page.route !== '/');
+// Every heading the search index lists carries its own id (search results
+// and shared links land on it), and no id repeats on a page: fail the build
+// otherwise. That covers /releases too, which has no docs layout to give a
+// heading its id in the browser (OnThisPage).
+const idErrors = docsPages
   .flatMap((page) => idProblems(page.html).map((problem) => `${page.route}: ${problem}`));
 if (idErrors.length > 0) {
   for (const error of idErrors) console.error(`[docs] error: ${error}`);
@@ -50,9 +55,6 @@ if (idErrors.length > 0) {
   process.exit(1);
 }
 await writeLlmsTxt(outDir, pages, process.env.GIO_SITE_URL);
-// The landing page is marketing, not documentation: llms.txt lists it, the
-// .md copies and the search index leave it out.
-const docsPages = pages.filter((page) => page.route !== '/');
 await writeMarkdownPages(outDir, docsPages, process.env.GIO_SITE_URL);
 const index = buildSearchIndex(docsPages, searchPlace);
 await writeFile(join(outDir, 'search-index.json'), JSON.stringify(index), 'utf8');

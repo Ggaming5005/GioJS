@@ -33,6 +33,14 @@ function isLatest(rel: Release): boolean {
   return rel.tag === 'latest';
 }
 
+/**
+ * A release card's anchor: '0.1.0-beta.8' → 'v0-1-0-beta-8'. Search results
+ * and shared links land on it (build.mjs requires an id on every heading).
+ */
+function releaseId(version: string): string {
+  return `v${version.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+}
+
 const RELEASES: Release[] = [
   {
     version: '0.1.0-beta.8',
@@ -286,7 +294,7 @@ export default function ReleasesPage(): React.JSX.Element {
               <span className={`rel-node${isLatest(rel) ? ' rel-node--latest' : ''}`} aria-hidden="true" />
               <article className={`rel-card${isLatest(rel) ? ' rel-card--latest' : ''}`}>
                 <div className="rel-head">
-                  <h2 className="rel-version">{rel.version}</h2>
+                  <h2 className="rel-version" id={releaseId(rel.version)}>{rel.version}</h2>
                   {rel.tag && <span className="rel-badge">{rel.tag}</span>}
                   <time className="rel-date">{rel.date}</time>
                 </div>

@@ -46,7 +46,9 @@ export interface OpenGraphImage {
 }
 
 export interface OpenGraphMetadata {
+  /** Defaults to the resolved page title (templated, like `<title>`). */
   title?: string;
+  /** Defaults to the resolved `description`. */
   description?: string;
   url?: string | URL;
   siteName?: string;
@@ -385,8 +387,10 @@ export function metadataToTags(
 
   const og = objectOf(resolved.openGraph);
   if (og !== undefined) {
-    meta(tags, 'property', 'og:title', og.title);
-    meta(tags, 'property', 'og:description', og.description);
+    // A share card names the page it is on: a layout's site-wide openGraph
+    // (images, siteName) still gets each page's own title and description.
+    meta(tags, 'property', 'og:title', og.title ?? resolved.title);
+    meta(tags, 'property', 'og:description', og.description ?? resolved.description ?? undefined);
     if (og.url !== undefined) meta(tags, 'property', 'og:url', url(og.url));
     meta(tags, 'property', 'og:site_name', og.siteName);
     meta(tags, 'property', 'og:locale', og.locale);

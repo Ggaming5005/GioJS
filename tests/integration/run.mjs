@@ -4454,6 +4454,8 @@ async function standalonePhase() {
         'title=STANDALONE_HOME_TITLE',
         'description=STANDALONE_HOME_DESC',
         'og:title=STANDALONE_HOME_OG',
+        // Its openGraph sets no description: the page's fills it.
+        'og:description=STANDALONE_HOME_DESC',
       ]);
       assert.deepEqual(report.nav.head, ['title=STANDALONE_ARTICLE_TITLE 7 | Blog']);
       // The post's stylesheet was loaded for the navigation, exactly once.

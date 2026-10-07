@@ -17,8 +17,13 @@
  * inline-code term, the text - times how well it matched. Sections with
  * every query word come before sections with some of them. A query that is
  * exactly a page title or a heading, ignoring case and punctuation
- * ("redirect", "useRouter()", "gio.toml"), puts that page or section first:
- * exact API names rank above every prose mention.
+ * ("redirect", "useRouter()", "gio.toml"), puts that page or section first,
+ * and so does a section of the code API reference (components, hooks,
+ * functions, page exports) that names it in inline code - an overview
+ * listing `useRouter()`: exact API names rank above every prose mention. A
+ * per-item page titled with the name still beats the overview, and a
+ * mention in a guide, the gio.toml or the CLI reference gets a small bonus
+ * only.
  *
  * Results are grouped by page, best page first, each with its best
  * sections and a snippet around the first match; matched spans come back
@@ -47,9 +52,13 @@ const MAX_CANDIDATES = 80;
 
 /** Bonuses for a query that names a page or section exactly. */
 const B_EXACT_TITLE = 100;
+/** An inline-code term of a code API reference page: above any heading elsewhere, below a title. */
+const B_EXACT_REFERENCE_CODE = 70;
 const B_EXACT_HEADING = 60;
 const B_TITLE_PREFIX = 12;
 const B_EXACT_CODE = 6;
+/** The pages whose inline code names the API itself - the page and its subpages. */
+const CODE_REFERENCE = /^\/docs\/(?:components|hooks|functions|page-exports)(?:\/|$)/;
 
 const STOP_WORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'do', 'for', 'from', 'how', 'i', 'in', 'is', 'it',
@@ -263,6 +272,7 @@ export function createSearch(index) {
 
   const vocabulary = [...postings.keys()].sort();
   const pageNames = pages.map((page) => [normalizeName(page.t), normalizeName(page.n ?? '')]);
+  const codeReference = pages.map((page) => CODE_REFERENCE.test(page.u));
   const headingNames = sections.map((section) => normalizeName(section.h));
   const codeNames = sections.map((section) =>
     (section.k ? new Set(section.k.split('\n').map(normalizeName)) : null));
@@ -358,15 +368,21 @@ export function createSearch(index) {
       }
       if (matched === 0) continue;
       const section = sections[s];
+      let bonus = 0;
       if (nameQuery.length > 0) {
         const [title, label] = pageNames[section.p];
-        if (section.l === 1 && (title === nameQuery || label === nameQuery)) score += B_EXACT_TITLE;
-        else if (section.l === 1 && title.startsWith(nameQuery)) score += B_TITLE_PREFIX;
-        if (headingNames[s] === nameQuery) score += B_EXACT_HEADING;
-        if (codeNames[s]?.has(nameQuery)) score += B_EXACT_CODE;
+        if (section.l === 1 && (title === nameQuery || label === nameQuery)) bonus += B_EXACT_TITLE;
+        else if (section.l === 1 && title.startsWith(nameQuery)) bonus += B_TITLE_PREFIX;
+        if (headingNames[s] === nameQuery) bonus += B_EXACT_HEADING;
+        if (codeNames[s]?.has(nameQuery)) {
+          bonus += codeReference[section.p] ? B_EXACT_REFERENCE_CODE : B_EXACT_CODE;
+        }
       }
-      if (matched === terms.length) complete.push({ s, score, complete: true });
-      else partial.push({ s, score: score * 0.2 * (matched / terms.length), complete: false });
+      if (matched === terms.length) complete.push({ s, score: score + bonus, base: score, complete: true });
+      else {
+        const share = 0.2 * (matched / terms.length);
+        partial.push({ s, score: (score + bonus) * share, base: score * share, complete: false });
+      }
     }
     // Sections with every word first; the rest only when those are few.
     const pool = complete.length >= limit ? complete : complete.concat(partial);
@@ -381,8 +397,10 @@ export function createSearch(index) {
     }
     const ranked = [...byPage].map(([p, entries]) => {
       entries.sort((a, b) => Number(b.complete) - Number(a.complete) || b.score - a.score || a.s - b.s);
-      // The best section decides; more matching sections nudge a page up.
-      const rest = entries.slice(1, 4).reduce((sum, entry) => sum + entry.score, 0);
+      // The best section decides; more matching sections nudge a page up -
+      // by how well they match, not by the exact-name bonus, so an overview
+      // naming an API in several sections stays below that API's own page.
+      const rest = entries.slice(1, 4).reduce((sum, entry) => sum + entry.base, 0);
       return { p, entries, complete: entries[0].complete, score: entries[0].score + 0.15 * rest };
     });
     ranked.sort((a, b) => Number(b.complete) - Number(a.complete) || b.score - a.score || a.p - b.p);

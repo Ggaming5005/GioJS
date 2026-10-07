@@ -7,7 +7,11 @@
  * above the content on narrower screens (CSS shows one or the other).
  *
  * Both read the headings from the rendered article after hydration, so a
- * page needs nothing but its headings. Before reading, prepareHeadings()
+ * page needs nothing but its headings. The rail renders nothing until then:
+ * its column is there either way, so it fills in place, and without
+ * JavaScript (or on a page with too few headings) there is no empty "On
+ * this page" box. The inline variant keeps its summary in the server HTML
+ * (marked needs-js), so it does not push the content down when it fills. Before reading, prepareHeadings()
  * gives every h2/h3 a hover `#` link to itself. Pages give their headings
  * explicit ids (the build refuses one without); a heading that still has
  * none gets the slug the search index would use (lib/text.mjs uniqueSlug).
@@ -133,10 +137,11 @@ export function OnThisPage({ variant, path }: { variant: 'rail' | 'inline'; path
 
   if (headings !== null && headings.length < MIN_HEADINGS) return null;
   if (variant === 'rail') {
+    if (headings === null) return null;
     return (
       <nav className="toc-rail" aria-label="On this page">
         <p className="toc-title">On this page</p>
-        {headings !== null && <Outline headings={headings} active={active} />}
+        <Outline headings={headings} active={active} />
       </nav>
     );
   }

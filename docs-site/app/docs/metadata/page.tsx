@@ -135,6 +135,14 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         (share common values through a variable). <code>undefined</code> inherits,{' '}
         <code>null</code> removes the inherited value. Titles follow the template rules above.
       </p>
+      <p>
+        <code>og:title</code> and <code>og:description</code> default to the page&apos;s
+        resolved title (template applied) and description. A layout can therefore set a
+        site-wide <code>openGraph</code> with only images, site name and type, and every page
+        under it still shares with its own title and description. Leave{' '}
+        <code>twitter.title</code> and <code>twitter.description</code> unset too: X reads the
+        Open Graph tags when its own are missing.
+      </p>
 
       <h2 id="absolute-urls-metadatabase">Absolute URLs: metadataBase</h2>
       <p>
@@ -159,7 +167,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
           <tr><td><code>authors</code></td><td><code>&lt;meta name=&quot;author&quot;&gt;</code>, plus <code>&lt;link rel=&quot;author&quot;&gt;</code> for a <code>url</code></td></tr>
           <tr><td><code>robots</code></td><td><code>&lt;meta name=&quot;robots&quot;&gt;</code> from a string or <code>{`{ index, follow, noarchive, nosnippet, noimageindex, nocache, 'max-snippet', 'max-image-preview', 'max-video-preview' }`}</code>; <code>googleBot</code> renders <code>&lt;meta name=&quot;googlebot&quot;&gt;</code></td></tr>
           <tr><td><code>alternates</code></td><td><code>{`{ canonical, languages: { 'en-US': url } }`}</code> → <code>&lt;link rel=&quot;canonical&quot;&gt;</code> and <code>&lt;link rel=&quot;alternate&quot; hreflang&gt;</code></td></tr>
-          <tr><td><code>openGraph</code></td><td><code>og:title</code>, <code>og:description</code>, <code>og:url</code>, <code>og:site_name</code>, <code>og:locale</code>, <code>og:type</code>, and per image <code>og:image</code> (+ <code>:type</code>, <code>:width</code>, <code>:height</code>, <code>:alt</code>)</td></tr>
+          <tr><td><code>openGraph</code></td><td><code>og:title</code> and <code>og:description</code> (default: the page&apos;s title and description), <code>og:url</code>, <code>og:site_name</code>, <code>og:locale</code>, <code>og:type</code>, and per image <code>og:image</code> (+ <code>:type</code>, <code>:width</code>, <code>:height</code>, <code>:alt</code>)</td></tr>
           <tr><td><code>twitter</code></td><td><code>twitter:card</code>, <code>:site</code>, <code>:creator</code>, <code>:title</code>, <code>:description</code>, <code>:image</code> (+ <code>:alt</code>)</td></tr>
           <tr><td><code>icons</code></td><td>A URL, a list, or <code>{`{ icon, apple, shortcut }`}</code> → <code>&lt;link rel=&quot;icon&quot; | &quot;apple-touch-icon&quot; | &quot;shortcut icon&quot;&gt;</code> with <code>type</code>/<code>sizes</code>/<code>media</code></td></tr>
           <tr><td><code>manifest</code></td><td><code>&lt;link rel=&quot;manifest&quot;&gt;</code></td></tr>

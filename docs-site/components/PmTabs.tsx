@@ -12,9 +12,11 @@
  * PmTabs on the page follows it. The server and the first client render
  * show npm, so hydration matches; the stored pick applies right after.
  * Without JS only npm shows. Search and the Markdown copy read the npm
- * panel alone (the others are data-no-index).
+ * panel alone (the others are data-no-index). Each tab and its panel point
+ * at each other (aria-controls / aria-labelledby) through useId ids, which
+ * the server and the hydrating client derive alike.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { highlight } from '../lib/highlight.mjs';
 import { PACKAGE_MANAGERS, pmCommands, type PackageManager } from '../lib/package-managers.mjs';
 import { CopyButton } from './CopyButton.tsx';
@@ -56,6 +58,9 @@ interface PmTabsProps {
 export function PmTabs({ command, ...overrides }: PmTabsProps): React.JSX.Element {
   const commands = { ...pmCommands(command), ...overrides };
   const [selected, setSelected] = useState<PackageManager>('npm');
+  const baseId = useId();
+  const tabId = (pm: PackageManager): string => `${baseId}tab-${pm}`;
+  const panelId = (pm: PackageManager): string => `${baseId}panel-${pm}`;
   useEffect(() => {
     const stored = storedPick();
     if (stored !== null) setSelected(stored);
@@ -91,6 +96,8 @@ export function PmTabs({ command, ...overrides }: PmTabsProps): React.JSX.Elemen
               key={pm}
               type="button"
               role="tab"
+              id={tabId(pm)}
+              aria-controls={panelId(pm)}
               className={pm === 'npm' ? 'pm-tabs__tab' : 'pm-tabs__tab needs-js'}
               aria-selected={pm === selected}
               tabIndex={pm === selected ? 0 : -1}
@@ -107,7 +114,8 @@ export function PmTabs({ command, ...overrides }: PmTabsProps): React.JSX.Elemen
         <pre
           key={pm}
           role="tabpanel"
-          aria-label={pm}
+          id={panelId(pm)}
+          aria-labelledby={tabId(pm)}
           data-lang="bash"
           hidden={pm !== selected}
           {...(pm === 'npm' ? {} : { 'data-no-index': '' })}

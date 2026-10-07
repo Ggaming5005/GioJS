@@ -65,8 +65,10 @@ page" links, and the per-page `<title>`. A page holds only its content.
    the sidebar text, the breadcrumb, the pager label and the default `<title>`. A group's
    index page comes first, labelled `'Overview'`. Each page appears in the nav exactly
    once. Order matters: the prev/next pager follows the nav. `components/nav/index.ts`
-   puts the areas together; do not edit it to add a page. A group with no items is not
-   shown.
+   puts the areas together; do not edit it to add a page. Add a group to the one array
+   your file exports (`api-components.ts` holds Hooks next to Components): index.ts
+   spreads only that array, and check-links loads the real NAV, so an entry in a second
+   export is an error. A group with no items is not shown.
 3. Link to it from the pages where a reader would look for it.
 4. Run the [checks](#checks).
 
@@ -116,7 +118,8 @@ The rules:
 - **Metadata.** `export const metadata: Metadata = { title, description }`. The title is
   the h1 text. The root layout adds ` | GioJS Docs`, so do not repeat it. The
   description is the subtitle as plain text (no markup); search engines show about the
-  first 160 characters. The docs layout adds the canonical URL and Open Graph tags.
+  first 160 characters. The docs layout adds the canonical URL and the Open Graph card,
+  whose `og:title` and `og:description` are the page's title and description.
 - **Static.** `export const revalidate = false;` on every page.
 - **One h1**, then a `<p className="page-subtitle">` of one or two sentences.
 - **Every h2 and h3 has an explicit `id`.** Use the kebab-case slug of the heading
@@ -301,8 +304,8 @@ Run all of these before you commit. CI runs them too (the "Docs site" job in
 ```bash
 npm run typecheck     # tsc --noEmit
 npm run check-links   # dead links and fragments, pages missing from the nav or listed twice
-npm test              # node --test scripts/*.test.mjs
 npm run export        # the static build
+npm test              # node --test scripts/*.test.mjs (export.test.mjs reads out/)
 ```
 
 `npm test` covers:
@@ -313,6 +316,9 @@ npm run export        # the static build
 - the highlighter per language, and every sample on the site round-trips through it;
 - the PmTabs conversions;
 - the search index, the engine and its ranking;
+- the exported site, once `npm run export` has run (`export.test.mjs`): every search
+  result anchor exists, exact API names lead with the API reference, every docs page's
+  share card carries its own title and description;
 - facts the docs state that the code decides (`docs-content.test.mjs`).
 
 When you document a fact that code decides and that could drift (a default, a timeout,

@@ -14,4 +14,10 @@ export const componentsGroups: NavGroup[] = [
       { href: '/docs/components', label: 'Overview' },
     ],
   },
+  // Hooks belong in this array, not in a second export: index.ts spreads
+  // componentsGroups alone. Empty until /docs/hooks lands (not rendered).
+  {
+    title: 'Hooks',
+    items: [],
+  },
 ];

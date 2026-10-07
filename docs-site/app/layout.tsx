@@ -8,6 +8,8 @@
  * site-wide values here, with the title template every page's title goes
  * through ('Caching | GioJS Docs'); the docs layout adds a per-page title
  * and canonical URL, and a page's own `export const metadata` wins over both.
+ * A page's title and description also fill its share card (og:title,
+ * og:description; site-metadata.ts).
  * This layout is never hydrated, so its head script (THEME_SCRIPT) runs
  * once, before first paint.
  */
@@ -25,13 +27,8 @@ export const metadata: Metadata = {
   title: { default: 'GioJS Documentation', template: '%s | GioJS Docs' },
   description: SITE_DESCRIPTION,
   openGraph: SITE_OPEN_GRAPH,
-  twitter: {
-    card: 'summary_large_image',
-    title: 'GioJS - the Rust-powered React framework',
-    description:
-      'Self-hosted React at Vercel speed. HTTP/2, image optimization, ISR caching, and compression in one binary.',
-    images: '/public/og.png',
-  },
+  // No title or description: X reads each page's og:title and og:description.
+  twitter: { card: 'summary_large_image', images: '/public/og.png' },
   themeColor: '#0b0a09',
 };
 

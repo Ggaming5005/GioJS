@@ -146,11 +146,15 @@ describe('metadata in the rendered document', () => {
     expect(head).toContain('<title>Hello | Acme</title>');
     expect(head).toContain('<meta name="description" content="Acme site"/>');
     expect(head).toContain('<meta property="og:site_name" content="Acme Blog"/>');
+    // The blog's openGraph sets no title or description: the page's fill them.
+    expect(head).toContain('<meta property="og:title" content="Hello | Acme"/>');
     // Nothing of it is left inside the hydration boundary.
     expect(html.slice(html.indexOf('<div id="__gio">'))).not.toContain('<title');
     expect(envelopeOf(html)['metadata']).toEqual([
       { tag: 'title', text: 'Hello | Acme' },
       { tag: 'meta', attrs: { name: 'description', content: 'Acme site' } },
+      { tag: 'meta', attrs: { property: 'og:title', content: 'Hello | Acme' } },
+      { tag: 'meta', attrs: { property: 'og:description', content: 'Acme site' } },
       { tag: 'meta', attrs: { property: 'og:site_name', content: 'Acme Blog' } },
     ]);
   });
