@@ -192,6 +192,13 @@ ETag: "4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
         <li><code>max-age=0</code> - browsers revalidate every time; with the ETag that costs a <code>304 Not Modified</code> without a body while the page is unchanged</li>
       </ul>
       <p>
+        An on-demand purge (above) reaches browsers at once:
+        the re-rendered page has a new ETag, so their next revalidation gets a 200 instead
+        of a 304. It does not reach a CDN, which may serve its copy for the rest of{' '}
+        <code>s-maxage</code>. Purge the CDN from the same webhook, or keep{' '}
+        <code>revalidate</code> short on pages you purge on demand.
+      </p>
+      <p>
         The ETag is strong: a hash of the stored page, computed once when it is cached. A
         request whose <code>If-None-Match</code> names it gets a 304 with the same headers
         (<code>X-Request-Id</code>, security headers, header rules and the{' '}

@@ -60,9 +60,10 @@ pub struct CacheEntry {
     /// their metrics label without asking the worker. None when no route
     /// matched or for entries written before routes were stored.
     pub route: Option<String>,
-    /// Strong ETag of `html` (a quoted hex digest). Filled in by `put` when
-    /// None, so the hash is computed once per stored render, never per hit;
-    /// disk entries written before ETags existed get it when loaded.
+    /// Strong ETag of `html` (a quoted hex digest). Filled in by `put` and
+    /// `put_fresh` when None, so the hash is computed once per stored render,
+    /// never per hit; disk entries written before ETags existed get it when
+    /// loaded.
     pub etag: Option<String>,
 }
 
@@ -78,6 +79,15 @@ pub fn entry_etag(html: &[u8]) -> String {
     }
     etag.push('"');
     etag
+}
+
+/// Fill in the entry's ETag when the caller left it None: every store path
+/// (`put` and the server's `put_fresh` fills) hashes the body once here.
+fn with_etag(mut entry: CacheEntry) -> CacheEntry {
+    if entry.etag.is_none() {
+        entry.etag = Some(entry_etag(&entry.html));
+    }
+    entry
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,11 +192,8 @@ impl PageCache {
     }
 
     /// Store an entry. Writes to memory immediately; disk write is non-blocking.
-    pub async fn put(&self, key: &str, mut entry: CacheEntry) -> Result<(), CacheError> {
-        if entry.etag.is_none() {
-            entry.etag = Some(entry_etag(&entry.html));
-        }
-        self.backend.put(key, entry).await
+    pub async fn put(&self, key: &str, entry: CacheEntry) -> Result<(), CacheError> {
+        self.backend.put(key, with_etag(entry)).await
     }
 
     /// Capture the invalidation sequence before rendering a fill (a miss, a
@@ -205,7 +212,7 @@ impl PageCache {
         entry: CacheEntry,
         ticket: FillTicket,
     ) -> Result<bool, CacheError> {
-        self.backend.put_fresh(key, entry, ticket).await
+        self.backend.put_fresh(key, with_etag(entry), ticket).await
     }
 
     /// Purge every entry carrying any of `tags`, from memory and disk (PPR
@@ -324,6 +331,20 @@ mod tests {
         cache.put("etag-preset", preset).await.unwrap();
         let (entry, _) = cache.get("etag-preset", "deploy-1").await.unwrap();
         assert_eq!(entry.etag.as_deref(), Some("\"preset\""));
+    }
+
+    #[tokio::test]
+    async fn put_fresh_stamps_the_etag_too() {
+        // Every server fill stores through put_fresh: its entries need the
+        // ETag that 304 answers compare against.
+        let cache = cache_with_swr(10);
+        let ticket = cache.fill_ticket();
+        assert!(cache
+            .put_fresh("etag-fresh", make_entry(3600, 0), ticket)
+            .await
+            .unwrap());
+        let (entry, _) = cache.get("etag-fresh", "deploy-1").await.unwrap();
+        assert_eq!(entry.etag, Some(entry_etag(b"<h1>Test</h1>")));
     }
 
     fn cache_with_swr(multiplier: u64) -> PageCache {
