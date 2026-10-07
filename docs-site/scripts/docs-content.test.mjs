@@ -150,3 +150,30 @@ test("the releases page highlights the release tagged 'latest', which is release
     assert.match(source, new RegExp(`\\$\\{isLatest\\(rel\\) \\? ' ${cls}' : ''\\}`), cls);
   }
 });
+
+test('the component and hook reference states the defaults @gio.js/react ships', () => {
+  const react = (file) => read('packages', 'giojs-react', 'src', file);
+  /** `source` must contain `code`, and the docs page `route` must contain `text`. */
+  const check = (source, code, route, text) => {
+    assert.ok(source.includes(code), `${code} not found in @gio.js/react - update this test and the docs`);
+    assert.ok(docsPage(route).includes(text), `${route} should say ${JSON.stringify(text)} (${code})`);
+  };
+  const link = react('Link.tsx');
+  check(link, "prefetch = 'hover'", 'components/gio-link', `default: "'hover'"`);
+  check(link, 'transition = false', 'components/gio-link', "default: 'false'");
+  const nav = react('navigation.ts');
+  check(nav, 'PREFETCH_TTL_MS = 30_000', 'components/gio-link', '30 seconds');
+  check(nav, 'MAX_PREFETCH_ENTRIES = 50', 'components/gio-link', 'holds at most 50');
+  const animate = react('Animate.tsx');
+  check(animate, 'duration = 400', 'components/animate', "default: '400'");
+  check(animate, 'delay = 0', 'components/animate', "default: '0'");
+  check(animate, "when = 'visible'", 'components/animate', `default: "'visible'"`);
+  check(react('animate-observer.ts'), 'threshold: 0.1', 'components/animate', 'threshold <code>0.1</code>');
+  check(react('LocaleLink.tsx'), "defaultLocale = 'en'", 'components/locale-link', `default: "'en'"`);
+  check(react('Image.tsx'), 'DEFAULT_QUALITY = 75', 'components/gio-image', '[images] quality (75)');
+  const ws = react('hooks/useWebSocket.ts');
+  check(ws, 'DEFAULT_MAX_QUEUED = 100', 'hooks/use-web-socket', 'keeps up to 100');
+  check(ws, 'DEFAULT_INITIAL_DELAY_MS = 500', 'hooks/use-web-socket', "name: 'initialDelayMs', type: 'number', default: '500'");
+  check(ws, 'DEFAULT_MAX_DELAY_MS = 30_000', 'hooks/use-web-socket', "name: 'maxDelayMs', type: 'number', default: '30000'");
+  check(ws, 'DEFAULT_MIN_UPTIME_MS = 5_000', 'hooks/use-web-socket', "name: 'minUptimeMs', type: 'number', default: '5000'");
+});

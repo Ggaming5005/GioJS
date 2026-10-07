@@ -42,21 +42,6 @@ const scriptFile = fileURLToPath(import.meta.url);
 export const PENDING = new Set([
   // Wave B API reference and guide pages, written in parallel. Remove each
   // entry when its page lands (check-links warns about stale ones).
-  '/docs/hooks',
-  '/docs/components/gio-link',
-  '/docs/components/gio-image',
-  '/docs/components/gio-form',
-  '/docs/components/gio-font',
-  '/docs/components/json-ld',
-  '/docs/components/animate',
-  '/docs/components/locale-link',
-  '/docs/hooks/use-pathname',
-  '/docs/hooks/use-params',
-  '/docs/hooks/use-search-params',
-  '/docs/hooks/use-router',
-  '/docs/hooks/use-web-socket',
-  '/docs/hooks/use-locale',
-  '/docs/hooks/use-gio-form-state',
   '/docs/functions/redirect',
   '/docs/functions/not-found',
   '/docs/functions/revalidate-path',
