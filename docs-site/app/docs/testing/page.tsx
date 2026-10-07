@@ -62,9 +62,10 @@ export default function TestingPage(): React.JSX.Element {
 
       <h2>Setup</h2>
       <p>
-        <code>@gio.js/core</code> comes with <code>@gio.js/server</code>. With pnpm (no
-        hoisting), add it - and <code>tsx</code> for node:test - as dev dependencies:{' '}
-        <code>pnpm add -D @gio.js/core tsx</code>.
+        Scaffolded apps already depend on <code>@gio.js/core</code>; in an older project
+        that only has <code>@gio.js/server</code>, add it with pnpm (no hoisting) - and{' '}
+        <code>tsx</code> for node:test as a dev dependency:{' '}
+        <code>pnpm add @gio.js/core</code> and <code>pnpm add -D tsx</code>.
       </p>
       <h3>vitest</h3>
       <CodeBlock lang="bash" code={`npm install --save-dev vitest`} />
