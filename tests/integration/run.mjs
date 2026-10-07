@@ -1725,6 +1725,69 @@ async function main() {
       assert.equal(get.status, 200);
     });
 
+    // Page actions, the way a browser without JavaScript uses them: plain
+    // form posts from the page's own origin (fixture app/guestbook).
+    const formPost = (body, headers = {}) =>
+      rawRequest('POST', '/guestbook', {
+        'content-type': 'application/x-www-form-urlencoded',
+        origin: selfOrigin,
+        'sec-fetch-site': 'same-origin',
+        ...headers,
+      }, body);
+
+    await test('page action: a form POST answers 303 and the GET shows the new state', async () => {
+      const res = await formPost('name=Ada+Lovelace');
+      assert.equal(res.status, 303);
+      assert.equal(res.headers.location, '/guestbook?signed=Ada%20Lovelace');
+      assert.equal(res.headers['x-gio-cache'], 'bypass');
+      const page = await fetch(`${BASE}${res.headers.location}`);
+      assert.equal(page.status, 200);
+      assert.match(await page.text(), /GUESTBOOK_ENTRY Ada Lovelace/);
+    });
+
+    await test('page action: a 422 re-render shows field errors and is never cached', async () => {
+      // The page exports revalidate: its GET is cached...
+      await (await fetch(`${BASE}/guestbook`)).text();
+      const cached = await fetch(`${BASE}/guestbook`);
+      assert.match(cached.headers.get('x-gio-cache') ?? '', /^hit/);
+      await cached.text();
+
+      const res = await formPost('name=+');
+      assert.equal(res.status, 422);
+      assert.match(res.headers['content-type'] ?? '', /^text\/html/);
+      assert.match(res.body, /GUESTBOOK_ERROR Name is required/);
+      assert.match(res.body, /aria-invalid="true"/);
+      assert.match(res.body, /"actionData":\{"error":"Name is required"\}/, 'the envelope carries actionData');
+      assert.equal(res.headers['x-gio-cache'], 'bypass');
+      assert.equal(res.headers['cache-control'], 'private, no-cache');
+      // ...and the re-render never replaces it.
+      const after = await fetch(`${BASE}/guestbook`);
+      assert.match(after.headers.get('x-gio-cache') ?? '', /^hit/);
+      assert.doesNotMatch(await after.text(), /GUESTBOOK_ERROR/);
+    });
+
+    await test('page action: a multipart upload reaches the action byte for byte', async () => {
+      const form = new FormData();
+      form.append('attachment', new Blob([Buffer.from([0xff, 0x00, 0xfe, 0x80])]), 'photo.bin');
+      const res = await fetch(`${BASE}/guestbook`, { method: 'POST', body: form });
+      assert.equal(res.status, 200);
+      assert.match(await res.text(), /GUESTBOOK_UPLOAD name=photo\.bin size=4 hex=ff00fe80/);
+    });
+
+    await test('page action: cross-site form posts are refused by CSRF, other methods get 405', async () => {
+      const forged = await formPost('name=Mallory', { origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' });
+      assert.equal(forged.status, 403);
+      const page = await fetch(`${BASE}/guestbook?signed=check`);
+      assert.doesNotMatch(await page.text(), /GUESTBOOK_ENTRY Mallory/, 'the action never ran');
+      const put = await rawRequest('PUT', '/guestbook', { origin: selfOrigin });
+      assert.equal(put.status, 405);
+      assert.equal(put.headers.allow, 'GET, HEAD, POST');
+      // A page without an action still refuses every mutation.
+      const noAction = await rawRequest('POST', '/cached', { origin: selfOrigin });
+      assert.equal(noAction.status, 405);
+      assert.equal(noAction.headers.allow, 'GET, HEAD');
+    });
+
     await test('WebSocket upgrades from a foreign origin are refused with 403', async () => {
       assert.equal(await upgradeStatus('/live', { Origin: 'https://evil.example' }), 403);
       assert.equal(

@@ -11,7 +11,7 @@ import { existsSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   TEST_ENTRY_SCRIPT,
@@ -258,6 +258,42 @@ export default function Late() { return React.createElement('p', null, 'LATE_PAG
     const late = await renderPage('/late', { appDir });
     expect(late.status).toBe(200);
     expect(late.html).toContain('LATE_PAGE');
+  });
+});
+
+describe('callRoute and page actions', () => {
+  let root: string;
+
+  beforeAll(async () => {
+    root = await writeProject('gio-testing-action-', {
+      'app/contact/page.tsx': `import React from 'react';
+import { redirect } from '${pathToFileURL(join(packageDir, 'src', 'action.ts')).href}';
+export async function action(req) {
+  const email = String((await req.formData()).get('email') ?? '');
+  if (!email.includes('@')) return { status: 422, data: { error: 'ACTION_BAD_EMAIL' } };
+  return redirect('/contact/thanks');
+}
+export default function Contact({ actionData }) {
+  return React.createElement('p', null, actionData?.error ?? 'CONTACT_FORM');
+}
+`,
+    });
+  });
+
+  afterAll(async () => {
+    await resetTestApp(join(root, 'app'));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('posts a form to a page action: redirect, or a 422 re-render', async () => {
+    const appDir = join(root, 'app');
+    const sent = await callRoute('/contact', { appDir, method: 'POST', body: new URLSearchParams({ email: 'a@b.c' }) });
+    expect(sent.status).toBe(303);
+    expect(sent.headers['location']).toBe('/contact/thanks');
+
+    const invalid = await callRoute('/contact', { appDir, method: 'POST', body: new URLSearchParams({ email: 'x' }) });
+    expect(invalid.status).toBe(422);
+    expect(await invalid.text()).toContain('ACTION_BAD_EMAIL');
   });
 });
 
