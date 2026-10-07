@@ -20,6 +20,7 @@ import { fileConventionsGroups } from './api-file-conventions.ts';
 import { pageExportsGroups } from './api-page-exports.ts';
 import { gioTomlGroups } from './api-gio-toml.ts';
 import { otherReferenceGroups } from './api-other.ts';
+import { runtimeReferenceGroups } from './api-runtime.ts';
 import { architectureGroups } from './architecture.ts';
 
 export type { NavGroup, NavItem, NavSection } from './types.ts';
@@ -48,6 +49,7 @@ export const NAV: NavSection[] = [
       ...pageExportsGroups,
       ...gioTomlGroups,
       ...otherReferenceGroups,
+      ...runtimeReferenceGroups,
     ]),
   },
   {
