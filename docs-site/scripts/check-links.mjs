@@ -42,23 +42,6 @@ const scriptFile = fileURLToPath(import.meta.url);
 export const PENDING = new Set([
   // Wave B API reference and guide pages, written in parallel. Remove each
   // entry when its page lands (check-links warns about stale ones).
-  '/docs/gio-config',
-  '/docs/create-giojs',
-  '/docs/cli/dev',
-  '/docs/cli/start',
-  '/docs/cli/build',
-  '/docs/cli/build-standalone',
-  '/docs/cli/export',
-  '/docs/cli/routes',
-  '/docs/cli/typegen',
-  '/docs/cli/doctor',
-  '/docs/cli/info',
-  '/docs/cli/cache-explain',
-  '/docs/cli/bench',
-  '/docs/cli/migrate',
-  '/docs/cli/add',
-  '/docs/cli/help',
-  '/docs/cli/giojs-server',
   '/docs/env-vars',
   '/docs/endpoints',
   '/docs/headers',
