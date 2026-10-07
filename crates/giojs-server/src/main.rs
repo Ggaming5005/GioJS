@@ -2166,17 +2166,12 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
     response
 }
 
+/// Set the buffered document's `<html lang>` to the request locale,
+/// replacing the root layout's own (see `stream_inject::extend_with_html_lang`).
 fn inject_html_lang(html: Bytes, locale: &str) -> Bytes {
-    let needle = b"<html";
-    let Some(pos) = html.windows(needle.len()).position(|w| w == needle) else {
-        return html;
-    };
-    let attr = format!(" lang=\"{}\"", locale);
-    let mut out = BytesMut::with_capacity(html.len() + attr.len());
-    out.extend_from_slice(&html[..pos + needle.len()]);
-    out.extend_from_slice(attr.as_bytes());
-    out.extend_from_slice(&html[pos + needle.len()..]);
-    Bytes::from(out)
+    let mut out = BytesMut::with_capacity(html.len() + locale.len() + 8);
+    stream_inject::extend_with_html_lang(&mut out, &html, locale);
+    out.freeze()
 }
 
 /// Router fallback. Files in public/ answer at the site root (/favicon.ico,
@@ -8175,6 +8170,16 @@ mod tests {
         assert_eq!(
             &out[..],
             br#"<html lang="fr"><head><script>D</script></head><body><p>SHELL</p>"#
+        );
+    }
+
+    #[test]
+    fn buffered_lang_injection_replaces_the_root_layouts_lang() {
+        let html =
+            Bytes::from(r#"<!DOCTYPE html><html lang="en"><head></head><body></body></html>"#);
+        assert_eq!(
+            &inject_html_lang(html, "de")[..],
+            br#"<!DOCTYPE html><html lang="de"><head></head><body></body></html>"#
         );
     }
 

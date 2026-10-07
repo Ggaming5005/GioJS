@@ -995,6 +995,9 @@ first.
   written won, so `en;q=0.1, fr` picked `en`. Languages are now tried from
   the highest q-value down (written order breaks ties), and one marked
   `q=0` ("not this one") or with a malformed q is never picked.
+- Pages in a non-default locale rendered `<html lang="de" lang="en">`: the
+  server added the request locale's `lang` next to the root layout's own,
+  and browsers keep the first. The root layout's `lang` is now replaced.
 - A standalone build whose app had a module that throws while it is imported
   (a missing `GIO_SESSION_SECRET`) never started: `worker.js` evaluated every
   module at load, the worker died and the server gave up with
