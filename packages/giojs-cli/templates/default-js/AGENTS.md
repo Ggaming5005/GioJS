@@ -186,6 +186,7 @@ renders React. Full docs: https://giojs.com/llms.txt
 - `npx gio doctor` — check the environment and project; prints a fix for each
   problem (`npx gio --help` lists every command)
 - Health: `GET /_gio/health` · Dev dashboard: `/_gio/devtools` (dev only;
-  answers localhost hosts only, add LAN IPs/hostnames to `[dev] allowed_hosts`)
+  answers localhost hosts from this machine only, add LAN IPs/hostnames to
+  `[dev] allowed_hosts`)
 - `npx create-giojs add <feature>` — add tailwind, api, auth, db, docker or ci
   (never overwrites a changed file; safe to rerun)

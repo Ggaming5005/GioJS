@@ -14,7 +14,11 @@
 //!   (enforced by the router) and must be same-origin.
 //!
 //! Anyone who can reach the port directly can forge every header checked
-//! here; that threat is addressed by binding to 127.0.0.1, not by this module.
+//! here, `Host: localhost` included. So the localhost-style hosts are only
+//! trusted on a connection from this machine (a loopback peer address); a
+//! client on another machine must name the bind address or a host listed in
+//! `[dev] allowed_hosts`. Listing a host there opts in to that host from any
+//! peer, which is what a LAN device, a VM or a container's port mapping needs.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
@@ -62,6 +66,9 @@ impl DevEndpointKind {
 pub enum DevGuardRejection {
     MissingHost,
     UntrustedHost(String),
+    /// A localhost-style Host (normalized, no port) on a connection from
+    /// another machine: the header is forged, or a port mapping rewrote it.
+    RemotePeer(String),
     CrossSite(String),
     ForeignOrigin(String),
 }
@@ -78,6 +85,14 @@ impl DevGuardRejection {
                  \"{host}\" is not allowed.\n\
                  To use them through this host, add it to gio.toml:\n\n\
                  [dev]\nallowed_hosts = [\"{host}\"]\n"
+            ),
+            Self::RemotePeer(host) => format!(
+                "GioJS dev endpoints only answer \"{host}\" to requests from this machine.\n\
+                 To use them from another device, browse to a hostname or IP of this machine \
+                 and add it to gio.toml:\n\n\
+                 [dev]\nallowed_hosts = [\"192.168.1.20\"]\n\n\
+                 (Behind a container port mapping that connects from another address, list \
+                 \"{host}\" itself.)\n"
             ),
             Self::CrossSite(site) => format!(
                 "GioJS dev endpoints refuse requests with Sec-Fetch-Site: {site}; \
@@ -139,9 +154,43 @@ impl DevHostPolicy {
         }
     }
 
-    /// Whether a Host header value (`name[:port]`) is trusted.
+    /// Whether a Host header value (`name[:port]`) is trusted on a
+    /// connection from this machine.
+    #[cfg(test)]
     pub fn is_trusted_host(&self, host_header: &str) -> bool {
         normalize_hostname(host_header).is_some_and(|host| self.is_trusted_hostname(&host))
+    }
+
+    /// Whether a Host header value is trusted on a connection from `peer`
+    /// (`None` when the transport has no peer address). From another
+    /// machine every header is forgeable, so only the hosts the developer
+    /// configured (the bind address, `[dev] allowed_hosts`) are trusted.
+    pub fn is_trusted_host_from(&self, host_header: &str, peer: Option<IpAddr>) -> bool {
+        self.host_verdict(host_header, peer).is_ok()
+    }
+
+    fn host_verdict(
+        &self,
+        host_header: &str,
+        peer: Option<IpAddr>,
+    ) -> Result<(), DevGuardRejection> {
+        let Some(host) = normalize_hostname(host_header) else {
+            return Err(DevGuardRejection::UntrustedHost(host_header.to_string()));
+        };
+        if is_local_peer(peer) {
+            return if self.is_trusted_hostname(&host) {
+                Ok(())
+            } else {
+                Err(DevGuardRejection::UntrustedHost(host_header.to_string()))
+            };
+        }
+        if self.bind_host.as_deref() == Some(host.as_str()) || self.is_explicitly_allowed(&host) {
+            Ok(())
+        } else if self.is_trusted_hostname(&host) {
+            Err(DevGuardRejection::RemotePeer(host))
+        } else {
+            Err(DevGuardRejection::UntrustedHost(host_header.to_string()))
+        }
     }
 
     fn is_trusted_hostname(&self, host: &str) -> bool {
@@ -163,8 +212,8 @@ impl DevHostPolicy {
             })
     }
 
-    /// Vet one dev endpoint request. `host` is the Host header (or the
-    /// HTTP/2 :authority); `origin` and `sec_fetch_site` are the raw headers.
+    /// `check_from` on a connection from this machine.
+    #[cfg(test)]
     pub fn check(
         &self,
         kind: DevEndpointKind,
@@ -172,13 +221,25 @@ impl DevHostPolicy {
         origin: Option<&str>,
         sec_fetch_site: Option<&str>,
     ) -> Result<(), DevGuardRejection> {
+        self.check_from(kind, host, origin, sec_fetch_site, None)
+    }
+
+    /// Vet one dev endpoint request. `host` is the Host header (or the
+    /// HTTP/2 :authority); `origin` and `sec_fetch_site` are the raw headers;
+    /// `peer` is the connection's remote address.
+    pub fn check_from(
+        &self,
+        kind: DevEndpointKind,
+        host: Option<&str>,
+        origin: Option<&str>,
+        sec_fetch_site: Option<&str>,
+        peer: Option<IpAddr>,
+    ) -> Result<(), DevGuardRejection> {
         let host = host
             .map(str::trim)
             .filter(|h| !h.is_empty())
             .ok_or(DevGuardRejection::MissingHost)?;
-        if !self.is_trusted_host(host) {
-            return Err(DevGuardRejection::UntrustedHost(host.to_string()));
-        }
+        self.host_verdict(host, peer)?;
         if kind == DevEndpointKind::Page {
             return Ok(());
         }
@@ -305,6 +366,12 @@ fn normalize_hostname(raw: &str) -> Option<String> {
 
 fn is_port(s: &str) -> bool {
     !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Whether a connection comes from this machine. An unknown peer (no
+/// socket address, as in in-process tests) counts as local.
+fn is_local_peer(peer: Option<IpAddr>) -> bool {
+    peer.is_none_or(|ip| ip.to_canonical().is_loopback())
 }
 
 /// Whether the configured bind address listens on every interface.
@@ -488,6 +555,74 @@ mod tests {
             p.check(DevEndpointKind::Read, None, None, None),
             Err(DevGuardRejection::MissingHost)
         );
+    }
+
+    #[test]
+    fn localhost_host_from_another_machine_is_refused() {
+        let p = policy();
+        let lan: IpAddr = "192.0.2.2".parse().unwrap();
+        // A LAN client forging Host: localhost (the server binds 0.0.0.0).
+        for (host, name) in [
+            ("localhost:4518", "localhost"),
+            ("127.0.0.1:4518", "127.0.0.1"),
+            ("[::1]:4518", "::1"),
+            ("app.localhost", "app.localhost"),
+        ] {
+            assert_eq!(
+                p.check_from(DevEndpointKind::Read, Some(host), None, None, Some(lan)),
+                Err(DevGuardRejection::RemotePeer(name.into())),
+                "{host}"
+            );
+            assert!(!p.is_trusted_host_from(host, Some(lan)), "{host}");
+        }
+        assert_eq!(
+            p.check_from(
+                DevEndpointKind::Read,
+                Some("evil.example"),
+                None,
+                None,
+                Some(lan)
+            ),
+            Err(DevGuardRejection::UntrustedHost("evil.example".into()))
+        );
+        // The same request over loopback (IPv4, IPv6, IPv4-mapped) is fine.
+        for peer in ["127.0.0.1", "::1", "::ffff:127.0.0.1"] {
+            let peer: IpAddr = peer.parse().unwrap();
+            assert!(p
+                .check_from(
+                    DevEndpointKind::Read,
+                    Some("localhost:4518"),
+                    None,
+                    None,
+                    Some(peer)
+                )
+                .is_ok());
+            assert!(p.is_trusted_host_from("localhost:4518", Some(peer)));
+        }
+        let msg = DevGuardRejection::RemotePeer("localhost".into()).message();
+        assert!(msg.contains("allowed_hosts"), "{msg}");
+        assert!(msg.contains("list \"localhost\" itself"), "{msg}");
+    }
+
+    #[test]
+    fn configured_hosts_answer_other_machines() {
+        let lan: IpAddr = "192.168.1.30".parse().unwrap();
+        let p = DevHostPolicy::new("0.0.0.0", &["192.168.1.20".to_string()]);
+        assert!(p
+            .check_from(
+                DevEndpointKind::Read,
+                Some("192.168.1.20:3000"),
+                None,
+                None,
+                Some(lan)
+            )
+            .is_ok());
+        let bound = DevHostPolicy::new("192.168.1.20", &[]);
+        assert!(bound.is_trusted_host_from("192.168.1.20:3000", Some(lan)));
+        assert!(!bound.is_trusted_host_from("localhost:3000", Some(lan)));
+        // Listing localhost itself opts in (a container's port mapping).
+        let mapped = DevHostPolicy::new("0.0.0.0", &["localhost".to_string()]);
+        assert!(mapped.is_trusted_host_from("localhost:3000", Some(lan)));
     }
 
     #[test]

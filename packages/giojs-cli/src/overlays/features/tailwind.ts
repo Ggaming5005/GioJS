@@ -96,7 +96,9 @@ export const tailwind: Overlay = {
   modes: ['server', 'static'],
   templateDirs: ['tailwind'],
   generate: ctx => [{ path: TAILWIND_INPUT, content: tailwindInput(readLayout(ctx)), onExisting: 'keep' }],
-  devDependencies: {
+  // Regular dependencies: `start` builds the stylesheet, and a deploy from
+  // source installs with --omit=dev (the output is not committed).
+  dependencies: {
     '@tailwindcss/cli': '^4.1.0',
     tailwindcss: '^4.1.0',
   },

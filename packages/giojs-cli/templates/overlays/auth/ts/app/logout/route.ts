@@ -1,4 +1,4 @@
-import { sessions } from '@/lib/session.server';
+import { sessions } from '../../lib/session.server';
 
 // POST /logout deletes the session cookie. Cookie sessions are stateless: a
 // copy of the old cookie stays valid until it expires - keep maxAge short,

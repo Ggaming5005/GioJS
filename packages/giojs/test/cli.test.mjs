@@ -152,6 +152,36 @@ describe('unknown commands and options', () => {
   });
 });
 
+describe('gio build standalone --out', () => {
+  test('refuses an --out it would destroy: the project, an ancestor, app/, a foreign directory', () => {
+    const project = tempProject({
+      'gio.toml': '[app]\nname = "keep"\n',
+      'IMPORTANT.txt': 'do not delete\n',
+      'app/page.tsx': 'export default function Page() { return null; }\n',
+      'notes/todo.txt': 'mine\n',
+    });
+    // The out check runs before the server binary is needed; a dummy keeps
+    // a build that got past it from failing for that reason instead.
+    const env = { GIO_STANDALONE_SERVER_BIN: join(project, 'IMPORTANT.txt') };
+    for (const [out, message] of [
+      ['.', /is the project directory or contains it/],
+      ['..', /is the project directory or contains it/],
+      ['app', /inside the app directory/],
+      ['app/out', /inside the app directory/],
+      ['notes', /is not empty and is not a previous standalone build/],
+      ['IMPORTANT.txt', /is not a directory/],
+    ]) {
+      const result = run(['build', 'standalone', '--out', out], { cwd: project, env });
+      assert.equal(result.status, 1, `--out ${out}: ${result.stdout}${result.stderr}`);
+      assert.match(result.stderr, message, `--out ${out}`);
+      assert.ok(!hasStackTrace(result.stderr), result.stderr);
+    }
+    for (const file of ['gio.toml', 'IMPORTANT.txt', 'app/page.tsx', 'notes/todo.txt']) {
+      assert.ok(existsSync(join(project, file)), `${file} was deleted`);
+    }
+  });
+});
+
 describe('missing server binary', () => {
   test('gio start says what to fix, exits 1, never prints a stack trace', () => {
     const { status, stdout, stderr } = run(['start'], { env: { GIO_SERVER_BIN: '/nonexistent/giojs-server' } });

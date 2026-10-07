@@ -11,7 +11,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cliDir, runCli } from './helpers.ts';
@@ -47,6 +47,34 @@ test('a monorepo scaffold builds the workspace packages it links before the firs
     assert.match(steps, /again after changing them/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('create-giojs installed in a GioJS app (gio.toml four levels up) scaffolds in published mode', async () => {
+  const workDir = await mkdtemp(join(tmpdir(), 'gio-create-'));
+  try {
+    // `gio add` / `gio migrate` install create-giojs as a devDependency; npx
+    // and `npm create giojs` then run that copy from inside the app.
+    const host = join(workDir, 'hostproj');
+    await mkdir(host);
+    await writeFile(join(host, 'gio.toml'), '[app]\nname = "hostproj"\n');
+    const installed = join(host, 'node_modules', 'create-giojs');
+    await mkdir(installed, { recursive: true });
+    await cp(join(cliDir, 'dist'), join(installed, 'dist'), { recursive: true });
+    await cp(join(cliDir, 'templates'), join(installed, 'templates'), { recursive: true });
+    await cp(join(cliDir, 'package.json'), join(installed, 'package.json'));
+
+    const stdout = scaffold(join(installed, 'dist', 'index.js'), host, 'other-app');
+    const pkg = JSON.parse(await readFile(join(host, 'other-app', 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>;
+      scripts: Record<string, string>;
+    };
+    assert.match(pkg.dependencies['@gio.js/core'] ?? '', /^\^/);
+    assert.ok(pkg.dependencies['@gio.js/server'] !== undefined, 'the server bin is kept');
+    assert.doesNotMatch(JSON.stringify(pkg.scripts), /cargo|\.\.\/\.\.\//);
+    assert.doesNotMatch(stdout, /pnpm --filter/);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
   }
 });
 

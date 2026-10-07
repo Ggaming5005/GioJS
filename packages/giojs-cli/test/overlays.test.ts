@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -181,7 +181,10 @@ test('tailwind: CLI build into an imported stylesheet, the watcher in dev, a bui
   await withProject('ts', async project => {
     await applyFeatures(project, ['tailwind']);
     const pkg = await readJson<Pkg>(project.dir, 'package.json');
-    assert.ok(pkg.devDependencies?.['@tailwindcss/cli'] && pkg.devDependencies['tailwindcss']);
+    // `start` builds the stylesheet, so the CLI must survive `npm ci --omit=dev`.
+    assert.ok(pkg.dependencies['@tailwindcss/cli'] && pkg.dependencies['tailwindcss']);
+    assert.equal(pkg.devDependencies?.['@tailwindcss/cli'], undefined);
+    assert.equal(pkg.devDependencies?.['tailwindcss'], undefined);
     const build = 'tailwindcss -i ./app/tailwind.css -o ./app/tailwind.out.css --minify';
     assert.equal(pkg.scripts['css:build'], build);
     assert.equal(pkg.scripts['css:watch'], 'tailwindcss -i ./app/tailwind.css -o ./app/tailwind.out.css --watch');
@@ -443,7 +446,7 @@ test('tailwind + auth + db + docker compose, and docker builds the Tailwind outp
     const plan = await applyFeatures(project, ['docker', 'db', 'auth', 'tailwind']);
     assert.deepEqual(plan.features, ['tailwind', 'auth', 'db', 'docker']);
     const pkg = await readJson<Pkg>(project.dir, 'package.json');
-    assert.ok(pkg.dependencies['drizzle-orm'] && pkg.devDependencies?.['@tailwindcss/cli']);
+    assert.ok(pkg.dependencies['drizzle-orm'] && pkg.dependencies['@tailwindcss/cli']);
     assert.match(pkg.scripts['build'] ?? '', /^tailwindcss .* --minify && tsc --noEmit$/);
     assert.match(await read(project.dir, 'Dockerfile'), /RUN npm run build && npx gio build standalone/);
     assert.match(await read(project.dir, 'Dockerfile'), /cp -R drizzle standalone\/drizzle/);
@@ -642,6 +645,40 @@ test('add keeps the user\'s edits to a feature that is already set up, and still
     assert.equal(forced.status, 0, forced.stderr);
     assert.match(await read(project.dir, 'app/(site)/login/page.tsx'), /<h1>Log in<\/h1>/);
   });
+});
+
+test('add creates gio.toml when the project has none, so auth\'s guard and rate limit are never a manual step', async () => {
+  for (const language of ['ts', 'js'] as const) {
+    await withProject(language, async project => {
+      // A migrated Next app without a next.config has no gio.toml.
+      await rm(join(project.dir, 'gio.toml'));
+      const added = runCli(['add', 'auth'], project.dir);
+      assert.equal(added.status, 0, added.stderr);
+      assert.match(added.stdout, /Did create:[\s\S]*^ {2}gio\.toml$/m);
+      assert.doesNotMatch(added.stdout + added.stderr, /by hand|gio\.toml is missing/);
+      const gio = await read(project.dir, 'gio.toml');
+      assert.match(gio, /^# GioJS server configuration/);
+      assert.match(gio, /\[\[guards\]\]\npath = "\/dashboard\/\*rest"\nrequire_session = true\nredirect_to = "\/login"/);
+      assert.match(gio, /\[\[rate_limits\]\]\npath = "\/login"\nper_ip = 10/);
+      // Applied again, the created file is left as it is.
+      const again = runCli(['add', 'auth'], project.dir);
+      assert.equal(again.status, 0, again.stderr);
+      assert.equal(await read(project.dir, 'gio.toml'), gio);
+      // The dashboard checks the session itself too, not only through the guard.
+      const dashboard = await read(project.dir, `app/dashboard/page.${language === 'ts' ? 'tsx' : 'jsx'}`);
+      assert.match(dashboard, /if \(email === undefined\) return redirect\('\/login'\);/);
+      assert.doesNotMatch(dashboard, /'unknown'/);
+    });
+  }
+});
+
+test('overlay pages import lib/ relatively, never through a tsconfig alias the project may map elsewhere', async () => {
+  const root = join(cliDir, 'templates', 'overlays');
+  const offenders: string[] = [];
+  for (const file of (await readdir(root, { recursive: true })).filter(path => /\.[cm]?[jt]sx?$/.test(path))) {
+    if (/\bfrom ['"]@\//.test(await read(root, file))) offenders.push(file);
+  }
+  assert.deepEqual(offenders, []);
 });
 
 test('add refuses a script the user already defined differently', async () => {

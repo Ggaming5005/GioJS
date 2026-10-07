@@ -1,5 +1,5 @@
 import { isUnsupportedMediaTypeError, type GioRequest } from '@gio.js/core';
-import { addEntry, listEntries, validateEntry } from '@/lib/guestbook.server';
+import { addEntry, listEntries, validateEntry } from '../../../lib/guestbook.server';
 
 // GET /api/guestbook → 200 { entries: [...] }
 export function GET(): Response {

@@ -574,6 +574,12 @@ curl -H "Authorization: Bearer a-long-random-secret" \\
           re-points its own domain at your machine.
         </li>
         <li>
+          The localhost names and loopback IPs count only on a connection from
+          this machine. A client on another machine can send{' '}
+          <code>Host: localhost</code> itself, so its requests must name the{' '}
+          <code>[server] host</code> or an <code>allowed_hosts</code> entry.
+        </li>
+        <li>
           The state, stream and codeframe reads refuse requests a browser marks{' '}
           <code>Sec-Fetch-Site: cross-site</code>, and requests whose{' '}
           <code>Origin</code> is neither the requested host nor a host in{' '}
@@ -615,10 +621,13 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         distinct host or origin.
       </p>
       <div className="callout">
-        These checks stop websites you visit, not people on your network: a
-        client that can reach the port directly can send any headers. On an
-        untrusted network, bind the dev server to <code>127.0.0.1</code> (or
-        publish the container port to <code>127.0.0.1</code> only).
+        An <code>allowed_hosts</code> entry opens the dev endpoints - project
+        source included - to every client that can reach the port and sends
+        that host, not only to you. On an untrusted network, list no hosts and
+        bind the dev server to <code>127.0.0.1</code> (or publish the
+        container port to <code>127.0.0.1</code> only). Behind a container
+        port mapping the connection comes from another address, so{' '}
+        <code>localhost</code> itself needs an entry there.
       </div>
 
       <h2>Security</h2>

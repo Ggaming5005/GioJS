@@ -223,6 +223,27 @@ test('a --force scaffold commits only what it created, never the files already t
   assert.deepEqual(untracked, ['?? .env', '?? app/mine.tsx', '?? notes/todo.txt']);
 });
 
+test('a scaffold into an "empty" directory leaves its editor folders and README out of the commit', async () => {
+  const cwd = await newCaseDir();
+  const target = join(cwd, 'editor');
+  // Entries inspectTargetDir counts as harmless, so no --force is needed.
+  await mkdir(join(target, '.vscode'), { recursive: true });
+  await mkdir(join(target, '.idea'), { recursive: true });
+  await writeFile(join(target, '.vscode', 'settings.json'), '{"sqltools.connections":[{"password":"hunter2"}]}\n');
+  await writeFile(join(target, '.idea', 'dataSources.local.xml'), '<secret-storage>hunter2</secret-storage>\n');
+  await writeFile(join(target, 'README.md'), '# notes\n');
+  const env = withIdentity();
+  const result = runCli(['editor', '--no-install'], { cwd, env });
+  assertOk(result);
+  assert.match(result.stdout, /Initialized a git repository with an initial commit/);
+  assert.match(result.stdout, /not in the commit: /);
+  const files = git(['ls-files'], target, env).split('\n');
+  assert.ok(files.includes('app/page.tsx') && files.includes('gio.toml'), files.join(', '));
+  for (const file of ['.vscode/settings.json', '.idea/dataSources.local.xml', 'README.md']) {
+    assert.ok(!files.includes(file), `${file} was already there and must not be committed`);
+  }
+});
+
 test('a failed initial commit (no git identity) leaves the repository and a note', async () => {
   const cwd = await newCaseDir();
   const result = runCli(['app', '--no-install'], { cwd, env: withoutIdentity() });

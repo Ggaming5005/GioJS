@@ -11,7 +11,7 @@
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ALL_FEATURES, applyFeatures, createNodeModules, scaffold, typecheck } from './overlay-helpers.ts';
@@ -33,6 +33,24 @@ test('default (TS) template typechecks with every feature applied', async () => 
   const project = await scaffold(join(workDir, 'ts'), 'ts');
   const plan = await applyFeatures(project, ALL_FEATURES);
   assert.deepEqual(plan.manual, []);
+  await symlink(nodeModules, join(project.dir, 'node_modules'), 'junction');
+  assert.deepEqual(typecheck(project.dir, 'tsconfig.json'), []);
+});
+
+test('the TS overlays typecheck in a project whose @/* alias points at src/ (create-next-app --src-dir)', async () => {
+  const project = await scaffold(join(workDir, 'src-dir'), 'ts');
+  // The layout's own @/components imports keep resolving under src/.
+  await mkdir(join(project.dir, 'src'));
+  await rename(join(project.dir, 'components'), join(project.dir, 'src', 'components'));
+  const tsconfigPath = join(project.dir, 'tsconfig.json');
+  const tsconfig = JSON.parse(await readFile(tsconfigPath, 'utf8')) as {
+    compilerOptions: { paths: Record<string, string[]> };
+    include: string[];
+  };
+  tsconfig.compilerOptions.paths = { '@/*': ['./src/*'] };
+  tsconfig.include = ['app', 'src', 'lib'];
+  await writeFile(tsconfigPath, JSON.stringify(tsconfig, null, 2));
+  await applyFeatures(project, ['api', 'auth', 'db']);
   await symlink(nodeModules, join(project.dir, 'node_modules'), 'junction');
   assert.deepEqual(typecheck(project.dir, 'tsconfig.json'), []);
 });

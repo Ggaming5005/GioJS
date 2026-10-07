@@ -162,8 +162,11 @@ gio build standalone [--out <dir>] [--target <platform>]`} />
         declarations behind <code>href(&apos;/posts/:id&apos;, {'{ id }'})</code>,{' '}
         <code>PageProps</code>, <code>GsspContext</code> and CSS Module imports. The server
         regenerates them at every start; run <code>gio typegen</code> in CI before{' '}
-        <code>tsc</code>, or after adding a route with no server running. Files are only
-        rewritten when their content changes. Your <code>tsconfig.json</code> must list{' '}
+        <code>tsc</code>, or after adding a route with no server running. A{' '}
+        <code>route.ts</code> that fails to import (say it needs{' '}
+        <code>GIO_SESSION_SECRET</code>, which CI does not set) is still typed, so CI and
+        your machine get the same declarations. Files are only rewritten when their
+        content changes. Your <code>tsconfig.json</code> must list{' '}
         <code>&quot;.gio/routes.d.ts&quot;</code> in <code>include</code> (TypeScript&apos;s
         wildcards skip dot-folders).
       </p>

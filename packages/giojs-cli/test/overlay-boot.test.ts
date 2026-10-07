@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { cp, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
+import { cp, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -225,5 +225,33 @@ test('the docker overlay matches a real gio build standalone, which serves the a
     throw error;
   } finally {
     await stop(child);
+  }
+});
+
+test('the dashboard checks the session itself: without the [[guards]] entry it still sends you to /login', { skip }, async () => {
+  const tomlPath = join(project.dir, 'gio.toml');
+  const original = await read(project.dir, 'gio.toml');
+  const unguarded = original.replace(/\n\[\[guards\]\]\n(?:[^\n[]+\n)+/, '\n');
+  assert.doesNotMatch(unguarded, /require_session/);
+  await writeFile(tomlPath, unguarded);
+  const { base, child } = await start(binary as string, [], project.dir, {
+    GIO_NODE_SCRIPT: join(coreDir, 'src', 'index.ts'),
+    GIO_TSX_PKG: await realpath(join(coreDir, 'node_modules', 'tsx')),
+  });
+  try {
+    const anonymous = await fetch(`${base}/dashboard`, { redirect: 'manual' });
+    assert.ok([302, 303, 307].includes(anonymous.status), `GET /dashboard answered ${anonymous.status}`);
+    assert.match(anonymous.headers.get('location') ?? '', /\/login$/);
+    const login = await fetch(`${base}/login`, form({ email: ENV.DEMO_EMAIL, password: ENV.DEMO_PASSWORD }));
+    const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+    const dashboard = await fetch(`${base}/dashboard`, { headers: { cookie }, redirect: 'manual' });
+    assert.equal(dashboard.status, 200);
+    assert.match(await dashboard.text(), /Signed in as <strong>demo@example\.com/);
+  } catch (error) {
+    console.error(log);
+    throw error;
+  } finally {
+    await stop(child);
+    await writeFile(tomlPath, original);
   }
 });
