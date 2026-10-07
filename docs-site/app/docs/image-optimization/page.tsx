@@ -70,6 +70,9 @@ formats = ["webp"]          # default ["avif", "webp"]; [] = always JPEG`} />
         <code>data:</code> and <code>blob:</code> URLs always do - there is nothing to resize. In a{' '}
         <a href="/docs/static-export">static export</a> every image renders its plain{' '}
         <code>src</code>: a static host has no <code>/_gio/image</code>, so ship pre-sized files.
+        So does every image when <code>gio.toml</code> turns the optimizer off with{' '}
+        <code>[images] enabled = false</code> - for an app behind an image CDN, or one that wants
+        no CPU-heavy endpoint. <code>/_gio/image</code> then answers 404.
       </p>
       <CodeBlock lang="tsx" code={`<GioImage src="/avatar.gif" alt="" width={64} height={64} unoptimized />`} />
 
@@ -79,6 +82,19 @@ formats = ["webp"]          # default ["avif", "webp"]; [] = always JPEG`} />
 protocol = "https"
 hostname = "images.example.com"
 pathname = "/uploads/*"`} />
+
+      <h2>Limits</h2>
+      <p>
+        The optimizer bounds what one request can cost. Each limit is an <code>[images]</code>{' '}
+        key, and <code>0</code> lifts it (the server warns at startup when one is lifted).
+        Remote fetches never follow redirects, and a <code>src</code> outside{' '}
+        <code>public/</code> or the allowlist is refused, whatever the limits.
+      </p>
+      <CodeBlock lang="toml" code={`[images]
+max_remote_bytes = 20971520     # largest remote source downloaded (20 MiB)
+remote_timeout_secs = 30        # deadline for a whole remote download
+max_source_dimension = 10000    # widest or tallest source decoded, in pixels
+max_decode_bytes = 268435456    # decoder memory per source (256 MiB)`} />
     </>
   );
 }

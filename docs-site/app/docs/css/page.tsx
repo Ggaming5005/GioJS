@@ -50,7 +50,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <li>
           Files are served from <code>/_next/static/css/</code> with content-hashed names and{' '}
           <code>Cache-Control: public, max-age=31536000, immutable</code>, and minified in
-          production.
+          production (<code>[css] minify = false</code> in <code>gio.toml</code> keeps them as
+          written). Imported CSS is part of the module graph: no <code>[css]</code> key turns
+          its bundling off.
         </li>
         <li>
           The links are React stylesheet resources (<code>precedence=&quot;default&quot;</code>),
@@ -192,7 +194,8 @@ import './tailwind.out.css';`} />
       <CodeBlock lang="tsx" code={`<link rel="stylesheet" href="/public/styles/globals.css" />`} />
       <p>
         Every non-module <code>.css</code> file under <code>app/</code> is also transformed (and
-        minified in production) once at startup and served from memory at its path:
+        minified in production, unless <code>[css] minify = false</code>) once at startup and
+        served from memory at its path (<code>[css] enabled = false</code> turns this off):
         app/globals.css answers at <code>/globals.css</code>. Those URLs carry no content hash,
         so they are served with <code>Cache-Control: public, max-age=0, must-revalidate</code>{' '}
         and a strong ETag. Browsers revalidate on each use and get a bodiless 304 while the file
