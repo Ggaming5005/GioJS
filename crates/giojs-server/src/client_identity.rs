@@ -141,6 +141,10 @@ impl TrustedProxies {
         self.0.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     pub fn contains(&self, ip: IpAddr) -> bool {
         self.0.iter().any(|net| net.contains(ip))
     }

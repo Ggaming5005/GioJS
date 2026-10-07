@@ -1,49 +1,116 @@
 #!/usr/bin/env node
 'use strict';
-const { spawn, spawnSync } = require('child_process');
-const { existsSync } = require('fs');
-const { join, dirname } = require('path');
+/**
+ * giojs/bin/gio.js
+ *
+ * The `gio` command. Each command's module loads only when that command
+ * runs, so `gio --help` and friends start instantly. Help text and the
+ * command table live in lib/commands.js. Exit codes: 0 success, 1 the
+ * command failed, 2 usage error. The `giojs-server` bin is giojs-server.js:
+ * it starts the server with no command parsing, as it always has.
+ */
+const { spawnSync } = require('child_process');
+const { join } = require('path');
+const { parseArgs } = require('util');
+const { COMMANDS, HINTS, commandHelp, didYouMean, mainHelp } = require('./lib/commands');
 
-// `gio export` renders the app to static HTML (out/). It runs the Node
-// exporter through tsx and never touches the Rust binary, so it works even
-// where no platform binary is installed.
-if (process.argv[2] === 'export') {
-  runStaticExport();
+const USAGE_ERROR = 2;
+
+function usageError(message, command = null) {
+  const help = command ? `gio ${command} --help` : 'gio --help';
+  console.error(`gio: ${message}\nRun \`${help}\` for usage.`);
+  process.exit(USAGE_ERROR);
 }
 
-// `gio bench` runs the zero-dependency load generator. bench.mjs is ESM, so
-// it runs as a child node process to keep this entrypoint CJS.
-if (process.argv[2] === 'bench') {
-  runBench(process.argv.slice(3));
+/** Strict flag parsing for one command; a bad flag is a usage error. */
+function parseFlags(command, args, options, { positionals = 0 } = {}) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      options: { help: { type: 'boolean', short: 'h' }, ...options },
+      allowPositionals: positionals > 0,
+      strict: true,
+    });
+  } catch (err) {
+    const unknown = /^Unknown option '--([^'=]+)/.exec(err.message);
+    const suggestion = unknown && didYouMean(unknown[1], ['help', ...Object.keys(options)]);
+    if (unknown) {
+      usageError(`unknown option "--${unknown[1]}"${suggestion ? ` - did you mean --${suggestion}?` : ''}`, command);
+    }
+    // Other parseArgs messages are full sentences naming the option.
+    usageError(err.message.replace(/\. To specify a positional argument.*$/s, ''), command);
+  }
+  if (parsed.values.help) {
+    console.log(commandHelp(command));
+    process.exit(0);
+  }
+  if (parsed.positionals.length > positionals) {
+    usageError(`unexpected argument "${parsed.positionals[positionals]}"`, command);
+  }
+  return parsed;
+}
+
+function parsePort(value, command) {
+  if (value === undefined) return null;
+  if (!/^\d+$/.test(value) || Number(value) > 65535) {
+    usageError(`--port expects a port number (0-65535), got "${value}"`, command);
+  }
+  return Number(value);
+}
+
+/**
+ * --host as the server reads GIO_HOST: an IPv4 address, or IPv6 in
+ * brackets (`::1` and `[::1]` are both accepted and passed bracketed).
+ */
+function parseHost(value, command) {
+  if (value === undefined) return null;
+  // The server binds IP addresses only (shells set HOST to the machine's
+  // name, so names are never resolved); localhost is the one obvious alias.
+  if (value === 'localhost') return '127.0.0.1';
+  const { isIP } = require('net');
+  const bare = /^\[(.*)\]$/.exec(value);
+  if (bare ? isIP(bare[1]) === 6 : isIP(value) === 4) return value;
+  if (!bare && isIP(value) === 6) return `[${value}]`;
+  usageError(`--host expects an IP address such as 0.0.0.0 (every interface), 127.0.0.1 (this machine only) or [::] (every IPv6 interface), got "${value}"`, command);
+}
+
+function runNodeScript(script, args, env = process.env) {
+  const result = spawnSync(process.execPath, [join(__dirname, script), ...args], { stdio: 'inherit', env });
+  process.exit(result.status == null ? 1 : result.status);
+}
+
+// ── commands ───────────────────────────────────────────────────────────────
+
+function cmdServer(mode, command, args) {
+  const { values } = parseFlags(command, args, {
+    port: { type: 'string', short: 'p' },
+    host: { type: 'string', short: 'H' },
+    open: { type: 'boolean' },
+  });
+  require('./lib/server').runServerCommand({
+    mode,
+    port: parsePort(values.port, command),
+    host: parseHost(values.host, command),
+    open: Boolean(values.open),
+  });
 }
 
 // `gio build standalone` packages the app into a self-contained deploy dir
-// (Rust binary + bundled worker.js + prebuilt chunks). standalone.mjs is ESM,
-// so it runs as a child node process like bench.mjs. Plain `gio build` only
-// explains that normal deploys need no build step.
-if (process.argv[2] === 'build') {
-  runBuild(process.argv.slice(3));
-}
-
-// `gio cache explain <url>` requests the URL and decodes the X-Gio-Cache
-// header the server stamps on every response - one cache, one owner, and
-// this is how you see what it did.
-if (process.argv[2] === 'cache' && process.argv[3] === 'explain') {
-  runCacheExplain(process.argv[4]);
-} else {
-  runRustServer();
-}
-
-function runBuild(args) {
-  if (args[0] === 'standalone') {
-    const result = spawnSync(
-      process.execPath,
-      [join(__dirname, 'standalone.mjs'), ...args.slice(1)],
-      { stdio: 'inherit' },
-    );
-    process.exit(result.status == null ? 1 : result.status);
+// (Rust binary + bundled worker.js + prebuilt chunks); standalone.mjs is
+// ESM, so it runs as a child node process. Plain `gio build` only explains
+// that normal deploys need no build step.
+function cmdBuild(args) {
+  if (args[0] === 'standalone') runNodeScript('standalone.mjs', args.slice(1));
+  if (args[0] === '--help' || args[0] === '-h') {
+    console.log(commandHelp('build'));
+    process.exit(0);
   }
-  console.log('GioJS has no build step for normal deploys: `gio` starts the server,');
+  if (args.length > 0) {
+    const suggestion = didYouMean(args[0], ['standalone']);
+    usageError(`unknown build target "${args[0]}"${suggestion ? ` - did you mean \`gio build ${suggestion}\`?` : ''}`, 'build');
+  }
+  console.log('GioJS has no build step for normal deploys: `gio start` starts the server,');
   console.log('renders on demand, and caches in Rust. To package a self-contained');
   console.log('deploy directory (one folder, runs anywhere Node is installed), use:');
   console.log('');
@@ -51,69 +118,22 @@ function runBuild(args) {
   process.exit(0);
 }
 
-function runBench(args) {
-  const result = spawnSync(process.execPath, [join(__dirname, 'bench.mjs'), ...args], { stdio: 'inherit' });
-  process.exit(result.status == null ? 1 : result.status);
-}
-
-function runCacheExplain(target) {
-  if (!target) {
-    console.error('usage: gio cache explain <url-or-path>   (e.g. gio cache explain /posts/1)');
+// `gio export` renders the app to static HTML (out/). It runs the Node
+// exporter through tsx and never touches the Rust binary, so it works even
+// where no platform binary is installed.
+function cmdExport(args) {
+  parseFlags('export', args, {});
+  const { findCoreDir, findTsxCli } = require('./lib/project');
+  const coreDir = findCoreDir();
+  if (!coreDir) {
+    console.error('gio export: @gio.js/core is not installed. Run your package manager\'s install.');
     process.exit(1);
   }
-  const url = target.startsWith('/') ? `http://localhost:3000${target}` : target;
-
-  const EXPLANATIONS = {
-    hit: 'Served from the Rust page cache without touching Node. "ttl" is the\n    seconds until this entry goes stale.',
-    stale: 'Served instantly from the cache past its TTL while ONE background\n    render refreshes the entry (stale-while-revalidate). "age" is seconds\n    since the entry was rendered.',
-    'miss; stored': 'Rendered by the Node worker and stored in the cache - the next\n    request for this key is a hit. Pages opt in via `export const revalidate`.',
-    bypass: 'Rendered by the Node worker and NOT cached: the page did not declare\n    `revalidate`, the request was not GET/HEAD, the response varies per user,\n    or it set per-request headers.',
-    static: 'Served directly by the Rust static file layer (public/ assets,\n    hashed chunks, fonts) - never touches the cache or Node.',
-  };
-
-  (async () => {
-    let res;
-    try {
-      res = await fetch(url, { redirect: 'manual' });
-    } catch (err) {
-      console.error(`gio: could not reach ${url} - is the server running? (${err.cause?.code ?? err.message})`);
-      process.exit(1);
-    }
-    const value = res.headers.get('x-gio-cache');
-    console.log(`GET ${url}`);
-    console.log(`  status       ${res.status}`);
-    console.log(`  x-gio-cache  ${value ?? '(absent)'}`);
-    if (value === null) {
-      console.log('  → No cache header. Either this is an internal /_gio endpoint or the\n    server predates X-Gio-Cache (upgrade @gio.js/server).');
-    } else {
-      const key = value.startsWith('hit') ? 'hit' : value.startsWith('stale') ? 'stale' : value;
-      console.log(`  → ${EXPLANATIONS[key] ?? value}`);
-    }
-    process.exit(0);
-  })();
-}
-
-function runStaticExport() {
-  let coreDir;
-  try {
-    coreDir = dirname(require.resolve('@gio.js/core/package.json'));
-  } catch (_) {
-    coreDir = join(__dirname, '..', '..', '..', 'packages', 'giojs-core');
-  }
-  const exportCli = join(coreDir, 'src', 'export-cli.ts');
-
-  let tsxCli = [
-    join(process.cwd(), 'node_modules', 'tsx', 'dist', 'cli.mjs'),
-    join(coreDir, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
-  ].find(existsSync);
-  if (!tsxCli) {
-    try { tsxCli = require.resolve('tsx/dist/cli.mjs', { paths: [process.cwd(), coreDir] }); } catch (_) {}
-  }
+  const tsxCli = findTsxCli(coreDir);
   if (!tsxCli) {
     console.error('GioJS: tsx not found (required for `gio export`). Run `npm install`.');
     process.exit(1);
   }
-
   const env = Object.assign({}, process.env);
   env.GIO_APP_DIR = env.GIO_APP_DIR || join(process.cwd(), 'app');
   env.GIO_OUT_DIR = env.GIO_OUT_DIR || join(process.cwd(), 'out');
@@ -121,50 +141,143 @@ function runStaticExport() {
   // NODE_ENV=development. An unset NODE_ENV would load React's dev build,
   // which writes Suspense error messages and stacks into the exported HTML.
   env.NODE_ENV = env.NODE_ENV === 'development' ? 'development' : 'production';
-  const r = spawnSync(process.execPath, [tsxCli, exportCli], { stdio: 'inherit', env });
+  const r = spawnSync(process.execPath, [tsxCli, join(coreDir, 'src', 'export-cli.ts')], { stdio: 'inherit', env });
   process.exit(r.status == null ? 1 : r.status);
 }
 
-function findNodeScript() {
-  // 1. Clean npm install: @gio.js/core is a sibling package
-  try {
-    const pkgDir = dirname(require.resolve('@gio.js/core/package.json'));
-    const candidate = join(pkgDir, 'src', 'index.ts');
-    if (existsSync(candidate)) return candidate;
-  } catch (_) {}
-
-  // 2. Monorepo dev fallback
-  const dev = join(__dirname, '..', '..', '..', 'packages', 'giojs-core', 'src', 'index.ts');
-  if (existsSync(dev)) return dev;
-
-  return null;
+function cmdRoutes(args) {
+  const { values } = parseFlags('routes', args, { json: { type: 'boolean' } });
+  require('./lib/routes').runRoutes({ json: Boolean(values.json) });
 }
 
-function runRustServer() {
-  const { path } = require('./find-binary');
-  const env = Object.assign({}, process.env);
-  const nodeScript = findNodeScript();
-  if (nodeScript) env.GIO_NODE_SCRIPT = nodeScript;
-  // stdin is a pipe this launcher holds open and never writes: if it dies -
-  // even by SIGKILL, which it cannot forward - the server reads EOF and shuts
-  // down instead of lingering on the port with its worker.
-  env.GIO_EXIT_ON_STDIN_EOF = '1';
+function cmdTypegen(args) {
+  parseFlags('typegen', args, {});
+  require('./lib/routes').runTypegen();
+}
 
-  const server = spawn(path, process.argv.slice(2), { stdio: ['pipe', 'inherit', 'inherit'], env });
-  server.stdin.on('error', () => {});
-  server.on('error', (err) => {
-    console.error(`gio: could not start the server: ${err.message}`);
-    process.exit(1);
-  });
-  // A terminal Ctrl+C reaches the server directly (same process group, or
-  // the same console on Windows); on Unix, forwarding covers signals sent to
-  // this launcher alone. Windows never forwards: kill() there is
-  // TerminateProcess, which would cut short the server's graceful shutdown.
-  // Either way the launcher stays until the server has exited.
-  for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.on(signal, () => {
-      if (process.platform !== 'win32') server.kill(signal);
-    });
+async function cmdDoctor(command, args) {
+  const modes = command === 'doctor' ? { dev: { type: 'boolean' }, prod: { type: 'boolean' } } : {};
+  const { values } = parseFlags(command, args, { json: { type: 'boolean' }, ...modes });
+  if (values.dev && values.prod) usageError('--dev and --prod cannot be combined', command);
+  const doctor = require('./lib/doctor');
+  if (command === 'info') await doctor.runInfo({ json: Boolean(values.json) });
+  else {
+    const mode = values.dev ? 'development' : values.prod ? 'production' : null;
+    await doctor.runDoctor({ json: Boolean(values.json), mode });
   }
-  server.on('exit', (code, signal) => process.exit(code ?? (signal === null ? 0 : 1)));
 }
+
+function cmdCache(args) {
+  if (args.length === 0) usageError('missing subcommand: gio cache explain <url-or-path>', 'cache');
+  if (args[0] === '--help' || args[0] === '-h') {
+    console.log(commandHelp('cache'));
+    process.exit(0);
+  }
+  if (args[0] !== 'explain') {
+    const suggestion = didYouMean(args[0], ['explain']);
+    usageError(`unknown cache command "${args[0]}"${suggestion ? ` - did you mean \`gio cache ${suggestion}\`?` : ''}`, 'cache');
+  }
+  const { values, positionals } = parseFlags('cache', args.slice(1), { base: { type: 'string' } }, { positionals: 1 });
+  if (positionals.length === 0) {
+    usageError('usage: gio cache explain <url-or-path>   (e.g. gio cache explain /posts/1)', 'cache');
+  }
+  return require('./lib/cache-explain').runCacheExplain(positionals[0], { base: values.base || null });
+}
+
+// `gio bench` runs the zero-dependency load generator (ESM, so a child
+// node process). Paths and --suite default to the local server's address.
+function cmdBench(args) {
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(commandHelp('bench'));
+    process.exit(0);
+  }
+  const needsBase = !args.includes('--base') && (args.includes('--suite') || args.some((arg) => arg.startsWith('/')));
+  const extra = needsBase ? ['--base', require('./lib/cache-explain').localBaseUrl()] : [];
+  runNodeScript('bench.mjs', [...args, ...extra]);
+}
+
+function cmdDelegate(subcommand, args) {
+  require('./lib/delegate').delegate(subcommand, args);
+}
+
+function cmdHelp(args) {
+  if (args.length === 0) {
+    console.log(mainHelp());
+    process.exit(0);
+  }
+  const help = commandHelp(args[0]);
+  if (!help) unknownCommand(args[0]);
+  console.log(help);
+  process.exit(0);
+}
+
+function cmdVersion() {
+  const { locateBinary } = require('./find-binary');
+  const { findCoreDir, ownPackage, readJson } = require('./lib/project');
+  const binary = locateBinary();
+  const coreDir = findCoreDir();
+  const core = coreDir ? readJson(join(coreDir, 'package.json')) : null;
+  const server = binary.found
+    ? binary.source === 'package'
+      ? `${binary.version || 'unknown'} (${binary.packageName})`
+      : `${binary.source === 'env' ? 'GIO_SERVER_BIN' : 'repository build'} (${binary.path})`
+    : `not installed (${binary.packageName || `no package for ${binary.key}`})`;
+  const rows = [
+    ['gio', `${ownPackage().version} (@gio.js/server)`],
+    ['server binary', server],
+    ['@gio.js/core', core && core.version ? core.version : 'not installed'],
+  ];
+  for (const [label, value] of rows) console.log(`${label.padEnd(15)}${value}`);
+  process.exit(0);
+}
+
+function unknownCommand(name) {
+  const hint = HINTS[name];
+  const suggestion = hint ? null : didYouMean(name, Object.keys(COMMANDS));
+  const tail = hint ? ` - try \`${hint}\`` : suggestion ? ` - did you mean \`gio ${suggestion}\`?` : '';
+  usageError(`unknown command "${name}"${tail}`);
+}
+
+async function main(argv) {
+  const [command, ...args] = argv;
+  if (command === undefined) {
+    // Nothing to run: the help, and a non-zero exit so a script that relied
+    // on bare `gio` starting the server (before it had commands) fails
+    // loudly instead of succeeding without a server.
+    console.error(mainHelp());
+    console.error('\nTo start the server: gio dev (development) or gio start (production).');
+    process.exit(USAGE_ERROR);
+  }
+  switch (command) {
+    case '-h':
+    case '--help':
+      return cmdHelp([]);
+    case '-v':
+    case '--version':
+      return cmdVersion();
+    case 'help': return cmdHelp(args);
+    case 'dev': return cmdServer('development', 'dev', args);
+    case 'start': return cmdServer('production', 'start', args);
+    case 'build': return cmdBuild(args);
+    case 'export': return cmdExport(args);
+    case 'routes': return cmdRoutes(args);
+    case 'typegen': return cmdTypegen(args);
+    case 'doctor':
+    case 'info':
+      return cmdDoctor(command, args);
+    case 'cache': return cmdCache(args);
+    case 'bench': return cmdBench(args);
+    case 'migrate':
+    case 'add':
+      return cmdDelegate(command, args);
+    default:
+      if (command.startsWith('-')) usageError(`unknown option "${command}"`);
+      return unknownCommand(command);
+  }
+}
+
+main(process.argv.slice(2)).catch((err) => {
+  // Every expected failure exits with its own message; this is a bug.
+  console.error(`gio: unexpected error: ${err && err.stack ? err.stack : err}`);
+  process.exit(1);
+});

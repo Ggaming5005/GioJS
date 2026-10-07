@@ -15,8 +15,12 @@ npm create giojs@latest
 It installs `@gio.js/server` (this package - the binary + Node bridge), `@gio.js/react`, and the right prebuilt platform binary automatically.
 
 ```bash
-npm run dev      # development server
+gio dev          # development server (watcher, error overlay)
+gio start        # production server
+gio routes       # list every route the app serves
+gio doctor       # check the environment and project, with fixes
 gio export       # pre-render to static HTML in out/
+gio --help       # every command
 ```
 
 ## What's inside

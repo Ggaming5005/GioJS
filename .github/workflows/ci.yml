@@ -124,6 +124,11 @@ jobs:
       - name: create-giojs tests
         working-directory: packages/giojs-cli
         run: npm test
+      # The gio CLI (node:test): help, dev/start plumbing against a fake
+      # server binary, routes/typegen, doctor, cache explain, bench helpers.
+      - name: gio CLI tests
+        working-directory: packages/giojs
+        run: npm test
 
   # Same reasoning as cargo-deny advisories: a fresh advisory in a transitive
   # npm dependency must not turn every unrelated PR red, so this reports as a

@@ -17,7 +17,7 @@ import { existsSync, readlinkSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createHmac, hkdfSync } from 'node:crypto';
-import { connect } from 'node:net';
+import { connect, createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -4605,6 +4605,18 @@ async function strictConfigPhase() {
         assert.match(run.stderr, expected);
         assert.ok(run.stderr.includes(join(projectDir, 'gio.toml')), `names the file:\n${run.stderr}`);
       });
+      await test(`--check-config reports gio.toml with ${label} as JSON, exit 1`, async () => {
+        const check = spawnSync(binary, ['--check-config'], {
+          cwd: projectDir,
+          env: { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production' },
+          encoding: 'utf8',
+          timeout: 30_000,
+        });
+        assert.equal(check.status, 1, `exit status ${check.status}, stderr:\n${check.stderr}`);
+        const report = JSON.parse(check.stdout);
+        assert.equal(report.ok, false);
+        assert.match(report.errors[0], expected);
+      });
     }
     await writeFile(join(projectDir, 'gio.toml'), server + '[cache]\ndisk_path = "public/_cache"\n');
     await test('a page cache directory inside public/ stops startup before it is created', async () => {
@@ -4620,7 +4632,72 @@ async function strictConfigPhase() {
         /configuration error: \[cache\] disk_path: the page cache directory \S*public\/_cache is inside the public\/ directory/,
       );
       assert.equal(existsSync(join(projectDir, 'public', '_cache')), false, 'nothing was created');
+      const check = spawnSync(binary, ['--check-config'], {
+        cwd: projectDir,
+        env: { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production' },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      assert.equal(check.status, 1);
+      assert.match(JSON.parse(check.stdout).errors[0], /^\[cache\] disk_path: .*inside the public\/ directory/);
+      assert.equal(existsSync(join(projectDir, 'public', '_cache')), false, '--check-config creates nothing');
     });
+
+    // Refusals that come after gio.toml parses: --check-config shares
+    // startup's validation, so it must refuse exactly what startup refuses,
+    // with the same message - and never echo a token.
+    const secret = 's3cr3t-revalidate-token-0123456789abcdef';
+    const refusals = [
+      [
+        'a CSRF trusted origin without a scheme',
+        server + '[security.csrf]\ntrusted_origins = ["admin.example.com"]\n',
+        {},
+        /\[security\.csrf\] trusted_origins entry "admin\.example\.com" is not an origin/,
+      ],
+      [
+        'a revalidation token that is too short',
+        server + '[revalidate]\ntoken = "short"\n',
+        {},
+        /the revalidation token \(\[revalidate\] token\) is 5 bytes; at least 32 are required/,
+      ],
+      [
+        'a GIO_REVALIDATE_TOKEN that is too short',
+        server,
+        { GIO_REVALIDATE_TOKEN: 'tiny' },
+        /the revalidation token \(GIO_REVALIDATE_TOKEN\) is 4 bytes/,
+      ],
+      [
+        'TLS without a certificate',
+        server + '[server.tls]\nenabled = true\n',
+        {},
+        /TLS enabled but cert_path not set in gio\.toml/,
+      ],
+      [
+        'a syntax error on a line holding a token',
+        server + `[revalidate]\ntoken = "${secret}" extra\n`,
+        {},
+        /cannot parse \S*gio\.toml:6:52: expected newline/,
+      ],
+    ];
+    for (const [label, toml, extraEnv, expected] of refusals) {
+      await writeFile(join(projectDir, 'gio.toml'), toml);
+      const env = { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production', ...extraEnv };
+      if (!extraEnv.GIO_REVALIDATE_TOKEN) delete env.GIO_REVALIDATE_TOKEN;
+      await test(`${label}: startup and --check-config both refuse it`, async () => {
+        const run = spawnSync(binary, [], { cwd: projectDir, env, encoding: 'utf8', timeout: 30_000 });
+        assert.equal(run.status, 1, `exit status ${run.status} (signal ${run.signal}), stderr:\n${run.stderr}`);
+        assert.match(run.stderr, /configuration error: /);
+        assert.match(run.stderr, expected);
+        const check = spawnSync(binary, ['--check-config'], { cwd: projectDir, env, encoding: 'utf8', timeout: 30_000 });
+        assert.equal(check.status, 1, `--check-config said ok:\n${check.stdout}`);
+        const report = JSON.parse(check.stdout);
+        assert.equal(report.ok, false);
+        assert.match(report.errors.join('\n'), expected);
+        for (const output of [check.stdout, run.stderr]) {
+          assert.ok(!output.includes(secret), `a token value leaked:\n${output}`);
+        }
+      });
+    }
   } catch (err) {
     console.error(`\nintegration (strict gio.toml): FAILED\n${err?.stack ?? err}`);
     process.exitCode = 1;
@@ -4747,6 +4824,120 @@ async function configSettingsPhase() {
   }
 }
 
+/**
+ * Phase 1f (gio CLI): the launcher and the binary together. `--check-config`
+ * reports what the fixture's gio.toml, .env files and environment resolve to
+ * without binding anything; `gio doctor` validates through it; `gio start`
+ * passes --port through and prints the URL once /_gio/health reports the
+ * real worker ready.
+ */
+async function cliPhase() {
+  const binary = findServerBinary();
+  const gio = join(repoRoot, 'packages', 'giojs', 'bin', 'gio.js');
+  const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-cli-cache-'));
+  await linkFixtureDeps();
+  const env = {
+    ...process.env,
+    GIO_APP_DIR: join(fixtureDir, 'app'),
+    GIO_CACHE_DIR: cacheDir,
+    GIO_SERVER_BIN: binary,
+  };
+  delete env.NODE_ENV;
+  let log = '';
+  let launcher = null;
+  let launcherExited = Promise.resolve();
+  let port = null;
+  try {
+    await test('--check-config reports the fixture\'s resolved settings, never a secret', async () => {
+      const check = spawnSync(binary, ['--check-config'], {
+        cwd: repoRoot,
+        env: { ...env, NODE_ENV: 'production' },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      assert.equal(check.status, 0, check.stderr);
+      const report = JSON.parse(check.stdout);
+      assert.equal(report.ok, true);
+      assert.equal(report.mode, 'production');
+      assert.deepEqual(report.envFiles, ['.env.production', '.env']);
+      assert.deepEqual(report.listen, { host: '127.0.0.1', port: 39517, portSource: 'gio.toml', tls: false });
+      assert.equal(report.trustedProxies, 1);
+      assert.equal(report.rateLimitRules > 0, true);
+      assert.equal(report.sessionSecret, 'valid', 'GIO_SESSION_SECRET from .env.production');
+      assert.equal(report.cacheDir, cacheDir);
+      assert.doesNotMatch(check.stdout, new RegExp(FIXTURE_SESSION_SECRET));
+
+      const overridden = spawnSync(binary, ['--check-config'], {
+        cwd: repoRoot,
+        env: { ...env, GIO_PORT: '39599' },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      assert.deepEqual(JSON.parse(overridden.stdout).listen,
+        { host: '127.0.0.1', port: 39599, portSource: 'GIO_PORT', tls: false });
+    });
+
+    await test('gio doctor validates gio.toml with the server binary', async () => {
+      const doctor = spawnSync(process.execPath, [gio, 'doctor', '--json'], {
+        cwd: repoRoot,
+        env,
+        encoding: 'utf8',
+        timeout: 60_000,
+      });
+      const report = JSON.parse(doctor.stdout);
+      const byId = Object.fromEntries(report.checks.map((check) => [check.id, check]));
+      assert.equal(byId.config.status, 'ok', JSON.stringify(byId.config));
+      assert.match(byId.config.title, /gio\.toml is valid/);
+      assert.equal(byId.binary.status, 'ok');
+      assert.equal(byId.session.status, 'ok', 'guards plus a secret');
+    });
+
+    await test('gio start --port prints the URL once the worker is ready', async () => {
+      port = await new Promise((resolve) => {
+        const probe = createNetServer();
+        probe.listen(0, '127.0.0.1', () => {
+          const { port: free } = probe.address();
+          probe.close(() => resolve(free));
+        });
+      });
+      launcher = spawn(process.execPath, [gio, 'start', '--port', String(port)], { cwd: repoRoot, env });
+      launcherExited = new Promise((resolve) => launcher.on('exit', resolve));
+      launcher.stdout.on('data', (d) => { log += d.toString(); });
+      launcher.stderr.on('data', (d) => { log += d.toString(); });
+      await waitFor('the gio start banner', () => log.includes('- Local:'), 60_000);
+      assert.match(log, new RegExp(`GioJS \\S+ \\(production\\)\\n  - Local: +http://localhost:${port}\\n`));
+      // The fixture binds 127.0.0.1: nothing to show other devices.
+      assert.match(log, /- Network: +not exposed/);
+      const health = await (await fetch(`http://127.0.0.1:${port}/_gio/health`)).json();
+      assert.equal(health.nodeReady, true);
+      assert.match(log, new RegExp(`GioJS listening on 127\\.0\\.0\\.1:${port}`));
+    });
+  } catch (err) {
+    console.error(`\nintegration (gio CLI): FAILED\n${err?.stack ?? err}`);
+    console.error('\n── launcher log tail ──');
+    console.error(significantLogTail(log));
+    process.exitCode = 1;
+  } finally {
+    // Windows: kill() is TerminateProcess; the server then reads EOF on
+    // the stdin pipe the launcher held and shuts down on its own.
+    if (launcher !== null && launcher.exitCode === null) launcher.kill('SIGTERM');
+    await launcherExited;
+    if (port !== null) {
+      // Gone once its port refuses connections (Windows: not yet when the
+      // launcher dies), so its files are closed before the cleanup.
+      await waitFor('the gio start server to shut down', async () => {
+        try {
+          await fetch(`http://127.0.0.1:${port}/_gio/health`);
+          return false;
+        } catch {
+          return true;
+        }
+      }, 30_000).catch(() => {});
+    }
+    await rm(cacheDir, { recursive: true, force: true });
+  }
+}
+
 await strictConfigPhase();
 if (process.exitCode !== 1) {
   await main();
@@ -4774,6 +4965,9 @@ if (process.exitCode !== 1) {
 }
 if (process.exitCode !== 1) {
   await configSettingsPhase();
+}
+if (process.exitCode !== 1) {
+  await cliPhase();
 }
 if (process.exitCode !== 1) {
   await testingKitPhase();
