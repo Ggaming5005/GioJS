@@ -6,7 +6,8 @@
  * persistent React root), the prefetch cache, history entries with their
  * scroll positions, and the accessibility follow-up of a soft navigation to
  * another page (focus, route announcement). Deployment-id version skew
- * detection lives here too. All DOM access is guarded so this module is
+ * detection lives here too. GioForm submissions render their answer through
+ * the same path (submitForm). All DOM access is guarded so this module is
  * safe to import during SSR.
  *
  * A response is rendered in place only when it is a GioJS page: HTML with
@@ -107,25 +108,30 @@ async function fetchPage(url: string, purpose: FetchPurpose): Promise<PageResult
       // refresh() must not be answered from the browser's HTTP cache.
       ...(purpose === 'refresh' ? { cache: 'no-cache' as const } : {}),
     });
-    if (isHardReloadResponse(res)) return { kind: 'reload' };
-    const transient = !res.ok;
-    // After redirects res.url is where the page really lives: history and
-    // the navigation context must name it, not the link's href.
-    let finalUrl = url;
-    if (res.url) {
-      const landed = sameOriginUrl(res.url);
-      if (landed === null) return { kind: 'load', url: res.url, transient };
-      finalUrl = landed.pathname + landed.search;
-    }
-    if (!isHtml(res)) return { kind: 'load', url: finalUrl, transient };
-    const html = await res.text();
-    // 404/500 pages rendered by GioJS carry the boundary and soft-navigate
-    // like any page; a static host's 404.html or Rust's 503 page do not.
-    if (!html.includes('id="__gio"')) return { kind: 'load', url: finalUrl, transient };
-    return { kind: 'page', html, url: finalUrl, transient };
+    return await judgePage(res, url);
   } catch {
     return { kind: 'load', url, transient: true };
   }
+}
+
+/** Judge a fetched response for `url`. Rejects only when reading its body fails. */
+async function judgePage(res: Response, url: string): Promise<PageResult> {
+  if (isHardReloadResponse(res)) return { kind: 'reload' };
+  const transient = !res.ok;
+  // After redirects res.url is where the page really lives: history and
+  // the navigation context must name it, not the link's href.
+  let finalUrl = url;
+  if (res.url) {
+    const landed = sameOriginUrl(res.url);
+    if (landed === null) return { kind: 'load', url: res.url, transient };
+    finalUrl = landed.pathname + landed.search;
+  }
+  if (!isHtml(res)) return { kind: 'load', url: finalUrl, transient };
+  const html = await res.text();
+  // 404/500 pages rendered by GioJS carry the boundary and soft-navigate
+  // like any page; a static host's 404.html or Rust's 503 page do not.
+  if (!html.includes('id="__gio"')) return { kind: 'load', url: finalUrl, transient };
+  return { kind: 'page', html, url: finalUrl, transient };
 }
 
 // ── prefetch cache ────────────────────────────────────────────────────────────
@@ -778,6 +784,102 @@ export async function refresh(): Promise<void> {
   } catch {
     if (isCurrentNavigation(seq)) window.location.reload();
   }
+}
+
+// ── form submissions ──────────────────────────────────────────────────────────
+
+/**
+ * How a form submission ended (GioForm turns it into its result and
+ * callbacks). `status`, `url` (path + query) and `redirected` describe the
+ * final response, after any redirect fetch followed.
+ */
+export type FormSubmitOutcome =
+  /** A GioJS page - the action's re-render, or where its redirect led - is on screen. */
+  | { kind: 'shown'; status: number; url: string; redirected: boolean; actionData: unknown }
+  /** Not a GioJS page and not a redirect: nothing was rendered. */
+  | { kind: 'response'; status: number; url: string; redirected: boolean; response: Response }
+  /** A redirect led somewhere the router cannot render: the browser is loading it. */
+  | { kind: 'loading'; status: number; url: string; redirected: boolean }
+  /** Deployment skew: the server refused the request before the action ran. */
+  | { kind: 'reload' }
+  /** A newer navigation took over; its page is the one shown. */
+  | { kind: 'superseded' }
+  /** The request failed (network error); it may or may not have reached the server. */
+  | { kind: 'failed'; error: unknown };
+
+/** The `actionData` prop the page's envelope carries, if any. */
+function envelopeActionData(page: ParsedPage): unknown {
+  if (page.envelopeScript === null) return undefined;
+  try {
+    const envelope: unknown = JSON.parse(page.envelopeScript.textContent ?? '');
+    return isRecord(envelope) && isRecord(envelope['props']) ? envelope['props']['actionData'] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * POST `body` to `url` (same-origin path + query) and render the answer the
+ * way a navigation renders a page: through the persistent root, so state
+ * outside what changed survives. fetch follows a redirect itself, so the
+ * Post/Redirect/Get target arrives in the same response and is shown under
+ * its own URL (a new history entry, scrolled to the top); a re-render of
+ * the same URL replaces the current entry and keeps the scroll position.
+ * Never rejects. Internal: GioForm's half of the router.
+ */
+export async function submitForm(url: string, body: FormData | URLSearchParams): Promise<FormSubmitOutcome> {
+  if (typeof window === 'undefined') return { kind: 'superseded' };
+  ensureRouter();
+  const fromPathname = pathnameOf(renderedUrl ?? currentPageUrl());
+  const seq = beginNavigation();
+  const headers: Record<string, string> = { Accept: 'text/html' };
+  const id = getDeploymentId();
+  if (id) headers['x-deployment-id'] = id;
+  let res: Response;
+  // A mutation: no page prefetched before (or during) it may be shown after.
+  invalidatePrefetchCache();
+  try {
+    res = await fetch(url, { method: 'POST', body, headers });
+  } catch (error) {
+    return { kind: 'failed', error };
+  } finally {
+    invalidatePrefetchCache();
+  }
+  if (isHardReloadResponse(res)) return { kind: 'reload' };
+  const { status, redirected } = res;
+  // Callbacks get the untouched response when it is not a page.
+  const raw = res.clone();
+  let result: PageResult;
+  try {
+    result = await judgePage(res, url);
+  } catch (error) {
+    return { kind: 'failed', error };
+  }
+  if (!isCurrentNavigation(seq)) return { kind: 'superseded' };
+  if (result.kind === 'reload') return { kind: 'reload' };
+  const page = result.kind === 'page' ? parsePage(result.html) : null;
+  if (page === null) {
+    if (!redirected) return { kind: 'response', status, url: result.url, redirected, response: raw };
+    // The action already ran and sent the browser on: loading the target is
+    // the GET the browser would make anyway.
+    hardNavigate(result.url, false);
+    return { kind: 'loading', status, url: result.url, redirected };
+  }
+  const mode = result.url === currentPageUrl() ? 'replace' : 'push';
+  const focusedBefore = document.activeElement;
+  let shown: boolean;
+  try {
+    shown = await showPage(page, result.url, mode, false, seq);
+  } catch {
+    if (!isCurrentNavigation(seq)) return { kind: 'superseded' };
+    hardNavigate(result.url, mode === 'replace');
+    return { kind: 'loading', status, url: result.url, redirected };
+  }
+  if (!shown) return { kind: 'superseded' };
+  const newPage = window.location.pathname !== fromPathname;
+  if (newPage) scrollAfterPush('');
+  focusAndAnnounce(focusedBefore, { newPage, keepView: !newPage });
+  return { kind: 'shown', status, url: result.url, redirected, actionData: envelopeActionData(page) };
 }
 
 /** history.back() / forward(), with the router handling the traversal. */
