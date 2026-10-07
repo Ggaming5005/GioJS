@@ -232,6 +232,13 @@ export interface RenderPageResult {
   cacheable: boolean;
   /** Seconds the page cache keeps it (0 when not cacheable). */
   cacheMaxAge: number;
+  /**
+   * The cache tags the server would store the page under, for
+   * `revalidateTag()`: `export const tags` plus getServerSideProps `tags`,
+   * validated and de-duplicated (empty when not cacheable). The server adds
+   * the page's path on top, for `revalidatePath()`.
+   */
+  cacheTags: string[];
   /** Set for 3xx responses. */
   redirect?: { destination: string; permanent: boolean };
   /** Set when the render failed and no error.* file answered (status 500). */
@@ -489,6 +496,7 @@ export async function renderPage(
       props: null,
       cacheable: false,
       cacheMaxAge: 0,
+      cacheTags: [],
       error: info,
     };
   }
@@ -506,6 +514,7 @@ export async function renderPage(
     props: response.status === 200 ? envelopeProps(body) : null,
     cacheable,
     cacheMaxAge: cacheable ? response.cacheMaxAge : 0,
+    cacheTags: cacheable ? [...(response.cacheTags ?? [])] : [],
     ...(redirect !== undefined ? { redirect } : {}),
   };
 }

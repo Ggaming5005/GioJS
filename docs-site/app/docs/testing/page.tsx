@@ -159,6 +159,7 @@ describe('/posts/[id]', () => {
         <li><code>props</code> - the hydration props exactly as serialized into the page; <code>null</code> for redirects, 404s, errors, or props that are not JSON-serializable (that page renders but never hydrates).</li>
         <li><code>redirect</code> - <code>{`{ destination, permanent }`}</code> for 3xx answers.</li>
         <li><code>cacheable</code> / <code>cacheMaxAge</code> - whether the Rust page cache would store this response, by the server&apos;s own rule: <code>revalidate</code> set, no cookies or per-request headers sent, and no credentials read (a page that reads <code>ctx.cookies</code> is never shared).</li>
+        <li><code>cacheTags</code> - the tags a cacheable page is stored under for <code>revalidateTag()</code>: <code>export const tags</code> plus the ones <code>getServerSideProps</code> returns, validated and de-duplicated (empty when the page is not cacheable). The server also tags the page with its path for <code>revalidatePath()</code>.</li>
         <li><code>error</code> - set when the render failed and no <code>error.tsx</code> answered: <code>message</code> (generic in production), <code>digest</code>, and <code>stack</code> in development.</li>
       </ul>
       <div className="callout">

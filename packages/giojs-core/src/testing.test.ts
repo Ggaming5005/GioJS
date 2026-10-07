@@ -101,12 +101,15 @@ describe('renderPage', () => {
     expect(cached.cacheable).toBe(true);
     expect(cached.cacheMaxAge).toBe(60);
     expect(cached.props).toEqual({ generated: 'static' });
+    // export const tags plus the gSSP render's own, as Rust would store them.
+    expect(cached.cacheTags).toEqual(['catalog', 'generated:static']);
 
     // revalidate, but the render read a cookie: personal, never shared.
     const personal = await renderPage('/personal', { appDir, cookies: { user: 'ada' } });
     expect(personal.props).toEqual({ user: 'ada' });
     expect(personal.cacheable).toBe(false);
     expect(personal.cacheMaxAge).toBe(0);
+    expect(personal.cacheTags).toEqual([]);
 
     // gSSP response headers make a page uncacheable too.
     expect((await renderPage('/greet', { appDir })).cacheable).toBe(false);
@@ -531,6 +534,9 @@ function processesIn(dir: string): number[] {
   return found;
 }
 
+/** Enables POST /_gio/revalidate on the test server (>= 32 bytes). */
+const REVALIDATE_TOKEN = 'testing-kit-revalidate-token-0123456789';
+
 describe('createTestServer', () => {
   it('explains a missing binary', async () => {
     await expect(
@@ -543,7 +549,11 @@ describe('createTestServer', () => {
     let server: TestServer;
 
     beforeAll(async () => {
-      server = await createTestServer({ appDir, binary: binary!, env: { RUST_LOG: 'info' } });
+      server = await createTestServer({
+        appDir,
+        binary: binary!,
+        env: { RUST_LOG: 'info', GIO_REVALIDATE_TOKEN: REVALIDATE_TOKEN },
+      });
     }, 90_000);
 
     afterAll(async () => {
@@ -587,6 +597,23 @@ describe('createTestServer', () => {
       expect(second.headers.get('x-gio-cache')).toMatch(/^hit/);
       await second.text();
       expect(existsSync(join(fixtureRoot, '.gio', 'cache'))).toBe(false);
+    });
+
+    it('purges a page by the tags renderPage reports', async () => {
+      const { cacheTags } = await renderPage('/cached', { appDir });
+      expect(cacheTags).toContain('generated:static');
+      const warm = await fetch(`${server.url}/cached`);
+      expect(warm.headers.get('x-gio-cache')).toMatch(/^hit/);
+      await warm.text();
+      const purge = await fetch(`${server.url}/_gio/revalidate`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${REVALIDATE_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ tags: ['generated:static'] }),
+      });
+      expect(await purge.json()).toEqual({ ok: true, purged: 1 });
+      const fresh = await fetch(`${server.url}/cached`);
+      expect(fresh.headers.get('x-gio-cache')).toBe('miss; stored');
+      await fresh.text();
     });
 
     it('takes down the server and its worker on close', async () => {
