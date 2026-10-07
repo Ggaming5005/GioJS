@@ -69,6 +69,16 @@ renders React. Full docs: https://giojs.com/llms.txt
   the built-in `/_gio/image` optimizer; `sizes`, `priority` to preload,
   `unoptimized` for a plain `src` — never add `sharp` or `next/image`). Route-handler types come from `@gio.js/core`
   (`GioRequest`, `GioEventStream` for SSE).
+- CSS: `import './globals.css'` in `app/layout.tsx` for global styles, and
+  `import styles from './card.module.css'` (default import,
+  `className={styles.card}`) for CSS Modules - from any page, layout or
+  component. Each route's CSS is bundled into hashed files and linked in
+  `<head>` automatically: never add a `<link>` for an imported file. CSS
+  an npm package ships is imported explicitly (`import 'pkg/styles.css'`).
+  Tailwind: run the Tailwind CLI and import its generated `.css` file.
+  CSS import types come from the generated `.gio/css-modules.d.ts`
+  (referenced by `.gio/routes.d.ts`) - never add your own
+  `declare module '*.module.css'`: it clashes with the generated one.
 - WebSockets: export `wsHandler(socket)` from a `route.ts`.
 - Security runs in Rust: default headers (nosniff, `X-Frame-Options:
   SAMEORIGIN`, referrer policy) on every response, and cross-site

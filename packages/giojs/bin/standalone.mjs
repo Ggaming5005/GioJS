@@ -4,7 +4,10 @@
  * `gio build standalone` - packages an app into a self-contained deploy
  * directory: the platform Rust binary, the entire Node side bundled to one
  * worker.js (registry entry generated from discovered app modules), prebuilt
- * hydration chunks, public assets, and a run.mjs launcher. The output runs on
+ * hydration chunks and route stylesheets, public assets, and a run.mjs
+ * launcher. CSS imports work as in `gio dev`/`gio start`: the stylesheets are
+ * prebuilt under static/css, and CSS Module imports in worker.js evaluate to
+ * the same class maps the hydration chunks carry. The output runs on
  * a bare server that has only Node: `node run.mjs`.
  *
  * Cross-deploys: `--target <platform>` picks a different platform package,
@@ -178,9 +181,12 @@ async function main() {
   tsxApi.register();
   const coreSrc = (name) => pathToFileURL(join(coreDir, 'src', name)).href;
   const router = await import(coreSrc('router.ts'));
-  const { buildClientBundles, publicEnv, publicEnvDefines } = await import(
+  const { buildClientBundles, projectTsconfig, publicEnv, publicEnvDefines } = await import(
     coreSrc('client-build.ts')
   );
+  const { buildRouteStylesheets } = await import(coreSrc('css-build.ts'));
+  const { cssImportsAsClassMapsPlugin } = await import(coreSrc('css-modules.ts'));
+  const { styleManifestToJson } = await import(coreSrc('style-manifest.ts'));
   const { generateStandaloneEntry } = await import(coreSrc('standalone-gen.ts'));
   const { loadEnvFiles } = await import(coreSrc('env-files.ts'));
 
@@ -225,13 +231,22 @@ async function main() {
 
   console.log(`  routes: ${[...routes.keys()].join(', ') || '(none)'}`);
 
-  const clientManifest = await buildClientBundles({
+  const styleManifest = await buildRouteStylesheets({
     routes,
     layouts,
     segmentFiles,
     projectRoot,
     dev: false,
   });
+  const clientManifest = await buildClientBundles({
+    routes,
+    layouts,
+    segmentFiles,
+    projectRoot,
+    dev: false,
+    stylesheets: styleManifest.routes,
+  });
+  const stylesheets = styleManifestToJson(styleManifest);
 
   await rm(options.out, { recursive: true, force: true });
   await mkdir(options.out, { recursive: true });
@@ -250,6 +265,7 @@ async function main() {
     ),
     metadataRoutes: Object.values(metadataRoutes).map((m) => ({ kind: m.kind, filePath: m.filePath })),
     clientScripts: Object.fromEntries(clientManifest),
+    stylesheets,
   };
   const notFoundPath = pickExisting(appDir, 'not-found', ['tsx', 'jsx', 'js']);
   if (notFoundPath !== null) spec.notFoundPath = notFoundPath;
@@ -267,6 +283,8 @@ async function main() {
 
     const esbuildModule = await import(pathToFileURL(requireFromCore.resolve('esbuild')).href);
     const esbuild = esbuildModule.default ?? esbuildModule;
+    // jsxImportSource, decorators and paths apply as they did under tsx.
+    const tsconfig = projectTsconfig(projectRoot);
     await esbuild.build({
       entryPoints: [entryFile],
       outfile: join(options.out, 'worker.js'),
@@ -288,7 +306,11 @@ async function main() {
           'const require = __gioCreateRequire(import.meta.url);\n' +
           `Object.assign(process.env, ${JSON.stringify(publicEnv(process.env))});`,
       },
+      // A CSS Module import is its class map (the names the chunks carry);
+      // other .css imports are empty - the stylesheets ship in static/css.
+      plugins: [cssImportsAsClassMapsPlugin()],
       loader: { '.css': 'empty' },
+      ...(tsconfig !== undefined ? { tsconfig } : {}),
       define: publicEnvDefines(process.env),
       minify: false,
       sourcemap: false,
@@ -331,15 +353,19 @@ async function main() {
         routes: [...routes.keys()].sort(),
         handlers: routeFiles.map((f) => f.urlPattern).sort(),
         clientScripts: Object.fromEntries([...clientManifest].sort()),
+        stylesheets,
       },
       null,
       2,
     ),
     'utf8',
   );
-  const routeTypes = join(projectRoot, '.gio', 'routes.d.ts');
-  if (existsSync(routeTypes)) {
-    await copyFile(routeTypes, join(options.out, '.gio', 'routes.d.ts'));
+  // routes.d.ts references css-modules.d.ts, so the two travel together.
+  for (const typesFile of ['routes.d.ts', 'css-modules.d.ts']) {
+    const source = join(projectRoot, '.gio', typesFile);
+    if (existsSync(source)) {
+      await copyFile(source, join(options.out, '.gio', typesFile));
+    }
   }
 
   await writeFile(

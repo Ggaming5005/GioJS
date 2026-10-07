@@ -725,3 +725,63 @@ describe('exportSite hydration', () => {
     expect(result.unhydrated[0]?.reason).toMatch(/imports server-only code/);
   });
 });
+
+describe('exportSite stylesheets', () => {
+  const base = join(fixtureRoot, 'stylesheets');
+  const appDir = join(base, 'app');
+  const outDir = join(base, 'out');
+
+  beforeAll(async () => {
+    await mkdir(appDir, { recursive: true });
+    await writeFile(
+      join(appDir, 'layout.tsx'),
+      `import React from 'react';
+import './globals.css';
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return React.createElement('html', null, React.createElement('head', null), React.createElement('body', null, children));
+}
+`,
+    );
+    await writeFile(join(appDir, 'globals.css'), '.export-global-marker { color: red; }\n');
+    await writeFile(
+      join(appDir, 'page.tsx'),
+      `import React from 'react';
+import styles from './home.module.css';
+export default function Home() { return React.createElement('h1', { className: styles.hero }, 'EXPORT_STYLED'); }
+`,
+    );
+    await writeFile(join(appDir, 'home.module.css'), '.hero { color: teal; }\n');
+    await writeFile(join(appDir, 'not-found.tsx'), NOT_FOUND);
+    // The real `gio export` path: the worker-side CSS import hook runs under tsx.
+    const run = await runExport([tsxCli, exportCli], appDir, outDir);
+    expect(run.code, run.output).toBe(0);
+  }, 60_000);
+
+  afterAll(async () => {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  });
+
+  it('links the root and route stylesheets, which exist in out/ with the class SSR rendered', async () => {
+    const html = await readFile(join(outDir, 'index.html'), 'utf8');
+    const head = /<head>([\s\S]*?)<\/head>/.exec(html)?.[1] ?? '';
+    const links = [...head.matchAll(/<link rel="stylesheet" href="([^"]+)" data-precedence="default"\/>/g)].map(
+      m => m[1] as string,
+    );
+    expect(links).toHaveLength(2);
+    expect(links[0]).toMatch(/^\/_next\/static\/css\/root-[A-Z0-9]+\.css$/);
+    const className = /<h1 class="([^"]+)">EXPORT_STYLED/.exec(html)?.[1];
+    expect(className).toMatch(/^home_[0-9a-f]{6}_hero$/);
+    expect(await readFile(outFile(outDir, links[0] ?? ''), 'utf8')).toContain(
+      '.export-global-marker{color:red}',
+    );
+    expect(await readFile(outFile(outDir, links[1] ?? ''), 'utf8')).toContain(`.${className}{color:teal}`);
+    // The hydrating bundle renders the same class name.
+    expect((await readChunks(outDir)).some(js => js.includes(`"${className}"`))).toBe(true);
+  });
+
+  it('links the root stylesheet from 404.html', async () => {
+    const html = await readFile(join(outDir, '404.html'), 'utf8');
+    expect(html).toContain('EXPORT_CUSTOM_404');
+    expect(html).toMatch(/<link rel="stylesheet" href="\/_next\/static\/css\/root-[A-Z0-9]+\.css"/);
+  });
+});

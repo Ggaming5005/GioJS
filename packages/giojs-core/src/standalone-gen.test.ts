@@ -33,6 +33,10 @@ function fullSpec(): StandaloneEntrySpec {
     configPath: resolve('/proj/gio.config.ts'),
     middlewarePath: resolve('/proj/middleware.ts'),
     clientScripts: { '/': '/_next/static/chunks/route-index-ABC.js' },
+    stylesheets: {
+      routes: { '/': ['/_next/static/css/root-AAA.css', '/_next/static/css/route-index-BBB.css'] },
+      segmentPages: { 'notFound:': ['/_next/static/css/root-AAA.css'] },
+    },
   };
 }
 
@@ -101,7 +105,16 @@ describe('generateStandaloneEntry', () => {
     expect(source).not.toContain('gioConfig');
     expect(source).not.toContain('gioMiddleware');
     expect(source).not.toContain('gioNotFound');
+    expect(source).not.toContain('stylesheets');
     expect(source).toContain('clientScripts: {}');
+  });
+
+  it('embeds the prebuilt stylesheet manifest in the registry', () => {
+    const source = generateStandaloneEntry(fullSpec());
+    // Evaluate the registry literal the way the bundle would see it.
+    const literal = /^ {2}stylesheets: ([\s\S]*?),\n\}\);/m.exec(source)?.[1];
+    expect(literal).toBeDefined();
+    expect(JSON.parse(literal ?? '')).toEqual(fullSpec().stylesheets);
   });
 
   it('emits a syntactically valid ES module', async () => {

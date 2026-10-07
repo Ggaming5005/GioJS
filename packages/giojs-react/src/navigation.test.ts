@@ -707,3 +707,119 @@ describe('sequencing', () => {
     expect(push).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('route stylesheets on navigation', () => {
+  const styledPage = (marker: string, hrefs: string[]): Response =>
+    new Response(
+      `<!DOCTYPE html><html lang="en"><head>${hrefs
+        .map(href => `<link rel="stylesheet" href="${href}" data-precedence="default"/>`)
+        .join('')}<title>${marker}</title></head><body><div id="__gio"><main>${marker}</main></div></body></html>`,
+      { headers: { 'content-type': 'text/html; charset=utf-8' } },
+    );
+
+  const headSheets = (): (string | null)[] =>
+    [...document.head.querySelectorAll('link[rel="stylesheet"]')].map(l => l.getAttribute('href'));
+
+  const loadSheet = (href: string): void => {
+    document.head.querySelector(`link[href="${href}"]`)?.dispatchEvent(new Event('load'));
+  };
+
+  beforeEach(() => {
+    document.head.innerHTML =
+      '<link rel="stylesheet" href="/_next/static/css/root-A.css" data-precedence="default"/>' +
+      '<link rel="stylesheet" href="/legacy.css"/>';
+  });
+
+  afterEach(() => {
+    document.head.innerHTML = '';
+    vi.useRealTimers();
+  });
+
+  it("loads the next route's new stylesheets before rendering it, in cascade order", async () => {
+    serve({
+      '/styled': () =>
+        styledPage('styled-page', ['/_next/static/css/root-A.css', '/_next/static/css/route-B.css']),
+    });
+    const done = nav.navigate('/styled');
+    await vi.waitFor(() => expect(headSheets()).toContain('/_next/static/css/route-B.css'));
+    // Only the missing sheet is added - after the other route stylesheets,
+    // never after a hand-written link - and the content waits for it.
+    expect(headSheets()).toEqual([
+      '/_next/static/css/root-A.css',
+      '/_next/static/css/route-B.css',
+      '/legacy.css',
+    ]);
+    await settle();
+    expect(gioText()).toBe('initial');
+    expect(window.location.pathname).toBe('/');
+    loadSheet('/_next/static/css/route-B.css');
+    await done;
+    expect(gioText()).toBe('styled-page');
+    expect(window.location.pathname).toBe('/styled');
+  });
+
+  it('the persistent root commits only once the stylesheets have loaded', async () => {
+    const commits: string[] = [];
+    (window as unknown as Record<string, unknown>)['__GIO_RUNTIME__'] = {
+      prepare: async () => undefined,
+      commit: (content: Element | null) => {
+        commits.push(content?.textContent ?? '');
+      },
+    };
+    serve({ '/rooted': () => styledPage('rooted-page', ['/_next/static/css/route-E.css']) });
+    const done = nav.navigate('/rooted');
+    await vi.waitFor(() => expect(headSheets()).toContain('/_next/static/css/route-E.css'));
+    await settle();
+    expect(commits).toEqual([]);
+    loadSheet('/_next/static/css/route-E.css');
+    await done;
+    expect(commits).toEqual(['rooted-page']);
+  });
+
+  it('finds the stylesheets of a page without a root layout, which open its <body>', async () => {
+    serve({
+      '/bare': () =>
+        new Response(
+          '<html><head></head><body><link rel="stylesheet" href="/_next/static/css/route-D.css" data-precedence="default"/>' +
+            '<div id="__gio"><main>bare-page</main></div></body></html>',
+          { headers: { 'content-type': 'text/html' } },
+        ),
+    });
+    const done = nav.navigate('/bare');
+    await vi.waitFor(() => expect(headSheets()).toContain('/_next/static/css/route-D.css'));
+    loadSheet('/_next/static/css/route-D.css');
+    await done;
+    expect(gioText()).toBe('bare-page');
+  });
+
+  it('renders immediately when every stylesheet is already present', async () => {
+    serve({ '/same': () => styledPage('same-page', ['/_next/static/css/root-A.css']) });
+    await nav.navigate('/same');
+    expect(gioText()).toBe('same-page');
+    expect(headSheets()).toHaveLength(2);
+  });
+
+  it('back/forward waits for the stylesheets too', async () => {
+    serve({
+      '/first': () => styledPage('first-page', []),
+      '/': () => styledPage('home-page', ['/_next/static/css/route-H.css']),
+    });
+    await nav.navigate('/first');
+    history.back();
+    await vi.waitFor(() => expect(headSheets()).toContain('/_next/static/css/route-H.css'));
+    await settle();
+    expect(gioText()).toBe('first-page');
+    loadSheet('/_next/static/css/route-H.css');
+    await vi.waitFor(() => expect(gioText()).toBe('home-page'));
+  });
+
+  it('renders anyway when a stylesheet never loads', async () => {
+    vi.useFakeTimers();
+    serve({ '/slow-css': () => styledPage('slow-css-page', ['/_next/static/css/route-C.css']) });
+    const done = nav.navigate('/slow-css');
+    await vi.waitFor(() => expect(headSheets()).toContain('/_next/static/css/route-C.css'));
+    await vi.advanceTimersByTimeAsync(nav.STYLESHEET_WAIT_MS);
+    await done;
+    expect(gioText()).toBe('slow-css-page');
+  });
+});

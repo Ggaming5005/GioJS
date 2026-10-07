@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React, { act } from 'react';
 import { renderToString } from 'react-dom/server';
 import type { GioClientRuntime } from './client-runtime.ts';
-import type { GioErrorProps, SegmentLevel } from './segment-tree.ts';
+import { withStylesheets, type GioErrorProps, type SegmentLevel } from './segment-tree.ts';
 import { navigationContext, withNavigation, type GioNavigationState } from './navigation-context.ts';
 import { withMetadata, type MetadataTag } from './metadata-tags.ts';
 
@@ -215,6 +215,57 @@ describe('persistent root', () => {
     expect(text('count')).toBe('count=1');
     expect(document.head.querySelector('meta[name="description"]')).toBeNull();
     expect(titles()).toEqual(['TITLE_B']);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('keeps the shared layout between routes that link different stylesheets', async () => {
+    const runtime = await import('./client-runtime.ts');
+    // What client-build.ts generates: each entry wraps its route's tree
+    // with withStylesheets(), whatever (if anything) the route links.
+    const register = (pattern: string, hrefs: string[]): void => {
+      runtime.registerRoute(pattern, (props, path) =>
+        withStylesheets(
+          runtime.buildSegmentTree(React.createElement(Page, props as { label: string }), path, levels),
+          hrefs,
+        ),
+      );
+    };
+    const first: PageSpec = { path: '/plain', pattern: '/plain', props: { label: 'plain' } };
+    document.body.innerHTML = renderToString(
+      withNavigation(
+        navState(first),
+        React.createElement(
+          'div',
+          { id: '__gio' },
+          withMetadata(
+            withStylesheets(runtime.buildSegmentTree(React.createElement(Page, { label: 'plain' }), '/plain', levels), []),
+            undefined,
+          ),
+        ),
+      ),
+    );
+    swapEnvelope(first);
+    await act(async () => register('/plain', []));
+    act(() => document.getElementById('count')?.click());
+    expect(text('count')).toBe('count=1');
+
+    register('/styled', ['/_next/static/css/route-styled-A.css', '/_next/static/css/route-styled-B.css']);
+    swapEnvelope({ path: '/styled', pattern: '/styled', props: { label: 'styled' } });
+    act(() => runtimeApi().commit(null));
+    expect(document.querySelector('h1')?.textContent).toBe('styled');
+    expect(text('count')).toBe('count=1');
+    expect(document.head.querySelectorAll('link[rel="stylesheet"][href^="/_next/static/css/route-styled-"]')).toHaveLength(2);
+
+    register('/other', ['/_next/static/css/route-other-C.css']);
+    swapEnvelope({ path: '/other', pattern: '/other', props: { label: 'other' } });
+    act(() => runtimeApi().commit(null));
+    expect(document.querySelector('h1')?.textContent).toBe('other');
+    expect(text('count')).toBe('count=1');
+
+    swapEnvelope({ path: '/plain', pattern: '/plain', props: { label: 'plain again' } });
+    act(() => runtimeApi().commit(null));
+    expect(document.querySelector('h1')?.textContent).toBe('plain again');
+    expect(text('count')).toBe('count=1');
     expect(consoleError).not.toHaveBeenCalled();
   });
 

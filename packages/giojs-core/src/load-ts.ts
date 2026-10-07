@@ -10,9 +10,11 @@
  * the hooks are already global and the extra registration is a no-op pass.
  * tsx itself is imported lazily so standalone bundles (which never call
  * loadTsModule) can mark it external and run without node_modules.
+ * The `.css` import hooks (css-hooks.ts) register right after tsx's.
  */
 import { fileURLToPath } from 'node:url';
 import { logger } from './logger.ts';
+import { registerCssHooks } from './css-hooks.ts';
 
 let hooksReady: Promise<void> | null = null;
 
@@ -21,6 +23,8 @@ function ensureTransformHooks(): Promise<void> {
     hooksReady = import('tsx/esm/api')
       .then(({ register }) => {
         register();
+        // Last registered runs first: .css never reaches tsx's hooks.
+        registerCssHooks();
       })
       .catch((registerError: unknown) => {
         // Environments with their own TS pipeline (vitest) may refuse a second

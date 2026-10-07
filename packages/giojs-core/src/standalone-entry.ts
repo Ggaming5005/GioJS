@@ -21,6 +21,7 @@ import type {
 } from './router.ts';
 import { emptySegmentFiles } from './router.ts';
 import type { MetadataRouteKind, MetadataRouteModule, MetadataRoutes } from './metadata-routes.ts';
+import { styleManifestFromJson, type StyleManifestJson } from './style-manifest.ts';
 import { sanitizeMiddlewareRules } from './middleware.ts';
 import { registerRouteModule, type RouteFileModule, type WsHandlerFn } from './ws-router.ts';
 import { installProcessGuards, startPluginRegistry, startIpcServers } from './worker-boot.ts';
@@ -77,6 +78,8 @@ export interface StandaloneRegistry {
   middleware?: unknown;
   /** Route pattern → prebuilt hydration chunk URL. */
   clientScripts?: Record<string, string>;
+  /** Prebuilt stylesheet URLs per page. */
+  stylesheets?: StyleManifestJson;
 }
 
 /** Boot the worker from a prebuilt registry instead of app/ discovery. */
@@ -146,6 +149,7 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
   }
 
   const clientScripts = new Map(Object.entries(registry.clientScripts ?? {}));
+  const stylesheets = styleManifestFromJson(registry.stylesheets);
 
   logger.info('standalone registry loaded', {
     routes: [...routes.keys()],
@@ -165,6 +169,7 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     segmentFiles,
     metadataRoutes,
     clientScripts,
+    stylesheets,
     middlewareRules,
     pluginRegistry,
   });

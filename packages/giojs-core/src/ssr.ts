@@ -48,7 +48,13 @@ import { logger } from './logger.ts';
 import { clientBuildErrorFor } from './client-build-errors.ts';
 import { createErrorDigest, describeError, isDevMode } from './mode.ts';
 import { isNotFoundError } from './not-found.ts';
-import { buildSegmentTree, type SegmentLevel, type GioErrorProps } from './segment-tree.ts';
+import {
+  buildSegmentTree,
+  withStylesheets,
+  type SegmentLevel,
+  type GioErrorProps,
+} from './segment-tree.ts';
+import { segmentStylesheetKey, type StyleManifest } from './style-manifest.ts';
 import { cspNonce, nonceAttr } from './csp.ts';
 import {
   isJsonContentType,
@@ -146,6 +152,12 @@ export interface RenderExtras {
   onRouted?: (req: IPCRequest) => void;
   /** app/sitemap.*, app/robots.*, app/manifest.* (metadata-routes.ts). */
   metadataRoutes?: MetadataRoutes;
+  /**
+   * Each page's stylesheets (css-build.ts), rendered inside #__gio as React
+   * stylesheet resources - hoisted into <head> - exactly as the client
+   * entry renders them.
+   */
+  stylesheets?: StyleManifest;
 }
 
 /** What production responses say instead of the real error message. */
@@ -949,7 +961,13 @@ export async function renderRoute(
       React.createElement(
         'div',
         { id: '__gio' },
-        withMetadata(inner, metadataTags, { render: rootLayoutEntry !== undefined }),
+        // The client renders this same nesting: the runtime's withMetadata()
+        // around the route entry's withStylesheets() (client-build.ts).
+        withMetadata(
+          withStylesheets(inner, extras?.stylesheets?.routes.get(pattern) ?? []),
+          metadataTags,
+          { render: rootLayoutEntry !== undefined },
+        ),
       ),
       envelopeJson !== null && !deferEnvelope
         ? React.createElement('script', {
@@ -1524,6 +1542,8 @@ interface SegmentPageCandidate {
   /** app/-relative folder of the file: selects the layouts it renders in. */
   dir: string;
   load: () => Promise<{ default: React.ComponentType<Record<string, unknown>> }>;
+  /** Its stylesheets (root layout's included), from RenderExtras.stylesheets. */
+  stylesheets: readonly string[];
 }
 
 /**
@@ -1537,11 +1557,19 @@ function segmentPageCandidates(
   extras: RenderExtras | undefined,
 ): SegmentPageCandidate[] {
   const files = extras?.segmentFiles?.[kind];
+  const stylesheets = (fileDir: string): readonly string[] =>
+    extras?.stylesheets?.segmentPages.get(segmentStylesheetKey(kind, fileDir)) ?? [];
   const candidates: SegmentPageCandidate[] =
-    files !== undefined ? nearestSegmentFiles(dir, files) : [];
+    files !== undefined
+      ? nearestSegmentFiles(dir, files).map(file => ({
+          dir: file.dir,
+          load: file.load,
+          stylesheets: stylesheets(file.dir),
+        }))
+      : [];
   const rootFallback = extras?.specialPages?.[kind];
   if (rootFallback !== undefined && !candidates.some(c => c.dir === '')) {
-    candidates.push({ dir: '', load: rootFallback });
+    candidates.push({ dir: '', load: rootFallback, stylesheets: stylesheets('') });
   }
   return candidates;
 }
@@ -1651,7 +1679,9 @@ async function renderSpecialPage(
     let element: React.ReactNode = React.createElement(
       'div',
       { id: '__gio' },
-      withMetadata(inner, metadataTags, { render: rootLayoutEntry !== undefined }),
+      withMetadata(withStylesheets(inner, candidate.stylesheets), metadataTags, {
+        render: rootLayoutEntry !== undefined,
+      }),
     );
     if (rootLayoutEntry !== undefined) {
       const rootLayoutMod = await rootLayoutEntry.load();

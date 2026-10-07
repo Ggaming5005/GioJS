@@ -27,6 +27,11 @@
  * importing file chain. `GIO_PUBLIC_*` variables present at build time are
  * inlined; every other `process.env.X` reads as undefined.
  *
+ * CSS never ships in these bundles: a CSS Module import evaluates to its
+ * class map (css-modules.ts - the names SSR renders) and any other `.css`
+ * import to nothing. The stylesheets come from css-build.ts, and each entry
+ * renders its route's links exactly as ssr.ts does (withStylesheets).
+ *
  * A route whose entry fails to build is logged and served without hydration -
  * client build errors must not take down SSR, nor cost the other routes their
  * shared chunks. In dev the error is also handed to the error overlay
@@ -40,6 +45,7 @@ import {
   type OutputFile,
   type Plugin,
 } from 'esbuild';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,6 +59,7 @@ import {
 } from './router.ts';
 import { logger } from './logger.ts';
 import { clearClientBuildErrors, recordClientBuildError } from './client-build-errors.ts';
+import { cssImportsAsClassMapsPlugin } from './css-modules.ts';
 
 export { clientBuildErrorFor } from './client-build-errors.ts';
 
@@ -76,6 +83,13 @@ export interface ClientBuildOptions {
    * export never wipes a running server's build.
    */
   staticExportDir?: string;
+  /**
+   * Route pattern → its stylesheet URLs (css-build.ts). Each entry renders
+   * them as React stylesheet resources ahead of the page tree, exactly as
+   * ssr.ts does inside #__gio: hydration matches, and on client navigation
+   * React loads a route's new stylesheets before revealing it.
+   */
+  stylesheets?: Map<string, string[]>;
 }
 
 /** Route pattern → public entry script URL (e.g. "/_next/static/chunks/route-index-ABC.js"). */
@@ -87,7 +101,7 @@ interface GeneratedEntry {
   pattern: string;
 }
 
-function slugForPattern(pattern: string): string {
+export function slugForPattern(pattern: string): string {
   if (pattern === '/') return 'index';
   return pattern.slice(1).replace(/[^a-zA-Z0-9_-]+/g, '_');
 }
@@ -98,17 +112,34 @@ function importPath(p: string): string {
 }
 
 /**
+ * The project's tsconfig.json (or jsconfig.json), handed to every esbuild
+ * build: esbuild only auto-discovers it for files it resolves itself, and the
+ * plugins here resolve and load most project files - so without it,
+ * jsxImportSource, experimentalDecorators and friends would apply in SSR
+ * (tsx) but silently not in the bundles.
+ */
+export function projectTsconfig(projectRoot: string): string | undefined {
+  for (const name of ['tsconfig.json', 'jsconfig.json']) {
+    const candidate = join(projectRoot, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+/**
  * Entry module for one route. `chain` is segmentChainForDir() of the route's
  * folder - the chain ssr.ts renders inside the #__gio boundary (the root
  * layout stays server-only HTML) - and both sides build the tree with
  * buildSegmentTree(), so the client wraps exactly what the server wrapped
- * or hydration mismatches.
+ * or hydration mismatches. The route's stylesheets go in front of it with
+ * withStylesheets(), as on the server.
  */
 function generateEntrySource(
   pattern: string,
   route: RouteModule,
   chain: SegmentChainLevel[],
   runtimePath: string,
+  stylesheets: readonly string[],
 ): string {
   const imports: string[] = [];
   const levels = chain.map((level, i) => {
@@ -125,15 +156,17 @@ function generateEntrySource(
   });
   return `import React from 'react';
 import { registerRoute, buildSegmentTree } from ${importPath(runtimePath)};
+import { withStylesheets } from ${importPath(join(dirname(runtimePath), 'segment-tree.ts'))};
 import Page from ${importPath(route.filePath)};
 ${imports.join('\n')}
 
 const levels = [
 ${levels.join('\n')}
 ];
+const stylesheets = ${JSON.stringify(stylesheets)};
 
 registerRoute(${JSON.stringify(pattern)}, (props, path) =>
-  buildSegmentTree(React.createElement(Page, props), path, levels),
+  withStylesheets(buildSegmentTree(React.createElement(Page, props), path, levels), stylesheets),
 );
 `;
 }
@@ -469,8 +502,9 @@ interface EsbuildConfig {
   projectRoot: string;
   dev: boolean;
   defines: Record<string, string>;
-  plugin: Plugin;
+  plugins: Plugin[];
   nodePaths: string[] | undefined;
+  tsconfig: string | undefined;
 }
 
 interface BuiltBundles {
@@ -503,12 +537,15 @@ async function runEsbuild(config: EsbuildConfig): Promise<BuiltBundles> {
     jsx: 'automatic',
     platform: 'browser',
     define: config.defines,
+    // Stylesheets ship from the CSS build (css-build.ts); here a CSS
+    // Module import is its class map and any other .css import is empty.
     loader: { '.css': 'empty' },
     metafile: true,
     write: false,
     logLevel: 'silent',
-    plugins: [config.plugin],
+    plugins: config.plugins,
     ...(config.nodePaths !== undefined ? { nodePaths: config.nodePaths } : {}),
+    ...(config.tsconfig !== undefined ? { tsconfig: config.tsconfig } : {}),
   });
 
   // Map each generated entry file back to its public output URL.
@@ -580,12 +617,15 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
           options.segmentFiles ?? emptySegmentFiles(),
         ),
         runtimePath,
+        options.stylesheets?.get(pattern) ?? [],
       );
       await writeFile(file, source, 'utf8');
       entries.push({ name, file, pattern });
     }
 
-    const plugin = gioServerCodePlugin(projectRoot);
+    // One class-map plugin for every pass: each module compiles once.
+    const plugins = [gioServerCodePlugin(projectRoot), cssImportsAsClassMapsPlugin()];
+    const tsconfig = projectTsconfig(projectRoot);
     const defines = clientEnvDefines(process.env, options.dev, exportDir !== undefined);
     const bundle = (selected: GeneratedEntry[]): Promise<BuiltBundles> =>
       runEsbuild({
@@ -594,8 +634,9 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
         projectRoot,
         dev: options.dev,
         defines,
-        plugin,
+        plugins,
         nodePaths: options.nodePaths,
+        tsconfig,
       });
     const entryInput = (built: BuiltBundles, entry: GeneratedEntry): string | undefined =>
       built.entryInputs.get(resolve(entry.file));

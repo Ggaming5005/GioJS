@@ -20,7 +20,9 @@ export default function Page(): React.JSX.Element {
       <h2>How a soft navigation works</h2>
       <p>
         A click fetches the next page&apos;s HTML (or takes a fresh prefetch), loads the
-        route&apos;s client chunk, and renders the new page into the same React root. Layouts
+        route&apos;s client chunk and any of its <a href="/docs/css">stylesheets</a> the page
+        does not have yet (waiting at most 3 seconds for them), and renders the new page into
+        the same React root. Layouts
         the two pages share stay mounted, so their state (an open sidebar, a search box, a
         playing video) survives the navigation; the page itself mounts fresh, also when only
         a dynamic segment changes (<code>/posts/1</code> to <code>/posts/2</code>). So does a

@@ -263,3 +263,36 @@ export function buildSegmentTree(
   }
   return element;
 }
+
+/**
+ * `tree` preceded by its route's stylesheets (css-build.ts) as React
+ * stylesheet resources. React hoists them into <head> during SSR, adopts the
+ * server's <link>s on hydration, and on a client render loads new ones
+ * before revealing the tree. Resources take no position inside #__gio, so
+ * they never shift hydration - but both sides still build them here.
+ *
+ * The shape is the same whatever the route links (none included): the
+ * client runtime renders every soft navigation into one persistent root
+ * (client-runtime.ts), and a wrapper - or a link count - that changed with
+ * the route would move `tree` to another position and remount it, shared
+ * layouts and their state included.
+ */
+export function withStylesheets(tree: React.ReactNode, hrefs: readonly string[]): React.ReactNode {
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement(RouteStylesheets, { hrefs }),
+    tree,
+  );
+}
+
+function RouteStylesheets({ hrefs }: { hrefs: readonly string[] }): React.ReactNode {
+  if (hrefs.length === 0) return null;
+  return React.createElement(
+    React.Fragment,
+    null,
+    ...hrefs.map(href =>
+      React.createElement('link', { key: href, rel: 'stylesheet', href, precedence: 'default' }),
+    ),
+  );
+}

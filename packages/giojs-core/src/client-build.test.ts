@@ -766,3 +766,30 @@ const lazy = import('./lazy');
     expect([...bareImportSpecifiers(source)].sort()).toEqual(['./styles.css', 'polyfill']);
   });
 });
+
+describe("the project's tsconfig", () => {
+  it('applies to client bundles as it does in SSR (jsxImportSource)', async () => {
+    const root = await writeProject('gio-client-tsconfig-', {
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: { jsx: 'react-jsx', jsxImportSource: 'custom-jsx' },
+      }),
+      'node_modules/custom-jsx/package.json': JSON.stringify({
+        name: 'custom-jsx',
+        exports: { './jsx-runtime': './jsx-runtime.js', './jsx-dev-runtime': './jsx-runtime.js' },
+      }),
+      'node_modules/custom-jsx/jsx-runtime.js': `export const Fragment = 'CUSTOM_JSX_FRAGMENT';
+export function jsx(type, props) { return { marker: 'CUSTOM_JSX_RUNTIME', type, props }; }
+export const jsxs = jsx;
+export const jsxDEV = jsx;
+`,
+      'app/custom/page.tsx': `export default function Page() { return <p>tsconfig page</p>; }\n`,
+    });
+    try {
+      const manifest = await buildPages(root, ['custom']);
+      expect(manifest.get('/custom')).toBeDefined();
+      expect(await allChunks(root)).toContain('CUSTOM_JSX_RUNTIME');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});

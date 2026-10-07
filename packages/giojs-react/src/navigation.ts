@@ -3,8 +3,8 @@
  *
  * The client-side router behind GioLink and useRouter(): soft navigation
  * (fetch the next page's HTML and render it through the client runtime's
- * persistent React root), the prefetch cache, history entries with their
- * scroll positions, and the accessibility follow-up of a soft navigation to
+ * persistent React root, once the next route's stylesheets have loaded), the
+ * prefetch cache, history entries with their scroll positions, and the accessibility follow-up of a soft navigation to
  * another page (focus, route announcement). Deployment-id version skew
  * detection lives here too. All DOM access is guarded so this module is
  * safe to import during SSR.
@@ -596,6 +596,57 @@ function swapDocumentParts(page: ParsedPage): void {
   else document.documentElement.removeAttribute('lang');
 }
 
+/** How long a navigation waits for the next route's stylesheets before rendering anyway. */
+export const STYLESHEET_WAIT_MS = 3000;
+
+/**
+ * Load the route stylesheets the next page links (React stylesheet
+ * resources - `<link rel="stylesheet" data-precedence>`, hoisted out of
+ * #__gio) that this document does not have yet, and resolve once each has
+ * loaded or failed (at most STYLESHEET_WAIT_MS), so the next route is never
+ * shown unstyled. The persistent root renders inside flushSync, where React
+ * does not hold the commit back for new stylesheets, and a server-only page
+ * is swapped in as plain HTML: both rely on this. Inserted after the
+ * existing ones, keeping cascade order; React adopts them by href when it
+ * renders the route.
+ */
+export function adoptStylesheets(page: string | Document): Promise<void> {
+  const parsed = typeof page === 'string' ? new DOMParser().parseFromString(page, 'text/html') : page;
+  const present = new Set(
+    [...document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')].map(link =>
+      link.getAttribute('href'),
+    ),
+  );
+  const pending: Promise<void>[] = [];
+  // Anywhere in the document: without a root layout they open the <body>.
+  for (const incoming of parsed.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"][data-precedence]')) {
+    const href = incoming.getAttribute('href');
+    if (href === null || present.has(href)) continue;
+    present.add(href);
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.setAttribute('data-precedence', incoming.getAttribute('data-precedence') ?? 'default');
+    pending.push(
+      new Promise<void>(resolve => {
+        link.addEventListener('load', () => resolve(), { once: true });
+        link.addEventListener('error', () => resolve(), { once: true });
+      }),
+    );
+    const last = [...document.head.querySelectorAll('link[rel="stylesheet"][data-precedence]')].at(-1);
+    if (last !== undefined) last.after(link);
+    else document.head.append(link);
+  }
+  if (pending.length === 0) return Promise.resolve();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    Promise.all(pending).then(() => undefined),
+    new Promise<void>(resolve => {
+      timer = setTimeout(resolve, STYLESHEET_WAIT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 type HistoryMode = 'push' | 'replace' | 'pop' | 'refresh';
 
 function updateHistory(mode: HistoryMode, url: string): void {
@@ -645,6 +696,9 @@ async function showPage(
     if (clientRuntime() === undefined) await import(page.entry);
     await clientRuntime()?.prepare(page.entry, page.pattern);
   }
+  if (!isCurrentNavigation(seq)) return false;
+  // Its new stylesheets load before anything changes on screen, too.
+  await adoptStylesheets(page.doc);
   if (!isCurrentNavigation(seq)) return false;
 
   let committed = false;

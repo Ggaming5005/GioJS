@@ -1335,6 +1335,58 @@ async function main() {
       assert.match(await stale.text(), /fixture-css-marker/);
     });
 
+    await test('a CSS Module import renders its hashed class and links an immutable stylesheet holding it', async () => {
+      // Twice: the second response is the composed cache hit.
+      for (const expected of ['miss', 'hit']) {
+        const res = await fetch(`${BASE}/styled`);
+        assert.equal(res.status, 200);
+        assert.match(res.headers.get('x-gio-cache') ?? '', new RegExp(`^${expected}`));
+        const html = await res.text();
+        const className = html.match(/<div class="(card_[0-9a-f]{6}_card)">FIXTURE_STYLED_PAGE/)?.[1];
+        assert.ok(className, 'SSR rendered the CSS Module class');
+        const head = html.slice(0, html.indexOf('</head>'));
+        const sheets = [...head.matchAll(/<link rel="stylesheet" href="(\/_next\/static\/css\/[^"]+\.css)" data-precedence="default"\/>/g)]
+          .map((m) => m[1]);
+        // The root layout's stylesheet first, then the route's.
+        assert.equal(sheets.length, 2, head);
+        assert.match(sheets[0], /\/root-[A-Z0-9]+\.css$/);
+        assert.match(sheets[1], /\/route-styled-[A-Z0-9]+\.css$/);
+        // The legacy critical-CSS snippet stays out of pages that import CSS.
+        assert.ok(!html.includes('href="/globals.css"'), 'no second copy of globals.css');
+
+        const routeCss = await fetch(`${BASE}${sheets[1]}`);
+        assert.equal(routeCss.status, 200);
+        assert.match(routeCss.headers.get('content-type') ?? '', /^text\/css/);
+        assert.match(routeCss.headers.get('cache-control') ?? '', /immutable/);
+        assert.ok((await routeCss.text()).includes(`.${className}{color:`), 'the stylesheet styles that class');
+        const rootCss = await fetch(`${BASE}${sheets[0]}`);
+        assert.match(await rootCss.text(), /\.fixture-root-css-marker\{color:/);
+        // The hydrating bundle carries the same class name.
+        const chunk = html.match(/\/_next\/static\/chunks\/route-styled-[A-Z0-9]+\.js/)?.[0];
+        assert.ok(chunk, 'the page hydrates');
+        assert.ok((await (await fetch(`${BASE}${chunk}`)).text()).includes(`"${className}"`));
+      }
+    });
+
+    await test('the root layout links its imported CSS on every page, 404s included', async () => {
+      for (const [path, status] of [['/cached', 200], ['/definitely-missing-page', 404]]) {
+        const res = await fetch(`${BASE}${path}`);
+        assert.equal(res.status, status);
+        const html = await res.text();
+        assert.match(
+          html.slice(0, html.indexOf('</head>')),
+          /<link rel="stylesheet" href="\/_next\/static\/css\/root-[A-Z0-9]+\.css" data-precedence="default"\/>/,
+          path,
+        );
+      }
+    });
+
+    await test('CSS Modules are never served by path in a second, differently hashed form', async () => {
+      const res = await fetch(`${BASE}/styled/card.module.css`);
+      assert.equal(res.status, 404);
+      assert.doesNotMatch(res.headers.get('content-type') ?? '', /text\/css/);
+    });
+
     await test('gio.toml [[redirects]] issue the configured status with Location', async () => {
       const res = await fetch(`${BASE}/moved`, { redirect: 'manual' });
       assert.equal(res.status, 301);
@@ -2579,22 +2631,30 @@ async function devWatchPhase() {
     });
 
     await test('dev endpoints: a symlink named like source cannot expose other files', async () => {
-      // Outside app/ so the dev watcher does not restart the worker under
-      // the watch tests below.
-      await writeFile(join(devDir, 'secret.env'), 'TOKEN=integration-secret\n');
+      // In a hidden directory: the dev watcher covers the whole project and
+      // restarts the worker for a `.ts` anywhere else, racing the watch
+      // tests below. Hidden directories are ignored at every depth.
+      const restarts = () => (log.match(/dev watch: change detected/g) ?? []).length;
+      const restartsBefore = restarts();
+      const scratch = join(devDir, '.scratch');
+      await mkdir(scratch, { recursive: true });
+      await writeFile(join(scratch, 'secret.env'), 'TOKEN=integration-secret\n');
       // Symlinks need Developer Mode / admin rights on Windows.
       if (process.platform !== 'win32') {
-        await symlink(join(devDir, 'secret.env'), join(devDir, 'leak.ts'));
-        const res = await rawRequest('GET', '/_gio/devtools/codeframe?file=leak.ts&line=1', {
+        await symlink(join(scratch, 'secret.env'), join(scratch, 'leak.ts'));
+        const res = await rawRequest('GET', '/_gio/devtools/codeframe?file=.scratch%2Fleak.ts&line=1', {
           host: trustedHost,
         });
         assert.equal(res.status, 400);
         assert.doesNotMatch(res.body, /integration-secret/);
       }
-      const direct = await rawRequest('GET', '/_gio/devtools/codeframe?file=secret.env&line=1', {
+      const direct = await rawRequest('GET', '/_gio/devtools/codeframe?file=.scratch%2Fsecret.env&line=1', {
         host: trustedHost,
       });
       assert.equal(direct.status, 400);
+      // Past the watcher's 300ms batching window: still no restart.
+      await sleep(1_000);
+      assert.equal(restarts(), restartsBefore, 'the fixture files must not restart the worker');
     });
 
     await test('dev error pages: message and stack only reach localhost hosts', async () => {
@@ -2708,6 +2768,21 @@ async function devWatchPhase() {
       );
       await waitFor('component-triggered restart completed', () =>
         Promise.resolve(restartCount() > restartsBefore), 90_000);
+    });
+
+    await test('dev watch: editing a CSS Module rebuilds the route stylesheet', async () => {
+      const routeCss = async () => {
+        const html = await (await fetch(`${BASE}/styled`)).text();
+        const href = html.match(/href="(\/_next\/static\/css\/route-styled-[A-Z0-9]+\.css)"/)?.[1];
+        return href === undefined ? '' : (await fetch(`${BASE}${href}`)).text();
+      };
+      assert.match(await routeCss(), /rebeccapurple/);
+      await editAndWait(
+        'CSS edit to be served',
+        join(devDir, 'app', 'styled', 'card.module.css'),
+        (src) => src.replace('rebeccapurple', 'darkorange'),
+        async () => (await routeCss()).includes('darkorange'),
+      );
     });
 
     await test('dev watch: public/ changes refresh root serving without a worker restart', async () => {
@@ -2858,19 +2933,23 @@ async function standalonePhase() {
     // A group layout above a dynamic page: the prebuilt registry must carry
     // each page's folder so layouts still apply by ancestry.
     await mkdir(join(workDir, 'app', '(blog)', 'posts', '[id]'), { recursive: true });
+    // CSS imports travel too: a layout's global stylesheet and a page's CSS
+    // Module, whose class worker.js (SSR) and the chunk must agree on.
     await writeFile(
       join(workDir, 'app', '(blog)', 'layout.tsx'),
-      "import React from 'react';\n\nexport const metadata = { title: { default: 'Blog', template: '%s | Blog' } };\n\n" +
+      "import React from 'react';\nimport './blog.css';\n\nexport const metadata = { title: { default: 'Blog', template: '%s | Blog' } };\n\n" +
         "export default function BlogLayout({ children }) {\n  return <section data-layout=\"STANDALONE_BLOG_LAYOUT\">{children}</section>;\n}\n",
     );
+    await writeFile(join(workDir, 'app', '(blog)', 'blog.css'), '.standalone-blog-css { color: red; }\n');
+    await writeFile(join(workDir, 'app', '(blog)', 'posts', '[id]', 'post.module.css'), '.title { color: blue; }\n');
     await writeFile(
       join(workDir, 'app', '(blog)', 'posts', '[id]', 'page.tsx'),
-      "import React from 'react';\n" +
+      "import React from 'react';\nimport styles from './post.module.css';\n" +
         "import { useParams, usePathname } from '../../../../components/hooks/useNavigation.ts';\n\n" +
         'export default function Post({ params }) {\n' +
         probe('POST') +
         routerProbe +
-        '  return <><p>{`STANDALONE_POST id=[${params.id}]`}</p><p>{routerText}</p>{probe}</>;\n}\n' +
+        '  return <><p className={styles.title}>{`STANDALONE_POST id=[${params.id}]`}</p><p>{routerText}</p>{probe}</>;\n}\n' +
         "\nexport async function getServerSideProps(ctx) {\n" +
         "  return ctx.params.id === 'missing' ? { notFound: true } : { props: { params: ctx.params } };\n}\n" +
         "\nexport async function generateMetadata(ctx) {\n  return { title: `STANDALONE_ARTICLE_TITLE ${ctx.params.id}` };\n}\n" +
@@ -2953,6 +3032,14 @@ async function standalonePhase() {
           assert.match(entryJs, /STANDALONE_PUBLIC_VALUE/, 'GIO_PUBLIC_* frozen at export time');
         }
       }
+      // The post's stylesheet ships in out/ with the class its HTML renders.
+      const post = await readFile(join(exportOut, 'posts', '7', 'index.html'), 'utf8');
+      const postClass = post.match(/<p class="(post_[0-9a-f]{6}_title)">/)?.[1];
+      assert.ok(postClass, 'the CSS Module class is rendered');
+      const sheet = post.match(/<link rel="stylesheet" href="(\/_next\/static\/css\/route-[^"]+\.css)"/)?.[1];
+      assert.ok(sheet, 'the post links its stylesheet');
+      const css = await readFile(join(exportOut, ...sheet.split('/').filter(Boolean)), 'utf8');
+      assert.ok(css.includes(`.${postClass}{color:`) && css.includes('.standalone-blog-css'), css);
       assert.ok(existsSync(join(exportOut, '404.html')));
     });
 
@@ -2993,6 +3080,10 @@ async function standalonePhase() {
         'og:title=STANDALONE_HOME_OG',
       ]);
       assert.deepEqual(report.nav.head, ['title=STANDALONE_ARTICLE_TITLE 7 | Blog']);
+      // The post's stylesheet was loaded for the navigation, exactly once.
+      const postSheets = report.nav.stylesheets.filter((href) => /\/route-[^/]*posts[^/]*\.css$/.test(href));
+      assert.equal(postSheets.length, 1, JSON.stringify(report.nav.stylesheets));
+      assert.deepEqual(report.stylesheetsLoaded, postSheets);
     });
 
     await test('static export: sitemap.xml and robots.txt come from app/sitemap.ts and app/robots.ts', async () => {
@@ -3091,6 +3182,23 @@ async function standalonePhase() {
       // revalidate = 0: generated per request, never cached.
       assert.equal(sitemap.headers.get('x-gio-cache'), 'bypass');
       assert.match(await sitemap.text(), /<loc>https:\/\/standalone\.example\/<\/loc>/);
+    });
+
+    await test('standalone: CSS imports render their class and ship their prebuilt stylesheet', async () => {
+      const html = await (await fetch(`${STANDALONE_BASE}/posts/7`)).text();
+      const postClass = html.match(/<p class="(post_[0-9a-f]{6}_title)">/)?.[1];
+      assert.ok(postClass, 'worker.js rendered the CSS Module class');
+      const sheet = html.match(/<link rel="stylesheet" href="(\/_next\/static\/css\/route-[^"]+\.css)" data-precedence="default"\/>/)?.[1];
+      assert.ok(sheet, 'the stylesheet is linked');
+      const res = await fetch(`${STANDALONE_BASE}${sheet}`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/css/);
+      assert.match(res.headers.get('cache-control') ?? '', /immutable/);
+      const css = await res.text();
+      assert.ok(css.includes(`.${postClass}{color:`) && css.includes('.standalone-blog-css'), css);
+      // The prebuilt chunk hydrates with the same class name.
+      const chunk = html.match(/\/_next\/static\/chunks\/route-[^"]+?-[A-Z0-9]+\.js/)?.[0];
+      assert.match(await (await fetch(`${STANDALONE_BASE}${chunk}`)).text(), new RegExp(`"${postClass}"`));
     });
 
     await test('standalone: per-folder not-found and error files come from the prebuilt registry', async () => {
