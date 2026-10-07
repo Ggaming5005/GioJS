@@ -5919,7 +5919,8 @@ async function switchesOffPhase() {
       ]) {
         const warning = warnings.find((w) => w.startsWith(key));
         assert.ok(warning, `${key} in ${JSON.stringify(warnings)}`);
-        assert.ok(run.log().split('\n').some((line) => line.includes('WARN') && line.includes(warning)), `${key} logged`);
+        const logged = run.log().split('\n').filter((line) => line.includes('WARN') && line.includes(warning));
+        assert.equal(logged.length, 1, `${key} logged once: ${logged.join('\n')}`);
       }
       assert.equal(warnings.length, 4, JSON.stringify(warnings));
       assert.equal(run.report.envFilesDisabledBy, '[env] files');

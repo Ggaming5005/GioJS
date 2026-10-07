@@ -612,7 +612,8 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         }
     };
     ipc::set_render_timeout(cfg.server.render_timeout());
-    // Protections gio.toml turns off or loosens: allowed, never silent.
+    // Protections gio.toml turns off or loosens: allowed, never silent, and
+    // logged once, in the words --check-config reports them with.
     for warning in config_check::protections_off_warnings(&cfg) {
         warn!("{warning}");
     }
@@ -703,11 +704,6 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         websocket_origin_check = security.websocket_origin_check(),
         "security policy"
     );
-    // Every protection gio.toml turns off or loosens, in the words
-    // --check-config reports them with.
-    for warning in config_check::protections_off_warnings(&cfg) {
-        warn!("{warning}");
-    }
     let security = Arc::new(security);
 
     let workers = render_worker_count(

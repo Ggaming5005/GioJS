@@ -1010,6 +1010,8 @@ first.
   root layout that puts `children` past React's 30-bit tree id, with slots
   in lists of 8 or more children around it or in the page, can still see an
   id differ by a `0` digit.
+- Every startup warning for a protection `gio.toml` turns off or loosens was
+  logged twice.
 
 ### Known limitations
 
