@@ -46,7 +46,12 @@ export default defineConfig({
           ),
         },
       ]} />
-      <h3 id="gionodeplugin">GioNodePlugin</h3>
+      <h3 id="gionodeplugin">Plugin fields</h3>
+      <p>
+        Each entry of <code>plugins</code> is a{' '}
+        <a href="/docs/gio-config#gionodeplugin"><code>GioNodePlugin</code></a>; the{' '}
+        <code>gio.config.ts</code> reference covers its hooks in full.
+      </p>
       <PropsTable kind="Field" rows={[
         { name: 'name', type: 'string', required: true, description: <>Shown in errors and logs.</> },
         { name: 'version', type: 'string', required: true, description: <>Your plugin&apos;s version (required by the type).</> },

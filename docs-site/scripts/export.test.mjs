@@ -58,6 +58,38 @@ test('exact API names lead with the API reference in the real index', { skip }, 
   }
 });
 
+test('names lead to the section that defines them in the real index', { skip }, () => {
+  const search = createSearch(index);
+  const expected = {
+    // gio.toml keys: their section page's key table, not the version history.
+    skew_protection: '/docs/configuration/server#reference',
+    max_keys_per_client: '/docs/configuration/rate-limits#reference',
+    swr_multiplier: '/docs/configuration/cache#reference',
+    allowed_hosts: '/docs/configuration/dev#reference',
+    'server.idle_timeout_secs': '/docs/configuration/server#reference',
+    '[security.headers]': '/docs/configuration/security#reference',
+    '[[fonts]]': '/docs/configuration/fonts',
+    GioNodePlugin: '/docs/gio-config#gionodeplugin',
+    // A command's own page, not the CLI overview.
+    typegen: '/docs/cli/typegen',
+    doctor: '/docs/cli/doctor',
+    'router.refresh': '/docs/hooks/use-router#refresh',
+    // Page exports.
+    getServerSideProps: '/docs/page-exports/get-server-side-props',
+    generateMetadata: '/docs/page-exports/generate-metadata',
+    getStaticPaths: '/docs/page-exports/get-static-paths',
+    metadata: '/docs/page-exports/metadata',
+    revalidate: '/docs/page-exports/revalidate',
+    shell: '/docs/page-exports/shell',
+    tags: '/docs/page-exports/tags',
+    action: '/docs/page-exports/action',
+    wsHandler: '/docs/page-exports/ws-handler',
+  };
+  for (const [query, url] of Object.entries(expected)) {
+    assert.equal(search.search(query).pages[0]?.items[0].url, url, query);
+  }
+});
+
 test('a docs page\'s share card carries its own title and description', { skip }, () => {
   for (const route of docsRoutes()) {
     const html = pageHtml(route);

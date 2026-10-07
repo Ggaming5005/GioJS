@@ -23,7 +23,14 @@
  * listing `useRouter()`: exact API names rank above every prose mention. A
  * per-item page titled with the name still beats the overview, and a
  * mention in a guide, the gio.toml or the CLI reference gets a small bonus
- * only.
+ * only. A section that defines the name ranks above any mention: a row of
+ * its reference table (a gio.toml key like `skew_protection`, a prop), or
+ * its heading on an API Reference page that writes the name as code
+ * (`GioNodePlugin`, `refresh()`). A CLI page titled `gio typegen` answers
+ * `typegen` as if titled with it, and a gio.toml key is also found by its
+ * full name (`server.idle_timeout_secs`, `[security.headers]`). Between two
+ * titles that differ only in punctuation, the one typed wins: `[security]`
+ * is the gio.toml page, `Security` the guide.
  *
  * Results are grouped by page, best page first, each with its best
  * sections and a snippet around the first match; matched spans come back
@@ -52,6 +59,14 @@ const MAX_CANDIDATES = 80;
 
 /** Bonuses for a query that names a page or section exactly. */
 const B_EXACT_TITLE = 100;
+/** On top: the title as typed, punctuation included - `[security]` is the gio.toml page, not Security. */
+const B_LITERAL_TITLE = 12;
+/**
+ * A section that defines the name: a row of its reference table (a prop, a
+ * gio.toml key), or its heading on an API Reference page. Above a mention
+ * in reference code, below a page titled with the name.
+ */
+const B_DEFINED = 80;
 /** An inline-code term of a code API reference page: above any heading elsewhere, below a title. */
 const B_EXACT_REFERENCE_CODE = 70;
 const B_EXACT_HEADING = 60;
@@ -59,6 +74,14 @@ const B_TITLE_PREFIX = 12;
 const B_EXACT_CODE = 6;
 /** The pages whose inline code names the API itself - the page and its subpages. */
 const CODE_REFERENCE = /^\/docs\/(?:components|hooks|functions|page-exports)(?:\/|$)/;
+/** The nav section of the API reference: its headings name what they document. */
+const API_REFERENCE = 'API Reference';
+/** A name written as an identifier: snake_case, a dot, a dash, `$` or a capital. */
+const IDENTIFIER = /[_$.-]|\p{Lu}/u;
+/** The title of a gio.toml section page: `[server]`, `[[rate_limits]]`. */
+const GIO_TOML_TABLE = /^\[\[?([\w.]+)\]\]?$/;
+/** A CLI command's page title (`gio typegen`) also answers the bare command (`typegen`). */
+const COMMAND_PREFIX = /^gio\s+/;
 
 const STOP_WORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'do', 'for', 'from', 'how', 'i', 'in', 'is', 'it',
@@ -272,10 +295,35 @@ export function createSearch(index) {
 
   const vocabulary = [...postings.keys()].sort();
   const pageNames = pages.map((page) => [normalizeName(page.t), normalizeName(page.n ?? '')]);
+  const literalTitles = pages.map((page) => [page.t, page.n ?? ''].map((text) => text.trim().toLowerCase()));
+  const commandNames = pages.map((page) =>
+    (COMMAND_PREFIX.test(page.t) ? normalizeName(page.t.replace(COMMAND_PREFIX, '')) : ''));
   const codeReference = pages.map((page) => CODE_REFERENCE.test(page.u));
+  const apiReference = pages.map((page) => page.s === API_REFERENCE);
   const headingNames = sections.map((section) => normalizeName(section.h));
   const codeNames = sections.map((section) =>
     (section.k ? new Set(section.k.split('\n').map(normalizeName)) : null));
+  // A table row defines a name only when the name reads as one: a plain
+  // word (`layouts`, `cookies`) is as likely a topic, which a guide's
+  // heading answers better. On a gio.toml section page (titled `[server]`)
+  // every key is also defined by its full name: `server.idle_timeout_secs`,
+  // `[security.headers]`.
+  const tableNames = pages.map((page) => GIO_TOML_TABLE.exec(page.t)?.[1]);
+  const definedNames = sections.map((section) => {
+    if (!section.d) return null;
+    const rows = section.d.split('\n');
+    const names = rows.filter((name) => IDENTIFIER.test(name)).map(normalizeName);
+    const table = tableNames[section.p];
+    if (table !== undefined) names.push(...rows.map((name) => normalizeName(`${table}.${name}`)));
+    return names.length > 0 ? new Set(names) : null;
+  });
+  // Per page, every name it writes as code: a heading among them names an
+  // API item (`GioNodePlugin`, `refresh()`), not a topic ('Layouts').
+  const pageCodeNames = pages.map(() => new Set());
+  sections.forEach((section, s) => {
+    const names = [...(codeNames[s] ?? []), ...(section.d ? section.d.split('\n').map(normalizeName) : [])];
+    for (const name of names) pageCodeNames[section.p].add(name);
+  });
   const candidateCache = new Map();
 
   /** Candidate tokens for one query word: [token, quality][], best first. */
@@ -337,6 +385,7 @@ export function createSearch(index) {
     const terms = queryTerms(query);
     if (terms.length === 0) return { pages: [], total: 0 };
     const nameQuery = normalizeName(query);
+    const literalQuery = query.trim().toLowerCase();
 
     // Per query word, each section's best score for it.
     const termScores = terms.map((term, t) => {
@@ -371,11 +420,21 @@ export function createSearch(index) {
       let bonus = 0;
       if (nameQuery.length > 0) {
         const [title, label] = pageNames[section.p];
-        if (section.l === 1 && (title === nameQuery || label === nameQuery)) bonus += B_EXACT_TITLE;
-        else if (section.l === 1 && title.startsWith(nameQuery)) bonus += B_TITLE_PREFIX;
-        if (headingNames[s] === nameQuery) bonus += B_EXACT_HEADING;
-        if (codeNames[s]?.has(nameQuery)) {
-          bonus += codeReference[section.p] ? B_EXACT_REFERENCE_CODE : B_EXACT_CODE;
+        const named = title === nameQuery || label === nameQuery || commandNames[section.p] === nameQuery;
+        if (section.l === 1 && named) {
+          bonus += B_EXACT_TITLE;
+          if (literalTitles[section.p].includes(literalQuery)) bonus += B_LITERAL_TITLE;
+        } else if (section.l === 1 && title.startsWith(nameQuery)) bonus += B_TITLE_PREFIX;
+        const exactHeading = headingNames[s] === nameQuery;
+        const apiHeading = exactHeading && apiReference[section.p] && pageCodeNames[section.p].has(nameQuery);
+        // A definition outranks a mention; the two do not add up, so a
+        // reference page that also quotes the name stays below its own page.
+        if (definedNames[s]?.has(nameQuery) || apiHeading) bonus += B_DEFINED;
+        else {
+          if (exactHeading) bonus += B_EXACT_HEADING;
+          if (codeNames[s]?.has(nameQuery)) {
+            bonus += codeReference[section.p] ? B_EXACT_REFERENCE_CODE : B_EXACT_CODE;
+          }
         }
       }
       if (matched === terms.length) complete.push({ s, score: score + bonus, base: score, complete: true });

@@ -27,6 +27,8 @@ export interface SearchIndexSection {
   x: string;
   /** Inline-code terms, one per line. */
   k?: string;
+  /** Names the section's reference tables define (their first column), one per line. */
+  d?: string;
   /** Words of the section's code blocks that `x` does not hold, space-separated. */
   c?: string;
 }
@@ -43,6 +45,7 @@ export interface ExtractedSection {
   level: number;
   text: string;
   code: string[];
+  defines: string[];
   blockWords: string[];
 }
 

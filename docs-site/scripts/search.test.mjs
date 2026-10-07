@@ -238,6 +238,73 @@ test('an API name only in an overview reference section\'s code still ranks abov
   ]);
 });
 
+test('a name a reference table, an API heading or a command page defines leads to that definition', () => {
+  const indexOf = (pages) => createSearch(buildSearchIndex(
+    pages.map(([route, , , body]) => ({ route, html: html(body) })),
+    (route) => {
+      const page = pages.find(([r]) => r === route);
+      return page && { section: page[1], group: page[2], label: 'label' };
+    },
+  ));
+  /** A ConfigKeyTable / PropsTable as the components render it. */
+  const refTable = (className, names) => `<table class="${className}"><thead><tr><th>Key</th><th>Type</th></tr></thead>
+    <tbody>${names.map((name) => `<tr><td><code>${name}</code></td><td><code>boolean</code></td></tr>`).join('')}</tbody></table>`;
+  const search = indexOf([
+    ['/docs/configuration/server', 'API Reference', 'gio.toml', `
+      <h1>[server]</h1><p>How the server listens.</p>
+      <h2 id="reference">Reference</h2>${refTable('ref-table config-key-table', ['skew_protection', 'layouts'])}
+      <h2 id="version-history">Version history</h2>
+      <table class="ref-table ref-table--versions"><thead><tr><th>Version</th></tr></thead>
+      <tbody><tr><td><code>v0.1.0-beta.8</code></td><td>Added <code>skew_protection</code> and <code>skew_protection</code>.</td></tr></tbody></table>`],
+    // Reference code that only mentions the key.
+    ['/docs/functions/deployment-helpers', 'API Reference', 'Functions', `
+      <h1>Deployment helpers</h1><p>Detect a new deployment.</p>
+      <h2 id="related">Related</h2><p>Turn it off with <code>skew_protection</code>.</p>`],
+    ['/docs/functions/define-config', 'API Reference', 'Functions', `
+      <h1>defineConfig</h1><p>Type gio.config.ts.</p>
+      <h2 id="reference">Reference</h2><p><code>plugins</code> is a <code>GioNodePlugin[]</code>.</p>`],
+    ['/docs/gio-config', 'API Reference', 'Other', `
+      <h1>gio.config.ts</h1><p>Node plugins.</p>
+      <h3 id="gionodeplugin">GioNodePlugin</h3><p>A plugin has a <code>name</code>.</p>
+      <pre data-lang="ts"><code>interface GioNodePlugin {}</code></pre>
+      <h3 id="examples">Examples</h3><p>A <code>GioNodePlugin</code> that adds a header.</p>`],
+    ['/docs/cli', 'API Reference', 'CLI', `
+      <h1>CLI</h1><p>Every gio command.</p>
+      <h2 id="typegen">typegen</h2><p>Run <code>gio typegen</code> to write the route types.</p>`],
+    ['/docs/cli/typegen', 'API Reference', 'CLI', `
+      <h1>gio typegen</h1><p>Write .gio/routes.d.ts.</p>`],
+    // A topic heading in a guide still answers a plain word.
+    ['/docs/layouts-and-pages', 'Getting Started', undefined, `
+      <h1>Layouts and Pages</h1><p>Nest layouts.</p>
+      <h2 id="layouts">Layouts</h2><p>A layout wraps its pages.</p>`],
+    // Two titles that differ only in punctuation.
+    ['/docs/security', 'Guides', 'Security', `
+      <h1>Security</h1><p>What the server protects, and <code>[security.headers]</code>.</p>`],
+    ['/docs/configuration/security', 'API Reference', 'gio.toml', `
+      <h1>[security]</h1><p>Response headers.</p>
+      <h2 id="reference">Reference</h2>${refTable('ref-table config-key-table', ['csp', 'headers'])}`],
+  ]);
+  const first = (query) => search.search(query).pages[0]?.items[0].url;
+  // A gio.toml key opens its section page at the key's row, not at a
+  // passing mention in reference code or the version history.
+  assert.equal(first('skew_protection'), '/docs/configuration/server#reference');
+  // A key by its full name, in either spelling - a plain-word key included.
+  assert.equal(first('server.skew_protection'), '/docs/configuration/server#reference');
+  assert.equal(first('[security.headers]'), '/docs/configuration/security#reference');
+  assert.equal(first('security.headers'), '/docs/configuration/security#reference');
+  // The title as typed decides between `[security]` and Security.
+  assert.equal(first('[security]'), '/docs/configuration/security');
+  assert.equal(first('Security'), '/docs/security');
+  // A heading that names an API item on a reference page beats the
+  // reference code that mentions it.
+  assert.equal(first('GioNodePlugin'), '/docs/gio-config#gionodeplugin');
+  // A command's own page beats the CLI overview's heading for it.
+  assert.equal(first('typegen'), '/docs/cli/typegen');
+  assert.equal(first('gio typegen'), '/docs/cli/typegen');
+  // A table row that is a plain word does not outrank a guide's heading.
+  assert.equal(first('layouts'), '/docs/layouts-and-pages#layouts');
+});
+
 test('prefixes and typos still find the page', () => {
   assert.equal(urls('revalid')[0], '/docs/caching');
   assert.equal(urls('revalidte')[0], '/docs/caching');
