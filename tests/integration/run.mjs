@@ -5540,6 +5540,11 @@ async function featureSwitchesPhase() {
           assert.equal(res.status, 429, path);
           assert.equal(res.headers.get('x-gio-cache'), 'bypass', path);
         }
+        // Speculation rules send Sec-Purpose with parameters.
+        for (const purpose of ['prefetch;prerender', 'prefetch;anonymous-client-ip']) {
+          const res = await fetch(`${BASE}/cached`, { headers: { 'sec-purpose': purpose } });
+          await res.arrayBuffer();
+          assert.equal(res.status, 429, purpose);
         }
         const plain = await fetch(`${BASE}/gio-test.png`);
         await plain.arrayBuffer();

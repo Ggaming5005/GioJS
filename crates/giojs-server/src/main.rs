@@ -4656,13 +4656,22 @@ fn is_event_stream_content_type(headers: &std::collections::HashMap<String, Stri
         .is_some_and(|ct| ct.starts_with("text/event-stream"))
 }
 
+/// Whether `Purpose` or `Sec-Purpose` names a prefetch. Both are lists
+/// whose items may carry parameters: browsers send
+/// `Sec-Purpose: prefetch;prerender` for speculation-rules prerenders and
+/// `prefetch;anonymous-client-ip` for private prefetches.
 fn is_prefetch(req: &Request) -> bool {
-    req.headers()
-        .get("purpose")
-        .or_else(|| req.headers().get("sec-purpose"))
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "prefetch")
-        .unwrap_or(false)
+    ["purpose", "sec-purpose"].into_iter().any(|name| {
+        req.headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|item| {
+                let token = item.split(';').next().unwrap_or_default().trim();
+                token.eq_ignore_ascii_case("prefetch")
+            })
+    })
 }
 
 /// Inspect Accept-Encoding and return the best encoding the CompressionLayer will apply.
@@ -8760,6 +8769,44 @@ Z1uis5x6LpdQ/f48fePWB4bJazo1nu0iiDgI5KKq1gGbWFFjVjMISa/m
         for name in ["connection", "keep-alive", "transfer-encoding"] {
             assert!(all(name).is_empty(), "{name} must not be forwarded");
         }
+    }
+
+    #[test]
+    fn prefetch_purposes_are_token_lists() {
+        let purpose = |name: &str, value: &str| {
+            Request::builder()
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap()
+        };
+        for (name, value) in [
+            ("purpose", "prefetch"),
+            ("sec-purpose", "prefetch"),
+            // Speculation rules and private prefetches add parameters.
+            ("sec-purpose", "prefetch;prerender"),
+            ("sec-purpose", "prefetch; anonymous-client-ip"),
+            ("purpose", "Prefetch"),
+            ("sec-purpose", "other, prefetch"),
+        ] {
+            assert!(is_prefetch(&purpose(name, value)), "{name}: {value}");
+        }
+        for (name, value) in [
+            ("purpose", "prerender"),
+            ("sec-purpose", "prefetcher"),
+            ("sec-purpose", "no-prefetch;prefetch"),
+        ] {
+            assert!(!is_prefetch(&purpose(name, value)), "{name}: {value}");
+        }
+        assert!(!is_prefetch(
+            &Request::builder().body(Body::empty()).unwrap()
+        ));
+        // Either header counts, whichever comes first.
+        let both = Request::builder()
+            .header("purpose", "prerender")
+            .header("sec-purpose", "prefetch;prerender")
+            .body(Body::empty())
+            .unwrap();
+        assert!(is_prefetch(&both));
     }
 
     #[tokio::test]

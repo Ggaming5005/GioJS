@@ -1029,6 +1029,10 @@ first.
   `X-RateLimit-Limit` is now the bucket's size, `per_ip + burst` (a fresh
   client of `per_ip = 3` with the default `burst = 20` sees `23` and `22`),
   and Remaining never exceeds it.
+- `Sec-Purpose: prefetch;prerender` (a browser's speculation-rules prerender)
+  and other parameterized `Purpose` / `Sec-Purpose` values did not count as
+  prefetches. Both headers are now read as lists, and an item `prefetch`
+  with or without parameters marks a prefetch.
 
 ### Known limitations
 
