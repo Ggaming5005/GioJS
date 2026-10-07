@@ -187,6 +187,26 @@ export interface HandlerEntry {
   methods: Map<string, RouteHandlerFn>;
 }
 
+/**
+ * What every method of a route.ts that threw while it was imported throws
+ * (ws-router.ts): its URL answers 500 instead of disappearing into a 404,
+ * or into a page or not-found file that would take it over.
+ */
+export class RouteLoadError extends Error {
+  /** The route.ts as a filesystem path. */
+  readonly file: string;
+
+  constructor(filePath: string, importError: unknown) {
+    const file = filePath.startsWith('file:') ? fileURLToPath(filePath) : filePath;
+    const reason = importError instanceof Error ? importError.message : String(importError);
+    super(`route file ${file} failed to load: ${reason}`, { cause: importError });
+    this.name = 'RouteLoadError';
+    this.file = file;
+    // The import's stack is the one that says where it threw.
+    if (importError instanceof Error && importError.stack !== undefined) this.stack = importError.stack;
+  }
+}
+
 /** Root-level special pages: app/not-found.* and app/error.* */
 export interface SpecialPages {
   notFound?: () => Promise<PageModule>;

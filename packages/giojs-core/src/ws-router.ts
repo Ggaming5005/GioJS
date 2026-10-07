@@ -7,10 +7,11 @@
  */
 import { loadTsModule } from './load-ts.ts';
 import type { WsHandler } from './context.ts';
-import { HANDLER_METHODS } from './router.ts';
+import { HANDLER_METHODS, RouteLoadError } from './router.ts';
 import type { HandlerEntry, RouteFile, RouteHandlerFn } from './router.ts';
 import { matchIn } from './ssr.ts';
 import { logger } from './logger.ts';
+import { describeError } from './mode.ts';
 
 export type WsHandlerFn = WsHandler;
 
@@ -64,22 +65,48 @@ export function registerRouteModule(
   }
 }
 
+/**
+ * Register a route.ts that threw while it was imported: every method
+ * answers 500 (ssr.ts runRouteHandler: a digest in production, the import
+ * error in dev) and logs the file and the error, so the URL fails loudly
+ * instead of turning into a 404 - or being taken over by a sibling page.
+ */
+export function registerFailedRouteModule(
+  importError: unknown,
+  filePath: string,
+  urlPattern: string,
+  handlers: Map<string, HandlerEntry>,
+): void {
+  const failure = new RouteLoadError(filePath, importError);
+  logger.error('route file failed to load - its URL answers 500 until it is fixed', {
+    urlPattern,
+    filePath: failure.file,
+    ...describeError(importError),
+  });
+  const fail: RouteHandlerFn = () => {
+    throw failure;
+  };
+  handlers.set(urlPattern, {
+    filePath,
+    urlPattern,
+    methods: new Map(HANDLER_METHODS.map(method => [method, fail])),
+  });
+}
+
 export async function discoverRouteModules(routeFiles: RouteFile[]): Promise<RouteModules> {
   const wsHandlers = new Map<string, WsHandlerFn>();
   const handlers = new Map<string, HandlerEntry>();
 
   await Promise.all(
     routeFiles.map(async ({ filePath, urlPattern }) => {
+      let mod: RouteFileModule;
       try {
-        const mod = await loadTsModule<RouteFileModule>(filePath);
-        registerRouteModule(mod, filePath, urlPattern, wsHandlers, handlers);
+        mod = await loadTsModule<RouteFileModule>(filePath);
       } catch (loadError) {
-        logger.warn('route file failed to load, skipping its handlers', {
-          filePath,
-          urlPattern,
-          error: loadError instanceof Error ? loadError.message : String(loadError),
-        });
+        registerFailedRouteModule(loadError, filePath, urlPattern, handlers);
+        return;
       }
+      registerRouteModule(mod, filePath, urlPattern, wsHandlers, handlers);
     }),
   );
 

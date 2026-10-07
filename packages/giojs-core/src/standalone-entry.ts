@@ -2,11 +2,16 @@
  * giojs-core/src/standalone-entry.ts
  *
  * Prebuilt-registry entrypoint for `gio build standalone` bundles. The
- * generated entry statically imports every discovered app module (pages,
- * layouts, not-found/error/loading files, route files, sitemap/robots/
- * manifest modules, gio.config, middleware) and hands them over here, so
- * boot performs no filesystem discovery, no tsx transform, and no esbuild
- * client build - the bundle runs on a bare Node install.
+ * generated entry bundles every discovered app module (pages, layouts,
+ * not-found/error/loading files, route files, sitemap/robots/manifest
+ * modules, gio.config, middleware) and hands them over here, so boot
+ * performs no filesystem discovery, no tsx transform, and no esbuild client
+ * build - the bundle runs on a bare Node install.
+ *
+ * Per-route modules arrive as loaders and are evaluated when the source path
+ * evaluates them: route files at boot, the rest on first use. A route file
+ * that throws while it is imported answers 500 (registerFailedRouteModule),
+ * a page that does renders the error page - the worker still starts.
  */
 import { validateGioConfig, type GioConfig } from './gio-config.ts';
 import type {
@@ -23,7 +28,12 @@ import { emptySegmentFiles } from './router.ts';
 import type { MetadataRouteKind, MetadataRouteModule, MetadataRoutes } from './metadata-routes.ts';
 import { styleManifestFromJson, type StyleManifestJson } from './style-manifest.ts';
 import { sanitizeMiddlewareRules } from './middleware.ts';
-import { registerRouteModule, type RouteFileModule, type WsHandlerFn } from './ws-router.ts';
+import {
+  registerFailedRouteModule,
+  registerRouteModule,
+  type RouteFileModule,
+  type WsHandlerFn,
+} from './ws-router.ts';
 import { installProcessGuards, startPluginRegistry, startIpcServers } from './worker-boot.ts';
 import { logger } from './logger.ts';
 
@@ -34,14 +44,14 @@ export interface StandaloneRouteEntry {
   dir: string;
   /** Original source path, kept for logs and error messages. */
   filePath: string;
-  module: PageModule;
+  load: () => Promise<PageModule>;
 }
 
 export interface StandaloneLayoutEntry {
   /** app/-relative directory holding the layout, '' for the root (LayoutEntry.dir). */
   dir: string;
   filePath: string;
-  module: LayoutModule;
+  load: () => Promise<LayoutModule>;
 }
 
 export interface StandaloneSegmentFileEntry {
@@ -49,26 +59,26 @@ export interface StandaloneSegmentFileEntry {
   /** app/-relative directory holding the file, '' for app/ itself (SegmentFileEntry.dir). */
   dir: string;
   filePath: string;
-  module: SegmentFileModule;
+  load: () => Promise<SegmentFileModule>;
 }
 
 export interface StandaloneMetadataRouteEntry {
   kind: MetadataRouteKind;
   filePath: string;
-  module: MetadataRouteModule;
+  load: () => Promise<MetadataRouteModule>;
 }
 
 export interface StandaloneRouteFileEntry {
   pattern: string;
   filePath: string;
-  module: RouteFileModule;
+  load: () => Promise<RouteFileModule>;
 }
 
 export interface StandaloneRegistry {
   routes: StandaloneRouteEntry[];
   layouts: StandaloneLayoutEntry[];
   routeFiles: StandaloneRouteFileEntry[];
-  specialPages?: { notFound?: PageModule; error?: PageModule };
+  specialPages?: { notFound?: () => Promise<PageModule>; error?: () => Promise<PageModule> };
   /** Per-folder not-found.*, error.* and loading.* files. */
   segmentFiles?: StandaloneSegmentFileEntry[];
   /** app/sitemap.*, app/robots.*, app/manifest.* */
@@ -94,7 +104,7 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
       filePath: entry.filePath,
       urlPattern: entry.pattern,
       dir: entry.dir,
-      load: () => Promise.resolve(entry.module),
+      load: entry.load,
     });
   }
 
@@ -103,25 +113,29 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     layouts.set(entry.dir, {
       filePath: entry.filePath,
       dir: entry.dir,
-      load: () => Promise.resolve(entry.module),
+      load: entry.load,
     });
   }
 
   const wsHandlers = new Map<string, WsHandlerFn>();
   const handlers = new Map<string, HandlerEntry>();
+  // Loaded at boot like discoverRouteModules does, in registry order.
   for (const entry of registry.routeFiles) {
-    registerRouteModule(entry.module, entry.filePath, entry.pattern, wsHandlers, handlers);
+    let mod: RouteFileModule;
+    try {
+      mod = await entry.load();
+    } catch (loadError) {
+      registerFailedRouteModule(loadError, entry.filePath, entry.pattern, handlers);
+      continue;
+    }
+    registerRouteModule(mod, entry.filePath, entry.pattern, wsHandlers, handlers);
   }
 
   const specialPages: SpecialPages = {};
-  const notFoundModule = registry.specialPages?.notFound;
-  if (notFoundModule !== undefined) {
-    specialPages.notFound = () => Promise.resolve(notFoundModule);
-  }
-  const errorModule = registry.specialPages?.error;
-  if (errorModule !== undefined) {
-    specialPages.error = () => Promise.resolve(errorModule);
-  }
+  const notFoundLoad = registry.specialPages?.notFound;
+  if (notFoundLoad !== undefined) specialPages.notFound = notFoundLoad;
+  const errorLoad = registry.specialPages?.error;
+  if (errorLoad !== undefined) specialPages.error = errorLoad;
 
   const segmentFiles = emptySegmentFiles();
   const segmentMapKey = { 'not-found': 'notFound', error: 'error', loading: 'loading' } as const;
@@ -130,7 +144,7 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
       kind: entry.kind,
       filePath: entry.filePath,
       dir: entry.dir,
-      load: () => Promise.resolve(entry.module),
+      load: entry.load,
     });
   }
 
@@ -139,7 +153,7 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     metadataRoutes[entry.kind] = {
       kind: entry.kind,
       filePath: entry.filePath,
-      load: () => Promise.resolve(entry.module),
+      load: entry.load,
     };
   }
 

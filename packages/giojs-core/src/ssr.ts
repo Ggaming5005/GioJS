@@ -46,6 +46,7 @@ import {
   emptySegmentFiles,
   layoutsForDir,
   nearestSegmentFiles,
+  RouteLoadError,
   segmentChainForDir,
 } from './router.ts';
 import { GioEventStream, isGioEventStream } from './sse.ts';
@@ -1769,17 +1770,22 @@ async function runRouteHandler(
     const clientError = requestBodyErrorResponse(err);
     if (clientError !== null) return { ...base, ...clientError };
     const digest = createErrorDigest();
-    logger.error('route handler failed', {
+    // A route.ts that threw while it was imported (ws-router.ts): the log
+    // names the file, and dev shows the import error in the response too.
+    const loadFailure = err instanceof RouteLoadError ? err : null;
+    logger.error(loadFailure !== null ? 'route file failed to load' : 'route handler failed', {
       path: req.path,
       method: req.method,
       digest,
-      ...describeError(err),
+      ...(loadFailure !== null ? { filePath: loadFailure.file } : {}),
+      ...describeError(loadFailure !== null ? loadFailure.cause : err),
     });
+    const message = loadFailure !== null && isDevMode() ? loadFailure.message : GENERIC_ERROR_MESSAGE;
     return {
       ...base,
       status: 500,
       headers: { 'content-type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({ error: GENERIC_ERROR_MESSAGE, digest }),
+      body: JSON.stringify({ error: message, digest }),
     };
   }
 }

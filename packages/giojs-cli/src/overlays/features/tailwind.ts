@@ -122,9 +122,11 @@ export const tailwind: Overlay = {
   edits: () => [layoutEdit],
   agents:
     '- Tailwind CSS v4 (CLI): `app/tailwind.css` is the input and `app/tailwind.out.css` the generated,\n' +
-    '  git-ignored output the root layout imports (never import the input). The dev script runs the\n' +
-    '  watcher next to the server (scripts/dev.mjs); build/start/export build the output first. The\n' +
-    "  starter stylesheet is imported into Tailwind's base layer, so utility classes override it.",
+    '  git-ignored output the root layout imports (never import the input). Start development with\n' +
+    '  `npm run dev` (scripts/dev.mjs: the watcher next to the server) - not `gio dev`/`npx gio dev`,\n' +
+    '  which start only the server, so a fresh clone has no tailwind.out.css (`npm run css:build`\n' +
+    '  writes it once). build/start/export build the output first. The starter stylesheet is\n' +
+    "  imported into Tailwind's base layer, so utility classes override it.",
   postSteps: ctx => [
     `Use Tailwind classes in any component - \`${ctx.packageManager.run('dev')}\` runs the Tailwind watcher next to the server.`,
     `The starter's own styles now load from ${TAILWIND_INPUT} (in Tailwind's base layer).`,

@@ -15,7 +15,9 @@
  *   plugin, as vitest otherwise names them its own way. What lives in Rust
  *   - gio.toml and middleware.ts rules, [i18n] locale detection, rate
  *   limits, CSRF checks, security headers, the page cache - is not
- *   applied; createTestServer covers that.
+ *   applied; createTestServer covers that. Without a GIO_SESSION_SECRET
+ *   (environment or .env files), discovery sets a random one for the test
+ *   process, so session modules load in production mode too.
  * - createTestServer starts the real giojs-server binary on a free port
  *   with a private cache, and close() takes down its whole process tree.
  *   A test process that never calls close() still exits, and its servers
@@ -31,7 +33,7 @@
 import '@gio.js/core/server-only';
 import { isUtf8 } from 'node:buffer';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { get as httpGet } from 'node:http';
@@ -58,6 +60,7 @@ import {
   discoverSegmentFiles,
   discoverSpecialPages,
 } from './router.ts';
+import { SESSION_SECRET_ENV } from './session.ts';
 import { renderRoute, type RenderExtras } from './ssr.ts';
 import { isGioEventStream, type GioEventStream, type SseStream } from './sse.ts';
 import { discoverRouteModules } from './ws-router.ts';
@@ -89,6 +92,9 @@ const apps = new Map<string, Promise<TestApp>>();
  */
 const loadedFromEnvFiles = new Map<string, string>();
 
+/** The GIO_SESSION_SECRET discovery generated for this process, if it did. */
+let testSessionSecret: string | undefined;
+
 /** `appDir`, else GIO_APP_DIR, else ./app - the server's own default. */
 function resolveAppDir(appDir: string | undefined): string {
   return resolve(appDir ?? process.env.GIO_APP_DIR ?? join(process.cwd(), 'app'));
@@ -105,6 +111,15 @@ async function discoverTestApp(appDir: string): Promise<TestApp> {
   loadEnvFiles(dirname(appDir));
   for (const [name, value] of Object.entries(process.env)) {
     if (!before.has(name) && value !== undefined) loadedFromEnvFiles.set(name, value);
+  }
+  // Tests run in production mode (vitest sets NODE_ENV=test), where
+  // createSessionStorage() throws without a secret - so a route.ts or page
+  // importing a session module would answer 500. Neither the environment
+  // nor a .env file has one: a random secret for this test process, set
+  // before any app module is imported. Not handed to createTestServer.
+  if ((process.env[SESSION_SECRET_ENV] ?? '').trim() === '') {
+    testSessionSecret = randomBytes(32).toString('base64url');
+    process.env[SESSION_SECRET_ENV] = testSessionSecret;
   }
   // Mirrors main.ts (minus client bundles, typed routes and the IPC
   // servers): a conflicting route fails here as it fails the worker boot.
@@ -904,6 +919,11 @@ function serverEnv(
   // the development files). A value the test has changed since is passed on.
   for (const [name, value] of loadedFromEnvFiles) {
     if (env[name] === value) delete env[name];
+  }
+  // Nor does the session secret discovery generated: the server is
+  // configured the way the project configures it.
+  if (testSessionSecret !== undefined && env[SESSION_SECRET_ENV] === testSessionSecret) {
+    delete env[SESSION_SECRET_ENV];
   }
   for (const [name, value] of Object.entries(extra)) {
     if (value === undefined) delete env[name];

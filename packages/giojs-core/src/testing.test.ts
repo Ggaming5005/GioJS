@@ -502,6 +502,120 @@ export default function Contact({ actionData }) {
   });
 });
 
+describe('callRoute and sessions', () => {
+  let root: string;
+
+  beforeAll(async () => {
+    // What a project scaffolded with --auth has: a module-scope storage,
+    // which throws in production (NODE_ENV=test) without a secret.
+    root = await writeProject('gio-testing-session-', {
+      'lib/session.server.ts': `import { createSessionStorage } from '${pathToFileURL(join(packageDir, 'src', 'session.ts')).href}';
+export const sessions = createSessionStorage();
+`,
+      'app/api/login/route.ts': `import { sessions } from '../../../lib/session.server.ts';
+export async function POST(req) {
+  const session = sessions.getSession(req);
+  session.set('email', (await req.json()).email);
+  return new Response(null, { status: 204, headers: { 'set-cookie': sessions.commitSession(session) } });
+}
+`,
+    });
+  });
+
+  afterAll(async () => {
+    await resetTestApp(join(root, 'app'));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('logs in under NODE_ENV=test with no GIO_SESSION_SECRET set: the kit provides one', async () => {
+    expect(process.env.NODE_ENV).toBe('test');
+    const res = await callRoute('/api/login', {
+      appDir: join(root, 'app'),
+      method: 'POST',
+      body: { email: 'ada@example.com' },
+    });
+    expect(res.status).toBe(204);
+    expect(res.setCookies.join('\n')).toMatch(/^gio_session=/);
+    expect(Buffer.byteLength(process.env.GIO_SESSION_SECRET ?? '')).toBeGreaterThanOrEqual(32);
+  });
+});
+
+describe('callRoute and a route.ts that throws while it is imported', () => {
+  let root: string;
+  const errors: unknown[][] = [];
+
+  beforeAll(async () => {
+    root = await writeProject('gio-testing-broken-route-', {
+      'lib/env.server.ts': `if (process.env.TK_REQUIRED_VAR === undefined) throw new Error('TK_REQUIRED_VAR is not set');
+export const required = process.env.TK_REQUIRED_VAR;
+`,
+      'app/api/broken/route.ts': `import { required } from '../../../lib/env.server.ts';
+export function POST() { return { required }; }
+`,
+      // A sibling page must not take the URL over (GET would render it).
+      'app/api/broken/page.tsx': `import React from 'react';
+export default function Sibling() { return React.createElement('p', null, 'SIBLING_PAGE'); }
+`,
+      'app/api/fine/route.ts': `export function GET() { return { fine: true }; }
+`,
+    });
+  });
+
+  afterAll(async () => {
+    await resetTestApp(join(root, 'app'));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('answers 500 with a digest for every method, never 404, and logs the file and the error', async () => {
+    const appDir = join(root, 'app');
+    const errorSpy = vi.mocked(logger.error);
+    errorSpy.mockImplementation((...args: unknown[]) => {
+      errors.push(args);
+    });
+    try {
+      for (const method of ['POST', 'GET', 'HEAD', 'DELETE']) {
+        const res = await callRoute('/api/broken', { appDir, method });
+        expect(res.status, method).toBe(500);
+        if (method === 'HEAD') continue;
+        const body = await res.json<{ error: string; digest: string }>();
+        expect(body.error).toBe('Internal Server Error');
+        expect(body.digest).toMatch(/^[0-9a-f]{12}$/);
+        expect(JSON.stringify(body)).not.toContain('TK_REQUIRED_VAR');
+      }
+      expect((await callRoute('/api/fine', { appDir })).status).toBe(200);
+    } finally {
+      errorSpy.mockImplementation(() => undefined);
+    }
+    const file = join(root, 'app', 'api', 'broken', 'route.ts');
+    // Once at discovery, then per request under the response's digest.
+    expect(errors[0]?.[0]).toMatch(/route file failed to load/);
+    expect(errors[0]?.[1]).toMatchObject({ urlPattern: '/api/broken', filePath: file, error: 'TK_REQUIRED_VAR is not set' });
+    expect(errors[1]?.[0]).toBe('route file failed to load');
+    expect(errors[1]?.[1]).toMatchObject({
+      path: '/api/broken',
+      method: 'POST',
+      digest: expect.stringMatching(/^[0-9a-f]{12}$/),
+      filePath: file,
+      error: 'TK_REQUIRED_VAR is not set',
+    });
+  });
+
+  it('shows the file and the import error in development', async () => {
+    const previous = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
+    try {
+      const res = await callRoute('/api/broken', { appDir: join(root, 'app'), method: 'POST' });
+      expect(res.status).toBe(500);
+      const body = await res.json<{ error: string }>();
+      expect(body.error).toBe(
+        `route file ${join(root, 'app', 'api', 'broken', 'route.ts')} failed to load: TK_REQUIRED_VAR is not set`,
+      );
+    } finally {
+      process.env.NODE_ENV = previous;
+    }
+  });
+});
+
 describe('renderPage and .env files', () => {
   const names = ['TK_ENV_FILE', 'TK_ENV_PRESET', 'TK_ENV_LOCAL', 'TK_ENV_DEV', 'TK_ENV_BROKEN'];
   const page = `import React from 'react';
@@ -787,9 +901,15 @@ describe('createTestServer', () => {
       expect(await (await callRoute('/api/runtime', { appDir })).json()).toMatchObject({
         vitest: 'true',
         dotenv: 'from-dotenv',
+        sessionSecret: true,
       });
       const res = await fetch(`${server.url}/api/runtime`);
-      expect(await res.json()).toEqual({ vitest: null, nodeEnv: 'production', dotenv: 'from-dotenv' });
+      expect(await res.json()).toEqual({
+        vitest: null,
+        nodeEnv: 'production',
+        dotenv: 'from-dotenv',
+        sessionSecret: false,
+      });
     });
 
     it('uses a private cache, so the project cache is never touched', async () => {

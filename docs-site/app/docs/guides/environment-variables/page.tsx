@@ -130,6 +130,17 @@ export async function getServerSideProps() {
 }
 
 export default function Orders({ orders }) { /* ... */ }`} />
+      <p>
+        &quot;Fails loudly&quot; means: every URL whose module imports it answers{' '}
+        <strong>500</strong> - a page renders its error page, and a <code>route.ts</code>{' '}
+        answers <code>{'{ "error": "Internal Server Error", "digest": "..." }'}</code> for every
+        method (in development, the import error itself). The server log carries the file and
+        the error under the same digest, and a <code>route.ts</code> that fails to import is
+        also logged once at startup. The server still starts, so the rest of the app keeps
+        serving; <code>npx gio routes</code> marks such a route <code>(failed to load)</code>.
+        The same applies to <code>createSessionStorage()</code> at module scope with no{' '}
+        <code>GIO_SESSION_SECRET</code> in production.
+      </p>
       <div className="callout">
         <code>getServerSideProps</code> and everything only it imports are removed from the
         browser bundle, but its <strong>return value is not secret</strong>: props are
@@ -185,7 +196,7 @@ export default function Orders({ orders }) { /* ... */ }`} />
           <tr>
             <td><code>GIO_SESSION_SECRET</code></td>
             <td>You use <a href="/docs/authentication">sessions</a> or <code>require_session</code> guards</td>
-            <td>At least 32 bytes; comma-separated to rotate (the first signs, all verify). In production, missing means sessions throw and guards deny everyone; in development an ephemeral secret is generated.</td>
+            <td>At least 32 bytes; comma-separated to rotate (the first signs, all verify). In production, missing means <code>createSessionStorage()</code> throws - every page and <code>route.ts</code> importing the session module answers 500 - and guards deny everyone; in development an ephemeral secret is generated, and the <code>@gio.js/core/testing</code> kit sets a random one for tests.</td>
           </tr>
           <tr>
             <td><code>GIO_REVALIDATE_TOKEN</code></td>
