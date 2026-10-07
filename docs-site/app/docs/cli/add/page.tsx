@@ -105,6 +105,7 @@ Next steps:
       <h3 id="add-a-feature">Add a feature</h3>
       <CodeBlock lang="text" code={`$ npx gio add api
 Did create:
+  components/forms.css
   app/(site)/guestbook/page.tsx
   app/api/guestbook/route.ts
   lib/guestbook.server.ts

@@ -114,8 +114,8 @@ $ echo $?
       <p>
         <code>SIGINT</code> and <code>SIGTERM</code> start a graceful shutdown: up to 8
         seconds to drain in-flight requests, then up to 6 seconds for each worker to run its
-        plugin <code>onShutdown</code> hooks. Give a process manager at least 14 seconds
-        before it kills the server.
+        plugin <code>onShutdown</code> hooks (the workers stop in parallel). Give a process
+        manager at least 14 seconds before it kills the server.
       </p>
 
       <h3 id="environment-variables">Environment variables</h3>
@@ -132,6 +132,7 @@ $ echo $?
           <tr><td><code>NODE_ENV</code></td><td><code>development</code> runs dev mode; anything else production. The worker runs in the same mode.</td></tr>
           <tr><td><code>GIO_HOST</code>, <code>GIO_PORT</code>, <code>PORT</code></td><td>The listen address, over <code>[server] host</code> / <code>port</code> (<code>GIO_PORT</code> before <code>PORT</code>).</td></tr>
           <tr><td><code>GIO_APP_DIR</code></td><td>The <code>app/</code> directory (default <code>app</code>); <code>gio.toml</code>, <code>public/</code> and the <code>.env</code> files are read from its parent.</td></tr>
+          <tr><td><code>GIO_PUBLIC_DIR</code></td><td>The <code>public/</code> directory, when it is not next to <code>app/</code>.</td></tr>
           <tr><td><code>GIO_ENV_FILES</code></td><td><code>0</code> / <code>false</code> loads no <code>.env</code> files, <code>1</code> / <code>true</code> loads them whatever <code>[env] files</code> says. Any other value is a startup error.</td></tr>
           <tr><td><code>GIO_SESSION_SECRET</code></td><td>Signs sessions; required by <code>require_session</code> guards in production.</td></tr>
           <tr><td><code>GIO_REVALIDATE_TOKEN</code></td><td>The on-demand revalidation token, over <code>[revalidate] token</code> (at least 32 bytes).</td></tr>
@@ -243,10 +244,12 @@ node -e 'const r = require("./check.json"); if (r.warnings.length) { console.log
         </li>
         <li>
           <code>gio dev</code>, <code>gio start</code>, <code>gio doctor</code>,{' '}
-          <code>gio info</code> and <code>gio cache explain</code> run{' '}
-          <code>--check-config</code> to learn the listen address and validate the
-          configuration, so no JavaScript re-implements the <code>gio.toml</code> rules. They
-          ask only a binary of their own version.
+          <code>gio info</code>, <code>gio cache explain</code> and <code>gio bench</code>{' '}
+          run <code>--check-config</code> to learn the listen address and validate the
+          configuration, so no JavaScript re-implements the <code>gio.toml</code> rules. An
+          installed platform package of another version is not asked (it may predate the
+          flag); a <code>GIO_SERVER_BIN</code> or repository build always is. Without an
+          answer, they read <code>gio.toml</code> leniently and validate nothing.
         </li>
         <li>
           <code>--check-config</code> does not load <code>gio.config.ts</code>,{' '}

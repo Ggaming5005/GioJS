@@ -79,8 +79,9 @@ gio --version          # CLI, server binary and @gio.js/core versions (-v)`} />
       <p>
         Starts the server with <code>NODE_ENV=development</code> and prints the local and
         network URLs once the worker is ready. The listen address comes from{' '}
-        <code>--port</code> / <code>--host</code>, then <code>PORT</code>, the{' '}
-        <code>.env</code> files and <code>gio.toml</code>, then <code>0.0.0.0:3000</code>.
+        <code>--port</code> / <code>--host</code> (or <code>GIO_PORT</code> /{' '}
+        <code>GIO_HOST</code>), then <code>PORT</code> - from the environment or the{' '}
+        <code>.env</code> files - then <code>gio.toml</code>, then <code>0.0.0.0:3000</code>.
         See <a href="/docs/cli/dev"><code>gio dev</code></a>.
       </p>
       <h3 id="dev-mode-file-watching">Dev mode file watching</h3>

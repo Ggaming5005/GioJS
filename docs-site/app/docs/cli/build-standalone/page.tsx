@@ -57,7 +57,7 @@ node standalone/run.mjs`} />
           <tr><td><code>GIO_STANDALONE_SERVER_BIN</code></td><td>The server binary to copy, overriding <code>--target</code> and the installed package.</td></tr>
           <tr><td><code>GIO_SERVER_BIN</code></td><td>Without <code>--target</code>: the binary to copy instead of the installed platform package.</td></tr>
           <tr><td><code>GIO_PUBLIC_*</code></td><td>Inlined into the client chunks and <code>worker.js</code> at build time, from the environment and the project&apos;s <code>.env.production.local</code>, <code>.env.local</code>, <code>.env.production</code> and <code>.env</code>. Changing one needs a rebuild.</td></tr>
-          <tr><td><code>GIO_ENV_FILES</code></td><td><code>0</code> / <code>false</code> loads no <code>.env</code> files for the build, like <code>[env] files = false</code> in <code>gio.toml</code>.</td></tr>
+          <tr><td><code>GIO_ENV_FILES</code></td><td><code>0</code> / <code>false</code> loads no <code>.env</code> files for the build, like <code>[env] files = false</code> in <code>gio.toml</code>; <code>1</code> / <code>true</code> loads them even when <code>gio.toml</code> turns them off.</td></tr>
         </tbody>
       </table>
 
@@ -90,7 +90,7 @@ node standalone/run.mjs`} />
   gio.toml            a copy of gio.toml, when the project has one
   package.json        {"name":"giojs-standalone-app","private":true,"type":"module"}
   .gio/manifest.json  routes, handlers, chunk and worker hashes (feeds the deployment id)
-  .gio/routes.d.ts    the typed routes, when the project has them`} />
+  .gio/routes.d.ts    the typed routes and .gio/css-modules.d.ts, when the project has them`} />
       <p>
         <code>run.mjs</code> starts <code>server</code> with the output directory as its
         working directory, <code>NODE_ENV=production</code> unless the environment sets{' '}

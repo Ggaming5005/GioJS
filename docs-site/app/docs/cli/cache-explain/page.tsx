@@ -66,9 +66,9 @@ export default function Page(): React.JSX.Element {
           <tr><td><code>stale; age=N; revalidating</code></td><td>Served from the cache past its TTL while one background render refreshes it. <code>age</code> is the seconds since it was rendered.</td></tr>
           <tr><td><code>miss; stored</code></td><td>Rendered by the Node worker and stored; the next request is a hit.</td></tr>
           <tr><td><code>bypass</code></td><td>Rendered and not cached: the page has no <code>revalidate</code>, the request was not <code>GET</code> / <code>HEAD</code>, the render was personalized (cookies, credentials, client address), it set per-request headers, or <code>[cache] enabled = false</code>.</td></tr>
-          <tr><td><code>static</code></td><td>A file from <code>public/</code>, a hashed chunk or a font, served by Rust without the cache or Node.</td></tr>
+          <tr><td><code>static</code></td><td>A file from <code>public/</code> or a hashed chunk under <code>/_next/static/</code>, served by Rust without the cache or Node.</td></tr>
           <tr><td><code>ppr; ...</code></td><td>Partial prerendering: the shared shell came from (or went into) the cache and the Suspense holes rendered for this request.</td></tr>
-          <tr><td>(absent)</td><td>An internal <code>/_gio</code> endpoint, or a server older than <code>X-Gio-Cache</code>.</td></tr>
+          <tr><td>(absent)</td><td>An internal <code>/_gio</code> endpoint (the self-hosted fonts under <code>/_gio/fonts/</code> included), or a server older than <code>X-Gio-Cache</code>. The image optimizer, <code>/_gio/image</code>, answers <code>HIT</code> or <code>MISS</code> for its own cache instead; the command prints that value as it is.</td></tr>
         </tbody>
       </table>
 

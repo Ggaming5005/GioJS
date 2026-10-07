@@ -61,10 +61,11 @@ export default function Page(): React.JSX.Element {
         </li>
         <li>
           Asks the binary where it will listen (<a href="/docs/cli/giojs-server#check-config"><code>giojs-server --check-config</code></a>),
-          so the address comes from the same sources the server uses: <code>--port</code>{' '}
-          / <code>--host</code>, then <code>PORT</code>, then the <code>.env</code> files,
-          then <code>gio.toml</code>&apos;s <code>[server]</code> table, then{' '}
-          <code>0.0.0.0:3000</code>.
+          so the address comes from the same sources the server uses: <code>GIO_PORT</code>{' '}
+          / <code>GIO_HOST</code> (which <code>--port</code> / <code>--host</code> set), then{' '}
+          <code>PORT</code> - each from the environment or, when the environment does not set
+          it, the <code>.env</code> files - then <code>gio.toml</code>&apos;s{' '}
+          <code>[server]</code> table, then <code>0.0.0.0:3000</code>.
         </li>
         <li>
           Starts the server with <code>NODE_ENV=development</code>, whatever the shell had,

@@ -110,8 +110,9 @@ export default function Page(): React.JSX.Element {
       <p>
         <a href="/docs/cli/doctor"><code>gio doctor --prod</code></a> exits with{' '}
         <code>1</code> on a problem that would break production, such as a missing{' '}
-        <code>GIO_SESSION_SECRET</code> for <code>require_session</code> guards, which the
-        server itself only logs.
+        <code>GIO_SESSION_SECRET</code> for <code>require_session</code> guards. The server
+        does not refuse to start over that: it starts and denies every guarded request, and
+        logs an error only when the secret is set but invalid.
       </p>
 
       <h2 id="good-to-know">Good to know</h2>

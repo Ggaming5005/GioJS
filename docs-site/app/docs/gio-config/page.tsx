@@ -145,7 +145,8 @@ export const internalOnly: GioNodePlugin = {
   version: '1.0.0',
   async onRequest(req) {
     if (!req.path.startsWith('/internal/')) return req;
-    if (req.headers['x-ops-key'] === process.env.OPS_KEY) return req;
+    const key = process.env.OPS_KEY;
+    if (key && req.headers['x-ops-key'] === key) return req;
     return {
       id: req.id,
       status: 403,
@@ -158,7 +159,9 @@ export const internalOnly: GioNodePlugin = {
 };`} />
       <p>
         A response from <code>onRequest</code> must echo <code>req.id</code>; keep{' '}
-        <code>cacheable: false</code> for an answer that depends on the request. For a plain
+        <code>cacheable: false</code> for an answer that depends on the request. Check that
+        the key is set: with <code>OPS_KEY</code> unset, comparing it to a missing header would
+        compare <code>undefined</code> with <code>undefined</code> and let everyone in. For a plain
         cookie or role check, a <code>[[guards]]</code> rule in <code>gio.toml</code> runs in
         Rust before Node and needs no plugin.
       </p>

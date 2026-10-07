@@ -118,6 +118,7 @@ Route       Type                    File                            Wrapped by
 /logout     route (failed to load)  app/logout/route.ts
 ...
 
+5 routes, 1 dynamic   (:param one segment, *param catch-all, *param? optional catch-all)
 ! app/logout/route.ts failed to load - the server answers 500 for its URL (and closes WebSocket connections with 1011) until it is fixed: GIO_SESSION_SECRET is not set. Sessions need a secret of at least 32 bytes in production. ...`} />
       <p>
         The server starts anyway and answers that URL with <code>500</code>. Here the module
