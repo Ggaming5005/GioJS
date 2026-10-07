@@ -9,17 +9,25 @@ export default function ConfigurationPage(): React.JSX.Element {
       <h1>Configuration</h1>
       <p className="page-subtitle">
         All GioJS configuration lives in <code>gio.toml</code> at the project root.
-        Every field is optional - defaults are production-ready.
+        Every field is optional - defaults are production-ready - and an unknown key stops
+        the server with a hint instead of being ignored.
       </p>
 
       <h2>Full reference</h2>
-      <CodeBlock lang="toml" code={`[app]
+      <p>
+        Every key GioJS reads, with its default. Every section and key is optional, and a
+        partial table keeps the defaults for what it leaves out (<code>[server]</code> with
+        only <code>http2 = false</code> still listens on <code>0.0.0.0:3000</code>).
+      </p>
+      <CodeBlock lang="toml" code={`#:schema ./node_modules/@gio.js/server/gio.schema.json
+
+[app]                   # informational
 name = "my-app"
-router = "app"          # "app" | "pages"
+router = "app"          # the app/ router is the only one
 
 [server]
-host = "0.0.0.0"        # bind address
-port = 3000
+host = "0.0.0.0"        # IP address to bind; GIO_HOST overrides
+port = 3000             # GIO_PORT, then PORT, override
 http2 = true            # HTTP/2 support
 max_body_bytes = 2097152  # request body limit (2 MiB)
 max_connections = 10000   # concurrent connections (see Connection limits)
@@ -40,6 +48,20 @@ enabled = false         # set true to terminate TLS in GioJS directly
 cert_path = "/path/to/cert.pem"
 key_path  = "/path/to/key.pem"
 
+[cache]                 # the page cache (see Caching)
+memory_max_entries = 1000           # pages kept in memory; the disk tier holds the rest
+disk_path = ".gio/cache/pages"      # relative to the project root; GIO_CACHE_DIR overrides
+disk_max_bytes = 536870912          # disk tier cap (512 MiB), oldest evicted first; 0 = unbounded
+
+[compression]
+enabled = true          # gzip / Brotli, negotiated from Accept-Encoding
+min_size_bytes = 1024   # smaller bodies are sent as-is (max 65535)
+prefer_brotli = true    # false = gzip only
+
+[prefetch]              # per-client budgets for <GioLink> prefetches (429 past them)
+max_concurrent = 5      # in flight at once
+max_per_second = 20
+
 [[fonts]]               # self-hosted fonts, repeat per font file
 family = "Inter"
 url    = "/fonts/inter.woff2"
@@ -49,6 +71,7 @@ style  = "normal"       # default "normal"
 [images]
 allowed_widths = [16, 32, 48, 64, 96, 128, 256, 384, 640, 750, 828, 1080, 1200, 1920, 2048, 3840]
 quality = 75            # 1-100
+formats = ["avif", "webp"]    # modern formats to negotiate, in order; JPEG is the fallback
 disk_max_bytes = 536870912    # on-disk image cache cap (512 MiB)
 max_remote_bytes = 20971520   # max fetched remote source size (20 MiB)
 
@@ -58,7 +81,7 @@ hostname = "images.example.com"
 pathname = "/photos/*"  # optional; exact match, or prefix with trailing *
 
 [css]
-enabled = true          # CSS pipeline
+enabled = true          # CSS pipeline (Lightning CSS)
 minify = true
 critical_extraction = true
 
@@ -94,7 +117,7 @@ require_session = true  # signed, unexpired gio_session (GIO_SESSION_SECRET)
 redirect_to = "/login"
 # require_cookie = "session"  # alone: only checks the cookie is present
 
-[security]              # see Security; unknown keys here are a startup error
+[security]              # see Security
 csp = ""                # Content-Security-Policy; "{nonce}" = fresh nonce per response
 csp_report_only = ""    # same syntax, sent as Content-Security-Policy-Report-Only
 hsts = true             # unset: only with [server.tls]; true | false | "raw" | { max_age, include_subdomains, preload }
@@ -124,11 +147,176 @@ ip_allowlist = []       # restrict by client IP or CIDR, e.g. ["10.0.0.5", "10.1
 [logging]
 format = "text"         # "json": one JSON object per line (GIO_LOG_FORMAT overrides)
 
-[revalidate]            # see Caching; unknown keys here are a startup error
+[revalidate]            # see Caching
 token = ""              # enables POST /_gio/revalidate (>= 32 bytes); GIO_REVALIDATE_TOKEN wins
 
 [dev]                   # only read when NODE_ENV=development
-allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer to`} />
+allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer to
+watch_ignore = []       # globs the dev watcher never restarts for, e.g. ["data/**", "*.db"]
+
+[x-mytool]              # tables named x-* are left alone, for other tools
+anything = "goes"`} />
+
+      <h2>Strict by design</h2>
+      <p>
+        <code>gio.toml</code> is checked against this reference when the server starts. An
+        unknown section or key anywhere - a typo, or a setting from another framework - stops
+        the server with the file, the line, the full key path and the closest valid key,
+        instead of being silently ignored while the default you meant to change stays in
+        effect:
+      </p>
+      <CodeBlock lang="text" code={`giojs-server: configuration error: ./gio.toml:12: unknown key [image] - did you mean [images]?
+giojs-server: configuration error: ./gio.toml:14: unknown key \`images.allowed_width\` - did you mean \`images.allowed_widths\`?
+giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: invalid type: string "http", expected u16`} />
+      <ul>
+        <li>
+          Wrong values fail the same way: a malformed <code>trusted_proxies</code> entry, a{' '}
+          <code>host</code> that is not an IP address, an unknown <code>[logging] format</code>,
+          a <code>[[guards]]</code> entry that would not protect its path, a page cache
+          directory inside <code>app/</code> or <code>public/</code>.
+        </li>
+        <li>
+          Top-level tables named <code>x-...</code> (<code>[x-deploy]</code>) are never read,
+          so other tools can keep their settings in the same file. Anywhere else an{' '}
+          <code>x-</code> key is unknown like any other.
+        </li>
+        <li>
+          Keys earlier versions documented but never acted on are rejected with what to do
+          instead: <code>[cache] memory_mb</code> (use <code>memory_max_entries</code>),{' '}
+          <code>[cache.redis]</code> (there is no Redis backend yet - each instance keeps its
+          own cache), <code>[css] engine</code> (Lightning CSS is the only engine) and{' '}
+          <code>[prefetch] strategy</code> (chosen per link with{' '}
+          <code>{'<GioLink prefetch="hover" | "viewport" | {false}>'}</code>).
+        </li>
+      </ul>
+
+      <h2>Editor autocomplete</h2>
+      <p>
+        <code>@gio.js/server</code> ships a JSON Schema for <code>gio.toml</code>, generated
+        from the server&apos;s own config types, so it always matches what the server accepts.
+        New apps start with the line that points editors at it; add it to the top of an
+        existing <code>gio.toml</code>:
+      </p>
+      <CodeBlock lang="toml" code={`#:schema ./node_modules/@gio.js/server/gio.schema.json`} />
+      <ul>
+        <li>
+          <strong>VS Code:</strong> install <em>Even Better TOML</em> (
+          <code>tamasfe.even-better-toml</code>). Keys and values complete, unknown keys are
+          underlined and hovering a key shows its documentation.
+        </li>
+        <li>
+          <strong>Other editors:</strong> any editor using the Taplo language server (Zed,
+          Neovim, Helix) reads the same <code>#:schema</code> directive. JetBrains IDEs can map{' '}
+          <code>gio.toml</code> to the schema file under{' '}
+          <em>Languages &amp; Frameworks › Schemas and DTDs › JSON Schema Mappings</em>.
+        </li>
+      </ul>
+
+      <h2 id="listen-address">Listen address</h2>
+      <p>
+        The server listens on <code>[server] host</code> and <code>port</code>, which default
+        to <code>0.0.0.0</code> and <code>3000</code>. The environment wins over the file, so
+        one <code>gio.toml</code> serves every environment:
+      </p>
+      <table>
+        <thead>
+          <tr><th>Setting</th><th>Precedence (first set wins)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Port</td><td><code>GIO_PORT</code>, then <code>PORT</code>, then <code>[server] port</code>, then <code>3000</code></td></tr>
+          <tr><td>Host</td><td><code>GIO_HOST</code>, then <code>[server] host</code>, then <code>0.0.0.0</code></td></tr>
+        </tbody>
+      </table>
+      <p>
+        The host is an IP address: <code>0.0.0.0</code> (every interface),{' '}
+        <code>127.0.0.1</code> (this machine only), or IPv6 in brackets (<code>[::]</code>,{' '}
+        <code>[::1]</code>).
+      </p>
+      <p>
+        <code>PORT</code> is the variable Heroku, Render, Railway, Fly.io and Cloud Run set,
+        so GioJS binds where the platform expects with no configuration. A plain{' '}
+        <code>HOST</code> variable is not read: shells and CI images often set it to the
+        machine&apos;s hostname. Empty values are ignored, and a malformed one (a port that
+        is not a number, a host that is not an IP address) stops startup. The startup log
+        names the address and where the port came from (
+        <code>GioJS listening on 0.0.0.0:8080 port_from=&quot;PORT&quot;</code>).
+      </p>
+
+      <h2>Page cache, compression &amp; prefetch</h2>
+      <table>
+        <thead>
+          <tr><th>Key</th><th>Default</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>[cache] memory_max_entries</code></td><td>1000</td><td>Pages kept in the in-memory LRU. Pages pushed out of memory are still served from the disk tier.</td></tr>
+          <tr><td><code>[cache] disk_path</code></td><td><code>.gio/cache/pages</code></td><td>The disk tier&apos;s directory, relative to the project root: a directory below the root (not <code>.</code>, not outside the project). Eviction and development-mode clears only ever delete the cache&apos;s own entry files (<code>&lt;sha256&gt;.json</code>), so other files in the directory are safe, but a dedicated directory keeps things clear. It must not be, contain or sit inside <code>app/</code> or <code>public/</code> (where entries would be served as static files); startup stops if it does. <code>GIO_CACHE_DIR</code> overrides it, may be absolute, and is held to the same rule.</td></tr>
+          <tr><td><code>[cache] disk_max_bytes</code></td><td>536870912 (512 MiB)</td><td>Size cap of the disk tier; the oldest entries are evicted past it. <code>0</code> disables the cap.</td></tr>
+          <tr><td><code>[compression] enabled</code></td><td>true</td><td>Compress responses with Brotli or gzip, whichever the client accepts. Images, server-sent events and responses that already carry a <code>Content-Encoding</code> are never compressed. Turn it off when a proxy or CDN in front compresses instead.</td></tr>
+          <tr><td><code>[compression] min_size_bytes</code></td><td>1024</td><td>Responses with a known length below this are sent as-is. Streamed responses have no known length and are always compressed. At most 65535.</td></tr>
+          <tr><td><code>[compression] prefer_brotli</code></td><td>true</td><td><code>true</code>: Brotli for clients that accept it, gzip otherwise. <code>false</code>: gzip only.</td></tr>
+          <tr><td><code>[prefetch] max_concurrent</code></td><td>5</td><td>Prefetch requests (<code>Purpose: prefetch</code>, sent by <code>{'<GioLink>'}</code>) one client may have in flight. Past it the server answers <code>429</code>, which the client treats as &quot;not prefetched&quot;. <code>0</code> refuses every prefetch.</td></tr>
+          <tr><td><code>[prefetch] max_per_second</code></td><td>20</td><td>Prefetch requests one client may start per second.</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Dev watcher</h2>
+      <p>
+        In development the server restarts the Node worker when source changes anywhere in
+        the project. Outside <code>app/</code> only source-like files count (
+        <code>.ts</code>, <code>.tsx</code>, <code>.js</code>, <code>.json</code>,{' '}
+        <code>.css</code>, <code>.toml</code>, ...), so SQLite databases, logs and uploads
+        your app writes never restart it - but a JSON data file (a lowdb{' '}
+        <code>db.json</code>) would, after every write. List such files in{' '}
+        <code>[dev] watch_ignore</code>:
+      </p>
+      <CodeBlock lang="toml" code={`[dev]
+watch_ignore = ["data/**", "*.db.json", "public/uploads"]`} />
+      <ul>
+        <li>
+          Patterns are relative to the project root. <code>*</code> matches within one path
+          segment, <code>?</code> one character, and <code>**</code> any number of segments;
+          every other character is literal (<code>app/[slug]/cache.json</code> names that
+          route folder).
+        </li>
+        <li>
+          A pattern without a <code>/</code> matches a file or directory name at any depth (
+          <code>*.db.json</code>, <code>uploads</code>); one with a <code>/</code> is anchored
+          at the root. Matching a directory covers everything in it, and{' '}
+          <code>data/**</code> covers <code>data/</code> itself: a top-level directory it
+          matches is not watched at all.
+        </li>
+        <li>
+          The default is empty. <code>node_modules</code>, hidden directories (
+          <code>.git</code>, <code>.gio</code>) and build output (<code>dist</code>,{' '}
+          <code>build</code>, <code>out</code>, ...) are always ignored. A malformed pattern
+          (<code>..</code>, a backslash) stops startup.
+        </li>
+        <li>
+          The page cache&apos;s own entry files are never a change, wherever{' '}
+          <code>[cache] disk_path</code> puts them, so a visible cache directory needs no
+          pattern. Other files in that directory still count.
+        </li>
+      </ul>
+
+      <h2>gio.config.ts</h2>
+      <p>
+        What only JavaScript can express lives in an optional <code>gio.config.ts</code> next
+        to <code>gio.toml</code>. Today that is Node plugins (<code>GioNodePlugin</code>:{' '}
+        <code>onRequest</code> / <code>onResponse</code> hooks around every request the worker
+        handles). <code>defineConfig</code> types it:
+      </p>
+      <CodeBlock lang="ts" code={`// gio.config.ts
+import { defineConfig } from '@gio.js/core';
+import { auditPlugin } from './lib/audit-plugin';
+
+export default defineConfig({
+  plugins: [auditPlugin],
+});`} />
+      <p>
+        It is checked at boot like <code>gio.toml</code>: an unknown key (<code>plugin:</code>)
+        or a plugin without a <code>name</code> stops the worker with an error naming the
+        file.
+      </p>
 
       <h2>Connection limits</h2>
       <p>
@@ -497,7 +685,9 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
         </thead>
         <tbody>
           <tr><td><code>GIO_APP_DIR</code></td><td>Path to the <code>app/</code> directory; <code>gio.toml</code> is loaded from its parent</td><td>app</td></tr>
-          <tr><td><code>GIO_HOST</code> / <code>GIO_PORT</code></td><td>Override <code>[server] host</code> / <code>port</code> without editing <code>gio.toml</code> (a second instance, a platform-assigned port). The host must be an IP address; a malformed value stops startup</td><td><code>[server]</code> values</td></tr>
+          <tr><td><code>GIO_HOST</code> / <code>GIO_PORT</code></td><td>Override <code>[server] host</code> / <code>port</code> without editing <code>gio.toml</code> (a second instance, a test server). The host must be an IP address; a malformed value stops startup (see <a href="#listen-address">Listen address</a>)</td><td><code>[server]</code> values</td></tr>
+          <tr><td><code>PORT</code></td><td>The port hosting platforms assign (Heroku, Render, Railway, Fly.io, Cloud Run): overrides <code>[server] port</code>; <code>GIO_PORT</code> wins over it</td><td>unset</td></tr>
+          <tr><td><code>GIO_CACHE_DIR</code></td><td>Page cache directory, overriding <code>[cache] disk_path</code>; may be absolute</td><td><code>.gio/cache/pages</code></td></tr>
           <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the build content and the gio.toml <code>[images]</code> settings). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
           <tr><td><code>GIO_SOCKET_PATH</code></td><td>Rust-to-Node IPC path; the server passes the resolved value to the Node worker (in a <a href="#render-workers">worker pool</a>, the other workers get it with a <code>-w&lt;N&gt;</code> suffix)</td><td>per-instance <code>.gio/ipc-&lt;pid&gt;-&lt;rand&gt;.sock</code> (Unix), unique named pipe (Windows)</td></tr>
           <tr><td><code>GIO_PUBLIC_DIR</code></td><td>Directory served at the site root and under <code>/public/*</code></td><td><code>public/</code> next to <code>app/</code></td></tr>

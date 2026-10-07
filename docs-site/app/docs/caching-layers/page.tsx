@@ -10,10 +10,17 @@ export default function Page(): React.JSX.Element {
       <h1>Caching Layers</h1>
       <p className="page-subtitle">In-process LRU over a persistent disk tier, per instance.</p>
       <p>
-        The page cache is layered: a bounded in-memory LRU (L1, 1000 entries) over an on-disk
-        tier (L2) that persists entries across restarts. Lookups check memory first, then disk;
-        all writes go to memory immediately and to disk in a background task. The disk tier is
-        bounded, with the oldest files evicted past the limit.
+        The page cache is layered: a bounded in-memory LRU (L1, 1000 entries by default) over
+        an on-disk tier (L2) that persists entries across restarts. Lookups check memory first,
+        then disk; all writes go to memory immediately and to disk in a background task. The
+        disk tier is bounded (512 MiB by default), with the oldest files evicted past the
+        limit. Both bounds and the disk directory are set in <code>gio.toml</code>:
+      </p>
+      <CodeBlock lang="toml" code={`[cache]
+memory_max_entries = 1000           # L1 size
+disk_path = ".gio/cache/pages"      # L2 directory; GIO_CACHE_DIR overrides
+disk_max_bytes = 536870912          # L2 cap; 0 = unbounded`} />
+      <p>
       </p>
       <p>
         On-demand purges (<a href="/docs/caching">revalidateTag, revalidatePath and{' '}

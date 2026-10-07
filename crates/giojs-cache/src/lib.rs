@@ -19,6 +19,7 @@ mod singleflight;
 mod tags;
 
 pub use backend::{CacheBackend, LocalBackend};
+pub use disk::is_disk_cache_file;
 pub use key::build_cache_key;
 pub use singleflight::SingleFlight;
 pub use tags::{path_tag, FillTicket, PathMatch, PATH_TAG_PREFIX};
@@ -612,14 +613,17 @@ mod tests {
     #[tokio::test]
     async fn startup_index_finds_entries_left_by_a_previous_run() {
         let dir = TempDir::new("inv-restart");
+        // The scan only reads files named by cache-key digests.
+        let [a, b, dead_key] =
+            ["/a", "/b", "/dead"].map(|path| PageCache::build_key("GET", path, ""));
         {
             let previous = dir.cache(100);
-            previous.put("a", tagged(&["posts"])).await.unwrap();
-            previous.put("b", tagged(&["users"])).await.unwrap();
+            previous.put(&a, tagged(&["posts"])).await.unwrap();
+            previous.put(&b, tagged(&["users"])).await.unwrap();
             let mut dead = tagged(&["posts"]);
             dead.deployment_id = "deploy-0".into();
-            previous.put("dead", dead).await.unwrap();
-            for key in ["a", "b", "dead"] {
+            previous.put(&dead_key, dead).await.unwrap();
+            for key in [&a, &b, &dead_key] {
                 dir.wait_for_file(key).await;
             }
         }
@@ -627,13 +631,13 @@ mod tests {
         let cache = dir.cache(100);
         cache.index_disk("deploy-1").await;
         assert!(
-            !dir.has_file("dead"),
+            !dir.has_file(&dead_key),
             "another deployment's file is deleted"
         );
         assert_eq!(cache.invalidate_tags(&["posts"]).await, 1);
-        assert!(!dir.has_file("a"));
-        assert!(cache.get("a", "deploy-1").await.is_none());
-        assert!(cache.get("b", "deploy-1").await.is_some());
+        assert!(!dir.has_file(&a));
+        assert!(cache.get(&a, "deploy-1").await.is_none());
+        assert!(cache.get(&b, "deploy-1").await.is_some());
     }
 
     #[tokio::test]

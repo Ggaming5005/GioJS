@@ -105,6 +105,8 @@ pub struct ImageHandler {
     /// None only if TLS backend init fails; remote fetches then error per-request.
     http_client: Option<reqwest::Client>,
     max_remote_bytes: u64,
+    /// Modern formats negotiated from Accept, in preference order.
+    formats: Vec<OutputFormat>,
 }
 
 impl ImageHandler {
@@ -129,7 +131,19 @@ impl ImageHandler {
             public_dir,
             http_client,
             max_remote_bytes: DEFAULT_MAX_REMOTE_BYTES,
+            formats: OutputFormat::MODERN.to_vec(),
         }
+    }
+
+    /// Restrict and order the modern formats (gio.toml `[images] formats`).
+    /// AVIF and WebP only: JPEG/PNG are always available. Builder-style, for
+    /// startup wiring.
+    pub fn with_formats(mut self, formats: Vec<OutputFormat>) -> Self {
+        self.formats = formats
+            .into_iter()
+            .filter(|format| OutputFormat::MODERN.contains(format))
+            .collect();
+        self
     }
 
     /// Override the remote download size cap (bytes). Builder-style, for startup wiring.
@@ -162,9 +176,17 @@ impl ImageHandler {
             }
             other => other,
         };
-        let forced_format = query.f.as_deref().and_then(OutputFormat::parse);
-        let format =
-            forced_format.unwrap_or_else(|| OutputFormat::from_accept(accept.unwrap_or("")));
+        // `f=` cannot pick a format the config left out (AVIF is left out
+        // to save encode CPU); it falls back to negotiation instead.
+        let forced_format = query
+            .f
+            .as_deref()
+            .and_then(OutputFormat::parse)
+            .filter(|format| {
+                !OutputFormat::MODERN.contains(format) || self.formats.contains(format)
+            });
+        let format = forced_format
+            .unwrap_or_else(|| OutputFormat::negotiate(accept.unwrap_or(""), &self.formats));
 
         let key = ImageCache::cache_key(src, width, quality, format.extension());
         if let Some(cached) = self.cache.get(&key, format.extension()).await {
@@ -516,6 +538,48 @@ mod tests {
             Err(ImageError::NotFound | ImageError::PathTraversal)
         ));
         let _ = std::fs::remove_dir_all(&public);
+    }
+
+    #[tokio::test]
+    async fn configured_formats_bound_negotiation_and_the_f_parameter() {
+        let base = std::env::temp_dir().join(format!("gio_image_formats_{}", std::process::id()));
+        let public = base.join("public");
+        std::fs::create_dir_all(&public).unwrap();
+        std::fs::create_dir_all(base.join("cache")).unwrap();
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgb8(4, 4)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(public.join("dot.png"), png).unwrap();
+        let handler = ImageHandler::new(ImageConfig::default(), base.join("cache"), public)
+            .with_formats(vec![OutputFormat::WebP]);
+        let query = |f: Option<&str>| ImageQuery {
+            src: Some("/dot.png".into()),
+            w: None,
+            q: None,
+            f: f.map(str::to_string),
+        };
+        let accept = Some("image/avif,image/webp,*/*");
+        let (_, format, _) = handler.handle(query(None), accept).await.unwrap();
+        assert_eq!(format, OutputFormat::WebP, "AVIF is not configured");
+        let (_, format, _) = handler.handle(query(Some("avif")), accept).await.unwrap();
+        assert_eq!(
+            format,
+            OutputFormat::WebP,
+            "f= cannot force a left-out format"
+        );
+        let (_, format, _) = handler.handle(query(Some("png")), accept).await.unwrap();
+        assert_eq!(format, OutputFormat::Png, "JPEG/PNG stay available");
+
+        let jpeg_only = ImageHandler::new(
+            ImageConfig::default(),
+            base.join("cache"),
+            base.join("public"),
+        )
+        .with_formats(Vec::new());
+        let (_, format, _) = jpeg_only.handle(query(None), accept).await.unwrap();
+        assert_eq!(format, OutputFormat::Jpeg);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

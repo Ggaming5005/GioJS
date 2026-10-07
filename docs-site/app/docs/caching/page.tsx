@@ -152,7 +152,8 @@ export GIO_REVALIDATE_TOKEN=<token>     # or [revalidate] token = "..." in gio.t
         With several instances behind a load balancer, call the endpoint on every instance
         (by its own address, not through the balancer); <code>revalidateTag()</code> and{' '}
         <code>revalidatePath()</code> only purge the instance whose worker runs them.
-        Instances that share a disk cache directory (<code>GIO_CACHE_DIR</code>) serve the
+        Instances that share a disk cache directory (<code>[cache] disk_path</code> or{' '}
+        <code>GIO_CACHE_DIR</code>) serve the
         pages each other stored, but each keeps its own memory cache - purge every one of
         them all the same.
       </div>

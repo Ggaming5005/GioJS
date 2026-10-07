@@ -5,10 +5,26 @@
 //! read or parsed is a startup-time failure: print the error and exit(1).
 //! So is a `[[guards]]` entry that would not protect its path - other rules
 //! are skipped with a warning, but a skipped guard leaves its path open.
-//! `GIO_HOST` / `GIO_PORT` override `[server] host` / `port` after parsing.
+//!
+//! Strict: an unknown key anywhere is a startup error naming the key path,
+//! the line and the closest valid key (see config_diagnostics.rs), because a
+//! misspelled setting that is silently ignored leaves a default in place the
+//! author thinks they changed. Every struct below denies unknown fields; the
+//! top level is checked against `SECTIONS` instead, so `[x-...]` tables stay
+//! free for other tools. Keys earlier releases documented that never did
+//! anything are rejected with what to do instead (`RETIRED_KEYS`).
+//!
+//! The listen address resolves env > gio.toml > default: `GIO_HOST` /
+//! `GIO_PORT`, then `PORT` (set by Heroku, Render, Railway, Fly.io, Cloud
+//! Run) for the port, then `[server] host` / `port`, then 0.0.0.0:3000.
+//!
+//! packages/giojs/gio.schema.json is rendered from these types (the
+//! cfg(test) JsonSchema derives) and a test fails when it is out of date.
 
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::config_diagnostics;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -21,6 +37,19 @@ pub enum ConfigError {
     Parse {
         path: String,
         source: toml::de::Error,
+    },
+    /// `location` is `path:line`; `hint` starts with " - " when present.
+    #[error("{location}: unknown key {key}{hint}")]
+    UnknownKey {
+        location: String,
+        key: String,
+        hint: String,
+    },
+    #[error("{location}: invalid {key}: {message}")]
+    InvalidValue {
+        location: String,
+        key: String,
+        message: String,
     },
     #[error("invalid [[guards]] entry for \"{guard}\" in {path}: {source}")]
     InvalidGuard {
@@ -36,12 +65,20 @@ pub enum ConfigError {
     },
 }
 
+/// `[metrics]`: the Prometheus endpoint `/_gio/metrics`. Off when the
+/// section is absent; a present section turns it on unless `enabled = false`.
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct MetricsConfig {
+    /// Serve `/_gio/metrics`.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Require `Authorization: Bearer <token>` when set.
     #[serde(default)]
     pub token: String,
+    /// Only these client IPs or CIDR blocks may scrape (after
+    /// `trusted_proxies` resolution).
     #[serde(default)]
     pub ip_allowlist: Vec<String>,
 }
@@ -52,6 +89,14 @@ pub struct MetricsConfig {
 /// must not silently leave the endpoint off.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[cfg_attr(
+    test,
+    schemars(
+        description = "`[revalidate]`: POST /_gio/revalidate purges cached pages by tag \
+        or path. The endpoint exists only with a token (here or GIO_REVALIDATE_TOKEN, which wins)."
+    )
+)]
 pub struct RevalidateConfig {
     /// Bearer token for `POST /_gio/revalidate`, at least 32 bytes.
     #[serde(default)]
@@ -60,6 +105,8 @@ pub struct RevalidateConfig {
 
 /// `[dev]`: settings that only apply when NODE_ENV=development.
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct DevConfig {
     /// Extra Host names the /_gio/devtools* endpoints answer to besides
     /// localhost, loopback IPs, and a specific `server.host` (DNS rebinding
@@ -67,6 +114,13 @@ pub struct DevConfig {
     /// are not a hostname or IP are ignored with a startup warning.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+    /// Glob patterns (relative to the project root) the dev watcher never
+    /// restarts for: data files the app writes, such as `["data/**",
+    /// "*.db"]`. `*` stays within a path segment, `**` spans segments; a
+    /// pattern without `/` matches a name at any depth.
+    #[serde(default)]
+    #[cfg_attr(test, schemars(with = "Vec<String>"))]
+    pub watch_ignore: crate::dev_watch::WatchIgnore,
 }
 
 /// `[security]`: default response headers, Content-Security-Policy and
@@ -75,6 +129,14 @@ pub struct DevConfig {
 /// silently leave a protection off.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[cfg_attr(
+    test,
+    schemars(
+        description = "`[security]`: default response headers, Content-Security-Policy \
+        and cross-site request protection. Every key is optional."
+    )
+)]
 pub struct SecurityConfig {
     /// `[security.headers]`: overrides for the default response headers
     /// (`x-content-type-options`, `x-frame-options`, `referrer-policy`) and
@@ -102,16 +164,56 @@ pub struct SecurityConfig {
 }
 
 /// `hsts = true | false | "raw value" | { max_age, include_subdomains, preload }`.
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(untagged))]
 pub enum HstsSetting {
     Enabled(bool),
     Raw(String),
     Policy(HstsPolicy),
 }
 
+/// Picked by the value's type instead of `#[serde(untagged)]`, which tries
+/// each variant and reports only "did not match any variant": a table goes
+/// straight to `HstsPolicy`, so a typo inside it (`preloadd`) gets serde's
+/// unknown-field error - key path, line and closest key included.
+impl<'de> Deserialize<'de> for HstsSetting {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct HstsVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for HstsVisitor {
+            type Value = HstsSetting;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "true, false, a header value, or a table of max_age, \
+                     include_subdomains and preload",
+                )
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(HstsSetting::Enabled(value))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(HstsSetting::Raw(value.to_string()))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                HstsPolicy::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(HstsSetting::Policy)
+            }
+        }
+
+        deserializer.deserialize_any(HstsVisitor)
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct HstsPolicy {
     #[serde(default = "default_hsts_max_age")]
     pub max_age: u64,
@@ -129,6 +231,7 @@ pub fn default_hsts_max_age() -> u64 {
 /// WebSocket upgrades. On by default.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub struct CsrfConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -158,6 +261,7 @@ impl Default for CsrfConfig {
 /// skips the same `exempt` paths.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub struct WebSocketSecurityConfig {
     #[serde(default = "default_true")]
     pub check_origin: bool,
@@ -169,14 +273,27 @@ impl Default for WebSocketSecurityConfig {
     }
 }
 
-// app is parsed from gio.toml but consumed by the Node layer, not by Rust server code.
+/// The whole gio.toml. Not `deny_unknown_fields`: top-level keys are checked
+/// against `SECTIONS` before deserializing, so `[x-...]` tables can carry
+/// settings for other tools.
+// `app` is informational: parsed (so its keys are checked) but never read.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Default)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[cfg_attr(
+    test,
+    schemars(
+        title = "gio.toml",
+        description = "GioJS configuration (https://giojs.com/docs/configuration). Unknown keys stop the server at startup; top-level tables named x-* are left for other tools.",
+        extend("additionalProperties" = false, "patternProperties" = { "^x-": {} })
+    )
+)]
 pub struct GioConfig {
     #[serde(default)]
     pub app: AppConfig,
     #[serde(default)]
     pub server: ServerConfig,
+    /// Self-hosted fonts, downloaded at startup and served from /_gio/fonts.
     #[serde(default, rename = "fonts")]
     pub fonts: Vec<FontEntry>,
     #[serde(default)]
@@ -185,6 +302,7 @@ pub struct GioConfig {
     pub css: CssConfig,
     #[serde(default)]
     pub websocket: WebsocketConfig,
+    /// Token-bucket rate limits per client, evaluated before routing.
     #[serde(default, rename = "rate_limits")]
     pub rate_limits: Vec<RateLimitEntry>,
     #[serde(default)]
@@ -192,11 +310,22 @@ pub struct GioConfig {
     #[serde(default)]
     pub metrics: MetricsConfig,
     #[serde(default)]
+    pub cache: CacheConfig,
+    #[serde(default)]
+    pub compression: CompressionConfig,
+    #[serde(default)]
+    pub prefetch: PrefetchConfig,
+    /// Redirects evaluated in Rust before routing.
+    #[serde(default)]
     pub redirects: Vec<crate::rules::RedirectRule>,
+    /// Rewrites: serve another route without changing the URL.
     #[serde(default)]
     pub rewrites: Vec<crate::rules::RewriteRule>,
+    /// Response headers stamped on matching paths.
     #[serde(default)]
     pub headers: Vec<crate::rules::HeaderRule>,
+    /// Cookie / session gates: a request without the credential is
+    /// redirected and never reaches Node.
     #[serde(default)]
     pub guards: Vec<crate::rules::GuardRule>,
     #[serde(default)]
@@ -207,12 +336,71 @@ pub struct GioConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub revalidate: RevalidateConfig,
+    /// Where the listen port came from (`GIO_PORT`, `PORT`, `gio.toml` or
+    /// `default`), for the startup log.
+    #[serde(skip)]
+    pub port_source: &'static str,
 }
+
+/// Every top-level key `GioConfig` takes, and whether it is an array of
+/// tables (`[[fonts]]`). Unknown top-level keys are checked against this
+/// list; a test keeps it equal to the struct's fields.
+pub const SECTIONS: &[(&str, bool)] = &[
+    ("app", false),
+    ("server", false),
+    ("fonts", true),
+    ("images", false),
+    ("css", false),
+    ("websocket", false),
+    ("rate_limits", true),
+    ("i18n", false),
+    ("metrics", false),
+    ("cache", false),
+    ("compression", false),
+    ("prefetch", false),
+    ("redirects", true),
+    ("rewrites", true),
+    ("headers", true),
+    ("guards", true),
+    ("dev", false),
+    ("security", false),
+    ("logging", false),
+    ("revalidate", false),
+];
+
+/// Keys that earlier releases documented or the example gio.toml carried,
+/// but that never did anything. Rejected like any unknown key, with what to
+/// do instead of a spelling suggestion.
+pub const RETIRED_KEYS: &[(&str, &str)] = &[
+    (
+        "cache.memory_mb",
+        "the memory cache is bounded by entry count: use memory_max_entries (default 1000)",
+    ),
+    (
+        "cache.redis",
+        "[cache.redis] is not available yet: GioJS has no Redis cache backend, so each \
+         instance keeps its own memory and disk cache. Remove the table",
+    ),
+    (
+        "css.engine",
+        "Lightning CSS is the only CSS engine. Remove the key",
+    ),
+    (
+        "prefetch.strategy",
+        "the prefetch strategy is chosen per link: <GioLink prefetch=\"hover\" | \"viewport\" \
+         | false> (default \"hover\"). Remove the key",
+    ),
+];
 
 /// `[logging]`: server log output (see logging.rs). `GIO_LOG_FORMAT`
 /// overrides `format`. An unknown key or format value is a startup error.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[cfg_attr(
+    test,
+    schemars(description = "`[logging]`: server log output. GIO_LOG_FORMAT overrides `format`.")
+)]
 pub struct LoggingConfig {
     #[serde(default)]
     pub format: LogFormat,
@@ -221,6 +409,7 @@ pub struct LoggingConfig {
 /// `"text"` (human-readable, the default) or `"json"` (one object per line).
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub enum LogFormat {
     #[default]
     Text,
@@ -240,12 +429,17 @@ impl GioConfig {
     }
 }
 
+/// `[i18n]`: locale detection and `<html lang>`. An empty `locales` list
+/// disables i18n.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub struct I18nConfig {
     #[serde(default)]
     pub locales: Vec<String>,
     #[serde(default = "default_locale")]
     pub default_locale: String,
+    /// Detection order: any of "path", "accept-language", "cookie".
     #[serde(default = "default_detect_from")]
     pub detect_from: Vec<String>,
 }
@@ -271,8 +465,13 @@ impl Default for I18nConfig {
     }
 }
 
+/// One `[[rate_limits]]` rule: `per_ip` requests per `window_seconds`, plus
+/// `burst`, per client.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct RateLimitEntry {
+    /// Exact path, or a prefix with a trailing `*` (`/api/*` covers `/api`).
     pub path: String,
     #[serde(default = "default_per_ip")]
     pub per_ip: u64,
@@ -280,6 +479,7 @@ pub struct RateLimitEntry {
     pub window_seconds: u64,
     #[serde(default = "default_burst")]
     pub burst: u64,
+    /// Key buckets on this request header's value instead of the client IP.
     pub key_header: Option<String>,
 }
 
@@ -293,10 +493,14 @@ fn default_burst() -> u64 {
     20
 }
 
+/// `[websocket]`: WebSocket routes (`route.ts` exporting `WS`).
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub struct WebsocketConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Concurrent WebSocket connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
     #[serde(default = "default_ping_interval")]
@@ -320,12 +524,16 @@ impl Default for WebsocketConfig {
     }
 }
 
+/// `[css]`: the Lightning CSS pipeline for app stylesheets.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub struct CssConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub minify: bool,
+    /// Inline the CSS a page's first paint needs.
     #[serde(default = "default_true")]
     pub critical_extraction: bool,
 }
@@ -344,11 +552,212 @@ impl Default for CssConfig {
     }
 }
 
+/// `[compression]`: gzip / Brotli for responses, negotiated from
+/// Accept-Encoding. Images are never recompressed.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
+pub struct CompressionConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Responses with a known length below this many bytes are sent as-is
+    /// (compressing them costs more than it saves). Streamed responses have
+    /// no known length and are always compressed. At most 65535.
+    #[serde(default = "default_compression_min_size_bytes")]
+    pub min_size_bytes: u16,
+    /// true: Brotli for clients that accept it, gzip otherwise. false: gzip
+    /// only (every client that accepts Brotli also accepts gzip).
+    #[serde(default = "default_true")]
+    pub prefer_brotli: bool,
+}
+
+fn default_compression_min_size_bytes() -> u16 {
+    1024
+}
+
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_size_bytes: default_compression_min_size_bytes(),
+            prefer_brotli: true,
+        }
+    }
+}
+
+/// `[prefetch]`: per-client budgets for prefetch requests (`Purpose:
+/// prefetch`, sent by `<GioLink>`). Over budget is a 429, which the client
+/// treats as "not prefetched". Which links prefetch is chosen per link.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
+pub struct PrefetchConfig {
+    /// Prefetches one client may have in flight at once. 0 refuses all.
+    #[serde(default = "default_prefetch_max_concurrent")]
+    pub max_concurrent: usize,
+    /// Prefetches one client may start per second. 0 refuses all.
+    #[serde(default = "default_prefetch_max_per_second")]
+    pub max_per_second: usize,
+}
+
+fn default_prefetch_max_concurrent() -> usize {
+    5
+}
+fn default_prefetch_max_per_second() -> usize {
+    20
+}
+
+impl Default for PrefetchConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: default_prefetch_max_concurrent(),
+            max_per_second: default_prefetch_max_per_second(),
+        }
+    }
+}
+
+impl PrefetchConfig {
+    pub fn budgets(&self) -> giojs_prefetch::PrefetchConfig {
+        giojs_prefetch::PrefetchConfig {
+            max_in_flight: self.max_concurrent,
+            max_per_second: self.max_per_second,
+        }
+    }
+}
+
+/// `[cache]`: the page cache (memory LRU in front of a disk directory).
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
+pub struct CacheConfig {
+    /// Pages kept in the in-memory LRU; the disk cache holds the rest.
+    #[serde(default = "default_memory_max_entries")]
+    pub memory_max_entries: std::num::NonZeroUsize,
+    /// Page cache directory, relative to the project root. GioJS only ever
+    /// deletes its own entry files there (`<sha256>.json`), but a dedicated
+    /// directory is clearer; it must not be, contain, or sit inside app/ or
+    /// public/. GIO_CACHE_DIR overrides it (and may be absolute).
+    #[serde(
+        default = "default_cache_disk_path",
+        deserialize_with = "cache_disk_path"
+    )]
+    pub disk_path: String,
+    /// Disk cache size bound; the oldest entries are evicted past it. 0
+    /// disables the bound.
+    #[serde(default = "default_cache_disk_max_bytes")]
+    pub disk_max_bytes: u64,
+}
+
+fn default_memory_max_entries() -> std::num::NonZeroUsize {
+    std::num::NonZeroUsize::new(1000).expect("non-zero")
+}
+fn default_cache_disk_path() -> String {
+    ".gio/cache/pages".to_string()
+}
+fn default_cache_disk_max_bytes() -> u64 {
+    512 * 1024 * 1024
+}
+
+/// `disk_path` must name a directory below the project root. Clearing and
+/// eviction only delete the cache's own entry files
+/// (`giojs_cache::is_disk_cache_file`), so other files in the directory are
+/// safe either way; but `.` would scatter entries across the project root,
+/// and a directory outside the project is what GIO_CACHE_DIR is for.
+/// Overlap with app/ and public/ is refused at startup
+/// (`check_cache_dir_placement`), once GIO_APP_DIR and GIO_PUBLIC_DIR have
+/// placed them.
+fn cache_disk_path<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    let path = std::path::Path::new(&raw);
+    let mut normal = 0;
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) => normal += 1,
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "expected a directory inside the project, relative to its root \
+                     (\".gio/cache/pages\"); use GIO_CACHE_DIR for a path outside it",
+                ))
+            }
+        }
+    }
+    if normal == 0 {
+        return Err(serde::de::Error::custom(
+            "expected a directory below the project root (\".gio/cache/pages\"), \
+             not the root itself",
+        ));
+    }
+    Ok(raw)
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            memory_max_entries: default_memory_max_entries(),
+            disk_path: default_cache_disk_path(),
+            disk_max_bytes: default_cache_disk_max_bytes(),
+        }
+    }
+}
+
+impl CacheConfig {
+    /// The page cache directory: `GIO_CACHE_DIR` when set and non-empty,
+    /// else `disk_path` under the project root.
+    pub fn disk_dir(
+        &self,
+        project_root: &std::path::Path,
+        env_override: Option<&str>,
+    ) -> std::path::PathBuf {
+        match env_override.filter(|dir| !dir.is_empty()) {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => project_root.join(&self.disk_path),
+        }
+    }
+}
+
+/// The page cache directory must keep clear of app/ (the route tree: in dev
+/// every change there restarts the worker) and public/ (served as static
+/// files, so entries would become public URLs): it may not be either one,
+/// sit inside one, or contain one. Checked at startup, before the directory
+/// is created, because GIO_APP_DIR and GIO_PUBLIC_DIR decide where those
+/// are. Paths are compared resolved (symlinks, `..`), the missing tail of a
+/// directory that does not exist yet by name.
+pub fn check_cache_dir_placement(
+    cache_dir: &std::path::Path,
+    app_dir: &std::path::Path,
+    public_dir: &std::path::Path,
+) -> Result<(), String> {
+    let cache = crate::dev_watch::resolve_dir(cache_dir);
+    for (name, dir) in [("app/", app_dir), ("public/", public_dir)] {
+        let dir = crate::dev_watch::resolve_dir(dir);
+        let relation = if cache == dir {
+            "is"
+        } else if cache.starts_with(&dir) {
+            "is inside"
+        } else if dir.starts_with(&cache) {
+            "contains"
+        } else {
+            continue;
+        };
+        return Err(format!(
+            "the page cache directory {} {relation} the {name} directory ({}) - give the \
+             cache a directory of its own, such as .gio/cache/pages",
+            cache_dir.display(),
+            dir.display(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct RemotePattern {
     #[serde(default = "default_protocol")]
     pub protocol: String,
     pub hostname: String,
+    /// Exact path, or a prefix with a trailing `*`.
     pub pathname: Option<String>,
 }
 
@@ -356,18 +765,47 @@ fn default_protocol() -> String {
     "https".to_string()
 }
 
+/// A modern format `/_gio/image` may negotiate from the Accept header.
+/// JPEG (PNG for `f=png`) is always the fallback.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    test,
+    derive(schemars::JsonSchema, serde::Serialize),
+    schemars(transform = image_format_schema_aliases)
+)]
+pub enum ImageFormat {
+    #[serde(rename = "avif", alias = "image/avif")]
+    Avif,
+    #[serde(rename = "webp", alias = "image/webp")]
+    Webp,
+}
+
+/// `[images]`: the `/_gio/image` optimizer and `<GioImage>` srcsets.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ImageConfig {
+    /// The only widths `/_gio/image` resizes to (anything else is a 400),
+    /// and the `<GioImage>` srcset candidates.
     #[serde(default = "default_allowed_widths")]
     pub allowed_widths: Vec<u32>,
+    /// Default output quality, 1-100.
     #[serde(default = "default_image_quality")]
     pub quality: u8,
+    /// Remote image sources the optimizer may fetch; none by default.
     #[serde(default)]
     pub remote_patterns: Vec<RemotePattern>,
+    /// On-disk optimized-image cache cap.
     #[serde(default = "default_image_disk_max_bytes")]
     pub disk_max_bytes: u64,
+    /// Largest remote source the optimizer downloads.
     #[serde(default = "default_image_max_remote_bytes")]
     pub max_remote_bytes: u64,
+    /// Modern formats to serve when the browser accepts them, in order of
+    /// preference; everything else gets JPEG. Leave AVIF out to save CPU:
+    /// it is several times slower to encode than WebP.
+    #[serde(default = "default_image_formats")]
+    pub formats: Vec<ImageFormat>,
 }
 
 fn default_allowed_widths() -> Vec<u32> {
@@ -388,6 +826,10 @@ fn default_image_max_remote_bytes() -> u64 {
     20 * 1024 * 1024
 }
 
+fn default_image_formats() -> Vec<ImageFormat> {
+    vec![ImageFormat::Avif, ImageFormat::Webp]
+}
+
 impl Default for ImageConfig {
     fn default() -> Self {
         Self {
@@ -396,6 +838,7 @@ impl Default for ImageConfig {
             remote_patterns: Vec::new(),
             disk_max_bytes: default_image_disk_max_bytes(),
             max_remote_bytes: default_image_max_remote_bytes(),
+            formats: default_image_formats(),
         }
     }
 }
@@ -431,11 +874,29 @@ impl ImageConfig {
         })
         .to_string()
     }
+
+    /// `formats` as the optimizer's negotiation order, duplicates dropped.
+    pub fn negotiated_formats(&self) -> Vec<giojs_image::processor::OutputFormat> {
+        let mut formats = Vec::new();
+        for format in &self.formats {
+            let format = match format {
+                ImageFormat::Avif => giojs_image::processor::OutputFormat::Avif,
+                ImageFormat::Webp => giojs_image::processor::OutputFormat::WebP,
+            };
+            if !formats.contains(&format) {
+                formats.push(format);
+            }
+        }
+        formats
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct FontEntry {
     pub family: String,
+    /// woff2 URL (or a /public path) downloaded at startup.
     pub url: String,
     #[serde(default = "default_font_weight")]
     pub weight: u16,
@@ -450,20 +911,41 @@ fn default_font_style() -> String {
     "normal".to_string()
 }
 
-// Fields parsed from gio.toml for completeness; consumed by the Node layer, not Rust.
+/// `[app]`: informational; nothing in the server reads it.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct AppConfig {
     pub name: Option<String>,
-    pub router: Option<String>,
+    /// The app/ directory router - the only router GioJS has.
+    pub router: Option<AppRouter>,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub enum AppRouter {
+    #[serde(rename = "app")]
+    App,
+}
+
+/// `[server]`: the listener. GIO_HOST overrides `host`; GIO_PORT, then
+/// PORT, override `port`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ServerConfig {
+    /// IP address to bind: "0.0.0.0" (every interface), "127.0.0.1" (this
+    /// machine only), or IPv6 in brackets ("[::]", "[::1]"). Overridden by
+    /// GIO_HOST.
+    #[serde(default = "default_host", deserialize_with = "listen_host")]
     pub host: String,
+    /// Overridden by GIO_PORT, then PORT.
+    #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default = "default_http2")]
     pub http2: bool,
+    /// Request body limit.
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
     // Connection-level DoS limits. For every field below, 0 disables the
@@ -500,6 +982,7 @@ pub struct ServerConfig {
     /// the client. Empty = trust nobody: the TCP peer is the client and
     /// forwarding headers are ignored. A malformed entry fails startup.
     #[serde(default)]
+    #[cfg_attr(test, schemars(with = "Vec<String>"))]
     pub trusted_proxies: crate::client_identity::TrustedProxies,
     /// Which forwarding headers the trusted proxies set: "x-forwarded"
     /// (X-Forwarded-For/-Proto/-Host, default) or "forwarded" (RFC 7239).
@@ -512,6 +995,7 @@ pub struct ServerConfig {
     pub accept_request_id: bool,
     /// Node render workers: 1 (default), a count, or "auto".
     #[serde(default)]
+    #[cfg_attr(test, schemars(with = "WorkersSchema"))]
     pub workers: WorkersSetting,
     #[serde(default)]
     pub tls: TlsConfig,
@@ -526,6 +1010,27 @@ pub const MAX_WORKERS: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkersSetting {
     Count(usize),
+    Auto,
+}
+
+// Schema-only mirror of the spellings `WorkersSetting` accepts (its
+// Deserialize is hand-written); the doc comment below is what editors show.
+/// Node render workers: a count from 1 to 64, or "auto" (one per CPU core,
+/// at most 8).
+#[cfg(test)]
+#[derive(schemars::JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+enum WorkersSchema {
+    Count(#[schemars(range(min = 1, max = 64))] u64),
+    Auto(WorkersAuto),
+}
+
+#[cfg(test)]
+#[derive(schemars::JsonSchema)]
+#[allow(dead_code)]
+enum WorkersAuto {
+    #[serde(rename = "auto")]
     Auto,
 }
 
@@ -570,6 +1075,32 @@ impl<'de> Deserialize<'de> for WorkersSetting {
             ))),
         }
     }
+}
+
+fn default_host() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_port() -> u16 {
+    3000
+}
+
+/// `bind_addr()` joins host and port and parses a SocketAddr, so a hostname
+/// such as "localhost" would only fail later with a vaguer error.
+fn listen_host<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let host = String::deserialize(deserializer)?;
+    if is_listen_host(&host) {
+        Ok(host)
+    } else {
+        Err(serde::de::Error::custom(LISTEN_HOST_EXPECTED))
+    }
+}
+
+const LISTEN_HOST_EXPECTED: &str = "expected an IP address such as 0.0.0.0 (every interface), \
+     127.0.0.1 (this machine only), or IPv6 in brackets ([::], [::1])";
+
+fn is_listen_host(host: &str) -> bool {
+    format!("{host}:0").parse::<std::net::SocketAddr>().is_ok()
 }
 
 fn default_http2() -> bool {
@@ -634,7 +1165,10 @@ impl ServerConfig {
     }
 }
 
+/// `[server.tls]`: terminate TLS in GioJS itself.
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TlsConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -645,8 +1179,8 @@ pub struct TlsConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            host: "0.0.0.0".to_string(),
-            port: 3000,
+            host: default_host(),
+            port: default_port(),
             http2: true,
             max_body_bytes: default_max_body_bytes(),
             max_connections: default_max_connections_server(),
@@ -682,6 +1216,7 @@ impl GioConfig {
             config.apply_listen_overrides(
                 std::env::var("GIO_HOST").ok().as_deref(),
                 std::env::var("GIO_PORT").ok().as_deref(),
+                std::env::var("PORT").ok().as_deref(),
             )?;
             Ok(config)
         });
@@ -696,55 +1231,81 @@ impl GioConfig {
 
     fn load_from_path(path: &std::path::Path) -> Result<Self, ConfigError> {
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(Self {
+                port_source: "default",
+                ..Self::default()
+            });
         }
         let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.display().to_string(),
             source,
         })?;
-        let config: Self = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
-            path: path.display().to_string(),
-            source,
-        })?;
+        Self::parse(&raw, &path.display().to_string())
+    }
+
+    /// Parse gio.toml's contents; `file` names it in errors.
+    fn parse(raw: &str, file: &str) -> Result<Self, ConfigError> {
+        let parsed = toml::from_str::<Self>(raw);
+        // A syntax error leaves no document: toml's own error (line,
+        // snippet) is then the best there is.
+        let doc = toml_edit::ImDocument::parse(raw).ok();
+        if let Some(doc) = &doc {
+            check_sections(doc, raw, file)?;
+        }
+        let mut config =
+            parsed.map_err(|source| describe_error(source, doc.as_ref(), raw, file))?;
         for guard in &config.guards {
             guard
                 .validate()
                 .map_err(|source| ConfigError::InvalidGuard {
-                    path: path.display().to_string(),
+                    path: file.to_string(),
                     guard: guard.path.clone(),
                     source,
                 })?;
         }
+        let port_in_file = doc
+            .as_ref()
+            .and_then(|doc| doc.as_table().get("server"))
+            .and_then(|server| server.get("port"))
+            .is_some();
+        config.port_source = if port_in_file { "gio.toml" } else { "default" };
         Ok(config)
     }
 
-    /// `GIO_HOST` / `GIO_PORT` win over `[server] host` / `port`, so one
-    /// gio.toml can serve instances on other addresses without being edited
-    /// (test servers on free ports, platform-assigned ports). Empty values
-    /// are ignored; a malformed one stops startup like a bad gio.toml rather
-    /// than silently binding somewhere else.
+    /// Env wins over gio.toml: `GIO_HOST` over `[server] host`, and
+    /// `GIO_PORT`, then `PORT`, over `[server] port` - so one gio.toml can
+    /// serve instances on other addresses without being edited (test
+    /// servers on free ports, and the platforms that assign the port through
+    /// `PORT`: Heroku, Render, Railway, Fly.io, Cloud Run). `HOST` is not
+    /// read: shells and CI images set it to the machine's hostname. Empty
+    /// values are ignored; a malformed one stops startup like a bad gio.toml
+    /// rather than silently binding somewhere else.
     fn apply_listen_overrides(
         &mut self,
         host: Option<&str>,
         port: Option<&str>,
+        platform_port: Option<&str>,
     ) -> Result<(), ConfigError> {
         if let Some(host) = host.filter(|h| !h.is_empty()) {
-            // bind_addr() joins host and port and parses a SocketAddr.
-            if format!("{host}:0").parse::<std::net::SocketAddr>().is_err() {
+            if !is_listen_host(host) {
                 return Err(ConfigError::InvalidEnv {
                     name: "GIO_HOST",
                     value: host.to_string(),
-                    reason: "expected an IPv4 address such as 127.0.0.1",
+                    reason: LISTEN_HOST_EXPECTED,
                 });
             }
             self.server.host = host.to_string();
         }
-        if let Some(port) = port.filter(|p| !p.is_empty()) {
+        let port_override = [("GIO_PORT", port), ("PORT", platform_port)]
+            .into_iter()
+            .find_map(|(name, value)| Some((name, value.filter(|p| !p.is_empty())?)));
+        if let Some((name, port)) = port_override {
             self.server.port = port.parse().map_err(|_| ConfigError::InvalidEnv {
-                name: "GIO_PORT",
+                name,
                 value: port.to_string(),
                 reason: "expected a port number (0-65535)",
             })?;
+            self.port_source = name;
         }
         Ok(())
     }
@@ -768,6 +1329,177 @@ fn project_root_of(app_dir: Option<&str>) -> std::path::PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .map(|parent| parent.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Top-level keys must be a `SECTIONS` entry or start with `x-` (left for
+/// other tools). `GioConfig` itself does not deny unknown fields, so this is
+/// the only check at this level.
+fn check_sections(
+    doc: &toml_edit::ImDocument<&str>,
+    raw: &str,
+    file: &str,
+) -> Result<(), ConfigError> {
+    let root = doc.as_table();
+    for (name, item) in root.iter() {
+        if name.starts_with("x-") || SECTIONS.iter().any(|(section, _)| *section == name) {
+            continue;
+        }
+        let line = root
+            .key(name)
+            .and_then(|key| key.span())
+            .map(|span| config_diagnostics::line_of(raw, span.start));
+        let suggestion =
+            config_diagnostics::closest(name, SECTIONS.iter().map(|(section, _)| *section))
+                .and_then(|section| SECTIONS.iter().find(|(known, _)| *known == section))
+                .map(|(section, array)| {
+                    let kind = if *array {
+                        config_diagnostics::KeyKind::ArrayOfTables
+                    } else {
+                        config_diagnostics::KeyKind::Table
+                    };
+                    format!(
+                        " - did you mean {}?",
+                        config_diagnostics::display_key(section, kind)
+                    )
+                });
+        return Err(ConfigError::UnknownKey {
+            location: location(file, line),
+            key: config_diagnostics::display_key(name, config_diagnostics::kind_of(item)),
+            hint: suggestion.unwrap_or_else(|| {
+                " - tables for other tools must be named x-... ([x-mytool])".to_string()
+            }),
+        });
+    }
+    Ok(())
+}
+
+/// `file:line`, or just `file` without a line.
+fn location(file: &str, line: Option<usize>) -> String {
+    match line {
+        Some(line) => format!("{file}:{line}"),
+        None => file.to_string(),
+    }
+}
+
+/// A deserialization error with the key path and line it belongs to, and
+/// for an unknown key the closest valid key at that level (or what replaced
+/// a retired one).
+fn describe_error(
+    source: toml::de::Error,
+    doc: Option<&toml_edit::ImDocument<&str>>,
+    raw: &str,
+    file: &str,
+) -> ConfigError {
+    let located = doc.zip(source.span()).and_then(|(doc, span)| {
+        config_diagnostics::key_at(doc, span.start).map(|key| (key, span.start))
+    });
+    let Some((key, offset)) = located else {
+        return ConfigError::Parse {
+            path: file.to_string(),
+            source,
+        };
+    };
+    let location = location(file, Some(config_diagnostics::line_of(raw, offset)));
+    let message = source.message().trim_end();
+    let unknown = config_diagnostics::parse_unknown(message);
+    let suggestion = unknown.as_ref().and_then(|unknown| {
+        config_diagnostics::closest(&unknown.name, unknown.expected.iter().map(String::as_str))
+    });
+    match &unknown {
+        Some(unknown) if !unknown.variant => {
+            let bare_path = strip_indexes(&key.path);
+            let retired = RETIRED_KEYS.iter().find(|(path, _)| *path == bare_path);
+            let hint = match (retired, suggestion) {
+                (Some((_, hint)), _) => format!(" - {hint}"),
+                (None, Some(suggestion)) => {
+                    let path = match key.path.rsplit_once('.') {
+                        Some((parent, _)) => format!("{parent}.{suggestion}"),
+                        None => suggestion.to_string(),
+                    };
+                    format!(
+                        " - did you mean {}?",
+                        config_diagnostics::display_key(&path, key.kind)
+                    )
+                }
+                (None, None) if unknown.expected.is_empty() => String::new(),
+                (None, None) => format!(" - expected one of: {}", unknown.expected.join(", ")),
+            };
+            ConfigError::UnknownKey {
+                location,
+                key: config_diagnostics::display_key(&key.path, key.kind),
+                hint,
+            }
+        }
+        _ => {
+            let hint = suggestion
+                .map(|suggestion| format!(" - did you mean \"{suggestion}\"?"))
+                .unwrap_or_default();
+            ConfigError::InvalidValue {
+                location,
+                key: format!("`{}`", key.path),
+                message: format!("{message}{hint}"),
+            }
+        }
+    }
+}
+
+/// `guards[1].path` -> `guards.path`, for matching `RETIRED_KEYS`.
+fn strip_indexes(path: &str) -> String {
+    path.split('.')
+        .map(|segment| segment.split_once('[').map_or(segment, |(name, _)| name))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// schemars renders neither serde's field aliases nor its variant aliases,
+/// so the editor schema would flag spellings the parser accepts. These add
+/// them; `schema_accepts_every_spelling_the_parser_does` keeps them in step.
+///
+/// Each `(field, alias)` becomes a property of its own, and the schema
+/// allows at most one spelling of a field (serde rejects both as a duplicate
+/// field) - exactly one when the field is required.
+#[cfg(test)]
+pub(crate) fn add_schema_field_aliases(schema: &mut schemars::Schema, aliases: &[(&str, &str)]) {
+    use serde_json::{json, Value};
+    let object = schema.as_object_mut().expect("an object schema");
+    let required: Vec<Value> = object
+        .get("required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut constraints = Vec::new();
+    let properties = object
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .expect("properties");
+    for (field, alias) in aliases {
+        let mut property = properties[*field].clone();
+        if let Some(property) = property.as_object_mut() {
+            property.remove("default");
+            property.insert("description".into(), format!("Same as `{field}`.").into());
+        }
+        properties.insert(alias.to_string(), property);
+        constraints.push(if required.contains(&json!(field)) {
+            json!({ "oneOf": [{ "required": [field] }, { "required": [alias] }] })
+        } else {
+            json!({ "not": { "required": [field, alias] } })
+        });
+    }
+    if let Some(Value::Array(required)) = object.get_mut("required") {
+        required.retain(|name| !aliases.iter().any(|(field, _)| name == field));
+    }
+    object.insert("allOf".into(), Value::Array(constraints));
+}
+
+/// `ImageFormat` also takes the MIME types (`image/avif`), the spelling
+/// Next.js's `images.formats` uses.
+#[cfg(test)]
+fn image_format_schema_aliases(schema: &mut schemars::Schema) {
+    let values = schema
+        .get_mut("enum")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("an enum schema");
+    values.extend(["image/avif", "image/webp"].map(serde_json::Value::from));
 }
 
 #[cfg(test)]
@@ -803,7 +1535,7 @@ mod tests {
         std::fs::write(&path, "[logging]\nformat = \"logfmt\"\n").unwrap();
         let result = GioConfig::load_from_path(&path);
         let _ = std::fs::remove_file(&path);
-        assert!(matches!(result, Err(ConfigError::Parse { .. })));
+        assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
     }
 
     #[test]
@@ -839,7 +1571,7 @@ mod tests {
         std::fs::write(&path, "[revalidate]\ntokn = \"abc\"\n").unwrap();
         let result = GioConfig::load_from_path(&path);
         let _ = std::fs::remove_file(&path);
-        assert!(matches!(result, Err(ConfigError::Parse { .. })));
+        assert!(matches!(result, Err(ConfigError::UnknownKey { .. })));
         assert!(GioConfig::default().revalidate.token.is_empty());
     }
 
@@ -903,7 +1635,10 @@ mod tests {
             ("workers_float.toml", "workers = 1.5\n"),
         ] {
             let err = load_server_toml(name, body).expect_err(body);
-            assert!(matches!(err, ConfigError::Parse { .. }), "{body}: {err}");
+            assert!(
+                matches!(err, ConfigError::Parse { .. } | ConfigError::InvalidValue { .. }),
+                "{body}: {err}"
+            );
         }
         let err = load_server_toml("workers_zero_msg.toml", "workers = 0\n").unwrap_err();
         assert!(err.to_string().contains("expected 1 to 64"), "{err}");
@@ -1109,7 +1844,10 @@ redirect_to    = "/"
             .unwrap();
             let result = GioConfig::load_from_path(&path);
             let _ = std::fs::remove_file(&path);
-            assert!(matches!(result, Err(ConfigError::Parse { .. })), "{bad}");
+            assert!(
+                matches!(result, Err(ConfigError::InvalidValue { .. })),
+                "{bad}"
+            );
         }
     }
 
@@ -1201,7 +1939,10 @@ check_origin = true
             let result = GioConfig::load_from_path(&path);
             let _ = std::fs::remove_file(&path);
             assert!(
-                matches!(result, Err(ConfigError::Parse { .. })),
+                matches!(
+                    result,
+                    Err(ConfigError::UnknownKey { .. } | ConfigError::InvalidValue { .. })
+                ),
                 "{body} must be rejected"
             );
         }
@@ -1224,14 +1965,17 @@ check_origin = true
         let _ = std::fs::remove_file(&path);
         let mut config = result.unwrap();
 
-        config.apply_listen_overrides(None, None).unwrap();
+        config.apply_listen_overrides(None, None, None).unwrap();
         assert_eq!(config.bind_addr(), "0.0.0.0:4321");
+        assert_eq!(config.port_source, "gio.toml");
         // Empty values (`GIO_PORT=` in a shell) leave gio.toml in charge.
-        config.apply_listen_overrides(Some(""), Some("")).unwrap();
+        config
+            .apply_listen_overrides(Some(""), Some(""), Some(""))
+            .unwrap();
         assert_eq!(config.bind_addr(), "0.0.0.0:4321");
 
         config
-            .apply_listen_overrides(Some("127.0.0.1"), Some("39999"))
+            .apply_listen_overrides(Some("127.0.0.1"), Some("39999"), None)
             .unwrap();
         assert_eq!(config.bind_addr(), "127.0.0.1:39999");
         assert!(config.bind_addr().parse::<std::net::SocketAddr>().is_ok());
@@ -1241,14 +1985,18 @@ check_origin = true
     fn malformed_listen_env_stops_startup_without_changing_the_address() {
         let mut config = GioConfig::default();
         let before = config.bind_addr();
-        for (host, port, name) in [
-            (Some("localhost"), None, "GIO_HOST"),
-            (Some("127.0.0.1:80"), None, "GIO_HOST"),
-            (None, Some("70000"), "GIO_PORT"),
-            (None, Some("http"), "GIO_PORT"),
-            (None, Some("-1"), "GIO_PORT"),
+        for (host, port, platform_port, name) in [
+            (Some("localhost"), None, None, "GIO_HOST"),
+            (Some("127.0.0.1:80"), None, None, "GIO_HOST"),
+            (None, Some("70000"), None, "GIO_PORT"),
+            (None, Some("http"), None, "GIO_PORT"),
+            (None, Some("-1"), None, "GIO_PORT"),
+            (None, None, Some("80a"), "PORT"),
+            (None, None, Some("65536"), "PORT"),
         ] {
-            let err = config.apply_listen_overrides(host, port).unwrap_err();
+            let err = config
+                .apply_listen_overrides(host, port, platform_port)
+                .unwrap_err();
             assert!(
                 matches!(err, ConfigError::InvalidEnv { name: n, .. } if n == name),
                 "{host:?} {port:?}: {err}"
@@ -1275,7 +2023,7 @@ check_origin = true
                 &format!("path = \"/admin/*rest\"\n{typo} = true\nredirect_to = \"/login\"\n"),
             );
             assert!(
-                matches!(result, Err(ConfigError::Parse { .. })),
+                matches!(result, Err(ConfigError::UnknownKey { .. })),
                 "{typo}: {result:?}"
             );
         }
@@ -1317,6 +2065,558 @@ check_origin = true
         )
         .expect("a valid session guard loads");
         assert!(ok.guards[0].require_session);
+    }
+
+    fn parse(body: &str) -> Result<GioConfig, ConfigError> {
+        GioConfig::parse(body, "gio.toml")
+    }
+
+    fn error_text(body: &str) -> String {
+        match parse(body) {
+            Ok(_) => panic!("{body:?} must be rejected"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn unknown_keys_name_the_path_line_and_closest_valid_key() {
+        for (body, expected) in [
+            (
+                "[image]\nquality = 80\n",
+                "gio.toml:1: unknown key [image] - did you mean [images]?",
+            ),
+            (
+                "[app]\nname = \"x\"\n\n[[rate_limit]]\npath = \"/api/*\"\n",
+                "gio.toml:4: unknown key [[rate_limit]] - did you mean [[rate_limits]]?",
+            ),
+            (
+                "[images]\nallowed_width = [640]\n",
+                "gio.toml:2: unknown key `images.allowed_width` - did you mean `images.allowed_widths`?",
+            ),
+            (
+                "[server.tls]\nenable = true\n",
+                "gio.toml:2: unknown key `server.tls.enable` - did you mean `server.tls.enabled`?",
+            ),
+            (
+                "[[guards]]\npath = \"/a\"\nrequire_session = true\nredirect_to = \"/\"\n\n\
+                 [[guards]]\npath = \"/b\"\nrequire_sesion = true\nredirect_to = \"/\"\n",
+                "gio.toml:8: unknown key `guards[1].require_sesion` - did you mean `guards[1].require_session`?",
+            ),
+            (
+                "[[images.remote_patterns]]\nhostnam = \"cdn.example.com\"\n",
+                "gio.toml:2: unknown key `images.remote_patterns[0].hostnam` - did you mean \
+                 `images.remote_patterns[0].hostname`?",
+            ),
+            (
+                "[security.csrff]\nenabled = false\n",
+                "gio.toml:1: unknown key [security.csrff] - did you mean [security.csrf]?",
+            ),
+            (
+                "[security]\nhsts = true\ncps = \"default-src 'self'\"\n",
+                "gio.toml:3: unknown key `security.cps` - did you mean `security.csp`?",
+            ),
+            (
+                "[security]\nhsts = { max_age = 1, preloadd = true }\n",
+                "gio.toml:2: unknown key `security.hsts.preloadd` - did you mean `security.hsts.preload`?",
+            ),
+            (
+                "[security.hsts]\nmax_age = 1\n\ninclude_subdomain = true\n",
+                "gio.toml:4: unknown key `security.hsts.include_subdomain` - did you mean \
+                 `security.hsts.include_subdomains`?",
+            ),
+            (
+                "[server]\nport = 3000\n[server.limits]\nmax = 1\n",
+                "gio.toml:3: unknown key [server.limits] - expected one of: host, port,",
+            ),
+            (
+                "prot = 3000\n",
+                "gio.toml:1: unknown key `prot` - tables for other tools must be named x-...",
+            ),
+        ] {
+            let text = error_text(body);
+            assert!(text.starts_with(expected), "{body:?}\n got: {text}\nwant: {expected}");
+        }
+    }
+
+    #[test]
+    fn x_tables_are_left_for_other_tools() {
+        let config = parse(
+            "[x-deploy]\nregion = \"eu\"\n\n[x-mytool.nested]\nlist = [1, 2]\n\n[server]\nport = 4000\n",
+        )
+        .unwrap();
+        assert_eq!(config.server.port, 4000);
+        // Only at the top level: nested x- keys are typos like any other.
+        assert!(matches!(
+            parse("[server]\nx-port = 1\n"),
+            Err(ConfigError::UnknownKey { .. })
+        ));
+    }
+
+    #[test]
+    fn retired_keys_are_rejected_with_what_to_do_instead() {
+        for (body, key, hint) in [
+            (
+                "[cache]\nmemory_mb = 50\n",
+                "`cache.memory_mb`",
+                "memory_max_entries",
+            ),
+            (
+                "[cache.redis]\nenabled = false\nurl = \"redis://localhost:6379\"\n",
+                "[cache.redis]",
+                "not available yet",
+            ),
+            (
+                "[css]\nengine = \"lightning\"\n",
+                "`css.engine`",
+                "only CSS engine",
+            ),
+            (
+                "[prefetch]\nstrategy = \"hover\"\n",
+                "`prefetch.strategy`",
+                "<GioLink prefetch=",
+            ),
+        ] {
+            let text = error_text(body);
+            assert!(text.contains(&format!("unknown key {key}")), "{text}");
+            assert!(text.contains(hint), "{text}");
+        }
+    }
+
+    #[test]
+    fn invalid_values_name_the_key_and_line() {
+        for (body, expected) in [
+            ("[server]\nport = \"http\"\n", "gio.toml:2: invalid `server.port`: invalid type"),
+            (
+                "[logging]\nformat = \"jsno\"\n",
+                "gio.toml:2: invalid `logging.format`: unknown variant `jsno`, expected `text` or `json` - did you mean \"json\"?",
+            ),
+            ("[server]\nhost = \"localhost\"\n", "gio.toml:2: invalid `server.host`: expected an IP address"),
+            (
+                "[server]\nhost = \"::1\"\n",
+                "gio.toml:2: invalid `server.host`: expected an IP address such as 0.0.0.0 \
+                 (every interface), 127.0.0.1 (this machine only), or IPv6 in brackets ([::], [::1])",
+            ),
+            (
+                "[security]\nhsts = 5\n",
+                "gio.toml:2: invalid `security.hsts`: invalid type: integer `5`, expected true, \
+                 false, a header value, or a table",
+            ),
+            ("[app]\nrouter = \"pages\"\n", "gio.toml:2: invalid `app.router`: unknown variant `pages`"),
+            ("[images]\nformats = [\"gif\"]\n", "gio.toml:2: invalid `images.formats[0]`: unknown variant `gif`"),
+            ("[compression]\nmin_size_bytes = 70000\n", "gio.toml:2: invalid `compression.min_size_bytes`"),
+            ("[cache]\nmemory_max_entries = 0\n", "gio.toml:2: invalid `cache.memory_max_entries`"),
+            ("[dev]\nwatch_ignore = [\"../shared/**\"]\n", "gio.toml:2: invalid `dev.watch_ignore`: invalid watch_ignore pattern"),
+            ("\n\n[[rate_limits]]\nper_ip = 1\n", "gio.toml:3: invalid `rate_limits[0]`: missing field `path`"),
+        ] {
+            let text = error_text(body);
+            assert!(text.starts_with(expected), "{body:?}\n got: {text}\nwant: {expected}");
+        }
+    }
+
+    #[test]
+    fn cache_disk_path_must_be_a_directory_inside_the_project() {
+        for bad in [".", "./", "", "../cache", "/var/cache/gio", ".gio/../.."] {
+            let text = error_text(&format!("[cache]\ndisk_path = {bad:?}\n"));
+            assert!(text.contains("invalid `cache.disk_path`"), "{bad}: {text}");
+        }
+        let config = parse("[cache]\ndisk_path = \"./tmp/pages\"\n").unwrap();
+        assert_eq!(config.cache.disk_path, "./tmp/pages");
+    }
+
+    #[test]
+    fn cache_dir_may_not_overlap_app_or_public() {
+        let root = unique_temp_path("cache_placement");
+        std::fs::create_dir_all(root.join("app/blog")).unwrap();
+        std::fs::create_dir_all(root.join("public")).unwrap();
+        let config = |disk_path: &str| {
+            parse(&format!("[cache]\ndisk_path = {disk_path:?}\n"))
+                .unwrap()
+                .cache
+                .disk_dir(&root, None)
+        };
+        let check = |cache_dir: &std::path::Path| {
+            check_cache_dir_placement(cache_dir, &root.join("app"), &root.join("public"))
+        };
+        for (disk_path, relation) in [
+            ("app", "is the app/ directory"),
+            ("app/cache", "is inside the app/ directory"),
+            ("./app/blog/x", "is inside the app/ directory"),
+            ("public", "is the public/ directory"),
+            ("public/_cache/pages", "is inside the public/ directory"),
+        ] {
+            let error = check(&config(disk_path)).unwrap_err();
+            assert!(error.contains(relation), "{disk_path}: {error}");
+            assert!(error.contains(".gio/cache/pages"), "{disk_path}: {error}");
+        }
+        // GIO_CACHE_DIR is held to the same rule, compared resolved; a
+        // parent of app/ contains it.
+        let error = check(&root.join("public/../app/blog/x")).unwrap_err();
+        assert!(error.contains("is inside the app/ directory"), "{error}");
+        let error = check(&root).unwrap_err();
+        assert!(error.contains("contains the app/ directory"), "{error}");
+        // Directories of their own pass, existing or not, hidden or not.
+        for disk_path in [".gio/cache/pages", "cachedir/pages", "data", "application"] {
+            assert_eq!(check(&config(disk_path)), Ok(()), "{disk_path}");
+        }
+        assert_eq!(check(&std::env::temp_dir().join("gio-cache")), Ok(()));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn bracketed_ipv6_hosts_are_accepted() {
+        for host in ["[::]", "[::1]"] {
+            let config = parse(&format!("[server]\nhost = {host:?}\n")).unwrap();
+            assert!(
+                config.bind_addr().parse::<std::net::SocketAddr>().is_ok(),
+                "{}",
+                config.bind_addr()
+            );
+        }
+    }
+
+    #[test]
+    fn partial_server_table_defaults_host_and_port() {
+        let config = parse("[server]\nhttp2 = false\n").unwrap();
+        assert_eq!(config.bind_addr(), "0.0.0.0:3000");
+        assert!(!config.server.http2);
+        assert_eq!(config.port_source, "default");
+        let config = parse("[server]\nport = 8080\n").unwrap();
+        assert_eq!(config.bind_addr(), "0.0.0.0:8080");
+        assert_eq!(config.port_source, "gio.toml");
+        let config = parse("[server]\nhost = \"127.0.0.1\"\n").unwrap();
+        assert_eq!(config.bind_addr(), "127.0.0.1:3000");
+        let missing = GioConfig::load_from_path(&unique_temp_path("no_server.toml")).unwrap();
+        assert_eq!(missing.port_source, "default");
+    }
+
+    #[test]
+    fn port_env_precedence_is_gio_port_then_port_then_gio_toml() {
+        let mut config = parse("[server]\nport = 4321\n").unwrap();
+        config
+            .apply_listen_overrides(None, None, Some("8080"))
+            .unwrap();
+        assert_eq!(config.server.port, 8080, "PORT beats gio.toml");
+        assert_eq!(config.port_source, "PORT");
+
+        let mut config = parse("[server]\nport = 4321\n").unwrap();
+        config
+            .apply_listen_overrides(None, Some("9090"), Some("8080"))
+            .unwrap();
+        assert_eq!(config.server.port, 9090, "GIO_PORT beats PORT");
+        assert_eq!(config.port_source, "GIO_PORT");
+
+        // An empty GIO_PORT falls through to PORT.
+        let mut config = parse("").unwrap();
+        config
+            .apply_listen_overrides(None, Some(""), Some("5000"))
+            .unwrap();
+        assert_eq!(config.bind_addr(), "0.0.0.0:5000");
+    }
+
+    #[test]
+    fn compression_section_parses_with_defaults() {
+        let defaults = parse("").unwrap().compression;
+        assert_eq!(defaults, CompressionConfig::default());
+        assert!(defaults.enabled && defaults.prefer_brotli);
+        assert_eq!(defaults.min_size_bytes, 1024);
+        let config =
+            parse("[compression]\nenabled = false\nmin_size_bytes = 256\nprefer_brotli = false\n")
+                .unwrap()
+                .compression;
+        assert_eq!(
+            config,
+            CompressionConfig {
+                enabled: false,
+                min_size_bytes: 256,
+                prefer_brotli: false,
+            }
+        );
+    }
+
+    #[test]
+    fn prefetch_section_sets_the_budgets() {
+        let defaults = parse("").unwrap().prefetch.budgets();
+        assert_eq!((defaults.max_in_flight, defaults.max_per_second), (5, 20));
+        let budgets = parse("[prefetch]\nmax_concurrent = 2\nmax_per_second = 7\n")
+            .unwrap()
+            .prefetch
+            .budgets();
+        assert_eq!((budgets.max_in_flight, budgets.max_per_second), (2, 7));
+        // The budgets the server builds really enforce them.
+        let enforced = giojs_prefetch::PrefetchBudgets::new(budgets);
+        let ip: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        assert!(enforced.try_acquire(ip));
+        assert!(enforced.try_acquire(ip));
+        assert!(
+            !enforced.try_acquire(ip),
+            "a third concurrent prefetch is over budget"
+        );
+    }
+
+    #[test]
+    fn cache_section_sets_entries_and_directory() {
+        let root = std::path::Path::new("/srv/site");
+        let defaults = parse("").unwrap().cache;
+        assert_eq!(defaults.memory_max_entries.get(), 1000);
+        assert_eq!(defaults.disk_max_bytes, 512 * 1024 * 1024);
+        assert_eq!(defaults.disk_dir(root, None), root.join(".gio/cache/pages"));
+
+        let cache = parse(
+            "[cache]\nmemory_max_entries = 50\ndisk_path = \"var/pages\"\ndisk_max_bytes = 0\n",
+        )
+        .unwrap()
+        .cache;
+        assert_eq!(cache.memory_max_entries.get(), 50);
+        assert_eq!(cache.disk_max_bytes, 0);
+        assert_eq!(cache.disk_dir(root, None), root.join("var/pages"));
+        // GIO_CACHE_DIR still wins; an empty one does not.
+        assert_eq!(
+            cache.disk_dir(root, Some("/tmp/gio-pages")),
+            std::path::PathBuf::from("/tmp/gio-pages")
+        );
+        assert_eq!(cache.disk_dir(root, Some("")), root.join("var/pages"));
+    }
+
+    #[test]
+    fn image_formats_parse_in_preference_order() {
+        use giojs_image::processor::OutputFormat;
+        let defaults = parse("").unwrap().images;
+        assert_eq!(
+            defaults.negotiated_formats(),
+            vec![OutputFormat::Avif, OutputFormat::WebP]
+        );
+        let images = parse("[images]\nformats = [\"webp\", \"image/avif\", \"webp\"]\n")
+            .unwrap()
+            .images;
+        assert_eq!(
+            images.negotiated_formats(),
+            vec![OutputFormat::WebP, OutputFormat::Avif]
+        );
+        let none = parse("[images]\nformats = []\n").unwrap().images;
+        assert!(none.negotiated_formats().is_empty());
+        assert_eq!(
+            OutputFormat::negotiate("image/avif,image/webp", &images.negotiated_formats()),
+            OutputFormat::WebP
+        );
+    }
+
+    #[test]
+    fn dev_watch_ignore_parses_globs() {
+        let config = parse("[dev]\nwatch_ignore = [\"data/**\", \"*.db\"]\n").unwrap();
+        let root = std::path::Path::new("/proj");
+        assert!(config
+            .dev
+            .watch_ignore
+            .is_ignored_under(root, std::path::Path::new("/proj/data/db.json")));
+        assert!(config
+            .dev
+            .watch_ignore
+            .is_ignored_under(root, std::path::Path::new("/proj/lib/app.db")));
+        assert!(parse("").unwrap().dev.watch_ignore.is_empty());
+    }
+
+    /// The example configs people copy must keep loading.
+    #[test]
+    fn every_gio_toml_in_the_repository_loads() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for file in [
+            "gio.toml",
+            "packages/giojs-cli/templates/default/gio.toml",
+            "packages/giojs-cli/templates/default-js/gio.toml",
+            "examples/basic-app/gio.toml",
+            "examples/auth-demo/gio.toml",
+            "docs-site/gio.toml",
+            "tests/integration/fixture/gio.toml",
+        ] {
+            let path = repo.join(file);
+            assert!(path.exists(), "{file} is missing");
+            if let Err(error) = GioConfig::load_from_path(&path) {
+                panic!("{file}: {error}");
+            }
+        }
+    }
+
+    fn render_schema() -> String {
+        let generator = schemars::generate::SchemaSettings::draft07().into_generator();
+        let schema = generator.into_root_schema_for::<GioConfig>();
+        let mut json = serde_json::to_string_pretty(&schema).expect("schema serializes");
+        json.push('\n');
+        json
+    }
+
+    /// packages/giojs/gio.schema.json is generated from these types. To
+    /// refresh it: GIO_UPDATE_SCHEMA=1 cargo test -p giojs-server json_schema
+    #[test]
+    fn committed_json_schema_is_up_to_date() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/giojs/gio.schema.json");
+        let rendered = render_schema();
+        if std::env::var_os("GIO_UPDATE_SCHEMA").is_some() {
+            std::fs::write(&path, &rendered).expect("write gio.schema.json");
+            return;
+        }
+        // A Windows checkout may have converted line endings.
+        let committed = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        assert!(
+            committed == rendered,
+            "packages/giojs/gio.schema.json is out of date - run: \
+             GIO_UPDATE_SCHEMA=1 cargo test -p giojs-server json_schema"
+        );
+    }
+
+    #[test]
+    fn sections_list_matches_the_config_struct() {
+        let schema: serde_json::Value = serde_json::from_str(&render_schema()).unwrap();
+        let properties = schema["properties"].as_object().expect("properties");
+        let mut fields: Vec<&str> = properties.keys().map(String::as_str).collect();
+        let mut sections: Vec<&str> = SECTIONS.iter().map(|(name, _)| *name).collect();
+        fields.sort_unstable();
+        sections.sort_unstable();
+        assert_eq!(fields, sections);
+        for (name, array) in SECTIONS {
+            assert_eq!(
+                properties[*name]["type"] == "array",
+                *array,
+                "{name}: array-of-tables flag"
+            );
+        }
+        // Editors flag unknown top-level keys, except x-* tables.
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(schema["patternProperties"]["^x-"].is_object());
+        for (key, _) in RETIRED_KEYS {
+            let (section, field) = key.split_once('.').unwrap();
+            let section_schema = &properties[section];
+            let reference = section_schema["$ref"].as_str().unwrap_or_default();
+            let definition = reference.rsplit('/').next().unwrap_or_default();
+            assert!(
+                schema["definitions"][definition]["properties"][field].is_null(),
+                "retired key {key} must not be accepted"
+            );
+        }
+    }
+
+    /// What serde accepts, read off its own error for an unknown key or
+    /// variant ("expected one of `a`, `b`" - aliases included).
+    fn serde_spellings(message: &str) -> std::collections::BTreeSet<String> {
+        let (_, expected) = message
+            .split_once("expected")
+            .unwrap_or_else(|| panic!("no list of expected spellings in: {message}"));
+        expected
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn struct_spellings<T: serde::de::DeserializeOwned + std::fmt::Debug>(
+    ) -> std::collections::BTreeSet<String> {
+        serde_spellings(toml::from_str::<T>("__probe__ = 0").unwrap_err().message())
+    }
+
+    fn enum_spellings<T: serde::de::DeserializeOwned + std::fmt::Debug>(
+    ) -> std::collections::BTreeSet<String> {
+        #[derive(Debug, Deserialize)]
+        struct Probe<T> {
+            #[allow(dead_code)]
+            value: T,
+        }
+        serde_spellings(
+            toml::from_str::<Probe<T>>("value = \"__probe__\"")
+                .unwrap_err()
+                .message(),
+        )
+    }
+
+    /// Editors validate with the schema, so it must accept every key and
+    /// value spelling the parser does - serde aliases included, which
+    /// schemars leaves out (`requireCookie`, `image/webp`) - and no more.
+    #[test]
+    fn schema_accepts_every_spelling_the_parser_does() {
+        use crate::client_identity::ProxyHeaders;
+        use crate::rules::{GuardRule, HeaderRule, RedirectRule, RewriteRule};
+        let schema: serde_json::Value = serde_json::from_str(&render_schema()).unwrap();
+        let definitions = schema["definitions"].as_object().expect("definitions");
+        for (name, definition) in definitions {
+            let parser = match name.as_str() {
+                "AppConfig" => struct_spellings::<AppConfig>(),
+                "CacheConfig" => struct_spellings::<CacheConfig>(),
+                "CompressionConfig" => struct_spellings::<CompressionConfig>(),
+                "CsrfConfig" => struct_spellings::<CsrfConfig>(),
+                "CssConfig" => struct_spellings::<CssConfig>(),
+                "DevConfig" => struct_spellings::<DevConfig>(),
+                "FontEntry" => struct_spellings::<FontEntry>(),
+                "GuardRule" => struct_spellings::<GuardRule>(),
+                "HeaderRule" => struct_spellings::<HeaderRule>(),
+                "HstsPolicy" => struct_spellings::<HstsPolicy>(),
+                "I18nConfig" => struct_spellings::<I18nConfig>(),
+                "ImageConfig" => struct_spellings::<ImageConfig>(),
+                "LoggingConfig" => struct_spellings::<LoggingConfig>(),
+                "MetricsConfig" => struct_spellings::<MetricsConfig>(),
+                "PrefetchConfig" => struct_spellings::<PrefetchConfig>(),
+                "RateLimitEntry" => struct_spellings::<RateLimitEntry>(),
+                "RedirectRule" => struct_spellings::<RedirectRule>(),
+                "RemotePattern" => struct_spellings::<RemotePattern>(),
+                "RevalidateConfig" => struct_spellings::<RevalidateConfig>(),
+                "RewriteRule" => struct_spellings::<RewriteRule>(),
+                "SecurityConfig" => struct_spellings::<SecurityConfig>(),
+                "ServerConfig" => struct_spellings::<ServerConfig>(),
+                "TlsConfig" => struct_spellings::<TlsConfig>(),
+                "WebSocketSecurityConfig" => struct_spellings::<WebSocketSecurityConfig>(),
+                "WebsocketConfig" => struct_spellings::<WebsocketConfig>(),
+                "AppRouter" => enum_spellings::<AppRouter>(),
+                "ImageFormat" => enum_spellings::<ImageFormat>(),
+                "LogFormat" => enum_spellings::<LogFormat>(),
+                "ProxyHeaders" => enum_spellings::<ProxyHeaders>(),
+                // true | false | a string | HstsPolicy, checked above.
+                "HstsSetting" => continue,
+                // A count or "auto": WorkersSetting's hand-written parser,
+                // covered by the worker-count tests.
+                "WorkersSchema" | "WorkersAuto" => continue,
+                other => {
+                    panic!("{other}: list it here so its schema is checked against the parser")
+                }
+            };
+            let in_schema: std::collections::BTreeSet<String> =
+                if let Some(properties) = definition["properties"].as_object() {
+                    assert_eq!(definition["additionalProperties"], false, "{name}");
+                    properties.keys().cloned().collect()
+                } else if let Some(values) = definition["enum"].as_array() {
+                    values
+                        .iter()
+                        .map(|v| v.as_str().unwrap().to_string())
+                        .collect()
+                } else {
+                    definition["oneOf"]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("{name}: neither properties nor values"))
+                        .iter()
+                        .map(|variant| variant["const"].as_str().unwrap().to_string())
+                        .collect()
+                };
+            assert_eq!(in_schema, parser, "{name}");
+        }
+        // Both spellings of one key are a duplicate to serde: the schema
+        // takes either, exactly one when the key is required.
+        let guard = &definitions["GuardRule"];
+        assert_eq!(guard["required"], serde_json::json!(["path"]));
+        assert_eq!(
+            guard["allOf"][2]["oneOf"],
+            serde_json::json!([{ "required": ["redirect_to"] }, { "required": ["redirectTo"] }])
+        );
+        for alias_spelled in [
+            "[[guards]]\npath = \"/a/*rest\"\nrequireCookie = \"s\"\nredirectTo = \"/\"\n",
+            "[[guards]]\npath = \"/a/*rest\"\nrequireSession = true\nredirectTo = \"/\"\n",
+            "[images]\nformats = [\"image/webp\", \"image/avif\"]\n",
+        ] {
+            parse(alias_spelled).unwrap_or_else(|error| panic!("{alias_spelled:?}: {error}"));
+        }
+        assert!(error_text(
+            "[[guards]]\npath = \"/a/*rest\"\nrequire_cookie = \"s\"\nredirect_to = \"/\"\nredirectTo = \"/\"\n"
+        )
+        .contains("duplicate field"));
     }
 
     #[test]

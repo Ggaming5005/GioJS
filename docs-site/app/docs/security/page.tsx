@@ -131,7 +131,8 @@ csp = """
         the server log: drop the header and let GioJS compress the response.
       </p>
       <p>
-        The placeholder is kept in <code>.gio/cache/pages/meta/</code> so the disk cache stays
+        The placeholder is kept in the page cache directory&apos;s <code>meta/</code> (
+        <code>.gio/cache/pages/meta/</code> by default) so the disk cache stays
         valid across restarts, and it changes with every deployment (each new build, or a new{' '}
         <code>GIO_DEPLOYMENT_ID</code>). To rotate it sooner, delete{' '}
         <code>.gio/cache/pages/meta/csp-nonce-placeholder-*</code> and restart; cached pages

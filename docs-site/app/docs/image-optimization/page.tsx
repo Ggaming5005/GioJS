@@ -43,6 +43,17 @@ quality        = 80`} />
       <CodeBlock lang="tsx" code={`<GioImage src="/hero.png" alt="" width={1200} height={630}
   sizes="(max-width: 768px) 100vw, 50vw" />`} />
 
+      <h2>Output formats</h2>
+      <p>
+        The optimizer serves the first format in <code>[images] formats</code> that the
+        browser&apos;s <code>Accept</code> header names, and JPEG otherwise. AVIF is the
+        smallest but several times slower to encode than WebP; leave it out to spend less CPU
+        on first requests. The <code>f=</code> query parameter cannot pick a format the list
+        leaves out (JPEG and PNG are always available).
+      </p>
+      <CodeBlock lang="toml" code={`[images]
+formats = ["webp"]          # default ["avif", "webp"]; [] = always JPEG`} />
+
       <h2>Above the fold: priority</h2>
       <p>
         <code>priority</code> loads the image eagerly with <code>fetchpriority=&quot;high&quot;</code> and

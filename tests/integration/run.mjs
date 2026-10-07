@@ -26,6 +26,12 @@ const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const fixtureDir = join(repoRoot, 'tests', 'integration', 'fixture');
 const BASE = 'http://127.0.0.1:39517';
 const EXT = process.platform === 'win32' ? '.exe' : '';
+// Every server spawned here inherits process.env and must listen where its
+// gio.toml (or its phase) says: an ambient PORT or GIO_PORT - exported by
+// Replit, Codespaces-style containers, `heroku local` - would override that
+// and leave the harness waiting on BASE. Phases that test them set them.
+delete process.env.PORT;
+delete process.env.GIO_PORT;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -3333,6 +3339,12 @@ async function devWatchPhase() {
     "export default function Boom() {\n  throw new Error('DEV_BOOM_DETAIL');\n}\n",
   );
   const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-devcache-'));
+  // Data the app writes into the project, which must never restart it.
+  await writeFile(
+    join(devDir, 'gio.toml'),
+    (await readFile(join(devDir, 'gio.toml'), 'utf8')) +
+      '\n[dev]\nwatch_ignore = ["data/**", "components/*.db.json"]\n',
+  );
 
   let log = '';
   const server = spawn(binary, [], {
@@ -3641,6 +3653,20 @@ async function devWatchPhase() {
       assert.equal(changeCount(), changesBefore, 'no change may be detected while idle');
     });
 
+    await test('dev watch: [dev] watch_ignore files never restart the worker', async () => {
+      // .json is a source extension: without watch_ignore both would restart.
+      const changesBefore = changeCount();
+      await mkdir(join(devDir, 'data'), { recursive: true });
+      for (let i = 0; i < 2; i++) {
+        await writeFile(join(devDir, 'data', 'db.json'), `{"todos":${i}}\n`);
+        await writeFile(join(devDir, 'components', 'todos.db.json'), `{"todos":${i}}\n`);
+      }
+      // Past the watcher's 300ms batching window.
+      await sleep(1_000);
+      assert.equal(changeCount(), changesBefore, 'watch_ignore matches must not be changes');
+      assert.doesNotMatch(log, /watching new directory.*[\\/]data\b/, 'an ignored top-level dir is never registered');
+    });
+
     await test('dev watch: a new top-level directory during an event burst keeps the watcher alive', async () => {
       // New top-level directories used to be registered by the task that
       // drains the watcher's bounded channel. A burst arriving while that
@@ -3673,6 +3699,88 @@ async function devWatchPhase() {
     if (!serverGone) server.kill();
     await serverExited;
     await rm(cacheDir, { recursive: true, force: true });
+    await rm(devDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Phase 2b (dev mode, a visible [cache] disk_path shared with app data):
+ * the cache's own writes are not source changes - they used to restart the
+ * worker and clear the cache after every miss, so the cache never hit - and
+ * clearing the cache deletes only its own files, never the app's data.
+ */
+async function devCacheDirPhase() {
+  const binary = findServerBinary();
+  const devDir = await copyFixtureForDev('.dev-cache-fixture');
+  const dataDir = join(devDir, 'data');
+  const dbFile = join(dataDir, 'db.json');
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(dbFile, '{"todos":[]}\n');
+  await writeFile(
+    join(devDir, 'gio.toml'),
+    (await readFile(join(devDir, 'gio.toml'), 'utf8')) + '\n[cache]\ndisk_path = "data"\n',
+  );
+  const env = {
+    ...process.env,
+    GIO_APP_DIR: join(devDir, 'app'),
+    RUST_LOG: 'info',
+    NODE_ENV: 'development',
+  };
+  delete env.GIO_CACHE_DIR;
+
+  let log = '';
+  const server = spawn(binary, [], { cwd: repoRoot, env });
+  server.stdout.on('data', (d) => { log += d.toString(); });
+  server.stderr.on('data', (d) => { log += d.toString(); });
+  let serverGone = false;
+  const serverExited = new Promise((r) =>
+    server.on('exit', () => { serverGone = true; r(); }),
+  );
+  const entryFiles = async () =>
+    (await readdir(dataDir)).filter((name) => /^[0-9a-f]{64}\.json$/.test(name));
+  const changeCount = () => (log.match(/dev watch: change detected/g) ?? []).length;
+
+  try {
+    await waitFor('dev server health (visible cache dir)', async () => {
+      const res = await fetch(`${BASE}/_gio/health`);
+      return res.ok && (await res.json()).nodeReady === true;
+    }, 30_000);
+
+    await test('dev: a visible [cache] disk_path hits without restarting the worker', async () => {
+      const statuses = [];
+      for (let i = 0; i < 3; i += 1) {
+        const res = await fetch(`${BASE}/cached`);
+        assert.match(await res.text(), /INTEGRATION_FIXTURE_CACHED/);
+        statuses.push((res.headers.get('x-gio-cache') ?? '').split(';')[0]);
+        await waitFor('the entry file', async () => (await entryFiles()).length > 0, 10_000);
+        // Past the watcher's 300 ms batching window: a restart would have begun.
+        await sleep(1_000);
+      }
+      assert.deepEqual(statuses, ['miss', 'hit', 'hit']);
+      assert.equal(changeCount(), 0, 'cache writes are no source change');
+    });
+
+    await test('dev: clearing a shared cache directory keeps the app data in it', async () => {
+      // A source edit restarts the worker, which clears the cache.
+      const banner = join(devDir, 'components', 'Banner.tsx');
+      await editAndWait(
+        'an edit to restart the worker',
+        banner,
+        (src) => src + '\n// restart\n',
+        async () => /dev watch: worker restarted/.test(log),
+      );
+      await waitFor('the cache entries to be cleared', async () => (await entryFiles()).length === 0, 10_000);
+      assert.equal(await readFile(dbFile, 'utf8'), '{"todos":[]}\n');
+    });
+  } catch (err) {
+    console.error('\nintegration (dev, visible cache dir): FAILED');
+    console.error(err);
+    console.error('\n── dev server log tail ──');
+    console.error(significantLogTail(log));
+    process.exitCode = 1;
+  } finally {
+    if (!serverGone) server.kill();
+    await serverExited;
     await rm(devDir, { recursive: true, force: true });
   }
 }
@@ -4442,28 +4550,50 @@ export function GET(): Response {
 }
 
 /**
- * Phase 0 (no server): a gio.toml guard that would not protect its path
- * stops the server at startup. A misspelled key used to parse fine and
- * leave the path open.
+ * Phase 0 (no server): a gio.toml the server cannot honor stops it at
+ * startup, naming the file, the line and the fix. A misspelled key used to
+ * parse fine and be ignored - leaving a guarded path open, or a setting at
+ * its default while the author believed it changed.
  */
-async function brokenGuardConfigPhase() {
+async function strictConfigPhase() {
   const binary = findServerBinary();
-  const projectDir = await mkdtemp(join(tmpdir(), 'gio-int-bad-guard-'));
+  const projectDir = await mkdtemp(join(tmpdir(), 'gio-int-bad-config-'));
+  // A port of its own: should the server wrongly start, it must not collide
+  // with the fixture servers.
+  const server = '[server]\nhost = "127.0.0.1"\nport = 39519\n\n';
+  const guard = (line) => `[[guards]]\npath = "/admin/*rest"\n${line}\nredirect_to = "/login"\n`;
   try {
     await mkdir(join(projectDir, 'app'));
     const cases = [
-      ['a misspelled key', 'require_sesion = true', /unknown field `require_sesion`/],
-      ['no requirement', '', /invalid \[\[guards\]\] entry for "\/admin\/\*rest"/],
+      [
+        'a guard with a misspelled key',
+        server + guard('require_sesion = true'),
+        /gio\.toml:7: unknown key `guards\[0\]\.require_sesion` - did you mean `guards\[0\]\.require_session`\?/,
+      ],
+      [
+        'a guard with no requirement',
+        server + guard(''),
+        /invalid \[\[guards\]\] entry for "\/admin\/\*rest"/,
+      ],
+      [
+        'a misspelled section',
+        server + '[image]\nquality = 80\n',
+        /gio\.toml:5: unknown key \[image\] - did you mean \[images\]\?/,
+      ],
+      [
+        'a misspelled key',
+        server + '[images]\nallowed_width = [640]\n',
+        /gio\.toml:6: unknown key `images\.allowed_width` - did you mean `images\.allowed_widths`\?/,
+      ],
+      [
+        'a cache backend that does not exist',
+        server + '[cache.redis]\nenabled = true\nurl = "redis://localhost:6379"\n',
+        /unknown key \[cache\.redis\] - \[cache\.redis\] is not available yet/,
+      ],
     ];
-    for (const [label, line, expected] of cases) {
-      await writeFile(
-        join(projectDir, 'gio.toml'),
-        // A port of its own: should the server wrongly start, it must not
-        // collide with the fixture servers.
-        '[server]\nhost = "127.0.0.1"\nport = 39519\n\n' +
-          `[[guards]]\npath = "/admin/*rest"\n${line}\nredirect_to = "/login"\n`,
-      );
-      await test(`gio.toml guard with ${label} stops startup`, async () => {
+    for (const [label, toml, expected] of cases) {
+      await writeFile(join(projectDir, 'gio.toml'), toml);
+      await test(`gio.toml with ${label} stops startup`, async () => {
         const run = spawnSync(binary, [], {
           cwd: projectDir,
           env: { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production' },
@@ -4473,17 +4603,151 @@ async function brokenGuardConfigPhase() {
         assert.equal(run.status, 1, `exit status ${run.status} (signal ${run.signal}), stderr:\n${run.stderr}`);
         assert.match(run.stderr, /configuration error/);
         assert.match(run.stderr, expected);
+        assert.ok(run.stderr.includes(join(projectDir, 'gio.toml')), `names the file:\n${run.stderr}`);
       });
     }
+    await writeFile(join(projectDir, 'gio.toml'), server + '[cache]\ndisk_path = "public/_cache"\n');
+    await test('a page cache directory inside public/ stops startup before it is created', async () => {
+      const run = spawnSync(binary, [], {
+        cwd: projectDir,
+        env: { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production' },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      assert.equal(run.status, 1, `exit status ${run.status} (signal ${run.signal}), stderr:\n${run.stderr}`);
+      assert.match(
+        run.stderr,
+        /configuration error: \[cache\] disk_path: the page cache directory \S*public\/_cache is inside the public\/ directory/,
+      );
+      assert.equal(existsSync(join(projectDir, 'public', '_cache')), false, 'nothing was created');
+    });
   } catch (err) {
-    console.error(`\nintegration (gio.toml guards): FAILED\n${err?.stack ?? err}`);
+    console.error(`\nintegration (strict gio.toml): FAILED\n${err?.stack ?? err}`);
     process.exitCode = 1;
   } finally {
     await rm(projectDir, { recursive: true, force: true });
   }
 }
 
-await brokenGuardConfigPhase();
+/**
+ * Phase 1e (gio.toml settings): the keys that used to be parsed but ignored
+ * now take effect - PORT for a [server] table without a port, [compression],
+ * [images] formats, [prefetch] budgets and [cache] disk_path - and a
+ * top-level [x-...] table is left for other tools.
+ */
+async function configSettingsPhase() {
+  const binary = findServerBinary();
+  const appRoot = await copyFixtureForDev('.config-fixture');
+  const tomlPath = join(appRoot, 'gio.toml');
+  let toml = await readFile(tomlPath, 'utf8');
+  assert.match(toml, /^port\s*=\s*39517$/m, 'fixture gio.toml sets the port');
+  assert.match(toml, /^quality\s*=\s*70$/m, 'fixture gio.toml sets [images] quality');
+  toml = toml
+    .replace(/^port\s*=.*\n/m, '')
+    .replace(/^quality\s*=\s*70$/m, 'quality        = 70\nformats        = ["webp"]');
+  toml += [
+    '',
+    '[x-integration]',
+    'note = "read by other tools, ignored by GioJS"',
+    '',
+    '[compression]',
+    'enabled = false',
+    '',
+    '[prefetch]',
+    'max_per_second = 1',
+    '',
+    '[cache]',
+    'disk_path = ".gio/config-phase-pages"',
+    '',
+  ].join('\n');
+  await writeFile(tomlPath, toml);
+
+  const env = {
+    ...process.env,
+    GIO_APP_DIR: join(appRoot, 'app'),
+    PORT: new URL(BASE).port,
+    RUST_LOG: 'info',
+    NODE_ENV: 'production',
+  };
+  delete env.GIO_PORT;
+  delete env.GIO_CACHE_DIR;
+
+  let log = '';
+  const server = spawn(binary, [], { cwd: repoRoot, env });
+  server.stdout.on('data', (d) => { log += d.toString(); });
+  server.stderr.on('data', (d) => { log += d.toString(); });
+  let serverGone = false;
+  const serverExited = new Promise((r) =>
+    server.on('exit', () => { serverGone = true; r(); }),
+  );
+
+  try {
+    await waitFor('server health (gio.toml settings)', async () => {
+      const res = await fetch(`${BASE}/_gio/health`);
+      return res.ok && (await res.json()).nodeReady === true;
+    }, 30_000);
+
+    await test('PORT sets the listen port when gio.toml names none', async () => {
+      const plain = log.replace(/\x1b\[[0-9;]*m/g, '');
+      assert.match(plain, /GioJS listening on 127\.0\.0\.1:39517 .*port_from="PORT"/);
+    });
+
+    await test('[compression] enabled = false sends bodies uncompressed', async () => {
+      const res = await rawGet('/', { 'accept-encoding': 'gzip, br' });
+      assert.equal(res.status, 200);
+      assert.ok(res.body.length > 1024, `a body worth compressing (${res.body.length} bytes)`);
+      assert.equal(res.headers['content-encoding'], undefined);
+      assert.doesNotMatch(res.headers.vary ?? '', /accept-encoding/i);
+    });
+
+    await test('[images] formats limits what /_gio/image negotiates', async () => {
+      const accept = { accept: 'image/avif,image/webp,*/*' };
+      for (const query of ['', '&f=avif']) {
+        const res = await fetch(`${BASE}/_gio/image?src=/gio-test.png&w=96${query}`, { headers: accept });
+        assert.equal(res.status, 200);
+        assert.equal(res.headers.get('content-type'), 'image/webp', `w=96${query}`);
+        await res.arrayBuffer();
+      }
+    });
+
+    await test('[prefetch] max_per_second bounds prefetches per client', async () => {
+      // Three at once fall into at most two one-second windows.
+      const statuses = await Promise.all([0, 1, 2].map(async () => {
+        const res = await fetch(`${BASE}/gio-test.png`, { headers: { purpose: 'prefetch' } });
+        await res.arrayBuffer();
+        return res.status;
+      }));
+      assert.ok(statuses.includes(200), `${statuses}`);
+      assert.ok(statuses.includes(429), `${statuses}`);
+      const plain = await fetch(`${BASE}/gio-test.png`);
+      assert.equal(plain.status, 200, 'requests that are not prefetches are not budgeted');
+      await plain.arrayBuffer();
+    });
+
+    await test('[cache] disk_path chooses the page cache directory', async () => {
+      const res = await fetch(`${BASE}/cached`);
+      assert.match(res.headers.get('x-gio-cache') ?? '', /^miss; stored$/);
+      await res.text();
+      const dir = join(appRoot, '.gio', 'config-phase-pages');
+      await waitFor('page persisted under [cache] disk_path', async () => {
+        const files = await readdir(dir).catch(() => []);
+        return files.some((f) => f.endsWith('.json'));
+      }, 10_000);
+    });
+  } catch (err) {
+    console.error('\nintegration (gio.toml settings): FAILED');
+    console.error(err);
+    console.error('\n── server log tail ──');
+    console.error(significantLogTail(log));
+    process.exitCode = 1;
+  } finally {
+    if (!serverGone) server.kill();
+    await serverExited;
+    await rm(appRoot, { recursive: true, force: true });
+  }
+}
+
+await strictConfigPhase();
 if (process.exitCode !== 1) {
   await main();
 }
@@ -4509,10 +4773,16 @@ if (process.exitCode !== 1) {
   await imageConfigCachePhase();
 }
 if (process.exitCode !== 1) {
+  await configSettingsPhase();
+}
+if (process.exitCode !== 1) {
   await testingKitPhase();
 }
 if (process.exitCode !== 1) {
   await devWatchPhase();
+}
+if (process.exitCode !== 1) {
+  await devCacheDirPhase();
 }
 if (process.exitCode !== 1) {
   await standalonePhase();

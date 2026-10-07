@@ -11,7 +11,7 @@
  *   /plugin-malformed-frame - a non-string header value: the response frame
  *                     fails to parse in Rust (must 500 at once, not time out)
  */
-import type { GioConfig } from '../../../packages/giojs-core/src/config-loader.ts';
+import { defineConfig } from '../../../packages/giojs-core/src/public.ts';
 import type { IPCRequest, IPCResponse } from '../../../packages/giojs-core/src/context.ts';
 
 function text(id: string, body: string): IPCResponse {
@@ -25,7 +25,7 @@ function text(id: string, body: string): IPCResponse {
   };
 }
 
-export default {
+export default defineConfig({
   plugins: [
     {
       name: 'integration-hooks',
@@ -64,4 +64,4 @@ export default {
       },
     },
   ],
-} satisfies GioConfig;
+});
