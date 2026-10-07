@@ -69,9 +69,9 @@ export default function NotFound() {
         random error reference in both modes - show it so users can quote it:
       </p>
       <CodeBlock lang="tsx" code={`// app/error.tsx
-import type { GioErrorProps } from '@gio.js/core';
+import type { ErrorPageProps } from '@gio.js/core';
 
-export default function Error({ error, reset }: GioErrorProps) {
+export default function Error({ error, reset }: ErrorPageProps) {
   return (
     <div>
       <h1>Something went wrong</h1>

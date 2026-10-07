@@ -16,9 +16,7 @@
  * must not export `revalidate`, or must read the session itself, which
  * marks the render personal and keeps it out of the cache.
  */
-import type { GioNodePlugin } from '../../giojs-core/src/plugin.ts';
-import type { IPCRequest, IPCResponse } from '../../giojs-core/src/context.ts';
-import type { SessionStorage } from '../../giojs-core/src/session.ts';
+import type { GioNodePlugin, IPCRequest, IPCResponse, SessionStorage } from '@gio.js/core';
 
 export interface AuthPluginOptions {
   /** The app's session storage (the one its login route commits). */

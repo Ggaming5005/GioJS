@@ -18,6 +18,42 @@ export async function getServerSideProps(ctx) {
   const post = await db.posts.find(ctx.params.id);
   return { props: { post } };
 }`} />
+      <h2>Types</h2>
+      <p>
+        Type the loader with <code>GetServerSideProps</code> from <code>@gio.js/core</code>:
+        the first type argument is the page&apos;s props, the second the route pattern, which
+        types <code>ctx.params</code>. The pattern is checked against the routes the server
+        discovered (the generated <code>.gio/routes.d.ts</code>), so a typo fails{' '}
+        <code>tsc</code>; a params shape (<code>{'{ id: string }'}</code>) works too. The
+        result must be one the server accepts: <code>{'{ props }'}</code> (optionally with{' '}
+        <code>headers</code> and <code>tags</code>), a <code>redirect</code>,{' '}
+        <code>{'{ notFound: true }'}</code> or <code>redirect()</code>.
+      </p>
+      <CodeBlock lang="tsx" code={`import type { GetServerSideProps } from '@gio.js/core';
+
+interface Props {
+  post: Post;
+}
+
+export const getServerSideProps: GetServerSideProps<Props, '/posts/:id'> = async (ctx) => {
+  const post = await db.posts.find(ctx.params.id);   // ctx.params: { id: string }
+  if (!post) return { notFound: true };
+  return { props: { post } };
+};
+
+export default function PostPage({ post }: Props) {
+  return <article><h1>{post.title}</h1></article>;
+}`} />
+      <p>
+        The component receives exactly the returned props - not the params.{' '}
+        <code>{'InferPageProps<typeof getServerSideProps>'}</code> reads them off an
+        unannotated loader. A page <em>without</em> <code>getServerSideProps</code> receives{' '}
+        <code>{'{ params, searchParams }'}</code> instead: type it as{' '}
+        <code>{"PageProps<'/posts/:id'>"}</code>. In JavaScript the same types work through
+        JSDoc, as in the <code>default-js</code> starter:{' '}
+        <code>{"/** @type {import('@gio.js/core').GetServerSideProps<{ post: Post }, '/posts/:id'>} */"}</code>.
+        All types are listed under <a href="/docs/functions#types">Functions</a>.
+      </p>
       <h2>Redirects</h2>
       <p>Return a redirect instead of props to send the visitor elsewhere.</p>
       <CodeBlock lang="tsx" code={`return { redirect: { destination: '/login', permanent: false } };`} />

@@ -40,6 +40,26 @@ export default function Page(): React.JSX.Element {
       <CodeBlock lang="tsx" code={`<GioImage src="/photo.jpg" alt="" width={800} height={600} priority />`} />
       <h2>GioFont</h2>
       <p>Self-hosts a font and injects preload + stylesheet links.</p>
+      <h2>Props of your app components</h2>
+      <p>
+        The props GioJS passes to the components in <code>app/</code> are typed by{' '}
+        <code>@gio.js/core</code>: <code>LayoutProps</code> (<code>{'{ children, path }'}</code>),{' '}
+        <code>{"PageProps<'/posts/:id'>"}</code> for a page without{' '}
+        <code>getServerSideProps</code> (<code>{'{ params, searchParams }'}</code> - a page
+        with one renders with exactly the props it returned),{' '}
+        <code>ErrorPageProps</code> and <code>NotFoundPageProps</code>. See{' '}
+        <a href="/docs/functions#types">Functions</a> for the full list.
+      </p>
+      <CodeBlock lang="tsx" code={`import type { ErrorPageProps, LayoutProps } from '@gio.js/core';
+
+export default function RootLayout({ children }: LayoutProps) {
+  return <html lang="en"><body>{children}</body></html>;
+}
+
+// app/error.tsx
+export default function Error({ error, reset }: ErrorPageProps) {
+  return <p>Something went wrong ({error.digest}) {reset && <button onClick={reset}>Retry</button>}</p>;
+}`} />
     </>
   );
 }

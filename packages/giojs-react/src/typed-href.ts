@@ -5,9 +5,23 @@
  * by the generated <projectRoot>/.gio/routes.d.ts via declaration merging,
  * so href('/posts/:id', { id }) autocompletes registered patterns and
  * typechecks params with zero annotations in app code.
+ *
+ * The generated file fills the global `GioJS.RegisteredRoutes`, the one
+ * registry this package and @gio.js/core's page types (PageProps,
+ * GsspContext) both read - a global, because neither package depends on
+ * the other. @gio.js/core declares the same empty interface; declarations
+ * merge.
  */
 
-export interface GioRegisteredRoutes {}
+declare global {
+  namespace GioJS {
+    /** Route pattern → params of every page and route.ts (.gio/routes.d.ts). */
+    interface RegisteredRoutes {}
+  }
+}
+
+/** The registered routes; augmenting this interface directly works too. */
+export interface GioRegisteredRoutes extends GioJS.RegisteredRoutes {}
 
 export type RouteParamsOf<P extends keyof GioRegisteredRoutes> = GioRegisteredRoutes[P];
 

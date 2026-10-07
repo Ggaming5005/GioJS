@@ -187,10 +187,14 @@ router.push('/about', { transition: 'slide-left' });`} />
       <p>
         The <code>href()</code> helper builds URLs from your route patterns with full
         type checking. At every server start GioJS generates{' '}
-        <code>.gio/routes.d.ts</code> from the discovered routes; the file augments{' '}
-        <code>@gio.js/react</code> (its <code>GioRegisteredRoutes</code> interface, via
-        declaration merging), so patterns autocomplete and params typecheck with zero
-        annotations in your code.
+        <code>.gio/routes.d.ts</code> from the discovered routes; the file fills the global{' '}
+        <code>GioJS.RegisteredRoutes</code> registry (declaration merging), so patterns
+        autocomplete and params typecheck with zero annotations in your code. The same
+        registry types params in <code>useParams()</code> and in the{' '}
+        <code>@gio.js/core</code> types - <code>{"PageProps<'/posts/:id'>"}</code>,{' '}
+        <code>{"GetServerSideProps<Props, '/posts/:id'>"}</code>,{' '}
+        <code>{"GioRequest<'/api/posts/:id'>"}</code> (see{' '}
+        <a href="/docs/functions#types">Functions</a>).
       </p>
       <CodeBlock lang="tsx" code={`import { GioLink, href } from '@gio.js/react';
 

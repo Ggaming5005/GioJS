@@ -35,8 +35,9 @@ export interface GioNodePlugin {
 }
 ```
 
-`IPCRequest`/`IPCResponse` are the wire shapes shown for reference - they are not separately
-exported from `@gio.js/core`. Annotate your plugin object as `GioNodePlugin` and the hook
+`IPCRequest`/`IPCResponse` are the wire shapes the hooks receive and return; both are exported
+from `@gio.js/core` (`import type { IPCRequest, IPCResponse } from '@gio.js/core'`) for helpers
+that build or inspect them. Annotate your plugin object as `GioNodePlugin` and the hook
 parameters and return types are inferred.
 
 **Hook behaviour:**

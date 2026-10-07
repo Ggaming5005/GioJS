@@ -8,6 +8,21 @@ importers:
 
   .: {}
 
+  examples/auth-demo:
+    dependencies:
+      '@gio.js/core':
+        specifier: workspace:*
+        version: link:../../packages/giojs-core
+      giojs-auth-example:
+        specifier: workspace:*
+        version: link:../../packages/giojs-auth-example
+      react:
+        specifier: ^19.0.0
+        version: 19.2.6
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.6(react@19.2.6)
+
   examples/basic-app:
     dependencies:
       '@gio.js/core':
@@ -44,6 +59,12 @@ importers:
       '@gio.js/server-win32-x64':
         specifier: 0.1.0-beta.7
         version: link:../../platform/giojs-win32-x64
+
+  packages/giojs-auth-example:
+    dependencies:
+      '@gio.js/core':
+        specifier: workspace:*
+        version: link:../giojs-core
 
   packages/giojs-cli:
     dependencies:

@@ -1,5 +1,5 @@
 import React from 'react';
-import { useWebSocket } from '../../../packages/giojs-react/src/index.ts';
+import { useWebSocket } from '@gio.js/react';
 
 export default function ChatPage(): React.JSX.Element {
   const { send, lastMessage, readyState } = useWebSocket('ws://localhost:3000/chat');

@@ -18,12 +18,29 @@ export default function Page(): React.JSX.Element {
       <CodeBlock lang="ts" code={`// app/api/notes/[id]/route.ts
 import type { GioRequest } from '@gio.js/core';
 
-export async function POST(req: GioRequest) {
+export async function POST(req: GioRequest<'/api/notes/:id'>) {
   const { text } = req.json<{ text: string }>();
   const user = req.cookies['session'];       // parsed Cookie header
-  const id = req.params['id'];               // from the [id] segment
+  const id = req.params.id;                  // from the [id] segment: string
   return { saved: text, id };                // → application/json, 200
 }`} />
+      <p>
+        The route pattern in <code>{"GioRequest<'/api/notes/:id'>"}</code> types{' '}
+        <code>req.params</code>; it is checked against the routes the server discovered (the
+        generated <code>.gio/routes.d.ts</code>), so a typo fails <code>tsc</code>. A params
+        shape (<code>{'GioRequest<{ id: string }>'}</code>) works too, and plain{' '}
+        <code>GioRequest</code> types them as <code>{'Record<string, string>'}</code> (each one{' '}
+        <code>string | undefined</code> under <code>noUncheckedIndexedAccess</code>, which the
+        TypeScript starter enables). To type
+        the whole handler, use <code>RouteHandler</code> - its return type admits everything
+        the server accepts:
+      </p>
+      <CodeBlock lang="ts" code={`import type { RouteHandler } from '@gio.js/core';
+
+export const GET: RouteHandler<'/api/notes/:id'> = async (req) => {
+  const note = await db.notes.find(req.params.id);
+  return note ?? new Response('gone', { status: 410 });
+};`} />
 
       <h2>The request object</h2>
       <p>

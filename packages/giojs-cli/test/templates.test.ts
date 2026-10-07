@@ -19,7 +19,7 @@ for (const [template, file] of [['default', 'page.tsx'], ['default-js', 'page.js
   test(`${template}: the post page exports in static mode and its copy holds in both modes`, async () => {
     const source = await readFile(join(templatesDir, template, 'app', 'posts', '[id]', file), 'utf8');
     // Static export needs the list of ids; the server ignores it.
-    assert.match(source, /export function getStaticPaths\(/);
+    assert.match(source, /export const getStaticPaths\b/);
     // The visible copy explains both: on-demand rendering on the server, and
     // only the getStaticPaths ids after an export.
     assert.match(source, /<code>getServerSideProps<\/code> renders any ID on demand/);
@@ -31,7 +31,7 @@ for (const [template, file] of [['default', 'page.tsx'], ['default-js', 'page.js
 for (const [template, file] of [['default', 'layout.tsx'], ['default-js', 'layout.jsx']] as const) {
   test(`${template}: the root layout declares its title and description as metadata`, async () => {
     const source = await readFile(join(templatesDir, template, 'app', file), 'utf8');
-    assert.match(source, /export const metadata = \{/);
+    assert.match(source, /export const metadata(?:: Metadata)? = \{/);
     assert.match(source, /title: \{ default: "\{\{PROJECT_NAME\}\}", template: "%s \| \{\{PROJECT_NAME\}\}" \}/);
     // Hand-written, a description would sit next to every page's metadata
     // one (only titles are deduplicated), and a <title> is superseded anyway.

@@ -6,7 +6,7 @@
  * `.server.ts` name keeps this module (and the secret handling) out of
  * client bundles - importing it from client code fails the route's build.
  */
-import { createSessionStorage } from '../../../packages/giojs-core/src/public.ts';
+import { createSessionStorage } from '@gio.js/core';
 
 export interface DemoSession {
   userId: string;

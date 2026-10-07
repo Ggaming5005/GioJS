@@ -374,6 +374,17 @@ async function main() {
       assert.match(html, /\/_next\/static\/chunks\/route-index-[A-Z0-9]+\.js/);
     });
 
+    await test('the worker types the discovered routes into the global registry (.gio/routes.d.ts)', async () => {
+      // @gio.js/react (href, useParams) and @gio.js/core (PageProps,
+      // GsspContext, GioRequest) both read GioJS.RegisteredRoutes.
+      const types = await readFile(join(fixtureDir, '.gio', 'routes.d.ts'), 'utf8');
+      assert.match(types, /declare global \{\n {2}namespace GioJS \{\n {4}interface RegisteredRoutes \{/);
+      assert.match(types, /'\/posts\/:id': \{ id: string \};/);
+      assert.match(types, /'\/docs\/\*slug': \{ slug: string \};/);
+      assert.match(types, /'\/shop\/\*path\?': \{ path\?: string \};/);
+      assert.doesNotMatch(types, /declare module/);
+    });
+
     await test('hydration chunk is served with immutable caching', async () => {
       const html = await (await fetch(`${BASE}/`)).text();
       const chunk = html.match(/\/_next\/static\/chunks\/route-index-[A-Z0-9]+\.js/)?.[0];

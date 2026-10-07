@@ -1,19 +1,16 @@
 import React from 'react';
+import type { LayoutProps, Metadata } from '@gio.js/core';
 import Navbar from '@/components/layout/Navbar';
 import Footer from '@/components/layout/Footer';
 
 // The title and description of every page: a page's own `metadata` (or
 // generateMetadata) title fills the template, e.g. 'About | {{PROJECT_NAME}}'.
-export const metadata = {
+export const metadata: Metadata = {
   title: { default: "{{PROJECT_NAME}}", template: "%s | {{PROJECT_NAME}}" },
   description: 'A GioJS application.',
 };
 
-interface RootLayoutProps {
-  children: React.ReactNode;
-}
-
-export default function RootLayout({ children }: RootLayoutProps): React.JSX.Element {
+export default function RootLayout({ children }: LayoutProps): React.JSX.Element {
   return (
     <html lang="en">
       <head>

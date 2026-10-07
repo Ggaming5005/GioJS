@@ -19,6 +19,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import React from 'react';
 import type { GsspContext } from './router.ts';
+import type { RouteOrParams } from './route-params.ts';
 import { metadataElements, type MetadataTag } from './metadata-tags.ts';
 
 /** `{ default, template }` in a layout, or `{ absolute }` anywhere. */
@@ -142,7 +143,7 @@ export interface Metadata {
  * gets, with the same tracking - reading `ctx.cookies`, `ctx.ip`,
  * `ctx.host`, `ctx.scheme` or a credential header makes the render personal.
  */
-export type MetadataContext = GsspContext;
+export type MetadataContext<Route extends RouteOrParams = Record<string, string>> = GsspContext<Route>;
 
 /** generateMetadata's second argument. */
 export interface MetadataExtras {
@@ -156,8 +157,9 @@ export interface MetadataExtras {
   props?: Record<string, unknown>;
 }
 
-export type GenerateMetadata = (
-  ctx: MetadataContext,
+/** `generateMetadata`'s type; `GenerateMetadata<'/posts/:id'>` types `ctx.params`. */
+export type GenerateMetadata<Route extends RouteOrParams = Record<string, string>> = (
+  ctx: MetadataContext<Route>,
   extras: MetadataExtras,
 ) => Metadata | Promise<Metadata>;
 

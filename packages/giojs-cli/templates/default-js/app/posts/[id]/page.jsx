@@ -1,6 +1,11 @@
 import React from 'react';
 import { GioLink } from '@gio.js/react';
 
+/**
+ * @typedef {{ id: string, title: string, body: string, publishedAt: string }} Post
+ */
+
+/** @param {{ post: Post }} props */
 export default function PostPage({ post }) {
   return (
     <section className="gio-container">
@@ -34,9 +39,12 @@ export default function PostPage({ post }) {
   );
 }
 
-export async function getServerSideProps(ctx) {
+// '/posts/:id' types ctx.params as { id: string } in your editor.
+/** @type {import('@gio.js/core').GetServerSideProps<{ post: Post }, '/posts/:id'>} */
+export const getServerSideProps = async (ctx) => {
   const { id } = ctx.params;
   // Replace with your actual data source
+  /** @type {Post} */
   const post = {
     id,
     title: `Post #${id}`,
@@ -44,10 +52,11 @@ export async function getServerSideProps(ctx) {
     publishedAt: new Date().toISOString(),
   };
   return { props: { post } };
-}
+};
 
 // `gio export` (static sites) pre-renders one page per entry: dynamic routes
 // need the list up front. The server ignores it and renders any id on demand.
-export function getStaticPaths() {
+/** @type {import('@gio.js/core').GetStaticPaths<'/posts/:id'>} */
+export const getStaticPaths = () => {
   return { paths: ['1', '2', '3'].map((id) => ({ params: { id } })) };
-}
+};

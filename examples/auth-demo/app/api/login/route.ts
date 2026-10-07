@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import type { GioRequest } from '../../../../../packages/giojs-core/src/public.ts';
+import type { GioRequest } from '@gio.js/core';
 import { sessions } from '../../../lib/session.server.ts';
 
 /** Constant-time string comparison (hashing first equalizes the lengths). */

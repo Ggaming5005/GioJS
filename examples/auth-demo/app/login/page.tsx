@@ -1,12 +1,13 @@
 import React from 'react';
+import type { GetServerSideProps } from '@gio.js/core';
 
 interface Props {
   failed: boolean;
 }
 
-export async function getServerSideProps(ctx: { query: Record<string, string> }): Promise<{ props: Props }> {
+export const getServerSideProps: GetServerSideProps<Props> = async (ctx) => {
   return { props: { failed: ctx.query['error'] === '1' } };
-}
+};
 
 export default function Login({ failed }: Props): React.JSX.Element {
   return (
