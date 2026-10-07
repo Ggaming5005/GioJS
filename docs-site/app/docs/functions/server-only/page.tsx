@@ -40,7 +40,9 @@ export const db = createClient(process.env.DATABASE_URL);`} />
         </li>
         <li>
           A file name ending in <code>.server.ts</code> (<code>.tsx</code>, <code>.js</code>,{' '}
-          <code>.jsx</code>), with no import at all.
+          <code>.jsx</code>, <code>.mts</code>, <code>.cts</code>, <code>.mjs</code>,{' '}
+          <code>.cjs</code>), with no import at all. This applies to your own files, not to
+          files inside dependencies.
         </li>
       </ul>
       <h3 id="behavior">Behavior</h3>
@@ -76,7 +78,10 @@ export function dbUrl(): string {
 export default function Leaky() {
   return <h1>{dbUrl().length}</h1>;   // a component - this code goes to the browser
 }`} />
-      <p>The server log at startup:</p>
+      <p>
+        At startup the worker logs an error (<code>client bundle imports server-only code -
+        route will render without hydration</code>) whose message names the chain:
+      </p>
       <CodeBlock lang="text" code={`client bundle for route "/leaky" imports server-only code: app/leaky/page.tsx -> lib/stats.ts -> @gio.js/core/server-only. The page still server-renders but will NOT hydrate (no client JS) until this import is removed from client code - keep server-only modules behind getServerSideProps or route.ts.`} />
       <h3 id="the-fix">The fix</h3>
       <CodeBlock lang="tsx" title="app/leaky/page.tsx" code={`import type { GetServerSideProps, InferPageProps } from '@gio.js/core';

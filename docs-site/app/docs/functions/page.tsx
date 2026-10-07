@@ -51,8 +51,10 @@ export default function Page(): React.JSX.Element {
 
       <h2 id="client-functions">Client functions</h2>
       <p>
-        From <code>@gio.js/react</code>. Safe to import during server rendering, where the
-        ones that touch the browser do nothing.
+        From <code>@gio.js/react</code>. Safe to import during server rendering:{' '}
+        <code>navigate()</code> and the observer helpers do nothing there, and{' '}
+        <code>getDeploymentId()</code> returns <code>undefined</code>. Only{' '}
+        <code>handleHardReload()</code> must not be called outside the browser.
       </p>
       <table>
         <thead><tr><th>Function</th><th>What it does</th></tr></thead>
@@ -63,7 +65,7 @@ export default function Page(): React.JSX.Element {
           <tr><td><code>initAnimateObserver()</code>, <code>observeElement()</code></td><td>The shared IntersectionObserver behind <a href="/docs/components/animate"><code>{'<Animate>'}</code></a> (below).</td></tr>
         </tbody>
       </table>
-      <h3 id="initanimateobserver-and-observeelement">initAnimateObserver and observeElement</h3>
+      <h3 id="initanimateobserver-and-observeelement"><code>initAnimateObserver</code> and <code>observeElement</code></h3>
       <p>
         <code>{'<Animate>'}</code> uses one <code>IntersectionObserver</code> for every
         animated element on the page. <code>observeElement(el)</code> adds an element to it

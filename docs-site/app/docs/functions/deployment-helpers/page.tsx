@@ -75,7 +75,8 @@ export default function Page(): React.JSX.Element {
       <p>
         <code>handleHardReload()</code> reloads the page (
         <code>window.location.reload()</code>), so the tab fetches the new build&apos;s HTML and
-        scripts. Browser only.
+        scripts. Browser only: unlike the other helpers it has no server-side guard, so
+        calling it during server rendering throws (there is no <code>window</code>).
       </p>
 
       <h2 id="initdeploymentid">initDeploymentId</h2>

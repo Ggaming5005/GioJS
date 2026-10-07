@@ -70,6 +70,11 @@ const res = await callRoute('/api/notes', { method: 'POST', body: { text: 'hi' }
 
       <h2 id="examples">Examples</h2>
       <h3 id="json-and-form-bodies">JSON and form bodies</h3>
+      <p>
+        Against the <code>/api/notes</code> handler from{' '}
+        <a href="/docs/functions/request-errors#accept-json-and-a-plain-form">Request body
+        errors</a>, which accepts JSON and a form:
+      </p>
       <CodeBlock lang="ts" title="tests/notes.test.ts" code={`import { expect, it } from 'vitest';
 import { callRoute } from '@gio.js/core/testing';
 
@@ -87,6 +92,11 @@ it('refuses a text/plain body', async () => {
   expect(res.status).toBe(415);
 });`} />
       <h3 id="a-page-action">A page action</h3>
+      <p>
+        Against the contact page from{' '}
+        <a href="/docs/functions/redirect#redirect-after-a-form-post">redirect</a>, whose
+        action redirects with a session cookie or re-renders with a <code>422</code>:
+      </p>
       <CodeBlock lang="ts" code={`it('redirects after a valid contact form', async () => {
   const res = await callRoute('/contact', {
     method: 'POST',
@@ -106,7 +116,9 @@ it('re-renders with a 422 for an invalid email', async () => {
       <p>
         For a handler that returns a <code>GioEventStream</code>, read <code>stream</code>{' '}
         piece by piece, or <code>text()</code> for a stream the handler closes. Cancelling the
-        reader runs the handler&apos;s cleanup function, like a client disconnecting.
+        reader runs the handler&apos;s cleanup function, like a client disconnecting. Here{' '}
+        <code>/api/clock</code> is the handler from{' '}
+        <a href="/docs/functions/gio-event-stream#named-events-with-ids">GioEventStream</a>.
       </p>
       <CodeBlock lang="ts" code={`it('ticks', async () => {
   const res = await callRoute('/api/clock');

@@ -199,3 +199,23 @@ test('the function reference states the limits and defaults the code uses', () =
   assert.ok(readyMs, 'createTestServer timeout default moved');
   assert.match(page('create-test-server'), new RegExp(`default: '${readyMs}'`));
 });
+
+test('the function reference states the server limits it quotes', () => {
+  const server = (name) => `crates/giojs-server/src/${name}`;
+  const page = (slug) => docsPage(`functions/${slug}`);
+
+  // Request body errors: the [server] max_body_bytes default and the IPC message cap behind 0.
+  const bodyDefault = /fn default_max_body_bytes\(\) -> usize \{\s*2 \* 1024 \* 1024\s*\}/;
+  assert.match(read(server('config.rs')), bodyDefault, 'max_body_bytes default moved - update request-errors');
+  assert.match(page('request-errors'), /2 MiB by\s+default/);
+  assert.match(read(server('ipc.rs')), /pub const MAX_IPC_MESSAGE_SIZE: usize = 64 \* 1024 \* 1024;/);
+  assert.match(read(server('ipc.rs')), /pub const MAX_BINARY_BODY_BYTES: usize = MAX_IPC_MESSAGE_SIZE \/ 4 \* 3;/);
+  assert.match(page('request-errors'), /64 MiB message cap \(about 48 MiB of binary body\)/);
+
+  // cspNonce: 24 random bytes per response (192 bits, 32 base64 characters), and where the placeholder lives.
+  assert.match(read(server('security.rs')), /const NONCE_BYTES: usize = 24;/);
+  assert.match(page('csp-nonce'), /192 bits \(32 base64 characters\)/);
+  assert.match(read(server('config.rs')), /fn default_cache_disk_path\(\) -> String \{\s*"\.gio\/cache\/pages"/);
+  assert.match(read(server('main.rs')), /load_or_create_nonce_placeholder\(\s*&cache_dir\.join\("meta"\)/);
+  assert.match(page('csp-nonce'), /<code>meta\/csp-nonce-placeholder-\*<\/code>[\s\S]*<code>\.gio\/cache\/pages<\/code>/);
+});

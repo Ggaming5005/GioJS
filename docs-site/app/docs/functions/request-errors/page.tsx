@@ -167,8 +167,10 @@ export function PATCH(req: GioRequest) {
           without a body, or with a binary (base64) body.
         </li>
         <li>
-          <strong>Bodies over <code>[server] max_body_bytes</code></strong> never reach your
-          code: the server answers <code>413</code> before reading them.
+          <strong>Bodies over <code>[server] max_body_bytes</code></strong> (2 MiB by
+          default) never reach your code: the server answers <code>413</code>.{' '}
+          <code>max_body_bytes = 0</code> lifts that limit, leaving only the worker&apos;s
+          64 MiB message cap (about 48 MiB of binary body), and logs a startup warning.
         </li>
         <li>
           <strong><code>req.body</code></strong> always holds the raw body (base64 when{' '}

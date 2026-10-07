@@ -111,8 +111,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <li>
           <strong>Rotation.</strong> The placeholder changes with a new{' '}
           <code>GIO_DEPLOYMENT_ID</code>, a new standalone build or a change to the{' '}
-          <code>gio.toml</code> settings pages render with. To rotate it by hand, delete{' '}
-          <code>.gio/cache/pages/meta/csp-nonce-placeholder-*</code> and restart.
+          <code>gio.toml</code> settings pages render with - not with a code-only redeploy.
+          To rotate it by hand, delete <code>meta/csp-nonce-placeholder-*</code> in the page
+          cache directory (<code>.gio/cache/pages</code> unless <code>[cache] disk_path</code>{' '}
+          or <code>GIO_CACHE_DIR</code> moves it) and restart.
         </li>
       </ul>
 

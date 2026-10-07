@@ -107,6 +107,10 @@ const page = await renderPage('/posts/1');`} />
 
       <h2 id="examples">Examples</h2>
       <h3 id="props-tags-and-cacheability">Props, tags and cacheability</h3>
+      <p>
+        For the cached, tagged <code>/posts/[id]</code> page from{' '}
+        <a href="/docs/functions/revalidate-tag#tag-a-list-and-its-items">revalidateTag</a>:
+      </p>
       <CodeBlock lang="ts" title="tests/posts.test.ts" code={`import { expect, it } from 'vitest';
 import { renderPage } from '@gio.js/core/testing';
 
@@ -125,6 +129,12 @@ it('404s an unknown post', async () => {
   expect(page.props).toBeNull();
 });`} />
       <h3 id="a-redirect-and-a-cookie">A redirect and a cookie</h3>
+      <p>
+        For the <code>/dashboard</code> guard from{' '}
+        <a href="/docs/functions/redirect#a-guard-shared-by-pages-and-actions">redirect</a>{' '}
+        and the <code>/welcome</code> page from{' '}
+        <a href="/docs/functions/cookies#cookies-from-getserversideprops">Cookie helpers</a>:
+      </p>
       <CodeBlock lang="ts" code={`it('sends visitors without a session to /login', async () => {
   const page = await renderPage('/dashboard');
   expect(page.status).toBe(302);
@@ -152,6 +162,12 @@ it('greets a returning visitor', async () => {
         <li>
           <strong>CSS Modules</strong> render the server&apos;s class names under node:test; under
           vitest add <a href="/docs/functions/gio-vitest">gioVitest()</a>.
+        </li>
+        <li>
+          <strong>No client bundles are built.</strong> The page&apos;s bootstrap script points
+          at <code>TEST_ENTRY_SCRIPT</code> (<code>/_gio/testing/entry.js</code>, also
+          exported from <code>@gio.js/core/testing</code>) instead of a real chunk; the
+          hydration envelope that <code>props</code> is read from is the real one.
         </li>
         <li>
           <strong>Server-only.</strong> <code>@gio.js/core/testing</code> imports the

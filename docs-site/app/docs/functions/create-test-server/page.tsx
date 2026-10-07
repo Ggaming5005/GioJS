@@ -45,7 +45,14 @@ await server.close();`} />
           name: 'binary',
           type: 'string',
           default: 'GIO_SERVER_BIN, else @gio.js/server',
-          description: <>The <code>giojs-server</code> binary to run.</>,
+          description: (
+            <>
+              The <code>giojs-server</code> binary to run. Without it,{' '}
+              <code>GIO_SERVER_BIN</code>, then the platform binary that{' '}
+              <code>@gio.js/server</code> installed, then (inside the GioJS repository) a{' '}
+              <code>target/debug</code> or <code>target/release</code> build.
+            </>
+          ),
         },
         { name: 'timeoutMs', type: 'number', default: '60000', description: <>How long to wait for the worker to be ready, in milliseconds.</> },
       ]} />
@@ -100,6 +107,16 @@ await server.close();`} />
 
       <h2 id="examples">Examples</h2>
       <h3 id="guards-csrf-and-headers">Guards, CSRF and headers (vitest)</h3>
+      <p>
+        For a project with a session guard on <code>/admin</code> and the{' '}
+        <code>/api/notes</code> handler from{' '}
+        <a href="/docs/functions/request-errors#accept-json-and-a-plain-form">Request body
+        errors</a>:
+      </p>
+      <CodeBlock lang="toml" title="gio.toml" code={`[[guards]]
+path = "/admin/*rest"
+require_session = true
+redirect_to = "/login"`} />
       <CodeBlock lang="ts" title="tests/server.test.ts" code={`import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createTestServer, type TestServer } from '@gio.js/core/testing';
 
@@ -129,6 +146,11 @@ it('sends the default security headers', async () => {
   expect(res.headers.get('x-content-type-options')).toBe('nosniff');
 });`} />
       <h3 id="the-page-cache-and-revalidation">The page cache and revalidation</h3>
+      <p>
+        With the cached <code>/posts/[id]</code> page and the <code>PUT</code> handler that
+        calls <code>revalidateTag</code> from{' '}
+        <a href="/docs/functions/revalidate-tag#tag-a-list-and-its-items">revalidateTag</a>:
+      </p>
       <CodeBlock lang="ts" code={`it('purges a post on update', async () => {
   await fetch(\`\${server.url}/posts/1\`);                       // miss; stored
   const cached = await fetch(\`\${server.url}/posts/1\`);

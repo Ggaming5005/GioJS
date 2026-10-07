@@ -59,8 +59,12 @@ export default defineMiddleware({
           type: '{ path, headers: Record<string, string> }[]',
           description: (
             <>
-              Set response headers on every response whose path matches. Every matching rule
-              applies; an empty value removes a header, including a default security header.
+              Set response headers on every response whose requested path matches, redirect
+              and guard responses included. Every matching rule applies, and a rule&apos;s value
+              replaces the response&apos;s own - except <code>set-cookie</code>, which is added
+              next to the response&apos;s cookies. An empty value removes a default security
+              header (<code>x-frame-options</code>, <code>referrer-policy</code>, CSP, ...)
+              for the rule&apos;s paths.
             </>
           ),
         },
@@ -97,7 +101,8 @@ export default defineMiddleware({
         <li>
           Per request: guards, then redirects, then rewrites; the first match wins within each
           phase, and <code>gio.toml</code> rules are checked before <code>middleware.ts</code>{' '}
-          rules in every phase. Header rules are applied independently.
+          rules in every phase. Header rules are applied independently, matched against the
+          path that was asked for (not a rewritten one).
         </li>
         <li>
           The original query string is kept: appended to a redirect&apos;s or a guard&apos;s{' '}
@@ -210,7 +215,9 @@ export default defineMiddleware({
           changes: (
             <>
               Guards gain <code>requireSession</code>, verified in Rust; a malformed guard
-              denies its path instead of being dropped.
+              denies its path instead of being dropped. <code>*rest</code> matches zero
+              segments too. Header rules also apply to redirect and guard responses and match
+              the requested path rather than a rewritten one.
             </>
           ),
         },
