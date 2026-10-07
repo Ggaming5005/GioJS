@@ -82,7 +82,7 @@ GET http://localhost:3000/posts/1
         Opt in by exporting <code>shell = 'cache'</code> next to <code>revalidate</code> on a
         page with Suspense boundaries:
       </p>
-      <CodeBlock lang="tsx" code={`import React, { Suspense } from 'react';
+      <CodeBlock lang="tsx" code={`import React, { Suspense, use } from 'react';
 
 export const revalidate = 60;
 export const shell = 'cache';
@@ -92,10 +92,18 @@ export default function Page({ who }: PageProps): React.JSX.Element {
     <main>
       <h1>Storefront</h1>{/* shell: cached, identical for everyone */}
       <Suspense fallback={<p>Loading your cart…</p>}>
-        <Cart who={who} />{/* hole: re-rendered per request, streamed in */}
+        <Cart cart={cartFor(who)} />{/* hole: suspends, re-rendered per request, streamed in */}
       </Suspense>
     </main>
   );
+}
+
+// The hole waits for this visitor's cart, so React sends it after the shell.
+// cartFor() stands for your data call (it runs again in the browser while
+// the page hydrates).
+function Cart({ cart }: { cart: Promise<CartItem[]> }): React.JSX.Element {
+  const items = use(cart);
+  return <p>{items.length} items in your cart</p>;
 }
 
 export async function getServerSideProps(ctx: GsspContext) {
@@ -121,12 +129,17 @@ export async function getServerSideProps(ctx: GsspContext) {
         dropped with a warning; set them from a route handler or a non-PPR page.
       </p>
       <p>
-        Reading cookies in <code>getServerSideProps</code> is expected here and keeps the shell
-        cached: the props it returns never become part of the shell. The hydration envelope
-        (the serialized props) is streamed right after the shell boundary on every response,
-        so each visitor hydrates with their own props. Rendering those props{' '}
-        <em>outside</em> a Suspense boundary breaks the contract - the first visitor&apos;s
-        values would be cached in the shell.
+        Reading cookies in <code>getServerSideProps</code> is expected here. The hydration
+        envelope (the serialized props) is streamed right after the shell boundary on every
+        response, so each visitor hydrates with their own props. What the holes render from
+        those props stays out of the shell only if the hole <em>suspends</em>: Suspense
+        content that renders without suspending - or whose data arrives before the shell has
+        been sent - is flushed with the shell. GioJS checks the shell before Rust stores it:
+        when <code>getServerSideProps</code> read credentials and the shell holds rendered
+        Suspense content (or no pending hole at all), the shell is not stored and a warning
+        names the route; the page still streams, rendered in full for every request.
+        Rendering those props <em>outside</em> a Suspense boundary breaks the contract - the
+        first visitor&apos;s values would be cached in the shell.
       </p>
       <p>
         A <code>loading.tsx</code> is a Suspense boundary too, around everything below its

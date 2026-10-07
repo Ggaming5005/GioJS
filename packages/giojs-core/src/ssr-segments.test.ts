@@ -634,10 +634,10 @@ describe('loading.*', () => {
     });
     const streamed = expectStream(await render('/feed', routes, layouts, { segmentFiles: files(), streaming: true }));
     expect(streamed.head.pprShell).toBe(true);
-    expect(streamed.keepShell?.()).toBe(true);
+    expect(streamed.keepShell?.('')).toBe(true);
     await readAll(streamed.stream);
     // Asked live: once React reported the hole's error, the shell is not kept.
-    expect(streamed.keepShell?.()).toBe(false);
+    expect(streamed.keepShell?.('')).toBe(false);
   });
 
   it("is the shell edge of a PPR page: the cached shell holds its fallback", async () => {

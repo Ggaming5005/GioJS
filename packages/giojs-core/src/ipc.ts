@@ -624,7 +624,7 @@ function shellFlushTick(): Promise<typeof SHELL_FLUSHED> {
  * PPR: React resolves renderToReadableStream at shell-ready and flushes the
  * complete shell on the first pull, so everything readable before a macrotask
  * tick is the shell. shellBoundary 'mark' emits a shell_end frame there
- * (unless keepShell() says the shell must not be stored);
+ * (unless keepShell(shell) says the shell must not be stored);
  * 'discard' drops everything before it (prefix included) and forwards only
  * the hole chunks. Both passes detect the boundary identically, so a cached
  * shell and a later holes render concatenate without gaps or overlaps as long
@@ -641,9 +641,12 @@ export async function pumpRenderStream(
   const reader = render.stream.getReader();
   const boundary = render.shellBoundary;
   let inShell = boundary !== undefined;
+  // The shell text keepShell judges: only collected when it is asked.
+  let shell = '';
+  const collectShell = boundary === 'mark' && render.keepShell !== undefined;
   const leaveShell = (): void => {
     inShell = false;
-    if (boundary === 'mark' && (render.keepShell?.() ?? true)) {
+    if (boundary === 'mark' && (render.keepShell?.(shell) ?? true)) {
       writeFrame(socket, { type: 'shell_end', id: reqId });
     }
     if (render.envelope !== undefined) {
@@ -657,6 +660,7 @@ export async function pumpRenderStream(
     }
     if (render.prefix !== '' && boundary !== 'discard') {
       writeFrame(socket, { type: 'chunk', id: reqId, data: render.prefix });
+      if (collectShell) shell += render.prefix;
     }
     let pending = reader.read();
     while (true) {
@@ -674,6 +678,7 @@ export async function pumpRenderStream(
         return;
       }
       const data = decoder.decode(value, { stream: true });
+      if (inShell && collectShell) shell += data;
       if (data !== '' && !(inShell && boundary === 'discard')) {
         writeFrame(socket, { type: 'chunk', id: reqId, data });
       }

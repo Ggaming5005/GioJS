@@ -172,6 +172,10 @@ export GIO_REVALIDATE_TOKEN=<token>     # or [revalidate] token = "..." in gio.t
         even though the page exports <code>revalidate</code>. A warning is logged once per
         route. Headers an <code>onRequest</code> plugin added, changed or removed count as
         credentials too; other headers (<code>accept-language</code>, <code>user-agent</code>, ...) do not.
+        A plugin that reads the credential headers and then rewrites the request&apos;s path,
+        query or locale personalizes the render too: Rust keys the cache on the URL as
+        requested, so that render (say, an admin dashboard picked from a <code>role</code>{' '}
+        cookie) is never stored under it.
       </p>
       <p>
         To keep a personalized page fast, either drop <code>revalidate</code> (it renders per

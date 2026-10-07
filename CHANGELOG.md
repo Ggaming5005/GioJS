@@ -74,9 +74,11 @@ first.
   `cookie` or `authorization` header, `ctx.ip`, `ctx.host` or `ctx.scheme` (or
   the raw client-address and host headers), or headers an `onRequest` plugin
   changed, renders per request and is never stored, and neither is any
-  response that sets a cookie. Pages that read cookies used to be cached and
-  served to everyone. A warning names each route: drop `revalidate`, or cache
-  the shell with `shell = 'cache'` and personalize inside Suspense.
+  response that sets a cookie or a render an `onRequest` plugin rewrote (path,
+  query or locale) after reading those headers. Pages that read cookies used
+  to be cached and served to everyone. A warning names each route: drop
+  `revalidate`, or cache the shell with `shell = 'cache'` and personalize
+  inside Suspense holes that suspend.
 - **Production errors show only a digest.** A failed render answers a generic
   page with a short error reference, and the message and stack are logged
   under the same digest. `error.tsx` now receives
@@ -162,11 +164,15 @@ first.
 ### Security
 
 - **No cross-visitor cache leaks.** Renders that read cookies, credentials,
-  the client's IP, host or scheme, or headers a plugin changed, and responses
-  that set cookies, are never cached or shared between concurrent requests,
-  whatever `revalidate` says. A spoofed `Host` can no longer poison the cache.
-  With PPR, the hydration props now stream after the shell boundary, so a
-  cached shell never carries another visitor's `getServerSideProps` props.
+  the client's IP, host or scheme, or headers a plugin changed, renders an
+  `onRequest` plugin rewrote (path, query or locale) after reading
+  credentials, and responses that set cookies, are never cached or shared
+  between concurrent requests, whatever `revalidate` says. A spoofed `Host`
+  can no longer poison the cache. With PPR, the hydration props now stream
+  after the shell boundary, and a shell holding Suspense content rendered
+  from a credential-reading `getServerSideProps` (a hole that did not
+  suspend, or resolved before the shell was sent) is not stored. Rendering
+  those props outside a Suspense hole still breaks the PPR contract.
 - **The `/_gio` namespace is closed.** `/_gio/settings` could render
   `app/[org]/settings` with `org = "_gio"` without running its guard; unknown
   `/_gio/` paths now `404` in Rust.
@@ -257,12 +263,13 @@ first.
   real sessions, and `examples/auth-demo` is a complete login, guard and
   logout flow.
 - **Server code stays out of the browser.** `getServerSideProps` and
-  `getStaticPaths`, and every module or package only they import, are
-  tree-shaken from client bundles in every export form, including
-  `export ... from` and `export *`. Importing `@gio.js/core/server-only` (or
-  `server-only`), or naming a file `*.server.ts`, marks a module server-only:
-  a route whose client bundle pulls one in is rejected with the import chain.
-  Only `GIO_PUBLIC_*` variables reach client code.
+  `getStaticPaths`, and every module or package only they import (with
+  `import` or `import()`), are tree-shaken from client bundles in every export
+  form, including `export ... from` and `export *`. Importing
+  `@gio.js/core/server-only` (or `server-only`), or naming a file
+  `*.server.ts`, marks a module server-only: a route whose client bundle
+  pulls one in is rejected with the import chain. Only `GIO_PUBLIC_*`
+  variables reach client code.
 - **Supply chain.** Release binaries are built from a committed `Cargo.lock`
   with `--locked`. GitHub Actions are pinned to commit SHAs and the `cross`
   install to an exact revision. `cargo-deny` checks advisories, licenses and
@@ -381,10 +388,11 @@ first.
   of deleting them, and the page cache only ever deletes its own entry files.
 - **Static exports hydrate.** `gio export` builds the client bundles, so
   exported pages are interactive and `GioLink` navigates client-side on any
-  static host; images render their plain `src`. Routes whose bundle fails or
-  imports server-only code are exported as HTML only and listed, pages that
-  call `notFound()` are skipped, and failed pages are listed with their error
-  reference.
+  static host; images render their plain `src`. They hydrate inside the same
+  `loading.tsx` and `error.tsx` boundaries as served pages. Routes whose
+  bundle fails or imports server-only code are exported as HTML only and
+  listed, pages that call `notFound()` are skipped, and failed pages are
+  listed with their error reference.
 - Changing `[images]` and restarting now drops persisted pages (the derived
   deployment ID covers it). A pinned `GIO_DEPLOYMENT_ID` should change with
   every deploy.

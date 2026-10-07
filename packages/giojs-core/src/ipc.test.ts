@@ -428,18 +428,19 @@ describe('pumpRenderStream PPR shell boundary', () => {
   });
 
   it("'mark' withholds shell_end when keepShell() says no, asked at the boundary", async () => {
-    let asked = 0;
+    const asked: string[] = [];
     const sink = makeStreamSink();
     const stream = suspenseLikeStream('<div>shell</div>', '<div>hole</div>');
     await pumpRenderStream(sink, 'r1', {
       ...renderResult(stream, 'PRE', 'SUF', 'mark'),
-      keepShell: () => {
-        asked++;
+      keepShell: shell => {
+        asked.push(shell);
         return false;
       },
     });
     const frames = sink.frames();
-    expect(asked).toBe(1);
+    // Asked once, with exactly the bytes Rust would have stored.
+    expect(asked).toEqual(['PRE<div>shell</div>']);
     expect(frames.some(f => f['type'] === 'shell_end')).toBe(false);
     // The visitor still gets the whole page.
     const body = frames.filter(f => f['type'] === 'chunk').map(f => f['data']).join('');

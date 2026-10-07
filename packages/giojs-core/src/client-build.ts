@@ -263,7 +263,38 @@ export function clientEnvDefines(
   };
 }
 
-function gioServerCodePlugin(projectRoot: string): Plugin {
+/**
+ * The import() targets of one bundle run (runEsbuild). esbuild makes every
+ * dynamically imported module a chunk of its own before it shakes out the
+ * code that imported it, so an `await import('../lib/db')` inside
+ * getServerSideProps would still ship db as a public chunk - and, being
+ * live, a `*.server.*` one would reject the route. A project file's import()
+ * therefore stays external (a marker path no chunk is made for) until a pass
+ * finds it in the output, i.e. in code that survived tree-shaking; only
+ * those targets are bundled, on the next pass.
+ */
+interface DynamicImports {
+  /** Resolved paths whose import() survived tree-shaking: bundled. */
+  readonly live: Set<string>;
+}
+
+/** External marker for a project file's import() not known to be live yet. */
+const DYNAMIC_IMPORT_MARKER = 'gio-dynamic-import:';
+
+/** Project modules a live import() loads that this pass left external. */
+function unbundledDynamicImports(metafile: Metafile): string[] {
+  const found = new Set<string>();
+  for (const output of Object.values(metafile.outputs)) {
+    for (const imported of output.imports) {
+      if (imported.external === true && imported.path.startsWith(DYNAMIC_IMPORT_MARKER)) {
+        found.add(imported.path.slice(DYNAMIC_IMPORT_MARKER.length));
+      }
+    }
+  }
+  return [...found];
+}
+
+function gioServerCodePlugin(projectRoot: string, dynamicImports: DynamicImports): Plugin {
   const root = resolve(projectRoot);
   return {
     name: 'gio-server-code',
@@ -309,10 +340,11 @@ function gioServerCodePlugin(projectRoot: string): Plugin {
       };
       pluginBuild.onResolve({ filter: /.*/ }, async args => {
         if (args.pluginData === 'gio-resolving') return null;
-        if (args.kind === 'dynamic-import' || args.namespace !== 'file') return null;
+        if (args.namespace !== 'file') return null;
         if (args.importer === '' || args.importer.includes('node_modules')) return null;
         if (!resolve(args.importer).startsWith(root)) return null;
-        if ((await bareImportsOf(args.importer)).has(args.path)) return null;
+        const dynamic = args.kind === 'dynamic-import';
+        if (!dynamic && (await bareImportsOf(args.importer)).has(args.path)) return null;
         const resolved = await pluginBuild.resolve(args.path, {
           importer: args.importer,
           resolveDir: args.resolveDir,
@@ -320,6 +352,12 @@ function gioServerCodePlugin(projectRoot: string): Plugin {
           pluginData: 'gio-resolving',
         });
         if (resolved.errors.length > 0 || resolved.external) return null;
+        // An import() is bundled only once a pass saw it survive (DynamicImports).
+        if (dynamic) {
+          return dynamicImports.live.has(resolved.path) || resolved.namespace !== 'file'
+            ? { path: resolved.path, namespace: resolved.namespace }
+            : { path: `${DYNAMIC_IMPORT_MARKER}${resolved.path}`, external: true };
+        }
         return { path: resolved.path, namespace: resolved.namespace, sideEffects: false };
       });
 
@@ -503,6 +541,8 @@ interface EsbuildConfig {
   dev: boolean;
   defines: Record<string, string>;
   plugins: Plugin[];
+  /** The live import() targets the server-code plugin bundles, per run. */
+  dynamicImports: DynamicImports;
   nodePaths: string[] | undefined;
   tsconfig: string | undefined;
 }
@@ -521,6 +561,24 @@ interface BuiltBundles {
  * passes, so a rejected bundle never becomes a servable chunk.
  */
 async function runEsbuild(config: EsbuildConfig): Promise<BuiltBundles> {
+  // Each pass bundles the import() targets the previous one found live -
+  // which may import() more. Without any, the first pass is the build.
+  config.dynamicImports.live.clear();
+  for (let pass = 1; ; pass++) {
+    const built = await runEsbuildPass(config);
+    const unbundled = unbundledDynamicImports(built.metafile);
+    if (unbundled.length === 0) return built;
+    if (pass >= MAX_DYNAMIC_IMPORT_PASSES) {
+      throw new Error(`dynamic import() chain too deep to bundle: ${unbundled.join(', ')}`);
+    }
+    for (const path of unbundled) config.dynamicImports.live.add(path);
+  }
+}
+
+/** Bounds runEsbuild's passes: each one goes a level deeper into nested import()s. */
+const MAX_DYNAMIC_IMPORT_PASSES = 16;
+
+async function runEsbuildPass(config: EsbuildConfig): Promise<BuiltBundles> {
   const result = await build({
     entryPoints: config.entryPoints,
     bundle: true,
@@ -624,7 +682,11 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
     }
 
     // One class-map plugin for every pass: each module compiles once.
-    const plugins = [gioServerCodePlugin(projectRoot), cssImportsAsClassMapsPlugin()];
+    const dynamicImports: DynamicImports = { live: new Set() };
+    const plugins = [
+      gioServerCodePlugin(projectRoot, dynamicImports),
+      cssImportsAsClassMapsPlugin(),
+    ];
     const tsconfig = projectTsconfig(projectRoot);
     const defines = clientEnvDefines(process.env, options.dev, exportDir !== undefined);
     const bundle = (selected: GeneratedEntry[]): Promise<BuiltBundles> =>
@@ -635,6 +697,7 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
         dev: options.dev,
         defines,
         plugins,
+        dynamicImports,
         nodePaths: options.nodePaths,
         tsconfig,
       });

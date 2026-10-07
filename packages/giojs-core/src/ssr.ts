@@ -161,11 +161,13 @@ export interface StreamRenderResult {
    */
   envelope?: string;
   /**
-   * 'mark' only: asked at the shell boundary. False withholds the shell_end
-   * frame, so Rust stores nothing - React reported an error by then, and a
-   * boundary it client-rendered may be part of the shell bytes.
+   * 'mark' only: asked at the shell boundary with the shell's text (prefix
+   * included). False withholds the shell_end frame, so Rust stores nothing:
+   * React reported an error by then (a boundary it client-rendered may be
+   * part of the shell bytes), or the shell holds Suspense content rendered
+   * from this request's credentials.
    */
-  keepShell?: () => boolean;
+  keepShell?: (shell: string) => boolean;
 }
 
 /** Optional render inputs beyond pages/layouts. */
@@ -188,7 +190,8 @@ export interface RenderExtras {
   /**
    * Static export: the page is written as HTML that never hydrates, so a
    * Suspense boundary React handed to the browser would show its fallback
-   * forever. Any error React reported fails the render instead.
+   * forever. Any error React reported fails the render instead, and a
+   * failed render is answered with the error itself, never an error.* page.
    */
   staticExport?: boolean;
   /**
@@ -344,6 +347,41 @@ function clientFields(req: IPCRequest): Pick<GioRequest, 'ip' | 'scheme' | 'host
 }
 
 /**
+ * A view of `headers` that calls `onRead` whenever one of the `tracked`
+ * names (lowercase) is read or probed, or the headers are enumerated at all.
+ * Writes go through to `headers`.
+ */
+function trackHeaderReads(
+  headers: Record<string, string>,
+  tracked: ReadonlySet<string>,
+  onRead: () => void,
+): Record<string, string> {
+  const isTracked = (key: string | symbol): boolean =>
+    typeof key === 'string' && tracked.has(key.toLowerCase());
+  return new Proxy(headers, {
+    get(target, key, receiver) {
+      if (isTracked(key)) onRead();
+      return Reflect.get(target, key, receiver) as unknown;
+    },
+    has(target, key) {
+      if (isTracked(key)) onRead();
+      return Reflect.has(target, key);
+    },
+    getOwnPropertyDescriptor(target, key) {
+      if (isTracked(key)) onRead();
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+    // Every enumeration (spread, Object.keys, JSON.stringify, for...in,
+    // getOwnPropertyNames) lists the keys first, and the list alone tells
+    // whether credentials were sent - a read with or without them.
+    ownKeys(target) {
+      onRead();
+      return Reflect.ownKeys(target);
+    },
+  });
+}
+
+/**
  * Build the getServerSideProps context with Next.js-style dynamic detection:
  * touching `ctx.cookies`, `ctx.ip`, `ctx.host` or `ctx.scheme`, reading or
  * probing one of the `tracked` headers (lowercase names) on `ctx.headers`,
@@ -363,32 +401,9 @@ function makeGsspContext(
   tracked: ReadonlySet<string>,
 ): { ctx: GsspContext; credentialsRead: () => boolean } {
   let read = false;
-  const isTracked = (key: string | symbol): boolean =>
-    typeof key === 'string' && tracked.has(key.toLowerCase());
-  const headers = new Proxy(
-    { ...req.headers },
-    {
-      get(target, key, receiver) {
-        if (isTracked(key)) read = true;
-        return Reflect.get(target, key, receiver) as unknown;
-      },
-      has(target, key) {
-        if (isTracked(key)) read = true;
-        return Reflect.has(target, key);
-      },
-      getOwnPropertyDescriptor(target, key) {
-        if (isTracked(key)) read = true;
-        return Reflect.getOwnPropertyDescriptor(target, key);
-      },
-      // Every enumeration (spread, Object.keys, JSON.stringify, for...in,
-      // getOwnPropertyNames) lists the keys first, and the list alone tells
-      // whether credentials were sent - a read with or without them.
-      ownKeys(target) {
-        read = true;
-        return Reflect.ownKeys(target);
-      },
-    },
-  );
+  const headers = trackHeaderReads({ ...req.headers }, tracked, () => {
+    read = true;
+  });
   let cookies: Record<string, string> | undefined;
   const ctx: GsspContext = {
     method: req.method,
@@ -442,6 +457,20 @@ function pluginDerivedHeaders(
   return [...names]
     .filter(name => before[name] !== after[name])
     .map(name => name.toLowerCase());
+}
+
+/**
+ * Whether an onRequest hook pointed the request somewhere else: another
+ * path, query or locale. Rust caches the render under the URL as requested.
+ */
+function pluginRewrote(before: IPCRequest, after: IPCRequest): boolean {
+  if (before.path !== after.path || before.locale !== after.locale) return true;
+  const beforeKeys = Object.keys(before.query);
+  const afterKeys = Object.keys(after.query);
+  return (
+    beforeKeys.length !== afterKeys.length ||
+    afterKeys.some(key => !Object.hasOwn(before.query, key) || before.query[key] !== after.query[key])
+  );
 }
 
 /**
@@ -717,17 +746,31 @@ async function answerRoute(
     ...CLIENT_ADDRESS_HEADERS,
     ...REQUEST_ORIGIN_HEADERS,
   ]);
+  // An onRequest hook that read credentials and then rewrote the path,
+  // query or locale picked this render per visitor - yet Rust stores it
+  // under the URL as requested, for everyone.
+  let pluginRewroteForVisitor = false;
   if (registry !== undefined && !registry.isEmpty) {
     // Snapshot first: plugins may mutate req.headers in place.
     const incomingHeaders = { ...req.headers };
-    const intercepted = await registry.interceptRequest(req);
+    const incoming = req;
+    let credentialsReadByPlugin = false;
+    let trackingPlugin = true;
+    const trackedHeaders = trackHeaderReads(req.headers, credentialHeaders, () => {
+      if (trackingPlugin) credentialsReadByPlugin = true;
+    });
+    const intercepted = await registry.interceptRequest({ ...req, headers: trackedHeaders });
+    trackingPlugin = false;
     if (isPluginResponse(intercepted)) {
       return intercepted;
     }
-    req = intercepted;
+    // The tracking view stays with the plugins: framework reads are not theirs.
+    req =
+      intercepted.headers === trackedHeaders ? { ...intercepted, headers: req.headers } : intercepted;
     for (const name of pluginDerivedHeaders(incomingHeaders, req.headers)) {
       credentialHeaders.add(name);
     }
+    pluginRewroteForVisitor = credentialsReadByPlugin && pluginRewrote(incoming, req);
   }
 
   extras?.onRouted?.(req);
@@ -738,7 +781,11 @@ async function answerRoute(
   const metadataRoute =
     metadataKind !== null ? extras?.metadataRoutes?.[metadataKind] : undefined;
   if (metadataRoute !== undefined) {
-    const result = await renderMetadataRoute(req, metadataRoute);
+    let result = await renderMetadataRoute(req, metadataRoute);
+    if (pluginRewroteForVisitor && result.cacheable) {
+      warnPersonalRender(req.path, req.path, 'onRequest plugin');
+      result = { ...result, cacheable: false, cacheMaxAge: 0 };
+    }
     return registry !== undefined && !registry.isEmpty
       ? registry.interceptResponse(req, result)
       : result;
@@ -953,6 +1000,7 @@ async function answerRoute(
       reported,
     );
     const inner = buildSegmentTree(React.createElement(Component, props), req.path, levels);
+    const loadingBoundaries = levels.filter(level => level.loading).length;
 
     const pattern = match.module.urlPattern;
     const navigation = navigationStateFor(req, pattern, match.params);
@@ -1051,8 +1099,12 @@ async function answerRoute(
         : pprCandidate && metadataUsedProps && credentialsRead()
           ? 'generateMetadata props'
           : null;
-    if (shareable && personalMetadata !== null) {
-      warnPersonalRender(pattern, req.path, personalMetadata);
+    // Neither the whole render nor a PPR shell may be stored for a URL a
+    // plugin rewrote per visitor.
+    const personalBefore: PersonalReadSource | null =
+      personalMetadata ?? (pluginRewroteForVisitor ? 'onRequest plugin' : null);
+    if (shareable && personalBefore !== null) {
+      warnPersonalRender(pattern, req.path, personalBefore);
       cacheable = false;
       cacheMaxAge = 0;
       shareable = false;
@@ -1076,6 +1128,8 @@ async function answerRoute(
     // the shared key would serve the first visitor's page to everyone. PPR
     // keeps its cache - Rust stores only the shell, which the PPR contract
     // keeps visitor-independent, and the per-request props stream after it.
+    // Whether the holes really stayed out of the shell is only known at the
+    // shell boundary: keepShell below checks it.
     const makePersonal = (): void => {
       warnPersonalRender(pattern, req.path);
       cacheable = false;
@@ -1219,7 +1273,20 @@ async function answerRoute(
             : {}),
         // An error React reports between now and the shell boundary (work
         // it picks up before the first read) can still land in the shell.
-        ...(storeShell ? { keepShell: () => reported.length === 0 } : {}),
+        // So can a hole rendered from a credential-reading gSSP's props: one
+        // that never suspended, or resolved before the boundary.
+        ...(storeShell
+          ? {
+              keepShell: (shell: string) => {
+                if (reported.length > 0) return false;
+                if (!credentialsRead() || !shellHoldsRenderedHoles(shell, loadingBoundaries)) {
+                  return true;
+                }
+                warnPersonalRender(pattern, req.path, 'ppr shell');
+                return false;
+              },
+            }
+          : {}),
         ...(deferEnvelope && envelopeJson !== null
           ? { envelope: envelopeScript(envelopeJson) }
           : {}),
@@ -1285,13 +1352,15 @@ async function answerRoute(
     const message = dev ? (err instanceof Error ? err.message : String(err)) : GENERIC_ERROR_MESSAGE;
     // The nearest error.* at or above the page's folder. One whose own
     // folder's layout is what threw fails to render again, so the walk
-    // moves on up - an error.* never catches its own layout.
+    // moves on up - an error.* never catches its own layout. A static
+    // export reports the failure (with its digest) instead of writing an
+    // error page in place of the page.
     const errorProps: GioErrorProps = { error: { message, digest } };
     const errorPage = await renderNearestSegmentPage(
       req,
       match.params,
       layouts,
-      segmentPageCandidates(match.module.dir, 'error', extras),
+      extras?.staticExport === true ? [] : segmentPageCandidates(match.module.dir, 'error', extras),
       errorProps,
       500,
       signal,
@@ -1327,8 +1396,38 @@ function envelopeScript(envelopeJson: string): string {
   return `<script id="__gio_props" type="application/json">${envelopeJson}</script>`;
 }
 
-/** What read credentials: gSSP, generateMetadata, or generateMetadata via gSSP's props. */
-type PersonalReadSource = 'getServerSideProps' | 'generateMetadata' | 'generateMetadata props';
+/**
+ * What read credentials: gSSP, generateMetadata, generateMetadata via gSSP's
+ * props, a credential-reading gSSP whose props rendered into a PPR shell, or
+ * an onRequest plugin that rewrote the request after reading them.
+ */
+type PersonalReadSource =
+  | 'getServerSideProps'
+  | 'generateMetadata'
+  | 'generateMetadata props'
+  | 'ppr shell'
+  | 'onRequest plugin';
+
+/**
+ * Whether a PPR shell holds Suspense content React already rendered from the
+ * page: no pending boundary at all (`<!--$?-->` - the whole page flushed with
+ * the shell), a hole segment that resolved before the shell boundary
+ * (`id="S:..."`, completed by a `$RC` script), or more boundaries completed
+ * inline (`<!--$-->`, they never suspended) than the route's loading.*
+ * boundaries. Those wrap the whole page, so they complete inline whenever
+ * the page renders without suspending - the PPR contract covers what the page
+ * renders outside its holes - while a page's own hole that completed inline
+ * always adds one more. A gSSP that read credentials hands its props to that
+ * content, so it is this visitor's, not a fallback everyone may get. A false
+ * positive only costs the shell its cache entry.
+ */
+function shellHoldsRenderedHoles(shell: string, loadingBoundaries: number): boolean {
+  return (
+    !shell.includes('<!--$?-->') ||
+    /\sid="S:[0-9a-f]+"/.test(shell) ||
+    shell.split('<!--$-->').length - 1 > loadingBoundaries
+  );
+}
 
 /**
  * Explain once per route why a page exporting `revalidate` is not cached.
@@ -1345,6 +1444,27 @@ function warnPersonalRender(
   const credentials =
     'request credentials (ctx.cookies, ctx.ip, ctx.host, ctx.scheme, the cookie/authorization, ' +
     'a client-address or a host header, or a header an onRequest plugin set)';
+  if (source === 'ppr shell') {
+    logger.warn(
+      `getServerSideProps read ${credentials} and the PPR shell holds content the page rendered ` +
+        'from it - a Suspense hole that did not suspend (or resolved before the shell was sent), ' +
+        'or a page with no pending hole at all - so this shell is not cached. Make the ' +
+        'personalized holes suspend (use() a per-request promise), or remove `revalidate`',
+      { route: pattern, path },
+    );
+    return;
+  }
+  if (source === 'onRequest plugin') {
+    logger.warn(
+      'an onRequest plugin read request credentials (the cookie/authorization, a client-address or ' +
+        "a host header) and rewrote the request's path, query or locale - " +
+        'the render answers a URL other than the one Rust caches it under, so it is not cached ' +
+        'even though the page exports revalidate. Redirect instead of rewriting, or decide from ' +
+        'non-credential headers',
+      { route: pattern, path },
+    );
+    return;
+  }
   logger.warn(
     source === 'generateMetadata props'
       ? `generateMetadata used the props of a getServerSideProps that read ${credentials} - ` +

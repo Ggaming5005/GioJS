@@ -23,7 +23,9 @@ import {
 } from './request-body.ts';
 import { installImageConfig, installedImageConfig } from './image-config.ts';
 import { NodePluginRegistry } from './plugin.ts';
+import { pumpRenderStream } from './ipc.ts';
 import type { IPCRequest } from './context.ts';
+import { emptySegmentFiles } from './router.ts';
 import type { RouteModule, LayoutEntry, PageModule, LayoutModule, GsspContext } from './router.ts';
 
 function makeRequest(path: string, id = 'req-1'): IPCRequest {
@@ -1659,6 +1661,82 @@ describe('credential reads make a revalidate page uncacheable', () => {
     ).toEqual(SHARED);
   });
 
+  describe('an onRequest plugin that rewrites after reading credentials', () => {
+    const page = (marker: string, overrides: Partial<PageModule> = {}): PageModule => ({
+      revalidate: 60,
+      default: () => React.createElement('main', null, marker),
+      ...overrides,
+    });
+    const dashboards = (overrides: Partial<PageModule> = {}): Map<string, RouteModule> => {
+      const routes = new Map<string, RouteModule>();
+      for (const [pattern, marker] of [['/dash', 'PUBLIC_DASH'], ['/dash-admin', 'ADMIN_PANEL']] as const) {
+        routes.set(pattern, {
+          filePath: `/app${pattern}/page.tsx`,
+          urlPattern: pattern,
+          dir: pattern.slice(1),
+          load: async () => page(marker, overrides),
+        });
+      }
+      return routes;
+    };
+    const plugin = (onRequest: (req: IPCRequest) => IPCRequest): NodePluginRegistry => {
+      const registry = new NodePluginRegistry();
+      registry.register({ name: 'rewrite', version: '1.0.0', onRequest: async req => onRequest(req) });
+      return registry;
+    };
+    const admin = (path = '/dash'): IPCRequest => ({ ...makeRequest(path), headers: { cookie: 'role=admin' } });
+    const toAdmin = (req: IPCRequest): IPCRequest =>
+      (req.headers['cookie'] ?? '').includes('role=admin') ? { ...req, path: '/dash-admin' } : req;
+
+    it('a path picked from the cookie is not cached under the requested URL', async () => {
+      const registry = plugin(toAdmin);
+      const result = await renderRoute(admin(), dashboards(), noLayouts, registry);
+      expect('body' in result && result.body).toContain('ADMIN_PANEL');
+      expect(await cacheFields(dashboards(), admin(), registry)).toEqual(PERSONAL);
+      // The anonymous variant the plugin left alone is shared as before.
+      expect(await cacheFields(dashboards(), makeRequest('/dash'), registry)).toEqual(SHARED);
+    });
+
+    it('so are a query or locale picked from credentials, rewritten in place', async () => {
+      const query = plugin(req => {
+        if (req.headers['authorization'] !== undefined) req.query = { ...req.query, view: 'admin' };
+        return req;
+      });
+      const authorized = { ...makeRequest('/dash'), headers: { authorization: 'Bearer t' } };
+      expect(await cacheFields(dashboards(), authorized, query)).toEqual(PERSONAL);
+      const locale = plugin(req => {
+        req.locale = 'cookie' in req.headers ? 'fr' : req.locale;
+        return req;
+      });
+      expect(await cacheFields(dashboards(), admin(), locale)).toEqual(PERSONAL);
+    });
+
+    it('rewrites that read no credentials, and credential reads that rewrite nothing, stay shared', async () => {
+      const fixed = plugin(req => (req.path === '/dash' ? { ...req, path: '/dash-admin' } : req));
+      expect(await cacheFields(dashboards(), admin(), fixed)).toEqual(SHARED);
+      const byLanguage = plugin(req =>
+        req.headers['accept-language'] === 'fr' ? { ...req, path: '/dash-admin' } : req,
+      );
+      const french = { ...admin(), headers: { cookie: 'role=admin', 'accept-language': 'fr' } };
+      expect(await cacheFields(dashboards(), french, byLanguage)).toEqual(SHARED);
+      const readsOnly = plugin(req => {
+        req.headers['x-role'] = req.headers['cookie'] ?? 'anon';
+        return req;
+      });
+      expect(await cacheFields(dashboards(), admin(), readsOnly)).toEqual(SHARED);
+    });
+
+    it('stores no PPR shell for such a rewrite either', async () => {
+      const streamed = expectStream(
+        await renderRoute(
+          admin(), dashboards({ shell: 'cache' }), noLayouts, plugin(toAdmin), undefined, undefined, { streaming: true },
+        ),
+      );
+      expect(streamed.head.pprShell).toBeUndefined();
+      expect(streamed.head.cacheable).toBe(false);
+    });
+  });
+
   it('warns once per route with the way out', async () => {
     const logs = captureLogs();
     try {
@@ -1734,6 +1812,150 @@ describe('credential reads make a revalidate page uncacheable', () => {
       );
       expect(streamed.envelope).toBeUndefined();
       expect(await readStreamToString(streamed.stream)).toContain('__gio_props');
+    });
+
+    /** Pump `streamed` like the IPC server: the text before shell_end (null without one) and all of it. */
+    async function pumpShell(streamed: StreamRenderResult): Promise<{ shell: string | null; body: string }> {
+      const written: Buffer[] = [];
+      const sink = {
+        destroyed: false,
+        writableLength: 0,
+        write(data: Buffer): boolean {
+          written.push(data);
+          return true;
+        },
+      };
+      await pumpRenderStream(sink, 'r1', streamed);
+      const frames: Record<string, unknown>[] = [];
+      for (let wire = Buffer.concat(written); wire.length >= 4; wire = wire.subarray(4 + wire.readUInt32BE(0))) {
+        frames.push(JSON.parse(wire.subarray(4, 4 + wire.readUInt32BE(0)).toString('utf8')) as Record<string, unknown>);
+      }
+      const text = (list: Record<string, unknown>[]): string =>
+        list.filter(f => f['type'] === 'chunk').map(f => String(f['data'])).join('');
+      const boundary = frames.findIndex(f => f['type'] === 'shell_end');
+      return { shell: boundary === -1 ? null : text(frames.slice(0, boundary)), body: text(frames) };
+    }
+
+    /** The caching-layers docs page: `who` from the cookie, rendered by `hole` inside <Suspense>. */
+    function storefront(
+      hole: (props: { who: string }) => React.ReactNode,
+      read: (ctx: GsspContextLike) => string = ctx => ctx.cookies['session'] ?? 'anon',
+    ): Map<string, RouteModule> {
+      return makeRoute('/', {
+        revalidate: 60,
+        shell: 'cache',
+        getServerSideProps: async (ctx) => ({ props: { who: read(ctx as GsspContextLike) } }),
+        default: function Storefront({ who }: Record<string, unknown>) {
+          return React.createElement(
+            'main',
+            null,
+            React.createElement('h1', null, 'STOREFRONT'),
+            React.createElement(
+              React.Suspense,
+              { fallback: React.createElement('p', null, 'CART_LOADING') },
+              React.createElement(hole, { who: String(who) }),
+            ),
+          );
+        },
+      });
+    }
+
+    it("never stores a shell holding a hole that rendered the visitor's props without suspending", async () => {
+      const Cart = ({ who }: { who: string }): React.ReactNode => React.createElement('p', null, `CART:${who}`);
+      const streamed = expectStream(
+        await renderRoute(
+          credentialRequest(), storefront(Cart), noLayouts, undefined, undefined, clientScripts, streamingExtras,
+        ),
+      );
+      expect(streamed.head.pprShell).toBe(true);
+      const { shell, body } = await pumpShell(streamed);
+      // u1's cart is in the bytes before the boundary: no shell_end, so Rust stores nothing.
+      expect(shell).toBeNull();
+      expect(body).toContain('CART:u1');
+    });
+
+    it('stores the shell when the personalized hole suspends past it', async () => {
+      const pending = new Map<string, { done: boolean; promise: Promise<void> }>();
+      const SlowCart = ({ who }: { who: string }): React.ReactNode => {
+        let gate = pending.get(who);
+        if (gate === undefined) {
+          const created = { done: false, promise: Promise.resolve() };
+          created.promise = new Promise<void>(resolve => setTimeout(() => {
+            created.done = true;
+            resolve();
+          }, 20));
+          gate = created;
+          pending.set(who, gate);
+        }
+        if (!gate.done) throw gate.promise;
+        return React.createElement('p', null, `CART:${who}`);
+      };
+      const streamed = expectStream(
+        await renderRoute(
+          credentialRequest(), storefront(SlowCart), noLayouts, undefined, undefined, clientScripts, streamingExtras,
+        ),
+      );
+      const { shell, body } = await pumpShell(streamed);
+      expect(shell).toContain('STOREFRONT');
+      expect(shell).toContain('CART_LOADING');
+      expect(shell).not.toContain('u1');
+      expect(body).toContain('CART:u1');
+    });
+
+    it('an app/loading.* around the page is not a hole: a suspending hole inside keeps the shell', async () => {
+      const files = emptySegmentFiles();
+      files.loading.set('', {
+        kind: 'loading',
+        dir: '',
+        filePath: '/app/loading.tsx',
+        load: async () => ({ default: () => React.createElement('p', null, 'APP_LOADING') }),
+      });
+      const extras = { ...streamingExtras, segmentFiles: files };
+      const gate = new Promise<void>(resolve => setTimeout(resolve, 20));
+      const SlowCart = ({ who }: { who: string }): React.ReactNode => {
+        React.use(gate);
+        return React.createElement('p', null, `CART:${who}`);
+      };
+      const slow = await pumpShell(expectStream(
+        await renderRoute(credentialRequest(), storefront(SlowCart), noLayouts, undefined, undefined, clientScripts, extras),
+      ));
+      expect(slow.shell).toContain('STOREFRONT');
+      expect(slow.shell).not.toContain('u1');
+      // The page's own hole rendering inline is still caught inside the loading boundary.
+      const Cart = ({ who }: { who: string }): React.ReactNode => React.createElement('p', null, `CART:${who}`);
+      const inline = await pumpShell(expectStream(
+        await renderRoute(credentialRequest(), storefront(Cart), noLayouts, undefined, undefined, clientScripts, extras),
+      ));
+      expect(inline.shell).toBeNull();
+      expect(inline.body).toContain('CART:u1');
+    });
+
+    it('judges the shell bytes: inline or already-resolved holes, or no hole at all, are not stored', async () => {
+      const Cart = ({ who }: { who: string }): React.ReactNode => React.createElement('p', null, who);
+      const streamed = expectStream(
+        await renderRoute(
+          credentialRequest(), storefront(Cart), noLayouts, undefined, undefined, clientScripts, streamingExtras,
+        ),
+      );
+      const pendingHole = '<main><!--$?--><template id="B:0"></template><p>CART_LOADING</p><!--/$--></main>';
+      expect(streamed.keepShell?.(pendingHole)).toBe(true);
+      // A hole whose content resolved before the boundary tick.
+      expect(streamed.keepShell?.(`${pendingHole}<div hidden id="S:0"><p>u1</p></div>`)).toBe(false);
+      expect(streamed.keepShell?.('<main><!--$--><p>u1</p><!--/$--></main>')).toBe(false);
+      expect(streamed.keepShell?.('<main><p>u1</p></main>')).toBe(false);
+    });
+
+    it('a gSSP that reads no credentials keeps its shell, holes rendered inline included', async () => {
+      const Cart = ({ who }: { who: string }): React.ReactNode => React.createElement('p', null, `CART:${who}`);
+      const streamed = expectStream(
+        await renderRoute(
+          credentialRequest(),
+          storefront(Cart, ctx => ctx.query['who'] ?? 'everyone'),
+          noLayouts, undefined, undefined, clientScripts, streamingExtras,
+        ),
+      );
+      const { shell } = await pumpShell(streamed);
+      expect(shell).toContain('CART:everyone');
     });
 
     it('a PPR page rendered without a shell boundary (HEAD) is never cached whole', async () => {
