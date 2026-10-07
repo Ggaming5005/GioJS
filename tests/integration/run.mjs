@@ -2795,6 +2795,245 @@ async function opsPhase() {
 }
 
 /**
+ * Phase 1e (worker pool): `[server] workers = 2` renders on two Node
+ * processes. Requests spread across both and so do WebSockets, while a room
+ * broadcast from either worker reaches sockets on both; only the first
+ * worker bundles the client code (the other loads its manifest); a killed
+ * worker takes down only itself and comes back without a rebuild; purges
+ * and middleware rules work from either worker; shutdown reaps them all.
+ */
+async function workersPhase() {
+  const binary = findServerBinary();
+  const workDir = await mkdtemp(join(tmpdir(), 'gio-int-workers-'));
+  const publicApi = JSON.stringify(
+    pathToFileURL(join(repoRoot, 'packages', 'giojs-core', 'src', 'public.ts')).href,
+  );
+  const files = {
+    'app/page.tsx':
+      "import React from 'react';\n" +
+      'export function getServerSideProps() {\n  return { props: { pid: process.pid } };\n}\n' +
+      'export default function Home({ pid }: { pid: number }) {\n' +
+      '  return <main><p>WORKERS_HOME pid={pid}</p></main>;\n}\n',
+    'app/cached/page.tsx':
+      "import React from 'react';\nexport const revalidate = 300;\n" +
+      'export function getServerSideProps() {\n  return { props: { pid: process.pid } };\n}\n' +
+      'export default function Cached({ pid }: { pid: number }) {\n' +
+      '  return <p>WORKERS_CACHED pid={pid}</p>;\n}\n',
+    'app/api/pid/route.ts':
+      `import type { GioRequest } from ${publicApi};\n` +
+      'export async function GET(req: GioRequest): Promise<unknown> {\n' +
+      "  await new Promise((resolve) => setTimeout(resolve, Number(req.query['ms'] ?? 0)));\n" +
+      '  return { pid: process.pid };\n}\n',
+    'app/api/purge/route.ts':
+      `import { revalidatePath } from ${publicApi};\n` +
+      'export async function POST(): Promise<unknown> {\n' +
+      "  return { pid: process.pid, ...(await revalidatePath('/cached')) };\n}\n",
+    'app/api/broadcast/route.ts':
+      `import { broadcast, type GioRequest } from ${publicApi};\n` +
+      'export function POST(req: GioRequest): unknown {\n' +
+      "  return { pid: process.pid, delivered: broadcast('everyone', `${process.pid}:${req.body ?? ''}`) };\n}\n",
+    'app/ws/room/route.ts':
+      `import type { GioSocket } from ${publicApi};\n` +
+      'export function wsHandler(socket: GioSocket): void {\n' +
+      "  socket.join('everyone');\n" +
+      '  socket.send(JSON.stringify({ pid: process.pid }));\n}\n',
+    'middleware.ts':
+      `import { defineMiddleware } from ${publicApi};\n` +
+      "export default defineMiddleware({ redirects: [{ from: '/old-home', to: '/' }] });\n",
+    'gio.toml':
+      '[server]\nhost = "127.0.0.1"\nport = 39517\nhttp2 = false\nworkers = 2\n\n[metrics]\nenabled = true\n',
+    'package.json': JSON.stringify({ private: true, type: 'module' }),
+  };
+  for (const [file, content] of Object.entries(files)) {
+    await mkdir(dirname(join(workDir, file)), { recursive: true });
+    await writeFile(join(workDir, file), content);
+  }
+  await linkFixtureDeps(workDir);
+
+  let log = '';
+  const server = spawn(binary, [], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      GIO_APP_DIR: join(workDir, 'app'),
+      GIO_CACHE_DIR: join(workDir, 'cache'),
+      RUST_LOG: 'info',
+      NODE_ENV: 'production',
+    },
+  });
+  server.stdout.on('data', (d) => { log += d.toString(); });
+  server.stderr.on('data', (d) => { log += d.toString(); });
+  let serverGone = false;
+  const serverExited = new Promise((r) =>
+    server.on('exit', () => { serverGone = true; r(); }),
+  );
+  const health = async () => (await fetch(`${BASE}/_gio/health`)).json();
+  const pidOf = async (path) => {
+    const res = await fetch(`${BASE}${path}`);
+    assert.equal(res.status, 200, `${path} answered ${res.status}`);
+    return (await res.json()).pid;
+  };
+  /** The workers that answer concurrent slow requests (distinct URLs: never coalesced). */
+  const bothPids = async () => {
+    const pids = await Promise.all(Array.from({ length: 6 }, (_, n) => pidOf(`/api/pid?ms=150&n=${n}`)));
+    return [...new Set(pids)];
+  };
+  const workerMetric = async (name, worker) => {
+    const text = await (await fetch(`${BASE}/_gio/metrics`)).text();
+    const line = text.split('\n').find((l) => l.startsWith(`${name}{worker="${worker}"} `));
+    return line === undefined ? undefined : Number(line.split(' ')[1]);
+  };
+  const countLines = (needle) => log.split('\n').filter((line) => line.includes(needle)).length;
+
+  try {
+    await waitFor('both workers ready', async () => {
+      const body = await health();
+      return body.nodeReady === true && body.workers.ready === 2;
+    }, 60_000);
+
+    let pids = [];
+    await test('workers: health reports the pool, concurrent requests reach both workers', async () => {
+      assert.deepEqual((await health()).workers, { configured: 2, ready: 2 });
+      pids = await bothPids();
+      assert.equal(pids.length, 2, `requests spread over two processes: ${pids}`);
+    });
+
+    await test('workers: metrics show each worker\'s load', async () => {
+      const slow = Promise.all([pidOf('/api/pid?ms=1500&n=a'), pidOf('/api/pid?ms=1500&n=b')]);
+      await waitFor('one request in flight on each worker', async () =>
+        (await workerMetric('gio_worker_in_flight', 0)) === 1 &&
+        (await workerMetric('gio_worker_in_flight', 1)) === 1, 1_400);
+      assert.equal(new Set(await slow).size, 2);
+      assert.equal(await workerMetric('gio_worker_in_flight', 0), 0);
+      assert.equal(await workerMetric('gio_worker_ready', 1), 1);
+      assert.equal(await workerMetric('gio_worker_restarts_total', 0), 0);
+    });
+
+    await test('workers: only the first worker bundles; pages from both hydrate from its build', async () => {
+      assert.equal(countLines('client bundles built'), 1, 'one esbuild run for the pool');
+      assert.equal(countLines('client build reused'), 1, 'the second worker loads the manifest');
+      assert.equal(countLines('route types written'), 1, 'generated types are the builder\'s job too');
+      const pages = new Map();
+      for (let i = 0; i < 8 && pages.size < 2; i++) {
+        const html = await (await fetch(`${BASE}/`)).text();
+        const pid = Number(html.match(/WORKERS_HOME pid=(?:<!-- -->)?(\d+)/)?.[1]);
+        pages.set(pid, html);
+      }
+      assert.equal(pages.size, 2, 'both workers rendered the page');
+      const chunks = [...pages.values()].map(
+        (html) => html.match(/\/_next\/static\/chunks\/route-index-[A-Z0-9]+\.js/)?.[0],
+      );
+      assert.ok(chunks[0], 'the page links its hydration entry');
+      assert.equal(chunks[0], chunks[1], 'both workers link the same build');
+      const chunk = await fetch(`${BASE}${chunks[0]}`);
+      assert.equal(chunk.status, 200);
+    });
+
+    await test('workers: middleware.ts rules apply', async () => {
+      const res = await fetch(`${BASE}/old-home`, { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), '/');
+    });
+
+    await test('workers: a purge from either worker clears the shared cache', async () => {
+      const purgedBy = new Set();
+      for (let i = 0; i < 8 && purgedBy.size < 2; i++) {
+        await (await fetch(`${BASE}/cached`)).text();
+        const hit = await fetch(`${BASE}/cached`);
+        await hit.text();
+        assert.match(hit.headers.get('x-gio-cache') ?? '', /^hit/);
+        // Idle workers take turns: an odd number of renders per round hands
+        // the next round's purge to the other worker.
+        await pidOf(`/api/pid?round=${i}`);
+        const purge = await (await fetch(`${BASE}/api/purge`, { method: 'POST' })).json();
+        assert.equal(purge.ok, true, JSON.stringify(purge));
+        assert.ok(purge.purged >= 1, JSON.stringify(purge));
+        purgedBy.add(purge.pid);
+        const after = await fetch(`${BASE}/cached`);
+        await after.text();
+        assert.match(after.headers.get('x-gio-cache') ?? '', /^miss/, 'purged');
+      }
+      assert.equal(purgedBy.size, 2, 'each worker purged at least once');
+    });
+
+    await test('workers: sockets spread across workers and a broadcast from either reaches all', async () => {
+      const clients = [];
+      for (let i = 0; i < 4; i++) {
+        const ws = new WebSocket(`ws://127.0.0.1:39517/ws/room`);
+        const inbox = [];
+        ws.addEventListener('message', (event) => inbox.push(String(event.data)));
+        await new Promise((resolve, reject) => {
+          ws.addEventListener('open', resolve, { once: true });
+          ws.addEventListener('error', () => reject(new Error('socket failed to open')), { once: true });
+        });
+        await waitFor('greeting', () => Promise.resolve(inbox.length > 0), 5_000);
+        clients.push({ ws, inbox, pid: JSON.parse(inbox[0]).pid });
+      }
+      assert.equal(new Set(clients.map((c) => c.pid)).size, 2, 'pinned to both workers');
+      const sentBy = new Set();
+      for (let i = 0; i < 8 && sentBy.size < 2; i++) {
+        const sent = await (await fetch(`${BASE}/api/broadcast`, { method: 'POST', body: `m${i}` })).json();
+        assert.equal(sent.delivered, true);
+        sentBy.add(sent.pid);
+        const expected = `${sent.pid}:m${i}`;
+        await waitFor(`broadcast ${expected} on every socket`, () =>
+          Promise.resolve(clients.every((c) => c.inbox.includes(expected))), 5_000);
+      }
+      assert.equal(sentBy.size, 2, 'both workers broadcast');
+      for (const { ws } of clients) ws.close();
+    });
+
+    await test('workers: a killed worker takes only itself down and respawns from the build', async () => {
+      const [victim, survivor] = pids;
+      const restarts = async () =>
+        (await workerMetric('gio_worker_restarts_total', 0)) +
+        (await workerMetric('gio_worker_restarts_total', 1));
+      assert.equal(await restarts(), 0);
+      process.kill(victim, 'SIGKILL');
+      // Counted when the supervisor respawns it - the victim's slot is out
+      // of dispatch from then until its READY.
+      await waitFor('the supervisor respawning the victim', async () => (await restarts()) === 1, 10_000);
+      // The site stays up on the surviving worker while the victim reboots.
+      for (let i = 0; i < 6; i++) {
+        const pid = await pidOf('/api/pid');
+        assert.notEqual(pid, victim, 'never answered by the dead worker');
+      }
+      const redirect = await fetch(`${BASE}/old-home`, { redirect: 'manual' });
+      assert.equal(redirect.status, 302, 'rules survive the worker they came from');
+      await waitFor('the pool back at two', async () => (await health()).workers.ready === 2, 30_000);
+      const respawned = await waitFor('the respawned worker answering', async () => {
+        const now = await bothPids();
+        return now.length === 2 && !now.includes(victim) ? now : undefined;
+      }, 15_000);
+      assert.ok(respawned.includes(survivor), 'the survivor kept serving throughout');
+      assert.equal(countLines('client bundles built'), 1, 'the respawn reused the build');
+      assert.equal(countLines('client build reused'), 2);
+      pids = respawned;
+    });
+
+    if (process.platform !== 'win32') {
+      await test('workers: shutdown leaves no worker process behind', async () => {
+        const tree = descendantPids(server.pid);
+        for (const pid of pids) assert.ok(tree.includes(pid), `worker ${pid} runs under the server`);
+        server.kill('SIGTERM');
+        await waitFor('server exit', () => Promise.resolve(serverGone), 15_000);
+        await waitFor('every worker gone', () => Promise.resolve(!tree.some(processRunning)), 5_000);
+      });
+    }
+  } catch (err) {
+    console.error('\nintegration (workers): FAILED');
+    console.error(err);
+    console.error('\n── server log tail ──');
+    console.error(significantLogTail(log));
+    process.exitCode = 1;
+  } finally {
+    if (!serverGone) server.kill();
+    await serverExited;
+    await rm(workDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Phase 1c (persisted page cache vs gio.toml): cached HTML bakes in the
  * [images] widths, and the disk cache outlives restarts. A restart with
  * different allowed_widths must not serve pages whose srcsets the optimizer
@@ -3751,6 +3990,30 @@ async function standalonePhase() {
         assert.match(log, /stdin closed: the launcher exited - shutting down/);
       });
     }
+
+    await test('standalone: a worker pool boots from the prebuilt registry', async () => {
+      const toml = join(outDir, 'gio.toml');
+      const pooled = (await readFile(toml, 'utf8')).replace('http2 = false\n', 'http2 = false\nworkers = 2\n');
+      assert.match(pooled, /workers = 2/);
+      await writeFile(toml, pooled);
+      log = '';
+      await startLauncher();
+      await waitFor('both standalone workers ready', async () =>
+        (await (await fetch(`${STANDALONE_BASE}/_gio/health`)).json()).workers.ready === 2, 30_000);
+      const pages = await Promise.all(
+        Array.from({ length: 4 }, async () => (await fetch(`${STANDALONE_BASE}/posts/7`)).text()),
+      );
+      for (const html of pages) assert.match(html, /STANDALONE_POST id=\[7\]/);
+      assert.doesNotMatch(log, /client bundles built|client build reused/, 'nothing builds at boot');
+      const tree = process.platform === 'win32' ? [] : descendantPids(run.pid);
+      if (process.platform === 'win32') {
+        spawnSync('taskkill', ['/pid', String(run.pid), '/T', '/F']);
+      } else {
+        run.kill('SIGTERM');
+      }
+      await waitFor('launcher exit', () => Promise.resolve(runGone), 15_000);
+      await waitFor('every standalone worker reaped', () => Promise.resolve(!tree.some(processRunning)), 10_000);
+    });
   } catch (err) {
     console.error('\nintegration (standalone): FAILED');
     console.error(err);
@@ -4149,6 +4412,9 @@ if (process.exitCode !== 1) {
 }
 if (process.exitCode !== 1) {
   await opsPhase();
+}
+if (process.exitCode !== 1) {
+  await workersPhase();
 }
 if (process.exitCode !== 1) {
   await imageConfigCachePhase();
