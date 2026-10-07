@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'WebSockets',
+  description: 'Routed, authenticated, full-duplex connections with rooms.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Realtime</div>
       <h1>WebSockets</h1>
       <p className="page-subtitle">Routed, authenticated, full-duplex connections with rooms.</p>
       <p>
@@ -27,7 +32,7 @@ export function wsHandler(socket: GioSocket) {
   socket.on('close', (code, reason) => console.log('left', room, code, reason));
 }`} />
 
-      <h2>The socket</h2>
+      <h2 id="the-socket">The socket</h2>
       <table>
         <thead>
           <tr><th>Member</th><th>Description</th></tr>
@@ -47,7 +52,7 @@ export function wsHandler(socket: GioSocket) {
         </tbody>
       </table>
 
-      <h2>Authenticating connections</h2>
+      <h2 id="authenticating-connections">Authenticating connections</h2>
       <p>
         The handler runs once per connection and decides whether to keep it. Return{' '}
         <code>false</code> (or resolve to <code>false</code>) to reject: the connection closes
@@ -77,8 +82,7 @@ export function wsHandler(socket: GioSocket) {
           awaiting it, since a handler that never resolves never accepts.
         </li>
       </ul>
-      <CodeBlock lang="ts" code={`// app/live/route.ts
-import type { GioSocket } from '@gio.js/core';
+      <CodeBlock lang="ts" title="app/live/route.ts" code={`import type { GioSocket } from '@gio.js/core';
 import { sessions } from '../../lib/session.server.ts';
 
 export async function wsHandler(socket: GioSocket) {
@@ -124,15 +128,14 @@ export async function wsHandler(socket: GioSocket) {
         browser can observe (it never sees the HTTP status of a failed upgrade).
       </p>
 
-      <h2>Rooms</h2>
+      <h2 id="rooms">Rooms</h2>
       <p>
         <code>socket.join(room)</code> adds a socket to a named room; it leaves with{' '}
         <code>socket.leave(room)</code> or when it disconnects. <code>broadcast(room, data)</code>{' '}
         sends to every member - from a <code>wsHandler</code>, or from any route handler, so an
         HTTP request can publish to WebSocket clients:
       </p>
-      <CodeBlock lang="ts" code={`// app/api/rooms/[room]/route.ts
-import { broadcast, type GioRequest } from '@gio.js/core';
+      <CodeBlock lang="ts" title="app/api/rooms/[room]/route.ts" code={`import { broadcast, type GioRequest } from '@gio.js/core';
 
 export function POST(req: GioRequest) {
   const delivered = broadcast(req.params.room, JSON.stringify(req.json()));
@@ -161,7 +164,7 @@ socket.on('message', (msg) => broadcast(room, msg, { except: socket.id }));`} />
         </li>
       </ul>
 
-      <h2>Close codes</h2>
+      <h2 id="close-codes">Close codes</h2>
       <table>
         <thead>
           <tr><th>Code</th><th>Meaning</th></tr>
@@ -181,7 +184,7 @@ socket.on('message', (msg) => broadcast(room, msg, { except: socket.id }));`} />
         for transient ones: <code>useWebSocket</code> reconnects on the latter only.
       </p>
 
-      <h2>On the client: useWebSocket</h2>
+      <h2 id="on-the-client-usewebsocket">On the client: useWebSocket</h2>
       <CodeBlock lang="tsx" code={`'use client';
 import { useWebSocket } from '@gio.js/react';
 
@@ -222,7 +225,7 @@ export function Chat({ room }: { room: string }) {
         <li>Returns <code>readyState</code> (<code>-1</code> during SSR), <code>reconnectAttempts</code> and <code>isReconnecting</code>; the hook is a no-op on the server.</li>
       </ul>
 
-      <h2>Origin check</h2>
+      <h2 id="origin-check">Origin check</h2>
       <p>
         Browsers let any website open a WebSocket to your server with your users&apos; cookies
         attached. GioJS refuses upgrade requests whose <code>Origin</code> is another site
@@ -233,7 +236,7 @@ export function Chat({ room }: { room: string }) {
         switches it. See <a href="/docs/security">Security</a>.
       </p>
 
-      <h2>Limits</h2>
+      <h2 id="limits">Limits</h2>
       <p>
         <code>[websocket]</code> in <code>gio.toml</code> sets <code>max_connections</code>{' '}
         (default 1000; further connections close with 1013) and{' '}

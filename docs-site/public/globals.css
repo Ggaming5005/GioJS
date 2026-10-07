@@ -25,6 +25,19 @@
   --mark:         rgba(232, 72, 15, 0.16);
   --shadow:       0 24px 80px rgba(20, 16, 10, 0.18);
   --win:          #1a9e6c;
+  /* Syntax highlighting (lib/highlight.mjs token classes). */
+  --tk-comment:   #6e7781;
+  --tk-keyword:   #c4320a;
+  --tk-string:    #0a7d4f;
+  --tk-number:    #0550ae;
+  --tk-function:  #8250df;
+  --tk-type:      #953800;
+  --tk-attr:      #0a6b8a;
+  --tk-meta:      #6639ba;
+  --tk-ins:       #116329;
+  --tk-ins-bg:    rgba(46, 160, 67, 0.12);
+  --tk-del:       #82071e;
+  --tk-del-bg:    rgba(248, 81, 73, 0.12);
   color-scheme: light;
 }
 
@@ -48,6 +61,18 @@
     --mark:        rgba(255, 122, 82, 0.24);
     --shadow:      0 24px 80px rgba(0, 0, 0, 0.6);
     --win:         #4ec98a;
+    --tk-comment:  #8b949e;
+    --tk-keyword:  #ff7b72;
+    --tk-string:   #8ddb8c;
+    --tk-number:   #79c0ff;
+    --tk-function: #d2a8ff;
+    --tk-type:     #ffa657;
+    --tk-attr:     #56d4dd;
+    --tk-meta:     #d2a8ff;
+    --tk-ins:      #7ee787;
+    --tk-ins-bg:   rgba(46, 160, 67, 0.15);
+    --tk-del:      #ffa198;
+    --tk-del-bg:   rgba(248, 81, 73, 0.15);
   }
 }
 :root[data-theme="dark"] {
@@ -67,6 +92,18 @@
   --mark:        rgba(255, 122, 82, 0.24);
   --shadow:      0 24px 80px rgba(0, 0, 0, 0.6);
   --win:         #4ec98a;
+  --tk-comment:  #8b949e;
+  --tk-keyword:  #ff7b72;
+  --tk-string:   #8ddb8c;
+  --tk-number:   #79c0ff;
+  --tk-function: #d2a8ff;
+  --tk-type:     #ffa657;
+  --tk-attr:     #56d4dd;
+  --tk-meta:     #d2a8ff;
+  --tk-ins:      #7ee787;
+  --tk-ins-bg:   rgba(46, 160, 67, 0.15);
+  --tk-del:      #ffa198;
+  --tk-del-bg:   rgba(248, 81, 73, 0.15);
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -343,11 +380,6 @@ kbd {
 .docs-column { min-width: 0; }
 .docs-prose { max-width: var(--content-max); }
 
-/* Pages no longer hand-write these: the layout derives breadcrumbs and the
-   pager from the nav (components/PageNav.tsx). */
-.docs-prose > .docs-eyebrow,
-.docs-prose > .docs-pager { display: none; }
-
 .docs-topbar {
   display: flex;
   align-items: center;
@@ -609,7 +641,13 @@ h3:hover > .heading-anchor,
   transition: color 0.15s, border-color 0.15s;
 }
 .code-block-copy:hover { color: var(--text); border-color: var(--faint); }
-.code-block-copy.copied { color: var(--accent-text); border-color: var(--accent-line); }
+.code-block-copy[data-state="copied"] { color: var(--accent-text); border-color: var(--accent-line); }
+.code-block-title {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
 .code-block pre { margin: 0; padding: 1.05rem 1.15rem; overflow-x: auto; }
 .code-block pre code {
   background: transparent;
@@ -619,6 +657,44 @@ h3:hover > .heading-anchor,
   line-height: 1.7;
   color: var(--text);
 }
+.tk-c { color: var(--tk-comment); font-style: italic; }
+.tk-k { color: var(--tk-keyword); }
+.tk-s { color: var(--tk-string); }
+.tk-n,
+.tk-l { color: var(--tk-number); }
+.tk-f { color: var(--tk-function); }
+.tk-t,
+.tk-v { color: var(--tk-type); }
+.tk-a { color: var(--tk-attr); }
+.tk-m { color: var(--tk-meta); }
+.tk-h { color: var(--tk-number); font-weight: 600; }
+/* Diff lines are tinted edge to edge. */
+.tk-ins,
+.tk-del { display: inline-block; min-width: 100%; }
+.tk-ins { color: var(--tk-ins); background: var(--tk-ins-bg); }
+.tk-del { color: var(--tk-del); background: var(--tk-del-bg); }
+
+/* PmTabs: the header holds a tab per package manager. */
+.pm-tabs__list { display: flex; gap: 0.15rem; margin: -0.45rem 0; }
+.pm-tabs__tab {
+  padding: 0.5rem 0.55rem 0.4rem;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+.pm-tabs__tab:hover { color: var(--text); }
+.pm-tabs__tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.pm-tabs__tab:focus-visible { outline: 2px solid var(--accent-line); outline-offset: -2px; }
+
+/* Reference tables (components/ReferenceTable.tsx). */
+.docs-prose .ref-table td:first-child { white-space: nowrap; }
+.docs-prose .ref-table td:nth-child(2) code { overflow-wrap: anywhere; }
+.ref-table__required { color: var(--muted); font-size: 0.78rem; }
+.docs-prose .ref-table--versions td:first-child { width: 1%; }
 
 /* ── Benchmarks ─────────────────────────────────── */
 .bench-table td:nth-child(2),

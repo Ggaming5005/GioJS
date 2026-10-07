@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Linking & Navigating',
+  description: 'Client-side navigation, router hooks, prefetching, scroll and focus.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Routing</div>
       <h1>Linking & Navigating</h1>
       <p className="page-subtitle">Client-side navigation, router hooks, prefetching, scroll and focus.</p>
       <p>Use GioLink for internal navigation. It prefetches on hover intent by default and swaps content without a full reload. Set <code>prefetch=&quot;viewport&quot;</code> to instead prefetch once when the link scrolls into view (via IntersectionObserver), or <code>prefetch={'{false}'}</code> to disable prefetching.</p>
@@ -17,7 +22,7 @@ export default function Page(): React.JSX.Element {
 <GioLink href="/search?q=gio" replace scroll={false}>Search</GioLink>
 <GioLink href="#comments">Jump to comments</GioLink>`} />
 
-      <h2>How a soft navigation works</h2>
+      <h2 id="how-a-soft-navigation-works">How a soft navigation works</h2>
       <p>
         A click fetches the next page&apos;s HTML (or takes a fresh prefetch), loads the
         route&apos;s client chunk and any of its <a href="/docs/css">stylesheets</a> the page
@@ -52,7 +57,7 @@ export default function Page(): React.JSX.Element {
         <code>app/(site)/layout.tsx</code>.
       </div>
 
-      <h2>Router hooks</h2>
+      <h2 id="router-hooks">Router hooks</h2>
       <p>
         <code>usePathname</code>, <code>useParams</code> and <code>useSearchParams</code> read
         the page the router matched. They work during server rendering - in the root layout
@@ -96,7 +101,7 @@ export default function PostPage() {
         </li>
       </ul>
 
-      <h2>Navigating from code</h2>
+      <h2 id="navigating-from-code">Navigating from code</h2>
       <CodeBlock lang="tsx" code={`import { useRouter, href } from '@gio.js/react';
 
 function SaveButton({ id }: { id: string }) {
@@ -126,7 +131,7 @@ function SaveButton({ id }: { id: string }) {
         <code>javascript:</code> URLs, and do nothing during server rendering.
       </p>
 
-      <h2>Scroll</h2>
+      <h2 id="scroll">Scroll</h2>
       <ul>
         <li>
           A navigation scrolls to the top of the new page, or to the element its{' '}
@@ -148,7 +153,7 @@ function SaveButton({ id }: { id: string }) {
         </li>
       </ul>
 
-      <h2>Prefetching</h2>
+      <h2 id="prefetching">Prefetching</h2>
       <p>
         Prefetched pages are kept for 30 seconds (<code>PREFETCH_TTL_MS</code>), at most 50 of
         them; an older entry is fetched again when it is used. The cache is cleared by{' '}
@@ -168,7 +173,7 @@ function SaveButton({ id }: { id: string }) {
         <code>gio.toml</code>.
       </div>
 
-      <h2>Focus and announcements</h2>
+      <h2 id="focus-and-announcements">Focus and announcements</h2>
       <p>
         After a soft navigation to another page, focus moves to the new page&apos;s{' '}
         <code>&lt;main&gt;</code> (or the page container when there is none), so keyboard and
@@ -184,13 +189,13 @@ function SaveButton({ id }: { id: string }) {
         it is gone.
       </p>
 
-      <h2>View transitions</h2>
+      <h2 id="view-transitions">View transitions</h2>
       <p>Set a transition preset to animate between pages using the View Transitions API.</p>
       <CodeBlock lang="tsx" code={`<GioLink href="/about" transition="fade">About</GioLink>
 
 router.push('/about', { transition: 'slide-left' });`} />
 
-      <h2>Typed routes</h2>
+      <h2 id="typed-routes">Typed routes</h2>
       <p>
         The <code>href()</code> helper builds URLs from your route patterns with full
         type checking. At every server start GioJS generates{' '}

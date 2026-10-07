@@ -857,7 +857,11 @@ first.
   headings, previous/next links, "Edit this page on GitHub", "Copy page" as
   Markdown (each page is also served as `.md`), its own `<title>` and
   canonical URL, and a light/dark/system theme switch. `/docs` is a new
-  index page.
+  index page. Code samples are syntax-highlighted (TypeScript, JSX, JSON,
+  TOML, shell, diff, Rust), show the file they belong in, and install
+  commands have npm, pnpm, yarn and bun tabs that remember your pick.
+  `docs-site/AGENTS.md` is the guide to writing a docs page, and CI now
+  typechecks, link-checks, tests and builds the site.
 - "Known Issues" is now **Known Limitations**: what GioJS does not do yet and
   what to use instead.
 - The README's comparison with self-hosted Next.js is corrected and expanded,

@@ -1,11 +1,16 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
+
+export const metadata: Metadata = {
+  title: 'How GioJS Works',
+  description: 'Rust owns the hot path. Node does what it is best at: rendering React.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Reference</div>
       <h1>How GioJS Works</h1>
       <p className="page-subtitle">Rust owns the hot path. Node does what it is best at: rendering React.</p>
       <p>GioJS splits responsibilities across two layers. The compiled Rust server handles everything performance-critical; Node handles React SSR and the npm ecosystem.</p>
@@ -15,7 +20,7 @@ export default function Page(): React.JSX.Element {
       </ul>
       <p>A request only reaches Node if it is a dynamic SSR route that missed the cache. Everything else is served entirely from Rust.</p>
 
-      <h2>Node workers</h2>
+      <h2 id="node-workers">Node workers</h2>
       <p>The Rust server spawns the Node side itself and talks to it over a local socket (a Unix socket, or a named pipe on Windows) carrying length-prefixed JSON frames. Each worker proves it was started by this server with a per-worker token before it gets any traffic. The server supervises its workers: one that crashes is respawned with backoff, and only the requests it had in flight fail (with a 503) - cached and static content keeps serving throughout.</p>
       <p>By default there is one worker. With <code>[server] workers = N</code> (or <code>&quot;auto&quot;</code>) the server runs a pool, so renders use several CPU cores:</p>
       <ul>

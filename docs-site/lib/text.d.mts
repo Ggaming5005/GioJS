@@ -7,3 +7,4 @@ export function htmlToText(html: string): string;
 export function htmlToPlain(html: string): string;
 export function slugify(text: string): string;
 export function uniqueSlug(text: string, taken: Set<string>): string;
+export function idProblems(html: string): string[];

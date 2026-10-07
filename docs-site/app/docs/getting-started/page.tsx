@@ -1,12 +1,20 @@
 import React from 'react';
-import { CodeBlock } from '../../../components/CodeBlock.tsx';
+import type { Metadata } from '@gio.js/core';
+import { PmTabs } from '../../../components/PmTabs.tsx';
+
+export const metadata: Metadata = {
+  title: 'Introduction',
+  description:
+    'GioJS is a Rust-powered React framework. You write familiar React with file-based ' +
+    'routing; the performance-critical hot path runs in compiled Rust, and Node does what it ' +
+    'is best at - rendering React.',
+};
 
 export const revalidate = false;
 
 export default function IntroductionPage(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Getting Started</div>
       <h1>Introduction</h1>
       <p className="page-subtitle">
         GioJS is a Rust-powered React framework. You write familiar React with
@@ -14,7 +22,7 @@ export default function IntroductionPage(): React.JSX.Element {
         and Node does what it is best at - rendering React.
       </p>
 
-      <h2>Why GioJS</h2>
+      <h2 id="why-giojs">Why GioJS</h2>
       <p>
         Most of the things that make a React app fast in production - HTTP/2, brotli
         compression, image optimization, ISR caching, font self-hosting - are usually
@@ -23,7 +31,7 @@ export default function IntroductionPage(): React.JSX.Element {
         profile on a $5 VPS, bare metal, Windows, or Kubernetes - no CDN tax.
       </p>
 
-      <h2>The split</h2>
+      <h2 id="the-split">The split</h2>
       <p>The framework is two cooperating layers:</p>
       <ul>
         <li><strong>Rust</strong> owns the hot path - HTTP/2 &amp; TLS, routing, brotli/gzip compression, image optimization, the ISR page cache, static files, and middleware.</li>
@@ -34,7 +42,7 @@ export default function IntroductionPage(): React.JSX.Element {
         Everything else is served entirely from Rust.
       </p>
 
-      <h2>What you get</h2>
+      <h2 id="what-you-get">What you get</h2>
       <ul>
         <li><strong>Routing</strong> - file-based <code>app/</code> routes with layouts, dynamic and catch-all segments, route groups, per-folder loading/error/not-found UI, and typed <code>href()</code>s.</li>
         <li><strong>Data</strong> - <code>getServerSideProps</code>, page actions with progressively enhanced <code>&lt;GioForm&gt;</code>, <code>route.ts</code> API handlers, SSE and WebSockets with rooms.</li>
@@ -44,8 +52,8 @@ export default function IntroductionPage(): React.JSX.Element {
         <li><strong>Operations</strong> - a supervised worker pool, health checks, Prometheus metrics, JSON logs with request ids, standalone builds and static export.</li>
       </ul>
 
-      <h2>Start in seconds</h2>
-      <CodeBlock lang="bash" code={`npm create giojs@latest my-app
+      <h2 id="start-in-seconds">Start in seconds</h2>
+      <PmTabs command={`npm create giojs@latest my-app
 cd my-app
 npm run dev`} />
       <p>
@@ -62,14 +70,6 @@ npm run dev`} />
         Coming from Next.js? The conventions (<code>app/</code>, <code>page</code>,
         <code>layout</code>, <code>getServerSideProps</code>) will feel familiar. See
         <a href="/docs/migration"> Migrating from Next.js</a>.
-      </div>
-
-      <div className="docs-pager">
-        <span />
-        <a className="next" href="/docs/installation">
-          <span className="dir">Next</span>
-          <span className="label">Installation →</span>
-        </a>
       </div>
     </>
   );

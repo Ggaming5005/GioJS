@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Authentication',
+  description: 'Encrypted cookie sessions, session guards verified in Rust, and secure cookie helpers.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Security &amp; Auth</div>
       <h1>Authentication</h1>
       <p className="page-subtitle">Encrypted cookie sessions, session guards verified in Rust, and secure cookie helpers.</p>
 
@@ -37,7 +42,7 @@ export default function Page(): React.JSX.Element {
         <a href="/docs/guides/authentication-example">authentication example</a>.
       </p>
 
-      <h2>1. Set a session secret</h2>
+      <h2 id="1-set-a-session-secret">1. Set a session secret</h2>
       <p>
         Sessions are encrypted and signed with keys derived from{' '}
         <code>GIO_SESSION_SECRET</code>. Generate a secret of at least 32 bytes:
@@ -70,9 +75,8 @@ export default function Page(): React.JSX.Element {
         </li>
       </ul>
 
-      <h2>2. Create a session storage</h2>
-      <CodeBlock lang="ts" code={`// lib/session.server.ts
-import { createSessionStorage } from '@gio.js/core';
+      <h2 id="2-create-a-session-storage">2. Create a session storage</h2>
+      <CodeBlock lang="ts" title="lib/session.server.ts" code={`import { createSessionStorage } from '@gio.js/core';
 
 interface UserSession {
   userId: string;
@@ -101,13 +105,12 @@ export const sessions = createSessionStorage<UserSession>({
         secrets in <code>GIO_SESSION_SECRET</code> (see Rotating secrets below).
       </p>
 
-      <h2>3. Log in</h2>
+      <h2 id="3-log-in">3. Log in</h2>
       <p>
         <code>getSession</code> reads the request&apos;s session (an empty, new one when there is
         none), and <code>commitSession</code> encrypts it into a <code>Set-Cookie</code> value:
       </p>
-      <CodeBlock lang="ts" code={`// app/api/login/route.ts
-import type { GioRequest } from '@gio.js/core';
+      <CodeBlock lang="ts" title="app/api/login/route.ts" code={`import type { GioRequest } from '@gio.js/core';
 import { sessions } from '../../../lib/session.server.ts';
 
 export async function POST(req: GioRequest) {
@@ -131,9 +134,8 @@ export async function POST(req: GioRequest) {
         on each visit gives a rolling session.
       </p>
 
-      <h2>4. Protect pages with a guard</h2>
-      <CodeBlock lang="toml" code={`# gio.toml
-[[guards]]
+      <h2 id="4-protect-pages-with-a-guard">4. Protect pages with a guard</h2>
+      <CodeBlock lang="toml" title="gio.toml" code={`[[guards]]
 path            = "/dashboard/*rest"
 require_session = true
 redirect_to     = "/login"`} />
@@ -161,9 +163,8 @@ export default defineMiddleware({
         its path until fixed, with a warning saying why.
       </p>
 
-      <h2>5. Read the session</h2>
-      <CodeBlock lang="ts" code={`// app/dashboard/page.tsx
-import { sessions } from '../../lib/session.server.ts';
+      <h2 id="5-read-the-session">5. Read the session</h2>
+      <CodeBlock lang="ts" title="app/dashboard/page.tsx" code={`import { sessions } from '../../lib/session.server.ts';
 
 export async function getServerSideProps(ctx) {
   const session = sessions.getSession(ctx);
@@ -188,9 +189,8 @@ export async function getServerSideProps(ctx) {
         session - <code>getSession</code> never throws on bad input.
       </p>
 
-      <h2>6. Log out</h2>
-      <CodeBlock lang="ts" code={`// app/api/logout/route.ts
-import { sessions } from '../../../lib/session.server.ts';
+      <h2 id="6-log-out">6. Log out</h2>
+      <CodeBlock lang="ts" title="app/api/logout/route.ts" code={`import { sessions } from '../../../lib/session.server.ts';
 
 export function POST() {
   return new Response(null, {
@@ -205,7 +205,7 @@ export function POST() {
         version server-side, put it in the session, and compare the two when you read it.
       </div>
 
-      <h2>Rotating secrets</h2>
+      <h2 id="rotating-secrets">Rotating secrets</h2>
       <p>
         <code>GIO_SESSION_SECRET</code> takes several comma-separated secrets. The first one
         encrypts and signs new sessions; all of them are accepted when reading, in Node and in
@@ -221,7 +221,7 @@ export function POST() {
         everyone out after a leak.
       </p>
 
-      <h2>Limits</h2>
+      <h2 id="limits">Limits</h2>
       <ul>
         <li>
           The whole session lives in the cookie, and browsers drop cookies over 4096 bytes:{' '}
@@ -235,7 +235,7 @@ export function POST() {
         </li>
       </ul>
 
-      <h2>CSRF</h2>
+      <h2 id="csrf">CSRF</h2>
       <p>
         Session cookies are <code>SameSite=Lax</code> by default, so browsers leave them off
         cross-site <code>POST</code>, <code>fetch</code>, and iframe requests - a malicious site
@@ -249,7 +249,7 @@ export function POST() {
         sites should arrive logged out.
       </p>
 
-      <h2>Cookies</h2>
+      <h2 id="cookies">Cookies</h2>
       <p>
         <code>serializeCookie(name, value, options?)</code> builds one <code>Set-Cookie</code>{' '}
         value. Its defaults are the secure ones:
@@ -288,7 +288,7 @@ headers.append('Set-Cookie', serializeCookie('q', encodeURIComponent(search)));`
         <code>constructor</code>.
       </p>
 
-      <h2>Signed values</h2>
+      <h2 id="signed-values">Signed values</h2>
       <p>
         For a value that must not be forged but may be read - an id in a URL, a
         preference cookie:
@@ -304,7 +304,7 @@ unsignValue('user-43.' + signed.split('.')[1], secrets);   // null`} />
         readable - use a session for anything secret.
       </p>
 
-      <h2>Token format</h2>
+      <h2 id="token-format">Token format</h2>
       <p>
         For reference only - the format is internal and may change behind a new version tag:
       </p>

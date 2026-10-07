@@ -106,6 +106,18 @@ test('htmlToText writes Markdown: headings, tables, fenced code with its languag
   );
 });
 
+test('a highlighted, titled code block extracts as plain code with its file name', () => {
+  const block =
+    '<div class="code-block"><div class="code-block-header" data-no-index=""><span>app/page.tsx</span></div>' +
+    '<pre data-lang="tsx" data-title="app/page.tsx"><code><span class="tk-k">export</span> ' +
+    '<span class="tk-k">const</span> a = <span class="tk-s">&quot;&lt;b&gt;&quot;</span>;</code></pre></div>';
+  assert.equal(htmlToText(block), '```tsx title="app/page.tsx"\nexport const a = "<b>";\n```');
+  // The file name is searchable with the block's words; the header is not page text.
+  const { sections } = extractSections(html(`<h1>T</h1><h2 id="s">S</h2>${block}`));
+  assert.deepEqual(sections[1].blockWords, ['app', 'page', 'tsx', 'export', 'const']);
+  assert.equal(sections[1].text, '');
+});
+
 // ── search-index.mjs ────────────────────────────────────────────────────────
 
 test('extractSections splits a page per h2/h3 with anchors, and leaves the chrome out', () => {

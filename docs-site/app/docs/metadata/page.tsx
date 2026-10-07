@@ -1,12 +1,19 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Metadata & SEO',
+  description:
+    'Titles, descriptions, Open Graph and Twitter cards, canonical URLs, sitemaps, robots.txt ' +
+    'and structured data.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Rendering &amp; Caching</div>
       <h1>Metadata &amp; SEO</h1>
       <p className="page-subtitle">
         Titles, descriptions, Open Graph and Twitter cards, canonical URLs, sitemaps,
@@ -37,7 +44,7 @@ export const metadata: Metadata = {
   alternates: { canonical: '/pricing' },  // → https://example.com/pricing
 };`} />
 
-      <h2>Titles</h2>
+      <h2 id="titles">Titles</h2>
       <ul>
         <li>
           A string sets the title. The nearest <code>template</code> set by a layout{' '}
@@ -57,7 +64,7 @@ export const metadata: Metadata = {
         </li>
       </ul>
 
-      <h2>generateMetadata</h2>
+      <h2 id="generatemetadata">generateMetadata</h2>
       <p>
         When the head depends on data, export <code>generateMetadata</code> instead (or as
         well - its result is merged over the static <code>metadata</code> of the same
@@ -66,8 +73,7 @@ export const metadata: Metadata = {
         <code>path</code>, <code>locale</code>, ... - and, on pages, the props the page
         renders with as <code>{`{ props }`}</code>, so nothing is fetched twice:
       </p>
-      <CodeBlock lang="tsx" code={`// app/posts/[slug]/page.tsx
-import type { Metadata, MetadataContext, MetadataExtras } from '@gio.js/core';
+      <CodeBlock lang="tsx" title="app/posts/[slug]/page.tsx" code={`import type { Metadata, MetadataContext, MetadataExtras } from '@gio.js/core';
 
 export const revalidate = 300;
 
@@ -121,7 +127,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         </li>
       </ul>
 
-      <h2>How segments merge</h2>
+      <h2 id="how-segments-merge">How segments merge</h2>
       <p>
         Root layout first, then each nested layout, then the page. The merge is shallow and
         the deepest segment wins per top-level field: a page that sets{' '}
@@ -130,7 +136,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         <code>null</code> removes the inherited value. Titles follow the template rules above.
       </p>
 
-      <h2>Absolute URLs: metadataBase</h2>
+      <h2 id="absolute-urls-metadatabase">Absolute URLs: metadataBase</h2>
       <p>
         Open Graph and Twitter images, <code>openGraph.url</code>, the canonical URL and
         alternate languages must be absolute for crawlers. Relative values resolve against the
@@ -143,7 +149,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         end up in every visitor&apos;s canonical URL.
       </p>
 
-      <h2>Fields</h2>
+      <h2 id="fields">Fields</h2>
       <table>
         <thead><tr><th>Field</th><th>Renders</th></tr></thead>
         <tbody>
@@ -166,7 +172,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         database cannot break out of the head.
       </p>
 
-      <h2>How the tags are rendered</h2>
+      <h2 id="how-the-tags-are-rendered">How the tags are rendered</h2>
       <ul>
         <li>
           The tags are React elements rendered inside the page&apos;s tree; React 19 hoists{' '}
@@ -211,7 +217,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         </li>
       </ul>
 
-      <h2>Structured data (JSON-LD)</h2>
+      <h2 id="structured-data-json-ld">Structured data (JSON-LD)</h2>
       <CodeBlock lang="tsx" code={`import { JsonLd } from '@gio.js/react';
 
 export default function Post({ post }: { post: Post }) {
@@ -235,7 +241,7 @@ export default function Post({ post }: { post: Post }) {
         It is a data block the browser never executes, so it needs no CSP nonce.
       </p>
 
-      <h2>sitemap.xml, robots.txt and the web manifest</h2>
+      <h2 id="sitemapxml-robotstxt-and-the-web-manifest">sitemap.xml, robots.txt and the web manifest</h2>
       <p>
         Three files at the root of <code>app/</code> generate the crawler files. Each default
         export is the data, or a (sync or async) function returning it:
@@ -305,7 +311,7 @@ export default function robots(): MetadataRoute.Robots {
         </li>
       </ul>
 
-      <h2>Not yet available</h2>
+      <h2 id="not-yet-available">Not yet available</h2>
       <p>
         Generated Open Graph images (an <code>opengraph-image.tsx</code> convention rendering
         JSX to PNG) are not part of GioJS yet. Point <code>openGraph.images</code> at a static

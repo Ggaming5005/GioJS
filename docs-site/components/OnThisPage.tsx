@@ -8,9 +8,9 @@
  *
  * Both read the headings from the rendered article after hydration, so a
  * page needs nothing but its headings. Before reading, prepareHeadings()
- * gives every h2/h3 an id (the explicit one, else the slug the search
- * index uses - lib/text.mjs uniqueSlug - so search results land on it) and
- * a hover `#` link to itself.
+ * gives every h2/h3 a hover `#` link to itself. Pages give their headings
+ * explicit ids (the build refuses one without); a heading that still has
+ * none gets the slug the search index would use (lib/text.mjs uniqueSlug).
  */
 import React, { useEffect, useState } from 'react';
 import { uniqueSlug } from '../lib/text.mjs';

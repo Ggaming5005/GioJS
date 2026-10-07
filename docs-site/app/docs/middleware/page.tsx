@@ -1,12 +1,19 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Middleware',
+  description:
+    'Declarative redirects, rewrites, response headers, and auth guards - executed in Rust ' +
+    'before routing.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Routing</div>
       <h1>Middleware</h1>
       <p className="page-subtitle">Declarative redirects, rewrites, response headers, and auth guards - executed in Rust before routing.</p>
 
@@ -29,7 +36,7 @@ export default function Page(): React.JSX.Element {
         <li><strong>middleware.ts</strong> - a file at the project root (sibling of <code>app/</code>)</li>
       </ul>
 
-      <h2>gio.toml rules</h2>
+      <h2 id="giotoml-rules">gio.toml rules</h2>
       <CodeBlock lang="toml" code={`[[redirects]]
 from   = "/old-home"
 to     = "/"
@@ -53,7 +60,7 @@ path            = "/admin/*rest"
 require_session = true      # a valid, unexpired session (see Authentication)
 redirect_to     = "/login"`} />
 
-      <h2>middleware.ts</h2>
+      <h2 id="middlewarets">middleware.ts</h2>
       <p>
         The same four rule kinds, typed. Export the result of{' '}
         <code>defineMiddleware</code> as the default export (guard fields are
@@ -86,7 +93,7 @@ export default defineMiddleware({
         startup.
       </p>
 
-      <h2>Pattern language</h2>
+      <h2 id="pattern-language">Pattern language</h2>
       <p>
         Patterns use the routing conventions and must start with <code>/</code>:
       </p>
@@ -139,7 +146,7 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         warning saying why.
       </p>
 
-      <h2>Evaluation order</h2>
+      <h2 id="evaluation-order">Evaluation order</h2>
       <p>Per request, the short-circuiting phases run in a fixed order:</p>
       <ol>
         <li><strong>Guards</strong></li>
@@ -160,7 +167,7 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         the browser URL stays what the client requested.
       </p>
 
-      <h2>Guards</h2>
+      <h2 id="guards">Guards</h2>
       <p>
         A guard redirects (302) any request to a matching path that lacks the
         credential it requires - the request never reaches Node. There are two
@@ -192,7 +199,7 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         anyone else. See <a href="/docs/caching">Caching</a>.
       </p>
 
-      <h2>Header rules</h2>
+      <h2 id="header-rules">Header rules</h2>
       <p>
         Header rules stamp response headers and do not short-circuit: every
         header rule whose <code>path</code> matches contributes its headers.
@@ -212,7 +219,7 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
         <code>/embed/*rest</code>. See <a href="/docs/security">Security</a>.
       </p>
 
-      <h2>public/ files at the site root</h2>
+      <h2 id="public-files-at-the-site-root">public/ files at the site root</h2>
       <p>
         A file in <code>public/</code> answers at its root URL as well as under{' '}
         <code>/public/*</code> - <code>public/members/report.pdf</code> is both{' '}

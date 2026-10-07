@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Error Handling',
+  description: '404 and error UI per folder, with special files.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Routing</div>
       <h1>Error Handling</h1>
       <p className="page-subtitle">404 and error UI per folder, with special files.</p>
 
@@ -21,7 +26,7 @@ export default function Page(): React.JSX.Element {
         the folders above it. Without any, GioJS serves clean built-in pages instead.
       </p>
 
-      <h2>Not found</h2>
+      <h2 id="not-found">Not found</h2>
       <p>
         Call <code>notFound()</code> from <code>@gio.js/core</code> in{' '}
         <code>getServerSideProps</code> or while rendering, or return{' '}
@@ -35,8 +40,7 @@ export default function Page(): React.JSX.Element {
     layout.tsx
     not-found.tsx        # /shop/* pages that call notFound() - inside shop/layout.tsx
     [id]/page.tsx`} />
-      <CodeBlock lang="tsx" code={`// app/not-found.tsx
-export default function NotFound() {
+      <CodeBlock lang="tsx" title="app/not-found.tsx" code={`export default function NotFound() {
   return <div><h1>404</h1><p>Page not found.</p></div>;
 }`} />
       <p>
@@ -51,7 +55,7 @@ export default function NotFound() {
         status 404.
       </p>
 
-      <h2>Errors</h2>
+      <h2 id="errors">Errors</h2>
       <p>
         When a page, its <code>getServerSideProps</code>, or a layout below the{' '}
         <code>error.tsx</code>&apos;s folder throws, the nearest <code>error.tsx</code>{' '}
@@ -68,8 +72,7 @@ export default function NotFound() {
         from the exception can leak into the page. <code>digest</code> is a short
         random error reference in both modes - show it so users can quote it:
       </p>
-      <CodeBlock lang="tsx" code={`// app/error.tsx
-import type { ErrorPageProps } from '@gio.js/core';
+      <CodeBlock lang="tsx" title="app/error.tsx" code={`import type { ErrorPageProps } from '@gio.js/core';
 
 export default function Error({ error, reset }: ErrorPageProps) {
   return (
@@ -82,7 +85,7 @@ export default function Error({ error, reset }: ErrorPageProps) {
   );
 }`} />
 
-      <h3>In the browser</h3>
+      <h3 id="in-the-browser">In the browser</h3>
       <p>
         Every <code>error.tsx</code> is also a React error boundary in the hydrated page, so
         it ships in the client bundle of the pages below it (like a layout - importing
@@ -119,7 +122,7 @@ export default function Error({ error, reset }: ErrorPageProps) {
         server renders is static HTML - link the user home or ask them to reload there.
       </p>
 
-      <h3>Streaming and loading.tsx</h3>
+      <h3 id="streaming-and-loadingtsx">Streaming and loading.tsx</h3>
       <p>
         A failure is answered with a 404 or 500 page only while nothing has been sent yet.
         Under a <code>loading.tsx</code> that means: if the page throws (or calls{' '}
@@ -138,7 +141,7 @@ export default function Error({ error, reset }: ErrorPageProps) {
         prerendering, its shell is not stored either.
       </p>
 
-      <h2>Production error responses</h2>
+      <h2 id="production-error-responses">Production error responses</h2>
       <p>
         A production response never carries an error message or stack. Without
         an <code>app/error.tsx</code>, a failed render is answered with a plain
@@ -156,7 +159,7 @@ export default function Error({ error, reset }: ErrorPageProps) {
         the matching <code>NODE_ENV</code>, so the two halves always agree.
       </p>
 
-      <h2>Development error overlay</h2>
+      <h2 id="development-error-overlay">Development error overlay</h2>
       <p>
         In development, SSR render errors - plus browser window errors and
         unhandled promise rejections - open a full-screen overlay instead of a
@@ -197,7 +200,7 @@ GIO_EDITOR="subl -w" npm run dev`} />
         codeframes and editor links will not work from there.
       </p>
 
-      <h2>Static export</h2>
+      <h2 id="static-export">Static export</h2>
       <p>
         <code>gio export</code> writes your <code>app/not-found.tsx</code> (or the built-in
         default) to <code>out/404.html</code>, which static hosts like Cloudflare Pages,
@@ -211,7 +214,7 @@ GIO_EDITOR="subl -w" npm run dev`} />
         would stay on screen.
       </p>
 
-      <h2>API routes</h2>
+      <h2 id="api-routes">API routes</h2>
       <p>
         Errors thrown in <code>route.ts</code> handlers are logged server-side and
         answered with a JSON <code>500</code>,{' '}

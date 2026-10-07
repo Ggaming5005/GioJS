@@ -6,6 +6,7 @@
  * HTML: llms.txt/llms-full.txt, a Markdown copy of every page (`/docs/x` →
  * `/docs/x.md`, what "Copy page as Markdown" fetches) and the search index
  * (`/search-index.json`, split per h2/h3 section - lib/search-index.mjs).
+ * Fails when a docs page has a heading without an id or an id used twice.
  * Run via `npm run export`.
  */
 import { tsImport } from 'tsx/esm/api';
@@ -13,7 +14,7 @@ import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative, sep } from 'node:path';
-import { articleHtml, decodeEntities, htmlToText } from './lib/text.mjs';
+import { articleHtml, decodeEntities, htmlToText, idProblems } from './lib/text.mjs';
 import { buildSearchIndex } from './lib/search-index.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +39,16 @@ const { written, skipped, unhydrated } = await exportSite(join(here, 'app'), out
 // favicon set and manifest already sit where browsers request them.
 
 const pages = await readPages(outDir);
+// Every docs heading carries its own id (search results and shared links
+// land on it), and no id repeats on a page: fail the build otherwise.
+const idErrors = pages
+  .filter((page) => page.route.startsWith('/docs'))
+  .flatMap((page) => idProblems(page.html).map((problem) => `${page.route}: ${problem}`));
+if (idErrors.length > 0) {
+  for (const error of idErrors) console.error(`[docs] error: ${error}`);
+  console.error('[docs] give every h2/h3 a unique id="kebab-case" (docs-site/AGENTS.md)');
+  process.exit(1);
+}
 await writeLlmsTxt(outDir, pages, process.env.GIO_SITE_URL);
 // The landing page is marketing, not documentation: llms.txt lists it, the
 // .md copies and the search index leave it out.

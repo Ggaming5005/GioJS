@@ -1,11 +1,19 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
+import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Deployment',
+  description:
+    'How a GioJS server behaves in production: static files, health checks, reverse proxies, ' +
+    'process supervision, sizing, and running several instances.',
+};
 
 export const revalidate = false;
 
 export default function DeploymentPage(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Deployment &amp; Operations</div>
       <h1>Deployment</h1>
       <p className="page-subtitle">
         How a GioJS server behaves in production: static files, health checks, reverse
@@ -73,8 +81,7 @@ export default function DeploymentPage(): React.JSX.Element {
         probes should read <code>nodeReady</code>.
         Use it for readiness probes, load balancer health checks, and uptime monitors:
       </p>
-      <pre>
-        <code>{`{
+      <CodeBlock lang="json" code={`{
   "status": "ok",
   "http2": true,
   "tls": false,
@@ -83,8 +90,7 @@ export default function DeploymentPage(): React.JSX.Element {
   "workers": { "configured": 2, "ready": 2 },
   "cacheEntries": 42,
   "uptimeSecs": 3600
-}`}</code>
-      </pre>
+}`} />
 
       <h2 id="reverse-proxy">Behind a reverse proxy or load balancer</h2>
       <p>
@@ -99,11 +105,9 @@ export default function DeploymentPage(): React.JSX.Element {
         proxy&apos;s. The proxy reads every request head in full, so a longer head deadline
         behind it costs nothing:
       </p>
-      <pre>
-        <code>{`[server]
+      <CodeBlock lang="toml" code={`[server]
 header_read_timeout_secs = 65   # above a 60s ALB / ingress-nginx idle timeout
-idle_timeout_secs = 65`}</code>
-      </pre>
+idle_timeout_secs = 65`} />
       <p>
         A plain <code>proxy_pass</code> with no <code>upstream</code> keep-alive opens a fresh
         connection per request and needs neither. See{' '}
@@ -155,8 +159,7 @@ idle_timeout_secs = 65`}</code>
         </li>
       </ul>
       <p>nginx (on the same machine):</p>
-      <pre>
-        <code>{`location / {
+      <CodeBlock lang="nginx" code={`location / {
     proxy_pass         http://127.0.0.1:3000;
     proxy_set_header   Host $host;
     proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -168,8 +171,7 @@ idle_timeout_secs = 65`}</code>
 # gio.toml
 [server]
 host = "127.0.0.1"
-trusted_proxies = ["127.0.0.1", "::1"]`}</code>
-      </pre>
+trusted_proxies = ["127.0.0.1", "::1"]`} />
       <p>
         Caddy&apos;s <code>reverse_proxy</code> sets all three forwarding headers and keeps{' '}
         <code>Host</code> by default, and Traefik does the same for its routers - both drop
@@ -179,9 +181,7 @@ trusted_proxies = ["127.0.0.1", "::1"]`}</code>
         <code>customRequestHeaders: {'{'} X-Request-Id: &quot;&quot; {'}'}</code>) or turn
         adoption off:
       </p>
-      <pre>
-        <code>{`# Caddyfile
-example.com {
+      <CodeBlock lang="text" title="Caddyfile" code={`example.com {
     reverse_proxy 127.0.0.1:3000 {
         header_up X-Request-Id {http.request.uuid}
     }
@@ -191,8 +191,7 @@ example.com {
 # network it connects from instead, e.g. ["172.16.0.0/12"]
 [server]
 trusted_proxies = ["127.0.0.1", "::1"]
-# accept_request_id = false   # Traefik without the strip middleware`}</code>
-      </pre>
+# accept_request_id = false   # Traefik without the strip middleware`} />
       <p>
         Cloud load balancers connect from addresses inside your network: trust that range.
         AWS ALB appends to <code>X-Forwarded-For</code>, sets <code>X-Forwarded-Proto</code>{' '}
@@ -203,12 +202,10 @@ trusted_proxies = ["127.0.0.1", "::1"]
         either remove them, so a client&apos;s own values arrive as if the load balancer had
         sent them. Turn request-id adoption off, and treat the host as client-supplied:
       </p>
-      <pre>
-        <code>{`# gio.toml behind AWS ALB (your VPC CIDR) or Google Cloud LB
+      <CodeBlock lang="toml" code={`# gio.toml behind AWS ALB (your VPC CIDR) or Google Cloud LB
 [server]
 trusted_proxies   = ["10.0.0.0/16"]
-accept_request_id = false   # the LB would pass a client's X-Request-Id through`}</code>
-      </pre>
+accept_request_id = false   # the LB would pass a client's X-Request-Id through`} />
       <p>
         In Kubernetes, trust the pod CIDR the ingress controller runs in. ingress-nginx sends
         an <code>X-Request-ID</code>, but it deliberately reuses one the client sent; keep{' '}
@@ -260,10 +257,8 @@ accept_request_id = false   # the LB would pass a client's X-Request-Id through`
         uncached or personalized pages, slow <code>getServerSideProps</code>, CPU-heavy
         route handlers), run a worker pool:
       </p>
-      <pre>
-        <code>{`[server]
-workers = "auto"   # one per CPU core, at most 8 - or an exact count`}</code>
-      </pre>
+      <CodeBlock lang="toml" code={`[server]
+workers = "auto"   # one per CPU core, at most 8 - or an exact count`} />
       <ul>
         <li>
           <strong>Memory.</strong> Each worker is a full Node process holding its own copy
@@ -315,9 +310,7 @@ workers = "auto"   # one per CPU core, at most 8 - or an exact count`}</code>
         and the gio.toml settings pages render with), so identical builds already agree - pinning it explicitly protects you
         when pods roll out at different times:
       </p>
-      <pre>
-        <code>{`GIO_DEPLOYMENT_ID=release-2026-09-06`}</code>
-      </pre>
+      <CodeBlock lang="bash" code={`GIO_DEPLOYMENT_ID=release-2026-09-06`} />
     </>
   );
 }

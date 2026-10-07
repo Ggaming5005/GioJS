@@ -93,8 +93,10 @@ function codeTerms(prose) {
 function blockWords(html, text) {
   const known = new Set(text.toLowerCase().match(/[\p{L}\p{N}_$]+/gu) ?? []);
   const words = new Set();
-  for (const block of stripNonText(html).matchAll(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi)) {
-    for (const [word] of stripTags(block[1]).matchAll(/[\p{L}\p{N}_$]+/gu)) {
+  for (const block of stripNonText(html).matchAll(/<pre\b([^>]*)>([\s\S]*?)<\/pre>/gi)) {
+    // The file name a CodeBlock shows (data-title) is searchable with its code.
+    const title = /\bdata-title="([^"]*)"/.exec(block[1])?.[1] ?? '';
+    for (const [word] of stripTags(`${title}\n${block[2]}`).matchAll(/[\p{L}\p{N}_$]+/gu)) {
       if (word.length < 2 || known.has(word.toLowerCase()) || /^\d+$/.test(word)) continue;
       words.add(word);
       if (words.size >= MAX_BLOCK_WORDS) return [...words];

@@ -96,7 +96,7 @@ function walk(dir, keep) {
  * Source with code samples blanked out (line numbers preserved): template
  * literals, and JSX string expressions holding markup (`{'<a href="/x">'}`).
  */
-function withoutTemplates(source) {
+export function withoutTemplates(source) {
   const blank = (m) => m.replace(/[^\n]/g, ' ');
   return source
     .replace(/`(?:\\[\s\S]|[^`\\])*`/g, blank)

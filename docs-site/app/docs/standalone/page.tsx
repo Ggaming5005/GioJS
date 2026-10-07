@@ -1,12 +1,20 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Standalone Deploys',
+  description:
+    'One folder, one command. Build a self-contained deploy directory, copy it to any server ' +
+    'that has Node installed, and run node run.mjs. No node_modules, no npm install, no ' +
+    'toolchain on the host.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Deployment &amp; Operations</div>
       <h1>Standalone Deploys</h1>
       <p className="page-subtitle">
         One folder, one command. Build a self-contained deploy directory, copy it to any
@@ -23,7 +31,7 @@ export default function Page(): React.JSX.Element {
         their work during the build and are never loaded at runtime.
       </p>
 
-      <h2>Build</h2>
+      <h2 id="build">Build</h2>
       <CodeBlock lang="bash" code={`gio build standalone [--out <dir>] [--target <platform>]
 
   --out <dir>         output directory (default: ./standalone)
@@ -34,7 +42,7 @@ export default function Page(): React.JSX.Element {
         mode.)
       </p>
 
-      <h2>What you get</h2>
+      <h2 id="what-you-get">What you get</h2>
       <CodeBlock lang="text" code={`standalone/
   server(.exe)     the Rust HTTP server binary for the target platform
   worker.js        the entire Node side bundled to one file (React included)
@@ -59,7 +67,7 @@ export default function Page(): React.JSX.Element {
         <code>worker.js</code>.
       </p>
 
-      <h2>Deploy</h2>
+      <h2 id="deploy">Deploy</h2>
       <p>
         Copy the folder to any server with Node 20+ installed, then:
       </p>
@@ -74,7 +82,7 @@ export default function Page(): React.JSX.Element {
         launcher holds open, and exits gracefully when that pipe closes (see{' '}
         <a href="/docs/deployment">process supervision</a>).
       </p>
-      <h2>Environment variables</h2>
+      <h2 id="environment-variables">Environment variables</h2>
       <p>
         The build loads the project's production <code>.env</code> files, and{' '}
         <code>GIO_PUBLIC_*</code> values are frozen into the hydration chunks and{' '}
@@ -100,7 +108,7 @@ Environment=NODE_ENV=production
 KillMode=mixed
 TimeoutStopSec=30`} />
 
-      <h2>Cross-building for another platform</h2>
+      <h2 id="cross-building-for-another-platform">Cross-building for another platform</h2>
       <p>
         By default the build packages the server binary for the machine you build on. To
         build on one platform and deploy to another (say, build on Windows or macOS, deploy
@@ -123,7 +131,7 @@ gio build standalone --target linux-x64`} />
       </p>
       <CodeBlock lang="bash" code={`GIO_STANDALONE_SERVER_BIN=/path/to/giojs-server gio build standalone`} />
 
-      <h2>When to prefer a normal deploy</h2>
+      <h2 id="when-to-prefer-a-normal-deploy">When to prefer a normal deploy</h2>
       <p>
         A standalone folder is frozen at build time: framework fixes only reach it when you
         rebuild and re-copy. A normal deploy (<code>npm install</code> on the host, run{' '}

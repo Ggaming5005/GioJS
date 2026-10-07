@@ -1,12 +1,18 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Forms and Mutations',
+  description:
+    'Page actions and <GioForm>: forms that work without JavaScript and feel instant with it.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Data</div>
       <h1>Forms and Mutations</h1>
       <p className="page-subtitle">Page actions and &lt;GioForm&gt;: forms that work without JavaScript and feel instant with it.</p>
 
@@ -17,8 +23,7 @@ export default function Page(): React.JSX.Element {
         <code>&lt;form method=&quot;post&quot;&gt;</code>, so it works before (or without) any
         JavaScript, and submits through the client router once the page has hydrated.
       </p>
-      <CodeBlock lang="tsx" code={`// app/contact/page.tsx
-import { redirect, type ActionArgs, type WithActionData } from '@gio.js/core';
+      <CodeBlock lang="tsx" title="app/contact/page.tsx" code={`import { redirect, type ActionArgs, type WithActionData } from '@gio.js/core';
 import { GioForm, useGioFormState } from '@gio.js/react';
 
 export async function action(req: ActionArgs) {
@@ -52,7 +57,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
   );
 }`} />
 
-      <h2>Progressive enhancement</h2>
+      <h2 id="progressive-enhancement">Progressive enhancement</h2>
       <p>
         <code>&lt;GioForm&gt;</code> renders <code>method=&quot;post&quot;</code> and no{' '}
         <code>action</code> attribute (unless you pass one), so the browser posts to the
@@ -78,7 +83,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         just always do a full page load.
       </p>
 
-      <h2>Writing an action</h2>
+      <h2 id="writing-an-action">Writing an action</h2>
       <p>
         <code>action(req)</code> receives the same request object as a{' '}
         <a href="/docs/route-handlers">route handler</a> - <code>params</code>,{' '}
@@ -133,7 +138,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         thrown - see <a href="/docs/fetching-data">Data Fetching</a>.
       </p>
 
-      <h2>Redirect after a change (Post/Redirect/Get)</h2>
+      <h2 id="redirect-after-a-change-postredirectget">Redirect after a change (Post/Redirect/Get)</h2>
       <p>
         After an action changes something, answer with <code>redirect()</code>. The 303 makes the
         browser <code>GET</code> the target, so reloading it never asks to resubmit the form and
@@ -169,7 +174,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         is still followed by <code>fetch</code>. Plain form posts always get the real redirect.
       </p>
 
-      <h2>Validation errors</h2>
+      <h2 id="validation-errors">Validation errors</h2>
       <p>
         Return <code>{'{ status: 422, data }'}</code> to show the form again with errors. The
         page re-renders with <code>actionData</code> - on the server for a plain post, swapped
@@ -187,7 +192,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         screen readers announce it.
       </p>
 
-      <h2>GioForm</h2>
+      <h2 id="gioform">GioForm</h2>
       <p>
         Every <code>&lt;form&gt;</code> prop passes through (<code>className</code>,{' '}
         <code>encType</code>, <code>id</code>, ...), plus:
@@ -244,7 +249,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         <li>A network failure - <code>onError</code> with <code>status: 0</code>; the form stays as it is.</li>
       </ul>
 
-      <h2>File uploads</h2>
+      <h2 id="file-uploads">File uploads</h2>
       <p>
         Set <code>encType=&quot;multipart/form-data&quot;</code> - the browser needs it to send
         file contents, with or without JavaScript - and read the files from{' '}
@@ -277,7 +282,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         <code>file.name</code> or <code>file.type</code>: they are whatever the client sent.
       </p>
 
-      <h2>Security</h2>
+      <h2 id="security">Security</h2>
       <ul>
         <li>
           Cross-site form posts are refused with <code>403</code> in the Rust server before the
@@ -297,14 +302,13 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         </li>
       </ul>
 
-      <h2>Sessions and cookies</h2>
+      <h2 id="sessions-and-cookies">Sessions and cookies</h2>
       <p>
         Read the session with <code>getSession(req)</code> and send cookies through the
         redirect&apos;s (or re-render&apos;s) <code>headers</code> - see{' '}
         <a href="/docs/authentication">Authentication</a>:
       </p>
-      <CodeBlock lang="tsx" code={`// app/login/page.tsx
-import { redirect, type ActionArgs, type WithActionData } from '@gio.js/core';
+      <CodeBlock lang="tsx" title="app/login/page.tsx" code={`import { redirect, type ActionArgs, type WithActionData } from '@gio.js/core';
 import { GioForm } from '@gio.js/react';
 import { sessions } from '../../lib/session.server.ts';
 
@@ -328,7 +332,7 @@ export default function Login({ actionData }: WithActionData<typeof action>) {
   );
 }`} />
 
-      <h2>Fresh data after a mutation</h2>
+      <h2 id="fresh-data-after-a-mutation">Fresh data after a mutation</h2>
       <p>
         <code>GioForm</code> drops the router&apos;s prefetched pages when it posts, and the page
         it shows next is fetched fresh. Pages cached in the Rust server (<code>revalidate</code>)
@@ -345,13 +349,13 @@ export async function action(req: ActionArgs) {
   return redirect('/blog');
 }`} />
 
-      <h2>Static export</h2>
+      <h2 id="static-export">Static export</h2>
       <p>
         Actions run in the server. A site deployed with <code>gio export</code> to a static host
         has no server to post to - point such forms at an external endpoint instead.
       </p>
 
-      <h2>Testing</h2>
+      <h2 id="testing">Testing</h2>
       <p>
         <code>callRoute</code> from <code>@gio.js/core/testing</code> posts to pages too: a{' '}
         <code>URLSearchParams</code> body is sent as a form.

@@ -1,16 +1,22 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+import { PmTabs } from '../../../components/PmTabs.tsx';
+
+export const metadata: Metadata = {
+  title: 'Installation',
+  description: 'Scaffold a new GioJS app in seconds, or add it to an existing project.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Getting Started</div>
       <h1>Installation</h1>
       <p className="page-subtitle">Scaffold a new GioJS app in seconds, or add it to an existing project.</p>
 
-      <h2>System requirements</h2>
+      <h2 id="system-requirements">System requirements</h2>
       <ul>
         <li>
           Node.js 20 or newer (22.16 or newer for the{' '}
@@ -24,10 +30,9 @@ export default function Page(): React.JSX.Element {
         <li>No Rust toolchain: the server binary for your platform is installed from npm</li>
       </ul>
 
-      <h2>Create a new app</h2>
+      <h2 id="create-a-new-app">Create a new app</h2>
       <p>The scaffolder asks a few questions:</p>
-      <CodeBlock lang="bash" code={`npm create giojs@latest
-# or: pnpm create giojs   yarn create giojs   bun create giojs`} />
+      <PmTabs command={`npm create giojs@latest`} />
       <ul>
         <li><strong>Project name</strong> - also the folder (default <code>my-giojs-app</code>)</li>
         <li><strong>Language</strong> - TypeScript or JavaScript</li>
@@ -52,20 +57,20 @@ export default function Page(): React.JSX.Element {
         It then creates a git repository with a first commit (when git is available and the
         folder is not already inside a repository). Start the dev server:
       </p>
-      <CodeBlock lang="bash" code={`cd my-giojs-app
+      <PmTabs command={`cd my-giojs-app
 npm run dev        # http://localhost:3000`} />
       <p>
         Edits restart the server&apos;s render worker and reload the browser. The dev server
         also serves the error overlay and the dashboard at <code>/_gio/devtools</code>.
       </p>
 
-      <h3>Options</h3>
+      <h3 id="options">Options</h3>
       <p>
         Pass the directory as the first argument and flags after it to skip the questions -
         anything you pass is not asked. With npm, put the flags after <code>--</code>; pnpm,
         Yarn and Bun pass them straight through.
       </p>
-      <CodeBlock lang="bash" code={`npm create giojs@latest my-app -- --ts --server
+      <PmTabs command={`npm create giojs@latest my-app -- --ts --server
 npm create giojs@latest my-app -- --js --static --no-git
 npm create giojs@latest . -- --yes          # current (empty) folder, all defaults
 npm create giojs@latest my-app -- --tailwind --features auth,db,docker
@@ -120,7 +125,7 @@ npm create giojs@latest -- --help           # every option`} />
         </li>
       </ul>
 
-      <h3>What you get</h3>
+      <h3 id="what-you-get">What you get</h3>
       <p>
         A small app that uses the framework&apos;s own features: file-based routes with a dynamic{' '}
         <code>posts/[id]</code> route (<code>getServerSideProps</code> plus{' '}
@@ -138,7 +143,7 @@ npm create giojs@latest -- --help           # every option`} />
         <code>[[fonts]]</code>.
       </p>
 
-      <h3>Starter recipes</h3>
+      <h3 id="starter-recipes">Starter recipes</h3>
       <p>Guides for common additions, explaining what each adds and how to take it further:</p>
       <ul>
         <li><a href="/docs/guides/tailwind">Tailwind CSS</a></li>
@@ -147,9 +152,9 @@ npm create giojs@latest -- --help           # every option`} />
         <li><a href="/docs/guides/docker">Docker</a> - a production image from a standalone build</li>
       </ul>
 
-      <h2>Add GioJS to an existing project</h2>
+      <h2 id="add-giojs-to-an-existing-project">Add GioJS to an existing project</h2>
       <p>Install the packages:</p>
-      <CodeBlock lang="bash" code={`npm install @gio.js/server @gio.js/core @gio.js/react react react-dom cross-env
+      <PmTabs command={`npm install @gio.js/server @gio.js/core @gio.js/react react react-dom cross-env
 npm install -D typescript @types/react @types/react-dom @types/node`} />
       <p>Add the scripts and an <code>app/</code> directory with a root layout and a page:</p>
       <CodeBlock lang="json" code={`{
@@ -189,17 +194,6 @@ export default function Home() {
         Next.js? <code>npm create giojs@latest -- migrate</code> converts the project - see{' '}
         <a href="/docs/migration">Migrating from Next.js</a>.
       </p>
-
-      <div className="docs-pager">
-        <a className="prev" href="/docs/getting-started">
-          <span className="dir">Previous</span>
-          <span className="label">← Introduction</span>
-        </a>
-        <a className="next" href="/docs/project-structure">
-          <span className="dir">Next</span>
-          <span className="label">Project Structure →</span>
-        </a>
-      </div>
     </>
   );
 }

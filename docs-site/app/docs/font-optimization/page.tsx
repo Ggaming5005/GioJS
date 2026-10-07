@@ -1,12 +1,17 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Font Optimization',
+  description: 'Self-host any font as WOFF2 with correct preload headers.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Styling &amp; Assets</div>
       <h1>Font Optimization</h1>
       <p className="page-subtitle">Self-host any font as WOFF2 with correct preload headers.</p>
       <p>
@@ -17,7 +22,7 @@ export default function Page(): React.JSX.Element {
         visitors never make a request to a third-party font CDN.
       </p>
 
-      <h2>Declare fonts in gio.toml</h2>
+      <h2 id="declare-fonts-in-giotoml">Declare fonts in gio.toml</h2>
       <p>
         Add one <code>[[fonts]]</code> entry per <code>.woff2</code> file - one weight and style
         of one family. Projects created with <code>create-giojs</code> ship their fonts in{' '}
@@ -41,8 +46,7 @@ family = "JetBrains Mono"
 url = "/public/fonts/jetbrains-mono-600-normal.woff2"
 weight = 600                # default 400`} />
       <p>Then use the family in your CSS:</p>
-      <CodeBlock lang="css" code={`/* app/globals.css */
-body {
+      <CodeBlock lang="css" title="app/globals.css" code={`body {
   font-family: 'Fraunces', Georgia, serif;
 }`} />
 
@@ -74,15 +78,14 @@ body {
         <code>.gio/fonts/</code>.
       </p>
       <div className="callout">Self-hosted fonts are served from /_gio/fonts, eliminating a render-blocking round-trip to an external host. Every page gets a <code>&lt;link rel=&quot;preload&quot;&gt;</code> per font and the generated <code>/_gio/fonts/fonts.css</code> with its <code>@font-face</code> rules (<code>font-display: swap</code>). The .woff2 files are cached as immutable (a URL never gets new content); fonts.css is rewritten from gio.toml on every start under the same URL, so it is served with <code>Cache-Control: public, max-age=0, must-revalidate</code> and revalidated via Last-Modified.</div>
-      <h2>Static export</h2>
+      <h2 id="static-export">Static export</h2>
       <p>
         <code>[[fonts]]</code> is applied by the Rust server, so <code>gio export</code> does not
         see it. A static site declares its fonts with <code>@font-face</code> in an imported
         stylesheet instead; the <a href="/docs/css">CSS pipeline</a> bundles the files its{' '}
         <code>url()</code>s name with hashed names:
       </p>
-      <CodeBlock lang="css" code={`/* app/globals.css */
-@font-face {
+      <CodeBlock lang="css" title="app/globals.css" code={`@font-face {
   font-family: 'Fraunces';
   src: url('../public/fonts/fraunces-400-normal.woff2') format('woff2');
   font-weight: 400;

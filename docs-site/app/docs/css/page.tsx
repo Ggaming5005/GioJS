@@ -1,25 +1,31 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'CSS & Styling',
+  description:
+    'Import stylesheets and CSS Modules from any page, layout or component. GioJS bundles ' +
+    'each route\'s CSS into content-hashed files and links them for you.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Styling &amp; Assets</div>
       <h1>CSS & Styling</h1>
       <p className="page-subtitle">
         Import stylesheets and CSS Modules from any page, layout or component. GioJS bundles
         each route&apos;s CSS into content-hashed files and links them for you.
       </p>
 
-      <h2>Global CSS</h2>
+      <h2 id="global-css">Global CSS</h2>
       <p>
         Import global stylesheets from the root layout. That is the recommended setup: every
         page, including not-found and error pages, gets them first.
       </p>
-      <CodeBlock lang="tsx" code={`// app/layout.tsx
-import React from 'react';
+      <CodeBlock lang="tsx" title="app/layout.tsx" code={`import React from 'react';
 import './globals.css';
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -36,7 +42,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         file: GioJS links it.
       </p>
 
-      <h2>How imported CSS ships</h2>
+      <h2 id="how-imported-css-ships">How imported CSS ships</h2>
       <p>
         At startup (and after every change in dev) GioJS follows each route&apos;s imports and
         bundles the CSS it reaches. That covers the page, its layouts and error/loading files,
@@ -83,13 +89,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         another. Keep page-specific styles in CSS Modules.
       </p>
 
-      <h2>CSS Modules</h2>
+      <h2 id="css-modules">CSS Modules</h2>
       <p>
         A file named <code>*.module.css</code> has locally scoped class names. Import its
         default export and use the generated names:
       </p>
-      <CodeBlock lang="css" code={`/* app/blog/card.module.css */
-.card { padding: 1rem; }
+      <CodeBlock lang="css" title="app/blog/card.module.css" code={`.card { padding: 1rem; }
 .title { composes: heading from '../shared.module.css'; color: teal; }
 :global(.prose) h2 { margin-top: 2rem; }`} />
       <CodeBlock lang="tsx" code={`import styles from './card.module.css';
@@ -131,7 +136,7 @@ export default function Card({ title }: { title: string }) {
         </li>
       </ul>
 
-      <h3>TypeScript</h3>
+      <h3 id="typescript">TypeScript</h3>
       <p>
         At every server start GioJS writes <code>.gio/css-modules.d.ts</code> next to the
         generated <code>.gio/routes.d.ts</code>, which references it. It types{' '}
@@ -153,7 +158,7 @@ declare module '*.css' {}`} />
         <code>string | undefined</code>, which <code>className</code> accepts.
       </p>
 
-      <h2>Tailwind CSS</h2>
+      <h2 id="tailwind-css">Tailwind CSS</h2>
       <p>
         <code>npm create giojs@latest -- --tailwind</code> (or{' '}
         <code>npx create-giojs add tailwind</code> in an existing app) sets up everything below,
@@ -166,15 +171,13 @@ declare module '*.css' {}`} />
         <code>npx @tailwindcss/cli</code> or the dependency-free standalone{' '}
         <code>tailwindcss</code> binary. The input file is plain CSS:
       </p>
-      <CodeBlock lang="css" code={`/* app/tailwind.css */
-@import "tailwindcss";`} />
+      <CodeBlock lang="css" title="app/tailwind.css" code={`@import "tailwindcss";`} />
       <CodeBlock lang="bash" code={`# dev: rebuild the output whenever a class is added
 npx @tailwindcss/cli -i ./app/tailwind.css -o ./app/tailwind.out.css --watch
 
 # before deploying (or in CI)
 npx @tailwindcss/cli -i ./app/tailwind.css -o ./app/tailwind.out.css --minify`} />
-      <CodeBlock lang="tsx" code={`// app/layout.tsx
-import './tailwind.out.css';`} />
+      <CodeBlock lang="tsx" title="app/layout.tsx" code={`import './tailwind.out.css';`} />
       <p>
         Tailwind finds class names by scanning your project&apos;s source files. In dev, every
         CLI rebuild changes <code>tailwind.out.css</code>, and that rebuilds the stylesheets and
@@ -184,7 +187,7 @@ import './tailwind.out.css';`} />
         up to date.
       </p>
 
-      <h2>Stylesheets served by path (legacy)</h2>
+      <h2 id="stylesheets-served-by-path-legacy">Stylesheets served by path (legacy)</h2>
       <p>
         Linking a stylesheet by URL still works. Files under <code>public/</code> are served
         directly by Rust:
@@ -218,7 +221,7 @@ import './tailwind.out.css';`} />
         </li>
       </ul>
 
-      <h2>Dev, export and standalone builds</h2>
+      <h2 id="dev-export-and-standalone-builds">Dev, export and standalone builds</h2>
       <p>
         In dev, editing any CSS file rebuilds the stylesheets, restarts the worker and reloads
         open tabs. <code>gio export</code> writes the stylesheets to{' '}

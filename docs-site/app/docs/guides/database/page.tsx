@@ -1,26 +1,34 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../../components/CodeBlock.tsx';
+import { PmTabs } from '../../../../components/PmTabs.tsx';
+
+export const metadata: Metadata = {
+  title: 'Database Example',
+  description:
+    'SQLite with Drizzle ORM: a typed schema, SQL migrations, server-only queries, and a page ' +
+    'that reads and writes rows.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Guides</div>
       <h1>Database Example</h1>
       <p className="page-subtitle">
         SQLite with Drizzle ORM: a typed schema, SQL migrations, server-only queries, and a page
         that reads and writes rows.
       </p>
 
-      <CodeBlock lang="bash" code={`npm create giojs@latest my-app -- --db   # a new app
+      <PmTabs command={`npm create giojs@latest my-app -- --db   # a new app
 npx create-giojs add db                    # an existing app`} />
       <p>
         Run <code>npm run dev</code> and open <code>/notes</code>: the rows come from{' '}
         <code>data/app.db</code>, created and migrated on first use.
       </p>
 
-      <h2>Why node:sqlite</h2>
+      <h2 id="why-nodesqlite">Why node:sqlite</h2>
       <p>
         The driver is Node&apos;s built-in <code>node:sqlite</code>, so there is nothing to
         compile or download. The native drivers (<code>better-sqlite3</code>,{' '}
@@ -33,9 +41,8 @@ npx create-giojs add db                    # an existing app`} />
         startup. Drizzle talks to it through its <code>sqlite-proxy</code> driver.
       </p>
 
-      <h2>The schema</h2>
-      <CodeBlock lang="ts" code={`// lib/schema.ts
-export const notes = sqliteTable('notes', {
+      <h2 id="the-schema">The schema</h2>
+      <CodeBlock lang="ts" title="lib/schema.ts" code={`export const notes = sqliteTable('notes', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   title: text('title').notNull(),
   createdAt: integer('created_at', { mode: 'timestamp' })
@@ -43,7 +50,7 @@ export const notes = sqliteTable('notes', {
     .default(sql\`(unixepoch())\`),
 });`} />
 
-      <h2>Queries</h2>
+      <h2 id="queries">Queries</h2>
       <p>
         <code>lib/db.server.ts</code> opens the database, applies pending migrations, and
         exports <code>db</code> plus the queries the page uses. The <code>.server</code> name
@@ -64,9 +71,8 @@ export async function createNote(title: string): Promise<void> {
         run inside it while its callback awaits, so keep transactions short.
       </p>
 
-      <h2>The page</h2>
-      <CodeBlock lang="tsx" code={`// app/(site)/notes/page.tsx
-export const getServerSideProps: GetServerSideProps<Props> = async () => ({
+      <h2 id="the-page">The page</h2>
+      <CodeBlock lang="tsx" title="app/(site)/notes/page.tsx" code={`export const getServerSideProps: GetServerSideProps<Props> = async () => ({
   props: { notes: await listNotes() },
 });
 
@@ -80,8 +86,8 @@ export async function action(req: ActionArgs) {
   return redirect('/notes');
 }`} />
 
-      <h2>Changing the schema</h2>
-      <CodeBlock lang="bash" code={`npm run db:generate   # drizzle-kit writes drizzle/0002_<name>.sql
+      <h2 id="changing-the-schema">Changing the schema</h2>
+      <PmTabs command={`npm run db:generate   # drizzle-kit writes drizzle/0002_<name>.sql
 npm run db:migrate    # optional: apply now, without starting the server`} />
       <p>
         Migrations live in <code>drizzle/</code> (commit them). The server applies pending ones
@@ -93,7 +99,7 @@ npm run db:migrate    # optional: apply now, without starting the server`} />
         <code>npx drizzle-kit generate --custom</code>.
       </p>
 
-      <h2>Where the data lives</h2>
+      <h2 id="where-the-data-lives">Where the data lives</h2>
       <ul>
         <li>
           <code>data/app.db</code> by default; <code>DATABASE_PATH</code> overrides it.{' '}

@@ -36,15 +36,15 @@ export function articleHtml(html) {
 
 /**
  * Markup that is not page text: scripts, styles, icons, buttons ("Copy"),
- * any element marked `data-no-index` (a code block's language bar), and
- * the hand-written eyebrow and pager older pages still carry (the layout
- * derives both now).
+ * any element marked `data-no-index` (a code block's header, the other
+ * package managers' tabs), and an eyebrow label over a title (the
+ * releases page).
  */
 export function stripNonText(html) {
   return html
     .replace(/<(script|style|svg|nav|button|template)\b[\s\S]*?<\/\1>/gi, '')
     .replace(/<(\w+)\b[^>]*\bdata-no-index\b[^>]*>[\s\S]*?<\/\1>/gi, '')
-    .replace(/<div class="(?:docs-eyebrow|docs-pager)"[^>]*>[\s\S]*?<\/div>/gi, '')
+    .replace(/<div class="docs-eyebrow"[^>]*>[\s\S]*?<\/div>/gi, '')
     .replace(/<!--[\s\S]*?-->/g, '');
 }
 
@@ -87,7 +87,10 @@ export function htmlToText(html) {
     // Code blocks are set aside so nothing below rewrites their content.
     .replace(/<pre([^>]*)>([\s\S]*?)<\/pre>/gi, (_, attrs, code) => {
       const lang = /\bdata-lang="([\w-]*)"/.exec(attrs)?.[1] ?? '';
-      fences.push({ lang, code: decodeEntities(code.replace(/<[^>]+>/g, '')).replace(/\n+$/, '') });
+      // A CodeBlock's file name goes on the fence: ```tsx title="app/page.tsx"
+      const title = /\bdata-title="([^"]*)"/.exec(attrs)?.[1];
+      const info = title === undefined ? lang : `${lang} title="${decodeEntities(title)}"`;
+      fences.push({ info, code: decodeEntities(code.replace(/<[^>]+>/g, '')).replace(/\n+$/, '') });
       return `\n\n\u0000${fences.length - 1}\u0000\n\n`;
     })
     .replace(/<table\b[^>]*>([\s\S]*?)<\/table>/gi, (_, body) => tableMarkdown(body))
@@ -101,7 +104,7 @@ export function htmlToText(html) {
     .replace(/\n[ \t]+/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/\n- \n+/g, '\n- ')
-    .replace(/\u0000(\d+)\u0000/g, (_, i) => `\`\`\`${fences[Number(i)].lang}\n${fences[Number(i)].code}\n\`\`\``)
+    .replace(/\u0000(\d+)\u0000/g, (_, i) => `\`\`\`${fences[Number(i)].info}\n${fences[Number(i)].code}\n\`\`\``)
     .trim();
 }
 
@@ -146,4 +149,28 @@ export function uniqueSlug(text, taken) {
   for (let n = 2; taken.has(slug); n++) slug = `${base}-${n}`;
   taken.add(slug);
   return slug;
+}
+
+/**
+ * What is wrong with the ids of a rendered page, for the build to refuse:
+ * an h2/h3 in the article without an explicit id (its `#` link and the
+ * search index would depend on a slug computed in the browser), and any
+ * id used twice in the document (chrome included - a heading named
+ * "sidebar" would collide with the sidebar). One message per problem.
+ */
+export function idProblems(html) {
+  const problems = [];
+  for (const match of articleHtml(html).matchAll(/<h([23])\b([^>]*)>([\s\S]*?)<\/h\1>/gi)) {
+    if (!/\bid="[^"]+"/.test(match[2])) {
+      problems.push(`<h${match[1]}> without an id: "${stripTags(match[3]).replace(/\s+/g, ' ').trim()}"`);
+    }
+  }
+  const seen = new Set();
+  // Ids inside scripts (serialized props) are data, not elements.
+  const markup = html.replace(/<script\b[\s\S]*?<\/script>/gi, '');
+  for (const [, id] of markup.matchAll(/<[a-z][\w-]*\b[^>]*?\sid="([^"]*)"/gi)) {
+    if (seen.has(id)) problems.push(`id="${id}" is used more than once`);
+    seen.add(id);
+  }
+  return problems;
 }

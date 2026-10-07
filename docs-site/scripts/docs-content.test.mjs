@@ -18,8 +18,9 @@ const repoDir = join(siteDir, '..');
 const read = (...path) => readFileSync(join(repoDir, ...path), 'utf8');
 const docsPage = (route) => read('docs-site', 'app', 'docs', ...route.split('/'), 'page.tsx');
 
-/** The TOML code samples of a page (`<CodeBlock lang="toml" code={`...`} />`). */
-const tomlSamples = (source) => [...source.matchAll(/lang="toml" code=\{`([\s\S]*?)`\}/g)].map((m) => m[1]).join('\n');
+/** The TOML code samples of a page (`<CodeBlock lang="toml" title="gio.toml" code={`...`} />`). */
+const tomlSamples = (source) =>
+  [...source.matchAll(/lang="toml"(?: title="[^"]*")? code=\{`([\s\S]*?)`\}/g)].map((m) => m[1]).join('\n');
 
 /** Every app/**\/page.tsx of the docs site. */
 function pageFiles(dir = join(siteDir, 'app')) {

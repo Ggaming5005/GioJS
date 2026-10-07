@@ -8,6 +8,7 @@
  * on the rendered article instead.
  */
 import React, { useEffect, useRef, useState } from 'react';
+import { writeClipboard } from './clipboard.ts';
 
 type State = 'idle' | 'copied' | 'failed';
 
@@ -34,38 +35,6 @@ async function pageMarkdown(path: string): Promise<string> {
     // Offline or blocked: convert what is on screen.
   }
   return markdownFromDom(path);
-}
-
-/**
- * Copy `text` once it resolves. A ClipboardItem takes the promise itself,
- * so the copy still counts as part of the click when fetching takes a
- * while (Safari refuses a later writeText); then writeText; then the
- * selection-and-copy fallback (plain http, where navigator.clipboard is
- * missing).
- */
-async function writeClipboard(text: Promise<string>): Promise<void> {
-  try {
-    const blob = text.then((value) => new Blob([value], { type: 'text/plain' }));
-    await navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]);
-    return;
-  } catch {
-    // No ClipboardItem support, or no clipboard access: try the next way.
-  }
-  try {
-    await navigator.clipboard.writeText(await text);
-    return;
-  } catch {
-    const area = document.createElement('textarea');
-    area.value = await text;
-    area.setAttribute('readonly', '');
-    area.style.position = 'fixed';
-    area.style.opacity = '0';
-    document.body.append(area);
-    area.select();
-    const ok = document.execCommand('copy');
-    area.remove();
-    if (!ok) throw new Error('copy refused');
-  }
 }
 
 export function CopyPageButton({ path }: { path: string }): React.JSX.Element {

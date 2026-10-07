@@ -1,51 +1,41 @@
 /**
  * docs-site/components/CodeBlock.tsx
  *
- * Syntax-highlighted code block with a copy-to-clipboard button.
- * The copy action is wired via a small inline script so it works
- * without React hydration.
+ * A code sample: a header with the file name (`title`) or the language,
+ * and a copy button, over the highlighted code. Highlighting is
+ * lib/highlight.mjs - a pure function of (code, lang), so the server and
+ * the hydrating client produce the same markup. Languages it does not
+ * know (text, css, yaml, ...) show as plain text.
+ *
+ *   <CodeBlock lang="tsx" title="app/page.tsx" code={`export default ...`} />
+ *
+ * The `<pre>` carries `data-lang` and `data-title`, which the Markdown and
+ * search extraction (lib/text.mjs, lib/search-index.mjs) read; the header
+ * is `data-no-index`, so "tsx" and "Copy" never land in page text.
  */
 import React from 'react';
+import { highlight } from '../lib/highlight.mjs';
+import { CopyButton } from './CopyButton.tsx';
 
 interface CodeBlockProps {
   code: string;
   lang?: string;
+  /** The file the code belongs in, shown in the header ("app/page.tsx"). */
+  title?: string;
 }
 
-// The script finds its own block (document.currentScript) instead of ids:
-// the page hydrates, and ids from a render counter would differ between
-// the server and the browser.
-const COPY_SCRIPT = `
-(function() {
-  var block = document.currentScript && document.currentScript.parentNode;
-  var btn = block && block.querySelector('.code-block-copy');
-  var pre = block && block.querySelector('pre');
-  if (!btn || !pre) return;
-  btn.addEventListener('click', function() {
-    navigator.clipboard.writeText(pre.textContent || '').then(function() {
-      btn.textContent = 'Copied!';
-      btn.classList.add('copied');
-      setTimeout(function() {
-        btn.textContent = 'Copy';
-        btn.classList.remove('copied');
-      }, 2000);
-    });
-  });
-})();
-`.trim();
-
-export function CodeBlock({ code, lang = 'bash' }: CodeBlockProps): React.JSX.Element {
+export function CodeBlock({ code, lang = 'bash', title }: CodeBlockProps): React.JSX.Element {
   return (
     <div className="code-block">
-      {/* data-no-index: the language and "Copy" are not page text (lib/text.mjs). */}
       <div className="code-block-header" data-no-index="">
-        <span className="code-block-lang">{lang}</span>
-        <button className="code-block-copy" type="button">Copy</button>
+        {title !== undefined
+          ? <span className="code-block-title">{title}</span>
+          : <span className="code-block-lang">{lang}</span>}
+        <CopyButton text={code} />
       </div>
-      <pre data-lang={lang}>
-        <code>{code}</code>
+      <pre data-lang={lang} data-title={title}>
+        <code dangerouslySetInnerHTML={{ __html: highlight(code, lang) }} />
       </pre>
-      <script dangerouslySetInnerHTML={{ __html: COPY_SCRIPT }} />
     </div>
   );
 }
