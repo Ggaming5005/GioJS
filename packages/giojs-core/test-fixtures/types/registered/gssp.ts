@@ -44,6 +44,29 @@ export async function inferred(ctx: GsspContext<'/posts/:id'>) {
 }
 expectTypeOf<InferPageProps<typeof inferred>>().toEqualTypeOf<{ title: string; views: number }>();
 
+// The plain Next.js-style form: no `as const`, so TypeScript widens the
+// inferred `notFound: true` to `boolean` (and gives every member the
+// others' keys as `?: undefined`).
+export async function plain(ctx: GsspContext<'/posts/:id'>) {
+  if (ctx.params.id === 'gone') return { notFound: true };
+  if (ctx.params.id === 'old') return { redirect: { destination: '/posts/new', permanent: false } };
+  return { props: { title: `Post ${ctx.params.id}` } };
+}
+expectTypeOf<InferPageProps<typeof plain>>().toEqualTypeOf<{ title: string }>();
+export function PlainPage({ title }: InferPageProps<typeof plain>): string {
+  return title;
+}
+
+// The flat form next to a notFound: the notFound member renders no props.
+export function flatOrMissing(id: string) {
+  if (id === 'gone') return { notFound: true };
+  return { title: id };
+}
+export function FlatPage({ title }: InferPageProps<typeof flatOrMissing>): string {
+  expectTypeOf(title).toEqualTypeOf<string>();
+  return title;
+}
+
 // The flat form (props without a `props` key) renders too.
 export function flat() {
   return { title: 'x' };

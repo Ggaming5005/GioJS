@@ -85,7 +85,8 @@ await revalidatePath('/blog', { type: 'prefix' });`} />
         pre-render for a dynamic route: return{' '}
         <code>{'{ paths: [{ params: { id: "1" } }] }'}</code>. Typed as{' '}
         <code>{"GetStaticPaths<'/posts/:id'>"}</code>, every entry must carry the
-        route&apos;s params.
+        route&apos;s params. A catch-all takes the path below it as one string{' '}
+        (<code>{"'guides/setup'"}</code>) or as its segments (<code>{"['guides', 'setup']"}</code>).
       </p>
 
       <h2>Route handler exports</h2>
@@ -186,7 +187,7 @@ export default function Doc({ params }: PageProps<'/docs/*slug'>) {
 }
 
 export const getStaticPaths: GetStaticPaths<'/docs/*slug'> = () => ({
-  paths: [{ params: { slug: 'intro' } }, { params: { slug: 'guides/setup' } }],
+  paths: [{ params: { slug: 'intro' } }, { params: { slug: ['guides', 'setup'] } }],
 });
 
 // app/api/posts/[id]/route.ts

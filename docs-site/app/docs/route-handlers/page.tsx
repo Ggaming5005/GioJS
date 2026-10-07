@@ -29,7 +29,9 @@ export async function POST(req: GioRequest<'/api/notes/:id'>) {
         <code>req.params</code>; it is checked against the routes the server discovered (the
         generated <code>.gio/routes.d.ts</code>), so a typo fails <code>tsc</code>. A params
         shape (<code>{'GioRequest<{ id: string }>'}</code>) works too, and plain{' '}
-        <code>GioRequest</code> leaves every param <code>string | undefined</code>. To type
+        <code>GioRequest</code> types them as <code>{'Record<string, string>'}</code> (each one{' '}
+        <code>string | undefined</code> under <code>noUncheckedIndexedAccess</code>, which the
+        TypeScript starter enables). To type
         the whole handler, use <code>RouteHandler</code> - its return type admits everything
         the server accepts:
       </p>

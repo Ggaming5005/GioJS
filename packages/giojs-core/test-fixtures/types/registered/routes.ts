@@ -66,6 +66,16 @@ export function action(req: ActionArgs<'/posts/:id'>): string {
   return req.params.id;
 }
 
+// Generic code: property access goes through the constraint, and the
+// params object is `ActionArgs<P>['params']` - a `ParamsOf<P>` (left
+// unresolved while P is a type parameter), not `P` itself.
+export function idOf<P extends { id: string }>(req: ActionArgs<P>): string {
+  return req.params.id;
+}
+export function paramsOf<P extends Record<string, string>>(req: ActionArgs<P>): ActionArgs<P>['params'] {
+  return req.params;
+}
+
 export const generateMetadata: GenerateMetadata<'/posts/:id'> = ctx => ({ title: `Post ${ctx.params.id}` });
 
 // Unregistered patterns are rejected once routes are registered.

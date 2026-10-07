@@ -98,7 +98,9 @@ export interface ActionDataResult<Data = unknown> {
 
 /**
  * The request a page action receives: route.ts's request, typed params -
- * `ActionArgs<'/posts/:id'>` or `ActionArgs<{ id: string }>`.
+ * `ActionArgs<'/posts/:id'>` or `ActionArgs<{ id: string }>`. In generic
+ * code `ActionArgs<P>['params']` is a `ParamsOf<P>`, not a `P` (see
+ * ParamsOf).
  */
 export interface ActionArgs<Route extends RouteOrParams = Record<string, string>>
   extends Omit<GioRequest, 'params'> {

@@ -71,5 +71,36 @@ export type RouteParamsOf<Pattern extends string> = Pattern extends RegisteredPa
  */
 export type RouteOrParams = RoutePattern | object;
 
-/** Resolves a RouteOrParams argument to the params object. */
+/**
+ * Resolves a RouteOrParams argument to the params object.
+ *
+ * A conditional type, so TypeScript leaves it unresolved while `Route` is
+ * still a type parameter: in generic code (`<P extends { id: string }>(req:
+ * ActionArgs<P>)`) `req.params.id` typechecks, but `req.params` is a
+ * `ParamsOf<P>`, not a `P` - annotate with `ActionArgs<P>['params']`.
+ */
 export type ParamsOf<Route> = Route extends string ? RouteParamsOf<Route> : Route;
+
+type CatchAllName<Segment extends string> = Segment extends `*${infer Name}?`
+  ? Name
+  : Segment extends `*${infer Name}`
+    ? Name
+    : never;
+
+/** The names of a pattern's catch-all segments (`*name`, `*name?`). */
+type CatchAllNames<Pattern extends string> = Pattern extends `${infer Head}/${infer Rest}`
+  ? CatchAllName<Head> | CatchAllNames<Rest>
+  : CatchAllName<Pattern>;
+
+type WithArrayCatchAlls<Params, Names> = {
+  [K in keyof Params]: K extends Names ? Params[K] | string[] : Params[K];
+};
+
+/**
+ * The params of one getStaticPaths entry: those of the route, except that
+ * `gio export` also takes a catch-all as an array of segments
+ * (`{ slug: ['guides', 'setup'] }` for `/docs/*slug`), as Next.js does.
+ */
+export type StaticParamsOf<Route> = Route extends string
+  ? WithArrayCatchAlls<RouteParamsOf<Route>, CatchAllNames<Route>>
+  : Route;

@@ -46,6 +46,7 @@ export type {
   ParamsFromPattern,
   RouteOrParams,
   ParamsOf,
+  StaticParamsOf,
 } from './route-params.ts';
 export type {
   Metadata,

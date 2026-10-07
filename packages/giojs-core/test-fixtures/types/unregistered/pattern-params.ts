@@ -4,7 +4,14 @@
  * parsed from the pattern itself.
  */
 import { expectTypeOf } from 'vitest';
-import type { GetServerSideProps, GsspContext, PageProps, RouteHandler, RoutePattern } from '@gio.js/core';
+import type {
+  GetServerSideProps,
+  GetStaticPaths,
+  GsspContext,
+  PageProps,
+  RouteHandler,
+  RoutePattern,
+} from '@gio.js/core';
 
 expectTypeOf<RoutePattern>().toEqualTypeOf<string>();
 
@@ -38,6 +45,15 @@ export const getServerSideProps: GetServerSideProps<{ id: string }, '/posts/:id'
 });
 
 export const GET: RouteHandler<'/api/:version/items'> = req => req.params.version;
+
+// Catch-alls found in the pattern take segment arrays in getStaticPaths too.
+export const getStaticPaths: GetStaticPaths<'/blog/:year/*slug'> = () => ({
+  paths: [{ params: { year: '2026', slug: ['a', 'b'] } }],
+});
+export const yearArray: GetStaticPaths<'/blog/:year/*slug'> = () => ({
+  // @ts-expect-error - `:year` is a single segment
+  paths: [{ params: { year: ['2026'], slug: 'a' } }],
+});
 
 // A wide `string` pattern falls back to the untyped params map.
 expectTypeOf<PageProps<string>['params']>().toEqualTypeOf<Record<string, string>>();

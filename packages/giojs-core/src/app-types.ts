@@ -15,7 +15,7 @@ import type { GioRequest } from './context.ts';
 import type { ActionRedirect } from './action.ts';
 import type { GsspContext, NotFoundResult, PropsResult, RedirectResult } from './router.ts';
 import type { GioErrorProps } from './segment-tree.ts';
-import type { ParamsOf, RouteOrParams } from './route-params.ts';
+import type { ParamsOf, RouteOrParams, StaticParamsOf } from './route-params.ts';
 
 type DefaultParams = Record<string, string>;
 type DefaultProps = Record<string, unknown>;
@@ -48,11 +48,17 @@ export type GetServerSideProps<
 ) => GetServerSidePropsResult<Props> | Promise<GetServerSidePropsResult<Props>>;
 
 // Distributes over the result union: only the props-carrying members count.
-type PropsOfResult<Result> = Result extends { props: infer Props }
-  ? Props
-  : Result extends RedirectResult | NotFoundResult | ActionRedirect
-    ? never
-    : Result;
+// Matched by key, the way the renderer tells them apart, not against the
+// exact result types: in an inferred return type `{ notFound: true }`
+// widens to `{ notFound: boolean }`, and the members of a union of object
+// literals carry each other's keys as `?: undefined`.
+type PropsOfResult<Result> = Result extends ActionRedirect | { redirect: unknown } | { notFound: true }
+  ? never
+  : Result extends { props: infer Props }
+    ? Props
+    : Result extends { notFound: unknown }
+      ? never
+      : Result;
 
 /**
  * The props a page renders with, read off its getServerSideProps:
@@ -87,9 +93,16 @@ export type ErrorPageProps = GioErrorProps;
 /** A not-found.* component renders with no props. */
 export type NotFoundPageProps = Record<string, never>;
 
-/** getStaticPaths's result: one entry per page `gio export` writes. */
-export interface StaticPathsResult<Route extends RouteOrParams = DefaultParams> {
-  paths: Array<{ params: ParamsOf<Route> }>;
+/** Untyped getStaticPaths params: a catch-all may be an array of segments. */
+type DefaultStaticParams = Record<string, string | string[]>;
+
+/**
+ * getStaticPaths's result: one entry per page `gio export` writes. A
+ * catch-all param is the path below it as one string (`'guides/setup'`)
+ * or as its segments (`['guides', 'setup']`).
+ */
+export interface StaticPathsResult<Route extends RouteOrParams = DefaultStaticParams> {
+  paths: Array<{ params: StaticParamsOf<Route> }>;
 }
 
 /**
@@ -97,7 +110,7 @@ export interface StaticPathsResult<Route extends RouteOrParams = DefaultParams> 
  * renders any params on demand):
  * `export const getStaticPaths: GetStaticPaths<'/posts/:id'> = () => ...`.
  */
-export type GetStaticPaths<Route extends RouteOrParams = DefaultParams> = () =>
+export type GetStaticPaths<Route extends RouteOrParams = DefaultStaticParams> = () =>
   | StaticPathsResult<Route>
   | Promise<StaticPathsResult<Route>>;
 

@@ -78,6 +78,19 @@ export const getStaticPaths: GetStaticPaths<'/posts/:id'> = () => ({
 // @ts-expect-error - every entry needs the route's params
 export const missingParam: GetStaticPaths<'/posts/:id'> = () => ({ paths: [{ params: {} }] });
 
+// `gio export` takes a catch-all as one string or as its segments.
+export const docsPaths: GetStaticPaths<'/docs/*slug'> = () => ({
+  paths: [{ params: { slug: 'intro' } }, { params: { slug: ['guides', 'setup'] } }],
+});
+export const shopPaths: GetStaticPaths<'/shop/*path?'> = () => ({
+  paths: [{ params: {} }, { params: { path: ['a', 'b'] } }],
+});
+// Untyped: any param may be an array.
+export const untypedPaths: GetStaticPaths = () => ({ paths: [{ params: { slug: ['a', 'b'] } }] });
+
+// @ts-expect-error - a single-segment param is a string, never segments
+export const segmentArray: GetStaticPaths<'/posts/:id'> = () => ({ paths: [{ params: { id: ['1'] } }] });
+
 export const GET: RouteHandler<'/api/posts/:id'> = req => {
   expectTypeOf(req.params).toEqualTypeOf<{ id: string }>();
   if (req.query['format'] === 'text') return new Response(req.params.id);
