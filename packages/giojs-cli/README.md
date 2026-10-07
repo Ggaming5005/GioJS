@@ -36,7 +36,7 @@ npm create giojs@latest -- migrate [dir]
 #   -y, --yes   apply without the confirmation prompt
 ```
 
-Moves `pages/` to `app/`, rewrites `next/*` imports (`next/link`, `next/image`, `next/router`, `next/head`, ...), converts `next.config` redirects/rewrites/headers/images/i18n to `gio.toml` (never overwriting an existing one), updates `package.json`, and writes `MIGRATION_REPORT.md` with every change and TODO. The `gio-migrate` bin runs the same command. Details: https://giojs.com/docs/migration
+Moves `pages/` to `app/`, rewrites `next/*` imports (`next/link`, `next/image`, `next/router`, `next/head`, ...), converts `next.config` redirects/rewrites/headers/images/i18n to `gio.toml` (never overwriting an existing one), updates `package.json` (GioJS packages, `"type": "module"`), renames `.js` files with JSX to `.jsx`, and writes `MIGRATION_REPORT.md` with every change and TODO. The `gio-migrate` bin runs the same command. Details: https://giojs.com/docs/migration
 
 ## What you get
 

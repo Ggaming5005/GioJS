@@ -4,7 +4,9 @@
  * The `migrate` command line, shared by every entry point:
  *   npm create giojs@latest -- migrate [dir]   (create-giojs subcommand)
  *   npx create-giojs migrate [dir]
- *   npx gio-migrate [dir]                       (standalone bin)
+ *   npx -p create-giojs gio-migrate [dir]       (standalone bin; a bare
+ *                                               `npx gio-migrate` would fetch
+ *                                               whatever npm package has that name)
  * Other CLIs (e.g. `gio migrate`) can import `runMigrate` from
  * `create-giojs/migrate` and pass their remaining argv.
  *
@@ -26,7 +28,7 @@ Migrate a Next.js project (pages or app router) to GioJS, in place.
 
   npm create giojs@latest -- migrate [dir]
   npx create-giojs migrate [dir]
-  npx gio-migrate [dir]
+  npx -p create-giojs gio-migrate [dir]
 
 Arguments:
   dir              Project root (default: the current directory)
@@ -46,7 +48,9 @@ What it does:
   - converts next.config redirects, rewrites, headers, images and i18n to
     gio.toml (merged into an existing gio.toml only when safe, otherwise
     written to gio.migrated.toml)
-  - swaps the next dependency for @gio.js/* in package.json
+  - swaps the next dependency for @gio.js/* in package.json and sets
+    "type": "module" (CommonJS .js files such as postcss.config.js become
+    .cjs); .js files with JSX become .jsx
   - writes MIGRATION_REPORT.md listing every change and every TODO
 
 Commit your work first: the migration edits files in place.`;

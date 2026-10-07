@@ -144,6 +144,10 @@ class Transformer {
   private headerBlock = '';
   /** Add `import React from 'react'` (classic JSX runtime). */
   private reactDefault = false;
+  /** Every identifier text in the file, for picking names of generated bindings. */
+  private identifiers: Set<string> | undefined;
+  /** `[...slug]` / `[[...slug]]` segments of the route this file serves. */
+  private readonly catchAlls: Array<{ name: string; optional: boolean }>;
 
   constructor(
     private readonly source: string,
@@ -151,6 +155,7 @@ class Transformer {
   ) {
     this.sf = parseSource(options.filePath, source);
     this.isTs = /\.(tsx?|mts|cts)$/.test(options.filePath);
+    this.catchAlls = catchAllSegments(options.filePath);
   }
 
   run(): TransformResult {
@@ -181,6 +186,7 @@ class Transformer {
     this.nextServer();
     this.otherNextImports();
     this.dataFetching();
+    this.catchAllParams();
     this.roleSpecific();
     this.classicJsxRuntime();
     this.finalizeImports();
@@ -355,7 +361,9 @@ class Transformer {
         this.required.delete('react');
       }
     }
-    for (const [module, req] of this.required) {
+    // A new `react` import goes first, the way imports are usually ordered.
+    const required = [...this.required].sort(([a], [b]) => Number(b === 'react') - Number(a === 'react'));
+    for (const [module, req] of required) {
       const existing = this.imports.find(
         i => i.module === module && i.namespaceName === undefined && !this.plans.has(i.decl),
       );
@@ -414,8 +422,11 @@ class Transformer {
       const lines = fresh.map(m => `${indent}// ${TODO_MARKER} ${m}`).join('\n') + '\n';
       this.edits.insert(prefix, prefix === start ? lines : '\n' + lines + indent);
     }
-    if (this.fileTodos.length > 0) {
-      this.headerBlock = this.fileTodos.map(m => `// ${TODO_MARKER} ${m}`).join('\n') + '\n' + this.headerBlock;
+    // A file-level TODO an earlier run already left in the file isn't repeated.
+    const present = new Set(scanTodos(this.source).map(t => t.message));
+    const fileTodos = this.fileTodos.filter(m => !present.has(m));
+    if (fileTodos.length > 0) {
+      this.headerBlock = fileTodos.map(m => `// ${TODO_MARKER} ${m}`).join('\n') + '\n' + this.headerBlock;
     }
   }
 
@@ -1014,10 +1025,8 @@ class Transformer {
       }
     }
     if (needsQuery) {
-      lines.push(`${keyword} routerQuery = { ...Object.fromEntries(useSearchParams()), ...useParams() };`);
-      this.require(GIO_REACT, 'useSearchParams');
-      this.require(GIO_REACT, 'useParams');
-      this.change(statement, 'router.query → routerQuery (useSearchParams() + useParams(); values are strings, never arrays)');
+      lines.push(...this.queryLines(keyword, 'routerQuery', indent));
+      this.change(statement, 'router.query → routerQuery (useSearchParams() + useParams(), memoized so it keeps its identity between renders like router.query; values are strings, never arrays)');
     }
     if (needsPath) {
       lines.push(`${keyword} routerPathname = usePathname();`);
@@ -1048,9 +1057,7 @@ class Transformer {
       } else if (key === 'reload') {
         lines.push(`${keyword} ${local} = () => window.location.reload();`);
       } else if (key === 'query') {
-        lines.push(`${keyword} ${local} = { ...Object.fromEntries(useSearchParams()), ...useParams() };`);
-        this.require(GIO_REACT, 'useSearchParams');
-        this.require(GIO_REACT, 'useParams');
+        lines.push(...this.queryLines(keyword, local, indent));
       } else if (ROUTER_PATH_PROPS.has(key)) {
         lines.push(`${keyword} ${local} = usePathname();`);
         this.require(GIO_REACT, 'usePathname');
@@ -1071,6 +1078,48 @@ class Transformer {
     this.handled.add(call.expression);
     this.change(statement, 'next/router useRouter() → @gio.js/react hooks');
     return kept.length > 0;
+  }
+
+  /**
+   * `router.query` as hooks. Next keeps router.query's identity until the
+   * next navigation, so code puts it in effect deps; a fresh object literal
+   * on every render would re-run those effects after every render (an
+   * endless fetch → setState → render loop). useSearchParams() is memoized
+   * on the query string and useParams() returns the navigation state's
+   * object, so the memo only recomputes when the URL changes.
+   */
+  private queryLines(keyword: string, target: string, indent: string): string[] {
+    const searchParams = this.freeName('searchParams', 'routerSearchParams');
+    const params = this.freeName('params', 'routeParams', 'routerParams');
+    this.require(GIO_REACT, 'useSearchParams');
+    this.require(GIO_REACT, 'useParams');
+    this.require('react', 'useMemo');
+    // In a catch-all route the TODO sits right above the useParams() line,
+    // exactly where a later run would put the one for that call.
+    const catchAll = this.catchAllMessage();
+    return [
+      `${keyword} ${searchParams} = useSearchParams();`,
+      ...(catchAll !== undefined ? [`// ${TODO_MARKER} ${catchAll}\n${indent}${keyword} ${params} = useParams();`] : [`${keyword} ${params} = useParams();`]),
+      `${keyword} ${target} = useMemo(() => ({ ...Object.fromEntries(${searchParams}), ...${params} }), [${searchParams}, ${params}]);`,
+    ];
+  }
+
+  /** The first candidate name no identifier in the file uses yet (else the first, numbered). */
+  private freeName(...candidates: string[]): string {
+    if (this.identifiers === undefined) {
+      const names = new Set<string>();
+      forEachDescendant(this.sf, n => {
+        if (ts.isIdentifier(n)) names.add(n.text);
+      });
+      this.identifiers = names;
+    }
+    const used = this.identifiers;
+    const free = candidates.find(c => !used.has(c));
+    if (free !== undefined) return free;
+    const base = candidates[0] as string;
+    let i = 2;
+    while (used.has(`${base}${i}`)) i++;
+    return `${base}${i}`;
   }
 
   private referencesIn(name: string, scope: ts.Node): ts.Identifier[] {
@@ -1367,9 +1416,16 @@ class Transformer {
       );
       this.change(gsParams.name, 'generateStaticParams → added getStaticPaths for gio export');
     }
-    for (const name of ['metadata', 'generateMetadata']) {
-      const entry = exported.get(name);
-      if (entry !== undefined) this.change(entry.name, `${name} kept: GioJS's metadata export follows the Next.js shape - check the fields you use against the GioJS docs`);
+    // GioJS has no metadata export (yet): left alone, these would silently
+    // drop the page's <title> and SEO tags.
+    const metadata = exported.get('metadata');
+    if (metadata !== undefined) this.todo(metadata.statement, this.metadataTodo(metadata.statement));
+    const generateMetadata = exported.get('generateMetadata');
+    if (generateMetadata !== undefined) {
+      this.todo(
+        generateMetadata.statement,
+        'GioJS does not read generateMetadata: render <title> and <meta> tags in the component instead (React 19 hoists them into <head>), with the data loaded in getServerSideProps',
+      );
     }
     for (const name of ['viewport', 'generateViewport']) {
       const entry = exported.get(name);
@@ -1402,6 +1458,28 @@ class Transformer {
         this.todo(def, 'async Server Components don\'t exist in GioJS (every page hydrates): move the awaited data loading into export async function getServerSideProps(ctx) and receive it as props');
       }
     }
+  }
+
+  /** The metadata TODO, spelling out the tags for a static title/description. */
+  private metadataTodo(statement: ts.Statement): string {
+    const base = 'GioJS does not read the metadata export (the page renders without these tags): render them in the component instead - React 19 hoists <title> and <meta> into <head>';
+    let init: ts.Expression | undefined;
+    if (ts.isVariableStatement(statement)) {
+      const decl = statement.declarationList.declarations.find(d => ts.isIdentifier(d.name) && d.name.text === 'metadata');
+      init = decl?.initializer !== undefined ? unwrapParens(decl.initializer) : undefined;
+    }
+    if (init === undefined || !ts.isObjectLiteralExpression(init)) return base;
+    const tags: string[] = [];
+    let other = false;
+    for (const prop of init.properties) {
+      const key = prop.name !== undefined ? propertyName(prop.name) : undefined;
+      const value = ts.isPropertyAssignment(prop) ? stringValue(prop.initializer)?.replace(/\s+/g, ' ') : undefined;
+      if (key === 'title' && value !== undefined) tags.push(`<title>${/[{}<>&]/.test(value) ? `{${JSON.stringify(value)}}` : value}</title>`);
+      else if (key === 'description' && value !== undefined) tags.push(`<meta name="description" content=${value.includes('"') ? `{${JSON.stringify(value)}}` : `"${value}"`} />`);
+      else other = true;
+    }
+    if (tags.length === 0) return base;
+    return `${base}: ${tags.join(' ')}${other ? ' (port the other fields by hand)' : ''}`;
   }
 
   private getStaticProps(entry: ExportedDecl, hasRevalidate: boolean): void {
@@ -1464,6 +1542,58 @@ class Transformer {
       entry.name,
       `getStaticProps → getServerSideProps + export const revalidate = ${revalidate === '' ? '?' : revalidate} (rendered on the first request, then served from the cache; gio export pre-renders it)`,
     );
+  }
+
+  // ── catch-all route params ────────────────────────────────────────────────
+
+  /**
+   * Next passes a `[...slug]` / `[[...slug]]` value as an array (page
+   * props, getStaticProps/getServerSideProps ctx.params, useParams(),
+   * router.query); GioJS passes the matched remainder as one '/'-joined
+   * string ('a/b'), so `params.slug.join('/')` or `.map()` would throw.
+   */
+  private catchAllMessage(): string | undefined {
+    if (this.catchAlls.length === 0) return undefined;
+    const names = this.catchAlls.map(c => `"${c.name}"`).join(', ');
+    const fixes = this.catchAlls.map(({ name, optional }) => (optional ? `${name} ? ${name}.split('/') : []` : `${name}.split('/')`));
+    return `catch-all route: the ${names} param is a '/'-joined string in GioJS ('a/b'), not an array as in Next.js - use ${fixes.join(', ')} where the code expects the array`;
+  }
+
+  private catchAllTodo(node: ts.Node): void {
+    const message = this.catchAllMessage();
+    if (message !== undefined) this.todo(node, message);
+  }
+
+  private catchAllParams(): void {
+    if (this.catchAlls.length === 0) return;
+    const mentions = (node: ts.Node, ...names: string[]): boolean => {
+      let found = false;
+      forEachDescendant(node, n => {
+        if (!found && ts.isIdentifier(n) && names.includes(n.text)) found = true;
+      });
+      return found;
+    };
+    const role = this.options.role;
+    if (role === 'pages-api' || role === 'app-route') {
+      if (mentions(this.sf, 'params', 'query')) this.fileTodos.push(this.catchAllMessage() as string);
+      return;
+    }
+    if (role === 'pages-page' || role === 'app-page') {
+      const exported = exportedDeclarations(this.sf);
+      for (const name of ['getServerSideProps', 'getStaticProps', 'generateMetadata']) {
+        const fn = exported.get(name)?.fn;
+        if (fn !== undefined && fn.parameters.length > 0 && mentions(fn, 'params')) this.catchAllTodo(fn);
+      }
+      const def = defaultExportFunction(this.sf);
+      if (def !== undefined && def.parameters.length > 0 && mentions(def, 'params')) this.catchAllTodo(def);
+    }
+    const hooks = new Set(
+      this.importsFrom(m => m === 'next/navigation' || m === GIO_REACT)
+        .flatMap(i => i.named.filter(n => n.imported === 'useParams').map(n => n.local)),
+    );
+    forEachDescendant(this.sf, n => {
+      if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && hooks.has(n.expression.text)) this.catchAllTodo(n);
+    });
   }
 
   // ── classic JSX runtime ───────────────────────────────────────────────────
@@ -1601,6 +1731,16 @@ function pathPropTodo(label: string, prop: string): string {
   return prop === 'asPath'
     ? `${label} → usePathname(): it has no query string or hash (read those from useSearchParams() / location.hash)`
     : `${label} → usePathname(): GioJS returns the real path ('/posts/1'), never the route pattern ('/posts/[id]')`;
+}
+
+/** The catch-all folders of a route file's path: app/docs/[...slug]/page.tsx → slug. */
+function catchAllSegments(filePath: string): Array<{ name: string; optional: boolean }> {
+  const out: Array<{ name: string; optional: boolean }> = [];
+  for (const segment of filePath.split('/').slice(0, -1)) {
+    const match = /^\[(\[)?\.\.\.([^\]]+)\]\]?$/.exec(segment);
+    if (match !== null) out.push({ name: match[2] as string, optional: match[1] !== undefined });
+  }
+  return out;
 }
 
 function oneLine(text: string): string {

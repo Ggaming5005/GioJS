@@ -44,19 +44,65 @@ function convertScript(command: string, staticExport: boolean, typescript: boole
   return undefined;
 }
 
-export function migratePackageJson(raw: string, options: { staticExport: boolean; typescript: boolean }): JsonUpdate | undefined {
-  let pkg: Record<string, unknown>;
+function parsePackage(raw: string): Record<string, unknown> | undefined {
   try {
-    pkg = JSON.parse(raw) as Record<string, unknown>;
+    const pkg = JSON.parse(raw) as unknown;
+    return pkg !== null && typeof pkg === 'object' && !Array.isArray(pkg) ? pkg as Record<string, unknown> : undefined;
   } catch {
-    return { content: raw, changes: [], todos: ['package.json is not valid JSON - update its dependencies and scripts by hand'] };
+    return undefined;
   }
+}
+
+function dependsOnNext(pkg: Record<string, unknown>): boolean {
   const deps = (pkg['dependencies'] ?? {}) as Record<string, string>;
   const devDeps = (pkg['devDependencies'] ?? {}) as Record<string, string>;
-  if (deps['next'] === undefined && devDeps['next'] === undefined) return undefined;
+  return deps['next'] !== undefined || devDeps['next'] !== undefined;
+}
+
+/**
+ * Whether migratePackageJson will set "type": "module" - the planner needs
+ * to know before it plans the file moves (CommonJS .js files → .cjs).
+ */
+export function addsModuleType(raw: string): boolean {
+  const pkg = parsePackage(raw);
+  return pkg !== undefined && dependsOnNext(pkg) && pkg['type'] !== 'module';
+}
+
+/** `pkg` with "type": "module" placed after name/version/private, like the GioJS templates. */
+function withModuleType(pkg: Record<string, unknown>): Record<string, unknown> {
+  const entries = Object.entries(pkg).filter(([key]) => key !== 'type');
+  let at = 0;
+  for (const key of ['name', 'version', 'private']) {
+    const index = entries.findIndex(([k]) => k === key);
+    if (index !== -1) at = Math.max(at, index + 1);
+  }
+  entries.splice(at, 0, ['type', 'module']);
+  return Object.fromEntries(entries);
+}
+
+export function migratePackageJson(
+  raw: string,
+  options: { staticExport: boolean; typescript: boolean; gioCore?: boolean },
+): JsonUpdate | undefined {
+  let pkg = parsePackage(raw);
+  if (pkg === undefined) {
+    return { content: raw, changes: [], todos: ['package.json is not valid JSON - update its dependencies and scripts by hand'] };
+  }
+  if (!dependsOnNext(pkg)) return undefined;
+  const deps = (pkg['dependencies'] ?? {}) as Record<string, string>;
+  const devDeps = (pkg['devDependencies'] ?? {}) as Record<string, string>;
   const changes: string[] = [];
   const todos: string[] = [];
   const range = gioVersionRange();
+
+  if (pkg['type'] !== 'module') {
+    // @gio.js/react ships ES modules only (its exports have no "require"
+    // condition): without "type": "module" tsx loads app/*.tsx as CommonJS,
+    // turns their imports into require() and fails to resolve it.
+    const before = pkg['type'];
+    pkg = withModuleType(pkg);
+    changes.push(`"type": ${before === undefined ? '(none)' : JSON.stringify(before)} → "module" (GioJS loads app files as ES modules; @gio.js/react is ESM-only)`);
+  }
 
   for (const table of [deps, devDeps]) {
     for (const name of ['next', '@next/font', 'eslint-config-next', '@next/eslint-plugin-next', '@next/bundle-analyzer', '@next/mdx']) {
@@ -66,7 +112,9 @@ export function migratePackageJson(raw: string, options: { staticExport: boolean
       }
     }
   }
-  for (const [name, version] of [['@gio.js/server', range], ['@gio.js/react', range], ['cross-env', '^7.0.3']] as const) {
+  const added: Array<[string, string]> = [['@gio.js/server', range], ['@gio.js/react', range], ['cross-env', '^7.0.3']];
+  if (options.gioCore === true) added.push(['@gio.js/core', range]);
+  for (const [name, version] of added) {
     if (deps[name] === undefined && devDeps[name] === undefined) {
       deps[name] = version;
       changes.push(`added ${name}@${version}`);

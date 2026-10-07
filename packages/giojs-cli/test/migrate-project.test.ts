@@ -105,7 +105,14 @@ test('a pages-router project migrates to app/ conventions', async () => {
     assert.match(tree['gio.toml'] as string, /\[\[redirects\]\]\nfrom = "\/old\/\*path"\nto = "\/new\/\*path"\nstatus = 308/);
     assert.match(tree['gio.toml'] as string, /\[\[images\.remote_patterns\]\]\nprotocol = "https"\nhostname = "images\.example\.com"/);
 
-    const pkg = JSON.parse(tree['package.json'] as string) as { dependencies: Record<string, string>; devDependencies: Record<string, string>; scripts: Record<string, string> };
+    const pkg = JSON.parse(tree['package.json'] as string) as { type: string; dependencies: Record<string, string>; devDependencies: Record<string, string>; scripts: Record<string, string> };
+    // @gio.js/react is ESM-only: without "type": "module" tsx loads app/*.tsx as
+    // CommonJS and every page importing it fails with ERR_PACKAGE_PATH_NOT_EXPORTED.
+    assert.equal(pkg.type, 'module');
+    assert.deepEqual(Object.keys(pkg).slice(0, 3), ['name', 'private', 'type']);
+    // The migrated code imports @gio.js/core (the API-route sketch): a direct
+    // dependency, so strict installs (pnpm, Yarn PnP) resolve it.
+    assert.equal(pkg.dependencies['@gio.js/core'], pkg.dependencies['@gio.js/server']);
     assert.equal(pkg.dependencies['next'], undefined);
     assert.equal(pkg.devDependencies['eslint-config-next'], undefined);
     assert.match(pkg.dependencies['@gio.js/server'] ?? '', /^\^0\./);
@@ -313,6 +320,99 @@ test('a JavaScript project without tsconfig.json gets React in scope for JSX', a
   }
 });
 
+test('a JavaScript project: JSX .js files become .jsx, CommonJS files .cjs, and imports follow', async () => {
+  const root = await writeTree({
+    'package.json': '{"name":"js-app","scripts":{"dev":"next dev"},"dependencies":{"next":"14.0.0","react":"18.2.0","react-dom":"18.2.0"}}\n',
+    'pages/_app.js': "import '../styles/globals.css';\nexport default function App({ Component, pageProps }) {\n  return <Component {...pageProps} />;\n}\n",
+    'pages/index.js': "import Link from 'next/link';\nimport { Nav } from '../components/Nav';\nimport { Card } from '../components/Card.js';\nimport { add } from '../lib/util';\nimport data from '../lib/data';\n\nexport default function Home() {\n  return <main><Nav /><Card n={add(1, 2)} /><Link href=\"/about\">{data.title}</Link></main>;\n}\n",
+    'pages/about.js': 'export default function About() {\n  return <p>About</p>;\n}\n',
+    'pages/api/hello.js': 'export default function handler(req, res) {\n  res.json({ ok: true });\n}\n',
+    'components/Nav.js': "import { Card } from './Card';\nexport function Nav() {\n  return <nav><Card n={0} /></nav>;\n}\n",
+    'components/Card.js': 'export const Card = ({ n }) => <b>{n}</b>;\n',
+    'lib/util.js': 'export const add = (a, b) => a + b;\n',
+    'lib/data.js': "module.exports = { title: 'Data' };\n",
+    'lib/legacy.js': "import fs from 'fs';\nexport const read = () => fs.readFileSync('x');\nmodule.exports.extra = 1;\n",
+    'styles/globals.css': 'body { margin: 0 }\n',
+    'postcss.config.js': "module.exports = { plugins: { autoprefixer: {} } };\n",
+    'tailwind.config.js': "/** @type {import('tailwindcss').Config} */\nmodule.exports = { content: ['./app/**/*.{js,jsx}'] };\n",
+    'scripts/seed.js': "const path = require('path');\nconsole.log(path.join(__dirname, 'seed.json'));\n",
+    'next.config.js': 'module.exports = { reactStrictMode: true };\n',
+  });
+  try {
+    const plan = await planMigration(root);
+    await applyMigration(plan);
+    const tree = await readTree(root);
+
+    // JSX in .js: GioJS compiles it only in .jsx (tsx and esbuild's js loader reject it).
+    for (const [from, to] of [
+      ['pages/index.js', 'app/page.jsx'], ['pages/about.js', 'app/about/page.jsx'],
+      ['components/Nav.js', 'components/Nav.jsx'], ['components/Card.js', 'components/Card.jsx'],
+    ]) {
+      assert.ok(tree[to] !== undefined, `${to} exists`);
+      assert.equal(tree[from as string], undefined, `${from} is gone`);
+    }
+    // The root layout generated from _app is JSX too.
+    assert.ok(tree['app/layout.jsx'] !== undefined);
+    assert.equal(tree['app/layout.js'], undefined);
+    // Without JSX a .js file stays put; a route handler stays route.js.
+    assert.equal(tree['lib/util.js'], 'export const add = (a, b) => a + b;\n');
+    assert.ok(tree['app/api/hello/route.js'] !== undefined);
+
+    // Imports keep their style: extension-less stays extension-less, `.js` becomes `.jsx`,
+    // and a CommonJS module renamed to .cjs is imported by its full name.
+    const home = tree['app/page.jsx'] as string;
+    assert.match(home, /import \{ Nav \} from '\.\.\/components\/Nav';/);
+    assert.match(home, /import \{ Card \} from '\.\.\/components\/Card\.jsx';/);
+    assert.match(home, /import \{ add \} from '\.\.\/lib\/util';/);
+    assert.match(home, /import data from '\.\.\/lib\/data\.cjs';/);
+    assert.match(tree['components/Nav.jsx'] as string, /^import \{ Card \} from '\.\/Card';\nimport React from 'react';\n/);
+
+    // "type": "module" makes every .js an ES module: pure CommonJS files become .cjs.
+    assert.equal(JSON.parse(tree['package.json'] as string).type, 'module');
+    assert.equal(tree['postcss.config.cjs'], "module.exports = { plugins: { autoprefixer: {} } };\n");
+    assert.ok(tree['tailwind.config.cjs'] !== undefined);
+    assert.ok(tree['scripts/seed.cjs'] !== undefined);
+    assert.equal(tree['lib/data.cjs'], "module.exports = { title: 'Data' };\n");
+    for (const gone of ['postcss.config.js', 'tailwind.config.js', 'scripts/seed.js', 'lib/data.js']) assert.equal(tree[gone], undefined, gone);
+    // An ES module that also assigns module.exports can't be renamed: TODO.
+    assert.ok(tree['lib/legacy.js'] !== undefined);
+    assert.ok(plan.todos.some(t => t.file === 'lib/legacy.js' && /module\.exports\/exports, which does nothing now that package\.json has "type": "module"/.test(t.message)));
+    // next.config.js is left for the user to delete, not renamed.
+    assert.ok(tree['next.config.js'] !== undefined);
+
+    const report = tree['MIGRATION_REPORT.md'] as string;
+    assert.match(report, /\| `components\/Card\.js` \| `components\/Card\.jsx` \|/);
+    assert.match(report, /\| `postcss\.config\.js` \| `postcss\.config\.cjs` \|/);
+    assert.match(report, /renamed \.js → \.jsx: GioJS compiles JSX only in \.jsx\/\.tsx files/);
+    assert.match(report, /renamed \.js → \.cjs: package\.json now has "type": "module"/);
+    assert.match(report, /"type": \(none\) → "module"/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a project that is already "type": "module" keeps its .js files and package type', async () => {
+  const root = await writeTree({
+    'package.json': '{"name":"esm-app","type":"module","dependencies":{"next":"15.0.0"}}\n',
+    'tsconfig.json': '{ "compilerOptions": { "jsx": "react-jsx" } }\n',
+    'app/page.tsx': 'export default function P() { return <p />; }\n',
+    'eslint.config.js': "import next from 'eslint-config-next';\nexport default [next];\n",
+    'lib/cjs.js': 'module.exports = 1;\n',
+  });
+  try {
+    const plan = await planMigration(root);
+    assert.ok(!plan.files.some(f => f.to.endsWith('.cjs')), 'nothing renamed to .cjs');
+    const pkg = plan.files.find(f => f.to === 'package.json');
+    assert.ok(pkg !== undefined && typeof pkg.content === 'string');
+    assert.ok(!pkg.changes.some(c => /"type"/.test(c.message)));
+    assert.equal(JSON.parse(pkg.content).type, 'module');
+    // Nothing in the migrated code imports @gio.js/core, so it isn't added.
+    assert.equal(JSON.parse(pkg.content).dependencies['@gio.js/core'], undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a directory without Next.js is refused', async () => {
   const root = await writeTree({ 'package.json': '{"name":"plain","dependencies":{"react":"19.0.0"}}\n' });
   try {
@@ -337,6 +437,9 @@ test('create-giojs dispatches `migrate` and both bins print usage', () => {
   const viaCreate = execFileSync(process.execPath, [join(dist, 'index.js'), 'migrate', '--help'], { encoding: 'utf8' });
   assert.match(viaCreate, /^Usage: create-giojs migrate \[dir\] \[options\]/);
   assert.match(viaCreate, /npm create giojs@latest -- migrate \[dir\]/);
+  // `npx gio-migrate` would fetch whatever npm package is named gio-migrate.
+  assert.doesNotMatch(viaCreate, /npx gio-migrate/);
+  assert.match(viaCreate, /npx -p create-giojs gio-migrate \[dir\]/);
   const viaBin = execFileSync(process.execPath, [join(dist, 'migrate-cli.js'), '--help'], { encoding: 'utf8' });
   assert.equal(viaBin, viaCreate);
   const createHelp = execFileSync(process.execPath, [join(dist, 'index.js'), '--help'], { encoding: 'utf8' });

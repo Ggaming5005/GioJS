@@ -1,9 +1,11 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { navigate, useSearchParams, useParams, usePathname, useRouter, type GioRouter } from '@gio.js/react';
 
 export function Search({ fallback }: { fallback: GioRouter | null }) {
   const router = useRouter();
-  const routerQuery = { ...Object.fromEntries(useSearchParams()), ...useParams() };
+  const searchParams = useSearchParams();
+  const params = useParams();
+  const routerQuery = useMemo(() => ({ ...Object.fromEntries(searchParams), ...params }), [searchParams, params]);
   const routerPathname = usePathname();
   const { id, tab = 'all' } = routerQuery;
 
@@ -31,12 +33,16 @@ export function Search({ fallback }: { fallback: GioRouter | null }) {
 export function Breadcrumb() {
   // TODO(gio-migrate): asPath → usePathname(): it has no query string or hash (read those from useSearchParams() / location.hash)
   const { push } = useRouter();
-  const query = { ...Object.fromEntries(useSearchParams()), ...useParams() };
+  const searchParams = useSearchParams();
+  const params = useParams();
+  const query = useMemo(() => ({ ...Object.fromEntries(searchParams), ...params }), [searchParams, params]);
   const asPath = usePathname();
   return <a onClick={() => push('/')}>{asPath} {String(query.slug)}</a>;
 }
 
 export function Title() {
-  const routerQuery = { ...Object.fromEntries(useSearchParams()), ...useParams() };
+  const searchParams = useSearchParams();
+  const params = useParams();
+  const routerQuery = useMemo(() => ({ ...Object.fromEntries(searchParams), ...params }), [searchParams, params]);
   return <h1>{routerQuery.title}</h1>;
 }

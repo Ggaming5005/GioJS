@@ -23,6 +23,10 @@ const fixtures = join(here, 'fixtures', 'transforms');
 const cases: Array<{ name: string; ext: string; options: TransformOptions }> = [
   { name: 'link-image', ext: 'tsx', options: { filePath: 'components/Nav.tsx', role: 'source' } },
   { name: 'router', ext: 'tsx', options: { filePath: 'components/Search.tsx', role: 'source' } },
+  // router.query in effect deps must keep its identity between renders (useMemo), not loop.
+  { name: 'router-effect', ext: 'tsx', options: { filePath: 'components/Post.tsx', role: 'source' } },
+  // [...slug] params are a '/'-joined string in GioJS: every place that reads them gets a TODO.
+  { name: 'catch-all', ext: 'tsx', options: { filePath: 'app/docs/[...slug]/page.tsx', role: 'pages-page', originalPath: 'pages/docs/[...slug].tsx' } },
   { name: 'head-script-dynamic', ext: 'jsx', options: { filePath: 'app/dashboard/page.jsx', role: 'app-page' } },
   { name: 'data-fetching', ext: 'tsx', options: { filePath: 'app/posts/[id]/page.tsx', role: 'pages-page' } },
   { name: 'api', ext: 'ts', options: { filePath: 'app/api/hello/route.ts', role: 'pages-api', originalPath: 'pages/api/hello.ts' } },
@@ -188,4 +192,79 @@ test('unifiedDiff prints standard hunks for --dry-run', () => {
 test('getStaticProps outside a pages/ page is left alone', () => {
   const source = 'export async function getStaticProps() { return { props: {} }; }\n';
   assert.equal(transformSource(source, { filePath: 'lib/x.ts', role: 'source' }).output, source);
+});
+
+test('router.query becomes a memoized value, so effects that depend on it run once per navigation', () => {
+  const source = [
+    "import { useEffect, useState } from 'react';",
+    "import { useRouter } from 'next/router';",
+    'export default function Post() {',
+    '  const router = useRouter();',
+    '  const [data, setData] = useState(null);',
+    '  useEffect(() => {',
+    '    if (!router.isReady) return;',
+    "    fetch('/api/' + router.query.id).then(r => r.json()).then(setData);",
+    '  }, [router.isReady, router.query]);',
+    '  return <pre>{JSON.stringify(data)}</pre>;',
+    '}',
+    '',
+  ].join('\n');
+  const { output } = transformSource(source, { filePath: 'components/Post.tsx', role: 'source' });
+  assert.match(output, /^import \{ useEffect, useState, useMemo \} from 'react';/);
+  assert.match(output, /const searchParams = useSearchParams\(\);\n {2}const params = useParams\(\);\n {2}const routerQuery = useMemo\(\(\) => \(\{ \.\.\.Object\.fromEntries\(searchParams\), \.\.\.params \}\), \[searchParams, params\]\);/);
+  assert.match(output, /\}, \[true, routerQuery\]\);/);
+  // Never a fresh object literal built in the render body.
+  assert.doesNotMatch(output, /routerQuery = \{/);
+});
+
+test('generated hook bindings never shadow names the file already uses', () => {
+  const source = "import { useRouter } from 'next/router';\nexport function A({ params, searchParams }: { params: string; searchParams: string }) {\n  const { query } = useRouter();\n  return <p>{params}{searchParams}{query.q}</p>;\n}\n";
+  const { output } = transformSource(source, { filePath: 'a.tsx', role: 'source' });
+  assert.match(output, /const routerSearchParams = useSearchParams\(\);\n {2}const routeParams = useParams\(\);\n {2}const query = useMemo\(\(\) => \(\{ \.\.\.Object\.fromEntries\(routerSearchParams\), \.\.\.routeParams \}\), \[routerSearchParams, routeParams\]\);/);
+});
+
+test('an optional catch-all flags useParams() with the empty-segment fallback', () => {
+  const source = "'use client';\nimport { useParams } from 'next/navigation';\n\nexport default function Blog() {\n  const { slug } = useParams();\n  return <p>{(slug ?? []).join(' / ')}</p>;\n}\n";
+  const { output, todos } = transformSource(source, { filePath: 'app/blog/[[...slug]]/page.jsx', role: 'app-page' });
+  assert.deepEqual(todos.map(t => t.message), [
+    "catch-all route: the \"slug\" param is a '/'-joined string in GioJS ('a/b'), not an array as in Next.js - use slug ? slug.split('/') : [] where the code expects the array",
+  ]);
+  assert.match(output, /\/\/ TODO\(gio-migrate\): catch-all route: [^\n]+\n {2}const \{ slug \} = useParams\(\);/);
+  // The default export takes no props: nothing to flag there.
+  assert.match(output, /\n\nexport default function Blog\(\) \{/);
+});
+
+test('catch-all route handlers get one file-level TODO, and a second run does not repeat it', () => {
+  const source = 'export default function handler(req, res) {\n  res.json({ path: req.query.path.join("/") });\n}\n';
+  const options = { filePath: 'app/api/files/[...path]/route.js', role: 'pages-api' as const, originalPath: 'pages/api/files/[...path].js' };
+  const once = transformSource(source, options).output;
+  assert.match(once, /^\/\/ TODO\(gio-migrate\): catch-all route: the "path" param is a '\/'-joined string in GioJS \('a\/b'\), not an array as in Next\.js - use path\.split\('\/'\)/);
+  const twice = transformSource(once, { ...options, role: 'app-route' }).output;
+  assert.equal(twice, once);
+});
+
+test('a file outside a catch-all route gets no catch-all TODO', () => {
+  const source = "import { useParams } from 'next/navigation';\nexport default function P({ params }) {\n  return <p>{useParams().id}{params.id}</p>;\n}\n";
+  const { todos } = transformSource(source, { filePath: 'app/posts/[id]/page.jsx', role: 'app-page' });
+  assert.deepEqual(todos, []);
+});
+
+test('metadata and generateMetadata get a TODO: GioJS would drop their tags silently', () => {
+  const source = [
+    "export const metadata = { title: 'Posts', description: 'All \"posts\"', openGraph: { title: 'x' } };",
+    'export async function generateMetadata({ params }) {',
+    '  return { title: params.id };',
+    '}',
+    'export default function P() { return <p />; }',
+    '',
+  ].join('\n');
+  const { todos, changes } = transformSource(source, { filePath: 'app/posts/page.jsx', role: 'app-page' });
+  assert.deepEqual(todos.map(t => t.message), [
+    'GioJS does not read the metadata export (the page renders without these tags): render them in the component instead - React 19 hoists <title> and <meta> into <head>: <title>Posts</title> <meta name="description" content={"All \\"posts\\""} /> (port the other fields by hand)',
+    'GioJS does not read generateMetadata: render <title> and <meta> tags in the component instead (React 19 hoists them into <head>), with the data loaded in getServerSideProps',
+  ]);
+  assert.ok(!changes.some(c => /metadata/.test(c.message)), 'never reported as converted');
+  // A metadata value that isn't a literal object still gets the TODO, without tags.
+  const dynamic = transformSource('export const metadata = buildMetadata();\n', { filePath: 'app/page.tsx', role: 'app-page' });
+  assert.match(dynamic.todos[0]?.message ?? '', /^GioJS does not read the metadata export \(the page renders without these tags\): render them in the component instead - React 19 hoists <title> and <meta> into <head>$/);
 });

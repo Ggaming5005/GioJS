@@ -22,11 +22,72 @@ test('convertPath maps path-to-regexp syntax to gio.toml patterns', () => {
     path: '/a/*rest',
     note: '":rest+" (one or more segments) became "*rest", which also matches zero segments',
   });
-  for (const bad of ['/a/:id?', '/a/:id(\\d+)', '/a/(.*)', '/post-:id', '/a/:path*/b', 'relative']) {
+  for (const bad of ['/a/:id?', '/a/:id(\\d+)', '/a/(.*)/b', '/a/(\\d+)', '/post-:id', '/a/:path*/b', 'relative']) {
     assert.ok('error' in convertPath(bad, 'source'), bad);
   }
   assert.ok('error' in convertPath('https://example.com/:path*', 'destination'));
   assert.ok('error' in convertPath('/search?q=:q', 'destination'));
+});
+
+test('convertPath turns a trailing (.*) group into a catch-all', () => {
+  // `/(.*)` matches every path including `/` in Next.js, exactly like `/*rest`.
+  assert.deepEqual(convertPath('/(.*)', 'source'), { path: '/*rest' });
+  assert.deepEqual(convertPath('/:path(.*)', 'source'), { path: '/*path' });
+  // Below a prefix Next needs the slash: the prefix itself is the one extra match.
+  assert.deepEqual(convertPath('/blog/(.*)', 'source'), {
+    path: '/blog/*rest',
+    note: '"(.*)" became "*rest", which also matches /blog itself (Next.js required something after the slash)',
+  });
+  assert.deepEqual(convertPath('/docs/:slug/:rest(.*)', 'source'), {
+    path: '/docs/:slug/*rest',
+    note: '":rest(.*)" became "*rest", which also matches /docs/:slug itself (Next.js required something after the slash)',
+  });
+  // An unnamed group never takes a name the path already captures.
+  assert.deepEqual(convertPath('/:rest/(.*)', 'source'), {
+    path: '/:rest/*rest2',
+    note: '"(.*)" became "*rest2", which also matches /:rest itself (Next.js required something after the slash)',
+  });
+  // A named group can be referenced by a destination; an unnamed one cannot.
+  assert.deepEqual(convertPath('/new/:path(.*)', 'destination'), { path: '/new/*path' });
+  assert.ok('error' in convertPath('/new/(.*)', 'destination'));
+});
+
+test('the site-wide `/(.*)` headers rule and `(.*)` redirects convert instead of being skipped', () => {
+  const config = convertConfigSource(`
+const securityHeaders = [{ key: 'X-Frame-Options', value: 'DENY' }];
+module.exports = {
+  async headers() {
+    return [
+      { source: '/(.*)', headers: securityHeaders },
+      { source: '/fonts/:file(.*)', headers: [{ key: 'Cache-Control', value: 'public, max-age=31536000, immutable' }] },
+    ];
+  },
+  async redirects() {
+    return [
+      { source: '/old/:path(.*)', destination: '/new/:path', permanent: true },
+      { source: '/legacy/(.*)', destination: '/', permanent: false },
+    ];
+  },
+};
+`, 'next.config.js');
+  assert.deepEqual(config.todos, []);
+  assert.deepEqual(config.entries.map(e => [e.name, Object.fromEntries(e.keys), e.comments.length]), [
+    ['headers', { path: '"/*rest"', headers: '{ "X-Frame-Options" = "DENY" }' }, 0],
+    ['headers', { path: '"/fonts/*file"', headers: '{ "Cache-Control" = "public, max-age=31536000, immutable" }' }, 1],
+    ['redirects', { from: '"/old/*path"', to: '"/new/:path"', status: '308' }, 1],
+    ['redirects', { from: '"/legacy/*rest"', to: '"/"', status: '307' }, 1],
+  ]);
+});
+
+test('a root catch-all rewrite is converted only when Next ran it before the filesystem too', () => {
+  // Array-form (afterFiles) rewrites only reached paths no page or public file
+  // matched; GioJS rewrites run before routing, so `/*rest` would take every request.
+  const after = convertConfigSource("module.exports = { rewrites: async () => [{ source: '/(.*)', destination: '/index.html' }] };", 'next.config.js');
+  assert.deepEqual(after.entries, []);
+  assert.match(after.todos[0] ?? '', /^rewrite \/\(\.\*\) → \/index\.html skipped: Next\.js checked pages and public files before it, but GioJS rewrites run before routing, so \/\*rest would rewrite every request/);
+  const before = convertConfigSource("module.exports = { rewrites: async () => ({ beforeFiles: [{ source: '/:path*', destination: '/maintenance' }] }) };", 'next.config.js');
+  assert.deepEqual(before.todos, []);
+  assert.deepEqual(before.entries.map(e => Object.fromEntries(e.keys)), [{ from: '"/*path"', to: '"/maintenance"' }]);
 });
 
 test('the legacy tests/fixtures next.config.js converts redirects, rewrites and images', async () => {
@@ -117,12 +178,6 @@ test('a rich next.config converts every supported setting and flags the rest', (
     '[images]',
     'allowed_widths = [16, 64, 640, 1080, 1920]',
     '',
-    '# TODO(gio-migrate): pathname "/uploads/*" (one segment in Next.js) now allows any depth below /uploads/',
-    '[[images.remote_patterns]]',
-    'protocol = "https"',
-    'hostname = "assets.example.com"',
-    'pathname = "/uploads/*"',
-    '',
     '[[headers]]',
     'path = "/*path"',
     'headers = { "X-Frame-Options" = "DENY", "X-Content-Type-Options" = "nosniff" }',
@@ -156,6 +211,8 @@ test('a rich next.config converts every supported setting and flags the rest', (
     /webpack: GioJS bundles with esbuild/,
     /remote image pattern img\.example\.com:8443 skipped: gio\.toml remote_patterns have no port/,
     /remote image pattern \*\.example\.org skipped: pathname "\/a\/\*\*\/b" uses a glob/,
+    // One segment in Next.js; GioJS's `*` would let the image proxy fetch any depth.
+    /remote image pattern assets\.example\.com skipped: pathname "\/uploads\/\*" allows one segment in Next\.js, but a gio\.toml "\*" matches at any depth/,
     /headers for \/api\/:path\* has has\/missing conditions/,
     /redirect \/legacy\/:id\(\\d\+\) → \/items\/:id skipped: segment ":id\(\\d\+\)" uses a regex/,
     /redirect \/a → \/b\/:missing skipped: the destination uses :missing, which the source doesn't capture/,

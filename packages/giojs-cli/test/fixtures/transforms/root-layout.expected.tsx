@@ -7,6 +7,7 @@ const inter = { className: '', variable: '', style: { fontFamily: "'Inter'" } };
 // TODO(gio-migrate): next/font: self-host "Roboto Mono" with a gio.toml [[fonts]] entry (see MIGRATION_REPORT.md) and apply font-family: 'Roboto Mono' in CSS - className/variable are now empty
 const mono = { className: '', variable: '', style: { fontFamily: "'Roboto Mono'" } };
 
+// TODO(gio-migrate): GioJS does not read the metadata export (the page renders without these tags): render them in the component instead - React 19 hoists <title> and <meta> into <head>: <title>My app</title> <meta name="description" content="Migrated from Next.js" />
 export const metadata: Metadata = {
   title: 'My app',
   description: 'Migrated from Next.js',

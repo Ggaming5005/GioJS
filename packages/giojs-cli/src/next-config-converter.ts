@@ -9,7 +9,9 @@
  * `# TODO(gio-migrate):` comment and a report entry; a rule that would
  * match differently in GioJS is skipped rather than approximated more
  * broadly (a `has` condition dropped from a redirect would apply it to
- * every request).
+ * every request). The one deliberate exception: a catch-all Next requires
+ * to be non-empty (`/blog/:path+`, `/blog/(.*)`) becomes `/blog/*path`,
+ * which adds only `/blog` itself, and says so in a TODO comment above it.
  *
  * An existing gio.toml is never overwritten: new tables are merged in when
  * that is provably safe (no table or key defined twice), otherwise the
@@ -217,6 +219,21 @@ export function convertPath(path: string, kind: 'source' | 'destination'): { pat
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i] as string;
     const last = i === segments.length - 1;
+    // `/(.*)` and `/:name(.*)` as the last segment: "the rest of the path".
+    // Next matches `/(.*)` on every path including `/`, exactly like
+    // `/*rest`; below a prefix (`/blog/(.*)`) it needs the slash, so
+    // `/blog` itself is the one extra path the catch-all matches.
+    const rest = last ? /^(?::([A-Za-z_][A-Za-z0-9_]*))?\(\.\*\)$/.exec(segment) : null;
+    if (rest !== null && (rest[1] !== undefined || kind === 'source')) {
+      const taken = new Set(segments.map(s => /^:([A-Za-z_][A-Za-z0-9_]*)/.exec(s)?.[1]));
+      let name = rest[1] ?? 'rest';
+      for (let n = 2; rest[1] === undefined && taken.has(name); n++) name = `rest${n}`;
+      out.push(`*${name}`);
+      if (kind === 'source' && out.length > 1) {
+        note = `"${segment}" became "*${name}", which also matches /${out.slice(0, -1).join('/')} itself (Next.js required something after the slash)`;
+      }
+      continue;
+    }
     const param = /^:([A-Za-z_][A-Za-z0-9_]*)([*+?]?)$/.exec(segment);
     if (param !== null) {
       const [, name, modifier] = param as unknown as [string, string, string];
@@ -394,9 +411,12 @@ function convertRedirects(value: Value, result: ConvertedConfig): void {
 
 function convertRewrites(value: Value, result: ConvertedConfig): void {
   let rules: Value[];
+  // Next checks pages and public files before every rewrite but beforeFiles.
+  let beforeFiles = new Set<Value>();
   if (Array.isArray(value)) {
     rules = value;
   } else if (isRecord(value)) {
+    beforeFiles = new Set(Array.isArray(value['beforeFiles']) ? value['beforeFiles'] : []);
     rules = [
       ...(Array.isArray(value['beforeFiles']) ? value['beforeFiles'] : []),
       ...(Array.isArray(value['afterFiles']) ? value['afterFiles'] : []),
@@ -435,6 +455,10 @@ function convertRewrites(value: Value, result: ConvertedConfig): void {
     const missing = [...captures(to.path)].filter(c => !captures(from.path).has(c));
     if (missing.length > 0) {
       result.todos.push(`${label} skipped: the destination uses ${missing.map(m => `:${m}`).join(', ')}, which the source doesn't capture`);
+      continue;
+    }
+    if (/^\/\*[^/]*$/.test(from.path) && !beforeFiles.has(rule)) {
+      result.todos.push(`${label} skipped: Next.js checked pages and public files before it, but GioJS rewrites run before routing, so ${from.path} would rewrite every request - move the fallback into a catch-all page (app/[...path]/page.tsx)`);
       continue;
     }
     result.entries.push({
@@ -487,14 +511,21 @@ function convertHeaders(value: Value, result: ConvertedConfig): void {
   }
 }
 
-/** Next's `**` / `*` pathname globs → GioJS's trailing-`*` prefix match. */
-function convertPathname(pathname: string): { pathname: string; note?: string } | { error: string } {
+/**
+ * Next's trailing `**` pathname glob → GioJS's trailing-`*` prefix match.
+ * A single `*` (one segment in Next.js) has no exact equivalent: GioJS's
+ * `*` matches at any depth, and this allowlist decides what the image
+ * proxy fetches, so such a pattern is skipped rather than widened.
+ */
+function convertPathname(pathname: string): { pathname: string } | { error: string } {
   if (!pathname.includes('*')) return { pathname };
   const multi = /^(.*\/)\*\*$/.exec(pathname);
   if (multi !== null && !(multi[1] as string).includes('*')) return { pathname: `${multi[1] as string}*` };
   const single = /^(.*\/)\*$/.exec(pathname);
   if (single !== null && !(single[1] as string).includes('*')) {
-    return { pathname, note: `pathname "${pathname}" (one segment in Next.js) now allows any depth below ${single[1] as string}` };
+    return {
+      error: `pathname "${pathname}" allows one segment in Next.js, but a gio.toml "*" matches at any depth - add pathname = "${pathname}" by hand if every depth below ${single[1] as string} is fine to proxy`,
+    };
   }
   return { error: `pathname "${pathname}" uses a glob gio.toml can't express (only a trailing * prefix match)` };
 }
@@ -543,7 +574,6 @@ function convertImages(value: Value, result: ConvertedConfig): void {
         continue;
       }
       entryKeys.push(['pathname', tomlString(converted.pathname)]);
-      if (converted.note !== undefined) comments.push(`${TODO_MARKER} ${converted.note}`);
     }
     result.entries.push({ name: 'images.remote_patterns', keys: entryKeys, comments });
     result.converted.push(`images.remotePatterns ${hostname} → [[images.remote_patterns]]`);

@@ -10,9 +10,10 @@
 import { existsSync } from 'fs';
 import { mkdir, readFile, readdir, rm, rmdir, stat, writeFile } from 'fs/promises';
 import { dirname, join, posix } from 'path';
-import { TODO_MARKER, scanTodos } from './migrate-edits.js';
+import ts from 'typescript';
+import { TODO_MARKER, forEachDescendant, isReference, parseErrors, parseSource, scanTodos } from './migrate-edits.js';
 import { buildRootLayout, mapPagesFile, stylesheetImports } from './migrate-pages.js';
-import { migratePackageJson, migrateTsconfig } from './migrate-package.js';
+import { addsModuleType, migratePackageJson, migrateTsconfig } from './migrate-package.js';
 import { buildReport, REPORT_FILE, REPORT_HEADER } from './migrate-report.js';
 import { transformSource, type FileNote, type FileRole, type FontHint } from './migrate-transforms.js';
 import {
@@ -137,12 +138,60 @@ function stylesheetUrl(path: string): string | undefined {
   return undefined;
 }
 
+export interface ModuleTraits {
+  /** Contains JSX (Next compiles it in .js files; GioJS only in .jsx/.tsx). */
+  jsx: boolean;
+  /** Uses import/export syntax or import.meta. */
+  esm: boolean;
+  /** Uses module.exports, exports.x =, require() or __dirname/__filename. */
+  commonJs: boolean;
+  /** Assigns module.exports / exports.x - a no-op once the file loads as an ES module. */
+  exportsAssignment: boolean;
+}
+
+/** What module syntax a source file uses; undefined when it doesn't parse. */
+export function moduleTraits(path: string, source: string): ModuleTraits | undefined {
+  const sf = parseSource(path, source);
+  if (parseErrors(sf).length > 0) return undefined;
+  const traits: ModuleTraits = { jsx: false, esm: false, commonJs: false, exportsAssignment: false };
+  for (const statement of sf.statements) {
+    const exported = ts.canHaveModifiers(statement) && ts.getModifiers(statement)?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) === true;
+    if (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement) || (ts.isExportAssignment(statement) && !statement.isExportEquals) || exported) {
+      traits.esm = true;
+    }
+  }
+  forEachDescendant(sf, n => {
+    if (ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n) || ts.isJsxFragment(n)) traits.jsx = true;
+    else if (ts.isMetaProperty(n) && n.keywordToken === ts.SyntaxKind.ImportKeyword) traits.esm = true;
+    else if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression)) {
+      const assigned = ts.isBinaryExpression(n.parent) && n.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && n.parent.left === n;
+      if ((n.expression.text === 'module' && n.name.text === 'exports') || (n.expression.text === 'exports' && assigned)) {
+        traits.commonJs = true;
+        traits.exportsAssignment = true;
+      }
+    } else if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'require' && n.arguments.length === 1) {
+      traits.commonJs = true;
+    } else if (ts.isIdentifier(n) && (n.text === '__dirname' || n.text === '__filename') && isReference(n)) {
+      traits.commonJs = true;
+    }
+  });
+  return traits;
+}
+
 export async function planMigration(rootDir: string): Promise<MigrationPlan> {
   const root = rootDir;
   if (!(await stat(root)).isDirectory()) throw new Error(`${root} is not a directory`);
   const fileList = await listFiles(root);
   const files = new Set(fileList);
-  const read = (rel: string): Promise<string> => readFile(join(root, rel), 'utf8');
+  const sources = new Map<string, Promise<string>>();
+  const read = (rel: string): Promise<string> => {
+    let text = sources.get(rel);
+    if (text === undefined) {
+      text = readFile(join(root, rel), 'utf8');
+      sources.set(rel, text);
+    }
+    return text;
+  };
 
   const pkgRaw = files.has('package.json') ? await read('package.json') : undefined;
   const configFile = CONFIG_FILES.find(f => files.has(f));
@@ -197,6 +246,45 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
     }
   }
 
+  // ── module formats ───────────────────────────────────────────────────────
+  // GioJS compiles .js files without JSX (tsx on the server, esbuild's js
+  // loader for the client), so a .js file with JSX becomes .jsx. And the
+  // migrated package.json gets "type": "module" (@gio.js/react ships ESM
+  // only, and tsx loads app files as CommonJS without it), which turns every
+  // .js file into an ES module: a CommonJS one (postcss.config.js with
+  // module.exports) becomes .cjs, where Node keeps loading it as CommonJS.
+  const moduleType = pkgRaw !== undefined && addsModuleType(pkgRaw);
+  const renameNotes = new Map<string, string>();
+  const specialFiles = new Set(specials.values());
+  for (const f of fileList) {
+    if (!isSource(f) || specialFiles.has(f)) continue;
+    const traits = moduleTraits(f, await read(f));
+    if (traits === undefined) continue;
+    const target = moves.get(f)?.to ?? f;
+    const role = moves.get(f)?.role;
+    const isJs = extOf(target) === '.js';
+    const isRoute = target.startsWith('app/') && stemOf(target) === 'route';
+    if (traits.jsx && isJs) {
+      if (isRoute) {
+        plan.todos.push({ file: target, message: 'route.js contains JSX, which GioJS compiles only in .jsx/.tsx files - move the JSX into a component' });
+      } else if (claim(f, `${target.slice(0, -3)}.jsx`, role)) {
+        renameNotes.set(f, 'renamed .js → .jsx: GioJS compiles JSX only in .jsx/.tsx files (Next.js also accepted it in .js)');
+      }
+      continue;
+    }
+    if (!moduleType || !traits.commonJs) continue;
+    if (isJs && !traits.esm && !target.startsWith('app/')) {
+      if (claim(f, `${target.slice(0, -3)}.cjs`, role)) {
+        renameNotes.set(f, 'renamed .js → .cjs: package.json now has "type": "module", which would make Node load this CommonJS file (module.exports/require) as an ES module');
+      }
+    } else if (traits.exportsAssignment) {
+      plan.todos.push({
+        file: target,
+        message: 'assigns module.exports/exports, which does nothing now that package.json has "type": "module" (every .js/.ts file is an ES module) - switch to export statements',
+      });
+    }
+  }
+
   // app/ component files must be .tsx/.jsx/.js; route handlers .ts/.js.
   for (const f of fileList) {
     const target = moves.get(f)?.to ?? f;
@@ -237,7 +325,8 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
     const appFile = specials.get('_app');
     const docFile = specials.get('_document');
     const sample = appFile ?? docFile ?? 'x.tsx';
-    const ext = extOf(sample) === '.ts' ? '.tsx' : extOf(sample);
+    // The generated layout is JSX: .js becomes .jsx like every JSX file.
+    const ext = ({ '.ts': '.tsx', '.js': '.jsx' } as Record<string, string>)[extOf(sample)] ?? extOf(sample);
     const layoutPath = `app/layout${ext}`;
     const existingLayout = fileList.some(f => /^app\/layout\.[jt]sx?$/.test(moves.get(f)?.to ?? f));
     if (existingLayout || taken.has(layoutPath)) {
@@ -294,8 +383,10 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
     const targetMove = target !== undefined ? moves.get(target)?.to : undefined;
     if (targetMove !== undefined && target !== undefined) {
       const written = posix.normalize(posix.join(oldDir, spec));
-      // Keep the specifier's style: extension-less stays extension-less.
-      const keepsExt = written === target || written.endsWith(extOf(target));
+      // Keep the specifier's style: extension-less stays extension-less -
+      // except for a file renamed to .cjs, which resolvers only find by
+      // its full name.
+      const keepsExt = written === target || written.endsWith(extOf(target)) || extOf(targetMove) === '.cjs';
       const dest = keepsExt ? targetMove : targetMove.slice(0, targetMove.length - extOf(targetMove).length);
       return relativeSpecifier(newDir, dest.replace(/\/index$/, ''));
     }
@@ -335,6 +426,8 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
     plan.fonts.push(...result.fonts);
     let output = result.output;
     let changes = result.changes;
+    const renamed = renameNotes.get(f);
+    if (renamed !== undefined) changes = [{ line: 0, message: renamed }, ...changes];
     const extra = headerTodos.get(f);
     if (extra !== undefined) {
       output = extra.map(m => `// ${TODO_MARKER} ${m}\n`).join('') + output;
@@ -385,7 +478,11 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
   // ── package.json / tsconfig.json ─────────────────────────────────────────
   const typescript = files.has('tsconfig.json');
   if (pkgRaw !== undefined) {
-    const update = migratePackageJson(pkgRaw, { staticExport, typescript });
+    // notFound, GioRequest, server-only and the API-route sketch come from
+    // @gio.js/core: a direct dependency, so strict installs (pnpm, Yarn PnP)
+    // resolve it without relying on @gio.js/server's being hoisted.
+    const gioCore = plan.files.some(f => typeof f.content === 'string' && /['"]@gio\.js\/core(?:\/[\w-]+)?['"]/.test(f.content));
+    const update = migratePackageJson(pkgRaw, { staticExport, typescript, gioCore });
     if (update !== undefined) {
       for (const t of update.todos) plan.todos.push({ file: 'package.json', message: t });
       if (update.content !== pkgRaw) {
@@ -409,7 +506,7 @@ export async function planMigration(rootDir: string): Promise<MigrationPlan> {
     });
   }
   for (const f of fileList.filter(p => /^\.eslintrc|^eslint\.config\./.test(p))) {
-    if (/next/.test(await read(f))) plan.todos.push({ file: f, message: 'uses eslint-config-next: switch to a plain React/TypeScript ESLint config' });
+    if (/next/.test(await read(f))) plan.todos.push({ file: moves.get(f)?.to ?? f, message: 'uses eslint-config-next: switch to a plain React/TypeScript ESLint config' });
   }
 
   // ── report ───────────────────────────────────────────────────────────────

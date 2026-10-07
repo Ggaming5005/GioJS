@@ -66,6 +66,20 @@ npm run dev`} />
         <code> middleware.ts</code> is renamed to <code>middleware.next.ts</code> - GioJS loads
         <code> middleware.ts</code> as declarative rules (see Middleware) - and flagged for porting.
       </p>
+      <p>
+        Next.js accepts JSX in <code>.js</code> files; GioJS compiles JSX only in
+        <code> .jsx</code>/<code>.tsx</code> files, so every <code>.js</code> file with JSX is
+        renamed to <code>.jsx</code> (<code>pages/index.js</code> → <code>app/page.jsx</code>,
+        <code> components/Nav.js</code> → <code>components/Nav.jsx</code>) and imports that spell
+        out the <code>.js</code> extension are updated. Files without JSX keep their name.
+      </p>
+      <p>
+        Catch-all params differ in shape: Next passes <code>[...slug]</code> as an array
+        (<code>['a', 'b']</code>), GioJS as the <code>'/'</code>-joined string
+        (<code>'a/b'</code>) - in page props, <code>getServerSideProps</code>'s
+        <code> params</code>, <code>useParams()</code> and route handlers alike. Code in a
+        catch-all route that reads them gets a TODO to use <code>.split('/')</code>.
+      </p>
 
       <h2>Code transforms</h2>
       <p>
@@ -87,7 +101,7 @@ npm run dev`} />
           </tr>
           <tr>
             <td><code>next/router</code> <code>useRouter()</code></td>
-            <td><code>useRouter</code> from <code>@gio.js/react</code> (<code>push</code>, <code>replace</code>, <code>back</code>, <code>forward</code>, <code>prefetch</code>, <code>refresh</code>); <code>router.query</code> → <code>useSearchParams()</code> + <code>useParams()</code>, <code>pathname</code>/<code>asPath</code> → <code>usePathname()</code>, <code>reload()</code> → <code>window.location.reload()</code>; <code>router.events</code> and other unsupported APIs get a TODO</td>
+            <td><code>useRouter</code> from <code>@gio.js/react</code> (<code>push</code>, <code>replace</code>, <code>back</code>, <code>forward</code>, <code>prefetch</code>, <code>refresh</code>); <code>router.query</code> → <code>useSearchParams()</code> + <code>useParams()</code> merged in a <code>useMemo</code> (it keeps its identity until the URL changes, like <code>router.query</code>, so effects that depend on it don't re-run every render), <code>pathname</code>/<code>asPath</code> → <code>usePathname()</code>, <code>reload()</code> → <code>window.location.reload()</code>; <code>router.events</code> and other unsupported APIs get a TODO</td>
           </tr>
           <tr>
             <td><code>next/navigation</code></td>
@@ -115,7 +129,7 @@ npm run dev`} />
           </tr>
           <tr>
             <td><code>export const metadata</code> / <code>generateMetadata</code></td>
-            <td>Kept as-is: GioJS's metadata export follows the Next.js shape</td>
+            <td>Left in place with a TODO: GioJS does not read them, so the page would render without its <code>&lt;title&gt;</code> and SEO tags. Render <code>&lt;title&gt;</code>/<code>&lt;meta&gt;</code> in the component instead (React 19 hoists them into <code>&lt;head&gt;</code>); for a static title/description the TODO spells out the tags</td>
           </tr>
           <tr>
             <td><code>'use client'</code> / <code>'use server'</code></td>
@@ -133,8 +147,16 @@ npm run dev`} />
       </table>
       <p>
         <code>package.json</code> drops <code>next</code> for <code>@gio.js/server</code> and
-        <code> @gio.js/react</code> (React moves to 19) and its <code>next dev</code>/
-        <code>next start</code> scripts run the GioJS server. <code>tsconfig.json</code> gets
+        <code> @gio.js/react</code> (plus <code>@gio.js/core</code> when the migrated code
+        imports it; React moves to 19), its <code>next dev</code>/<code>next start</code>
+        scripts run the GioJS server, and it gets <code>"type": "module"</code>, like every
+        GioJS app: GioJS loads app files as ES modules and <code>@gio.js/react</code> ships ES
+        modules only, so without it every page importing <code>@gio.js/react</code> fails to
+        load. That makes Node treat every <code>.js</code> file as an ES module, so CommonJS
+        files (<code>module.exports</code>/<code>require</code>, such as
+        <code> postcss.config.js</code> or <code>tailwind.config.js</code>) are renamed to
+        <code> .cjs</code>, and a file mixing <code>import</code>/<code>export</code> with
+        <code> module.exports</code> gets a TODO. <code>tsconfig.json</code> gets
         <code> "jsx": "react-jsx"</code> - <code>"preserve"</code> would leave JSX untransformed -
         loses the <code>next</code> plugin, and includes <code>.gio/routes.d.ts</code> for typed
         routes.
@@ -144,8 +166,10 @@ npm run dev`} />
       <p>
         The config is read statically (it is never executed). Redirects, rewrites and headers
         become the <code>gio.toml</code> rules the Rust server evaluates before routing, with the
-        path syntax converted: <code>:slug</code> stays, <code>:path*</code> becomes the
-        catch-all <code>*path</code>.
+        path syntax converted: <code>:slug</code> stays, <code>:path*</code> and a trailing
+        <code> (.*)</code> or <code>:path(.*)</code> become the catch-all <code>*path</code>
+        (<code>source: '/(.*)'</code>, the usual site-wide headers rule, becomes
+        <code> path = "/*rest"</code>).
       </p>
       <CodeBlock lang="toml" code={`# redirects() { return [{ source: '/blog/:path*', destination: '/news/:path*', permanent: true }] }
 [[redirects]]
@@ -163,7 +187,16 @@ headers = { "X-Frame-Options" = "DENY" }`} />
         <li>
           A rule GioJS would match differently is skipped with a TODO instead of approximated:
           <code> has</code>/<code>missing</code> conditions, regex or optional parameters, external
-          destinations, query strings in destinations
+          destinations, query strings in destinations, a root catch-all rewrite
+          (<code>/(.*)</code>, <code>/:path*</code>) outside <code>beforeFiles</code> - Next ran it
+          only after checking pages and public files, GioJS would rewrite every request - and
+          image <code>pathname</code> globs with
+          a single <code>*</code> (one segment in Next.js; a <code>gio.toml</code> pattern's
+          <code> *</code> matches at any depth, which would widen what the image proxy fetches).
+          The one exception is a catch-all Next requires to be non-empty
+          (<code>/blog/:path+</code>, <code>/blog/(.*)</code>): it becomes
+          <code> /blog/*path</code>, which also matches <code>/blog</code> itself, with a TODO
+          comment saying so
         </li>
         <li><code>basePath</code>, <code>trailingSlash</code>, <code>webpack</code>, <code>experimental</code> and the rest are listed in the report - GioJS compiles with esbuild, so webpack and SWC options don't apply</li>
       </ul>
