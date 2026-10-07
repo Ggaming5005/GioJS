@@ -335,6 +335,11 @@
         "family": {
           "type": "string"
         },
+        "preload": {
+          "description": "Preload the file from every page's head. false for fonts only used\nbelow the fold: the browser then fetches it when text needs it.",
+          "type": "boolean",
+          "default": true
+        },
         "style": {
           "type": "string",
           "default": "normal"

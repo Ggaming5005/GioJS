@@ -1011,6 +1011,10 @@ pub struct FontEntry {
     pub weight: u16,
     #[serde(default = "default_font_style")]
     pub style: String,
+    /// Preload the file from every page's head. false for fonts only used
+    /// below the fold: the browser then fetches it when text needs it.
+    #[serde(default = "default_true")]
+    pub preload: bool,
 }
 
 fn default_font_weight() -> u16 {
@@ -1744,6 +1748,18 @@ mod tests {
         // It changes the stylesheets pages link, so persisted pages must not
         // outlive a change to it.
         assert!(WORKER_RENDER_SETTINGS_ENV.contains(&WORKER_CSS_CONFIG_ENV));
+    }
+
+    #[test]
+    fn fonts_preload_by_default_and_per_entry_opt_out() {
+        let fonts = parse(
+            "[[fonts]]\nfamily = \"Inter\"\nurl = \"/fonts/inter.woff2\"\n\n\
+             [[fonts]]\nfamily = \"Serif\"\nurl = \"/fonts/serif.woff2\"\npreload = false\n",
+        )
+        .unwrap()
+        .fonts;
+        assert!(fonts[0].preload);
+        assert!(!fonts[1].preload);
     }
 
     #[test]

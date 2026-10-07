@@ -643,17 +643,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         files
     };
 
-    let font_snippets: Vec<String> = font_files
-        .iter()
-        .map(|file| format!(
-            r#"<link rel="preload" href="/_gio/fonts/{file}" as="font" type="font/woff2" crossorigin>"#
-        ))
-        .chain(if font_entries.is_empty() {
-            None
-        } else {
-            Some(r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string())
-        })
-        .collect();
+    let font_snippets = font_head_snippets(&cfg.fonts, &font_files);
 
     // Everything the deployment ID covers besides the build the worker is
     // about to produce: the worker's render settings, and what the server
@@ -5242,6 +5232,26 @@ async fn collect_ppr_shell(
     }
 }
 
+/// The head links for the served fonts (`files`, one per `[[fonts]]`
+/// entry): a preload per font whose entry keeps `preload = true`, then the
+/// @font-face stylesheet.
+fn font_head_snippets(fonts: &[config::FontEntry], files: &[String]) -> Vec<String> {
+    fonts
+        .iter()
+        .zip(files)
+        .filter(|(font, _)| font.preload)
+        .map(|(_, file)| {
+            format!(
+                r#"<link rel="preload" href="/_gio/fonts/{file}" as="font" type="font/woff2" crossorigin>"#
+            )
+        })
+        .chain(
+            (!fonts.is_empty())
+                .then(|| r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string()),
+        )
+        .collect()
+}
+
 /// How many Node workers render: `[server] workers`, except that dev mode
 /// always runs one. Dev restarts rebuild the client bundles on every edit,
 /// and the builder is the only worker that may write them.
@@ -6701,6 +6711,32 @@ mod tests {
             PrefetchSlot::acquire(&budgets, ip).is_some(),
             "the cancelled prefetch released its slot"
         );
+    }
+
+    #[test]
+    fn fonts_with_preload_off_get_no_preload_link() {
+        let font = |family: &str, preload: bool| config::FontEntry {
+            family: family.to_string(),
+            url: format!("/fonts/{family}.woff2"),
+            weight: 400,
+            style: "normal".to_string(),
+            preload,
+        };
+        let files = vec!["inter-1.woff2".to_string(), "serif-2.woff2".to_string()];
+        assert_eq!(
+            font_head_snippets(&[font("inter", true), font("serif", false)], &files),
+            vec![
+                r#"<link rel="preload" href="/_gio/fonts/inter-1.woff2" as="font" type="font/woff2" crossorigin>"#
+                    .to_string(),
+                r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string(),
+            ]
+        );
+        // Every font still has its @font-face rule; without fonts, no links.
+        assert_eq!(
+            font_head_snippets(&[font("serif", false)], &files[1..]),
+            vec![r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string()]
+        );
+        assert!(font_head_snippets(&[], &[]).is_empty());
     }
 
     #[test]
