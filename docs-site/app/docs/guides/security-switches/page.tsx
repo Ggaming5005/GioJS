@@ -497,18 +497,16 @@ hsts = true                               # TLS ends at the gateway
 trusted_origins = ["https://partner.example.com"]
 
 [metrics]
-token = "\${METRICS_TOKEN}"                # placeholder: put the real token here, or use ip_allowlist
+ip_allowlist = ["10.0.0.0/8"]             # the Prometheus network; loopback only without it
 
 [health]
 details = false                           # no deployment id or topology on a public probe`} />
-      <CodeBlock lang="text" code={`WARN [security] default_headers = false: responses no longer carry x-content-type-options,
-     x-frame-options or referrer-policy (MIME sniffing, clickjacking and full-URL referrers
-     are back) unless [security.headers] sets them`} />
-      <div className="callout warning">
-        <code>gio.toml</code> does not expand variables: <code>{'"${METRICS_TOKEN}"'}</code>{' '}
-        above stands for the token itself. Keep real tokens out of version control - the
-        revalidation token can come from <code>GIO_REVALIDATE_TOKEN</code> instead.
-      </div>
+      <p>
+        <code>--check-config</code> accepts it and lists the one protection it turns off
+        (output trimmed):
+      </p>
+      <CodeBlock lang="bash" code={`$ npx giojs-server --check-config
+{"errors":[],"ok":true,"trustedProxies":1,...,"warnings":["[security] default_headers = false: responses no longer carry x-content-type-options, x-frame-options or referrer-policy (MIME sniffing, clickjacking and full-URL referrers are back) unless [security.headers] sets them"]}`} />
 
       <h2 id="related">Related</h2>
       <ul>
