@@ -1700,8 +1700,9 @@ fn worker_runs_without_tsx(node_script: &str, standalone_env: Option<&str>) -> b
 /// We invoke node + tsx's cli.mjs directly rather than the .CMD shim because
 /// cmd.exe quoting rules make it unreliable when Rust builds the command line.
 ///
-/// The tsx bin dir location is resolved from `GIO_TSX_BIN` (env override) or
-/// found automatically in the pnpm workspace node_modules.
+/// The tsx package directory (the one holding `dist/cli.mjs`) comes from
+/// `GIO_TSX_PKG` (env override) or is found automatically in the pnpm
+/// workspace node_modules.
 fn spawn_node_tsx(
     node_script: &str,
     ipc_path: &str,
