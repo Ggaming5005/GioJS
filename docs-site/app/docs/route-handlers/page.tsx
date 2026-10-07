@@ -213,10 +213,13 @@ export function GET() {
           runs, so stop timers and upstream requests there.
         </li>
         <li>
-          A streamed body has no time limit: it ends when you close the stream, the client
-          leaves, or the server shuts down (open streams and SSE connections are ended and
-          cancelled when shutdown starts, so they never hold up a deploy). If your stream errors
-          midway, the response ends early (the status is already sent).
+          A streamed body has no time limit: it ends when you close the stream or the client
+          leaves. When the server shuts down, a <code>text/event-stream</code> body is ended and
+          cancelled at once (an <code>EventSource</code> reconnects), so it never holds up a
+          deploy. Any other streamed body - a download, an export - is left to finish within the
+          8-second shutdown drain; one still running after it has its connection reset, so the
+          client sees a failed download, never a short file that looks complete. If your stream
+          errors midway, the response ends early (the status is already sent).
         </li>
         <li>
           A streamed <code>text/html</code> body is sent exactly as you write it - an htmx

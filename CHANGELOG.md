@@ -575,10 +575,14 @@ first.
   frees the port.
 - **Graceful shutdown** closes idle keep-alive connections at once instead of
   waiting out the 8-second drain, and gives every worker a few seconds to run
-  plugin shutdown hooks. Open SSE streams and streamed route-handler bodies
-  are ended cleanly when shutdown starts (their producers are cancelled in
-  the worker), so one open dashboard tab no longer holds every stop for the
-  full drain; requests and page renders in flight still finish.
+  plugin shutdown hooks. Open event streams (SSE, and route handlers
+  answering `text/event-stream`) are ended cleanly when shutdown starts
+  (their producers are cancelled in the worker; `EventSource` reconnects),
+  so one open dashboard tab no longer holds every stop for the full drain.
+  Requests, page renders and other streamed route-handler bodies (downloads,
+  exports) in flight still finish; one still running when the drain times
+  out has its connection reset, so the client sees the download fail
+  instead of receiving a short file that looks complete.
 - **JSON logs.** `[logging] format = "json"` or `GIO_LOG_FORMAT=json` makes
   the server write one JSON object per line in the worker's shape (`ts`,
   `level`, `msg`, plus `target`), with span fields such as `request_id`

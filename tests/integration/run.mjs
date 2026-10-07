@@ -2568,11 +2568,11 @@ async function main() {
       );
     });
 
-    await test('stopping the server ends open streams at once, finishes in-flight renders, and leaves no orphaned worker', async () => {
+    await test('stopping the server ends open event streams at once, finishes in-flight renders and downloads, and leaves no orphaned worker', async () => {
       const worker = workerPids().at(-1);
       // Streams that never end on their own: a GioEventStream and an
-      // endless route.ts body. Without ending them the drain would wait out
-      // its 8s timeout and then reset both connections.
+      // endless route.ts event stream. Without ending them the drain would
+      // wait out its 8s timeout and then reset both connections.
       const readToEnd = async (res) => {
         const reader = res.body.getReader();
         await reader.read();
@@ -2587,6 +2587,33 @@ async function main() {
       // ~800ms later): it still completes.
       const slow = await fetch(`${BASE}/slow`, { headers: { 'accept-encoding': 'identity' } });
       const slowHtml = slow.text();
+      // A finite route.ts download in flight (~1.5s of 30ms pieces): it is a
+      // byte stream, not an event stream, so it must either arrive whole or
+      // fail visibly - never end cleanly short, which curl, wget and fetch
+      // all accept as a complete file. http.request reports both: `complete`
+      // is false and 'aborted'/'error' fire when the body is cut.
+      const download = new Promise((resolve, reject) => {
+        const req = httpRequest(
+          { host: '127.0.0.1', port: 39517, path: '/api/download?slow=1', headers: { 'accept-encoding': 'identity' } },
+          (res) => {
+            const chunks = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('error', reject);
+            res.on('aborted', () => reject(new Error('download aborted')));
+            res.on('end', () =>
+              resolve({
+                complete: res.complete,
+                total: Number(res.headers['x-download-bytes']),
+                body: Buffer.concat(chunks),
+              }),
+            );
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+      // Headers out and the body under way before the signal lands.
+      await new Promise((resolve) => setTimeout(resolve, 150));
       const stoppedAt = Date.now();
       server.kill();
       await Promise.all([sseEnded, routeEnded]);
@@ -2595,6 +2622,13 @@ async function main() {
       const html = await slowHtml;
       assert.match(html, /SLOW_FIXTURE_LATE_CONTENT/);
       assert.match(html, /<\/html>/);
+      const downloaded = await download;
+      assert.ok(downloaded.complete, 'the download ended with its final chunk');
+      assert.equal(downloaded.body.length, downloaded.total, 'the download drained in full');
+      const expected = Buffer.alloc(downloaded.total);
+      for (let i = 0; i < downloaded.total; i++) expected[i] = (i * 31 + (i >> 8)) & 0xff;
+      assert.ok(downloaded.body.equals(expected), 'every byte of the download arrived');
+      assert.match(log, /shutdown: ended open event streams/);
       await waitFor('server exit', () => Promise.resolve(serverGone), 10_000);
       const exitMs = Date.now() - stoppedAt;
       assert.ok(exitMs < 5000, `server exited ${exitMs}ms after SIGTERM`);

@@ -1130,9 +1130,13 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let streams_for_shutdown = ipc_for_shutdown.clone();
     serve_connections(listener, app, conn_settings, tls_acceptor, async move {
         shutdown_signal().await;
-        // An open SSE or route.ts stream never ends on its own: end them
-        // now, or one dashboard tab holds the drain to its timeout.
-        // Requests and page renders in flight still drain.
+        // An open event stream (SSE, or a route.ts text/event-stream body)
+        // never ends on its own: end them now, or one dashboard tab holds
+        // the drain to its timeout. Requests, page renders and other
+        // route.ts bodies (downloads) still drain: ending one of those
+        // cleanly would pass a short file off as complete. One that
+        // outlives the drain is cut with its connection (no final chunk),
+        // which the client sees as a failed transfer.
         streams_for_shutdown.end_endless_streams();
     })
     .await?;
