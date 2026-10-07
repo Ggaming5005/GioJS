@@ -150,3 +150,40 @@ test("the releases page highlights the release tagged 'latest', which is release
     assert.match(source, new RegExp(`\\$\\{isLatest\\(rel\\) \\? ' ${cls}' : ''\\}`), cls);
   }
 });
+
+/** Every file below `dir` (repo-relative) whose name matches `pattern`, tests and fixtures left out. */
+function sourceFiles(dir, pattern) {
+  return readdirSync(join(repoDir, dir), { withFileTypes: true }).flatMap((entry) => {
+    const rel = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const skip = ['node_modules', 'test', 'tests', 'templates', 'test-fixtures'];
+      return skip.includes(entry.name) ? [] : sourceFiles(rel, pattern);
+    }
+    return pattern.test(entry.name) && !/\.test\./.test(entry.name) ? [rel] : [];
+  });
+}
+
+test('the env-vars page names every GIO_* variable the server, worker and CLIs read', () => {
+  const found = new Map();
+  const note = (name, file) => found.has(name) || found.set(name, file);
+  // Rust: string literals outside the test modules (env::var("X"), .env("X", ..), const X: &str = "X").
+  for (const file of sourceFiles('crates/giojs-server/src', /\.rs$/)) {
+    const code = read(file).split(/#\[cfg\(test\)\]/)[0];
+    for (const m of code.matchAll(/"(GIO_[A-Z0-9_]*[A-Z0-9])"/g)) note(m[1], file);
+  }
+  // JS/TS: process.env.X, env.X, env['X'] and 'X' constants (not `error.code = 'GIO_...'`).
+  for (const dir of ['packages/giojs-core/src', 'packages/giojs/bin', 'packages/giojs-cli/src']) {
+    for (const file of sourceFiles(dir, /\.(ts|js|mjs|cjs)$/)) {
+      const code = read(file);
+      const reads = /\benv(?:\.|\[['"])(GIO_[A-Z0-9_]*[A-Z0-9])\b|(?<!\.code\s*)=\s*['"](GIO_[A-Z0-9_]*[A-Z0-9])['"]/g;
+      for (const m of code.matchAll(reads)) {
+        note(m[1] ?? m[2], file);
+      }
+    }
+  }
+  found.delete('GIO_PUBLIC_X'); // an example name; the GIO_PUBLIC_* family is documented
+  assert.ok(found.size > 20, `found only ${found.size} variables - update this test`);
+  const page = docsPage('env-vars');
+  const missing = [...found].filter(([name]) => !page.includes(name)).map(([name, file]) => `${name} (${file})`);
+  assert.deepEqual(missing, [], 'document these on /docs/env-vars');
+});
