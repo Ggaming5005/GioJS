@@ -494,6 +494,15 @@ impl RuleSet {
         !self.headers.is_empty()
     }
 
+    /// Whether any guard covers `path`. For a request the guard phase let
+    /// through, that means a guard admitted it: the response is for
+    /// admitted visitors only, not for everyone who asks for the URL.
+    pub fn guards_path(&self, path: &str) -> bool {
+        self.guards
+            .iter()
+            .any(|guard| guard.pattern.match_path(path).is_some())
+    }
+
     pub fn apply(&self, path: &str, cookie_header: Option<&str>) -> RuleOutcome {
         if let Some(outcome) = self.check_guards(path, cookie_header) {
             return outcome;
@@ -900,6 +909,20 @@ mod tests {
             RuleOutcome::None
         );
         assert_eq!(rules.apply("/admin", Some("session=x")), RuleOutcome::None);
+    }
+
+    #[test]
+    fn guards_path_tells_admitted_requests_from_open_ones() {
+        let rules = RuleSet::compile(&MiddlewareRules {
+            guards: vec![guard("/admin/*rest", "session", "/login")],
+            redirects: vec![redirect("/open", "/", 301)],
+            ..Default::default()
+        });
+        assert!(rules.guards_path("/admin/users/42"));
+        assert!(!rules.guards_path("/"));
+        // Only guards count: a redirect rule covers no visitor's access.
+        assert!(!rules.guards_path("/open"));
+        assert!(!RuleSet::default().guards_path("/admin/x"));
     }
 
     #[test]

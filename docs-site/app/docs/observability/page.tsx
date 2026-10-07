@@ -22,7 +22,8 @@ token = "a-long-random-secret"   # secure it for production`} />
         Request series carry a <code>route</code> label: the matched route{' '}
         <em>pattern</em> (<code>/posts/:id</code>), never the raw path, so one series
         covers every post and the number of series is bounded by your routes. Cache hits
-        keep the pattern of the render they replay.
+        keep the pattern of the render they replay, and a request a plugin&apos;s{' '}
+        <code>onRequest</code> hook rewrote is labeled with the route it rendered.
       </p>
       <table>
         <thead>

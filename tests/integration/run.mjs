@@ -746,10 +746,53 @@ async function main() {
       assert.match(revalidated.headers['x-request-id'] ?? '', /^[0-9a-f-]{36}$/);
       assert.equal(revalidated.headers['x-content-type-options'], 'nosniff');
       assert.equal(revalidated.headers['x-frame-options'], 'DENY');
+      // ...and the Vary its 200 got from the compression layer (RFC 9110
+      // 15.4.5): none for this page, too small to compress...
+      assert.equal(hit.headers.get('vary'), null);
+      assert.equal(revalidated.headers.vary, undefined);
+      // ...accept-encoding for one large enough, whatever the client accepts.
+      const large = await fetch(`${BASE}/cached-large`);
+      assert.match(await large.text(), /INTEGRATION_FIXTURE_CACHED_LARGE/);
+      assert.equal(large.headers.get('vary'), 'accept-encoding');
+      const largeRevalidated = await rawGet('/cached-large', { 'if-none-match': large.headers.get('etag') });
+      assert.equal(largeRevalidated.status, 304);
+      assert.equal(largeRevalidated.headers.vary, 'accept-encoding');
 
       const changed = await rawGet('/cached', { 'if-none-match': '"0123456789abcdef0123456789abcdef"' });
       assert.equal(changed.status, 200);
       assert.equal(changed.body, body);
+    });
+
+    await test('guarded or authorized cached pages never go public: a CDN would skip the guard', async () => {
+      const blocked = await fetch(`${BASE}/guarded-cached`, { redirect: 'manual' });
+      assert.equal(blocked.status, 302);
+      assert.equal(blocked.headers.get('location'), '/login');
+      const member = { cookie: 'session=member' };
+      const miss = await fetch(`${BASE}/guarded-cached`, { headers: member });
+      assert.match(await miss.text(), /INTEGRATION_FIXTURE_GUARDED_CACHED/);
+      const hit = await fetch(`${BASE}/guarded-cached`, { headers: member });
+      await hit.text();
+      // GioJS itself still caches the page: its guard runs before the cache.
+      assert.equal(miss.headers.get('x-gio-cache'), 'miss; stored');
+      assert.match(hit.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/);
+      for (const res of [miss, hit]) {
+        assert.equal(res.headers.get('cache-control'), 'private, no-cache');
+        assert.equal(res.headers.get('etag'), null);
+      }
+
+      // An open cached page asked for with credentials: private, no ETag, no 304.
+      const open = await fetch(`${BASE}/cached`);
+      await open.text();
+      const etag = open.headers.get('etag');
+      assert.match(etag ?? '', /^"[0-9a-f]{32}"$/);
+      const authorized = await rawGet('/cached', {
+        authorization: 'Basic YWxpY2U6c2VjcmV0',
+        'if-none-match': etag,
+      });
+      assert.equal(authorized.status, 200);
+      assert.match(authorized.body, /INTEGRATION_FIXTURE_CACHED/);
+      assert.equal(authorized.headers['cache-control'], 'private, no-cache');
+      assert.equal(authorized.headers.etag, undefined);
     });
 
     await test('personal, streamed and app-controlled pages keep browsers and CDNs honest', async () => {

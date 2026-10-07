@@ -118,6 +118,13 @@ export interface RenderExtras {
    * forever. Any error React reported fails the render instead.
    */
   staticExport?: boolean;
+  /**
+   * Called with the request routing goes by: after plugin onRequest hooks
+   * (which may rewrite its path) ran, right before matching. Not called
+   * when a hook answers the request itself. The IPC server resolves Rust's
+   * metrics `route` label from it.
+   */
+  onRouted?: (req: IPCRequest) => void;
 }
 
 /** What production responses say instead of the real error message. */
@@ -609,6 +616,7 @@ export async function renderRoute(
     }
   }
 
+  extras?.onRouted?.(req);
   const match = matchRoute(req.path, routes);
 
   // ── route.ts method handlers (API routes + SSE) ───────────────────────────

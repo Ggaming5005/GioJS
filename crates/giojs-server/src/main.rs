@@ -212,14 +212,15 @@ fn set_page_cache_control(resp: &mut Response, policy: PageCachePolicy, csp_nonc
 }
 
 /// Response extension: the Cache-Control value `apply_page_cache_control`
-/// set, so i18n_middleware can tell it from one the app or a header rule
-/// put there.
+/// set, so `make_framework_cache_control_private` can tell it from one the
+/// app or a header rule put there.
 #[derive(Debug, Clone)]
 struct FrameworkCacheControl(HeaderValue);
 
-/// Turn the pipeline's own Cache-Control private (a header-negotiated
-/// locale, see `HeaderNegotiatedLocale`). Only while the header still holds
-/// the value the pipeline set: one a [[headers]] rule stamped later wins.
+/// Turn the pipeline's own Cache-Control private (a URL that serves several
+/// audiences, see `shared_cache_audience`). Only while the header still
+/// holds the value the pipeline set: one the app set is never touched, and
+/// a [[headers]] rule stamped later still wins.
 fn make_framework_cache_control_private(resp: &mut Response) {
     let ours = resp
         .extensions()
@@ -239,6 +240,27 @@ fn make_framework_cache_control_private(resp: &mut Response) {
 /// (many ignore Vary), so such pages are never `public` and get no ETag.
 #[derive(Debug, Clone, Copy)]
 struct HeaderNegotiatedLocale;
+
+/// Request-extension marker from rules_middleware: a guard covers the
+/// requested path and admitted this visitor. The page is for admitted
+/// visitors only, but a shared cache keys by URL and never runs the guard:
+/// a CDN storing it would serve it to everyone the guard turns away. Such
+/// pages are never `public` and get no ETag.
+#[derive(Debug, Clone, Copy)]
+struct GuardAdmitted;
+
+/// Whether shared caches may reuse a page answered to `req`. The pipeline's
+/// `public` Cache-Control and its ETags stand for one body per URL, the
+/// same for every visitor - not so when the URL serves several audiences: a
+/// locale negotiated from request headers, a guard that admitted this
+/// visitor, or an Authorization header (RFC 9111 section 3.5: `public` and
+/// `s-maxage` let a shared cache hand a response to an authorized request
+/// to anyone).
+fn shared_cache_audience(req: &Request) -> bool {
+    req.extensions().get::<HeaderNegotiatedLocale>().is_none()
+        && req.extensions().get::<GuardAdmitted>().is_none()
+        && !req.headers().contains_key(header::AUTHORIZATION)
+}
 
 /// If-None-Match evaluation (RFC 9110 weak comparison, as the header
 /// requires): `*`, or any listed tag equal to `etag` ignoring `W/`.
@@ -286,11 +308,29 @@ fn apply_entry_etag(
         .is_some_and(|(candidates, etag)| if_none_match_hits(candidates, etag));
     resp.headers_mut().insert(header::ETAG, value);
     if not_modified {
+        // CompressionLayer marks only the bodies it compresses, and a 304
+        // has none: it carries the Vary its 200 would (RFC 9110 15.4.5).
+        let varies_by_encoding = compressed_by_layer(resp);
         *resp.status_mut() = StatusCode::NOT_MODIFIED;
         *resp.body_mut() = axum::body::Body::empty();
         resp.headers_mut().remove(header::CONTENT_LENGTH);
+        if varies_by_encoding && !varies_by(resp.headers(), header::ACCEPT_ENCODING.as_str()) {
+            resp.headers_mut()
+                .append(header::VARY, HeaderValue::from_static("accept-encoding"));
+        }
     }
     not_modified
+}
+
+/// Whether the Vary headers already name `field` (or are `*`).
+fn varies_by(headers: &axum::http::HeaderMap, field: &str) -> bool {
+    headers
+        .get_all(header::VARY)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .any(|listed| listed == "*" || listed.eq_ignore_ascii_case(field))
 }
 
 /// Stamps `X-Gio-Cache: static` on responses the dynamic pipeline never saw
@@ -555,7 +595,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let cache = Arc::new(PageCache::new(CacheConfig {
         memory_max_entries: NonZeroUsize::new(1000).expect("non-zero"),
         disk_dir: cache_dir,
-        swr_multiplier: 10,
+        swr_multiplier: CACHE_SWR_MULTIPLIER,
         disk_max_bytes: DEFAULT_DISK_CACHE_MAX_BYTES,
     }));
 
@@ -885,11 +925,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         ))
         .service(ServeDir::new(public_dir));
 
-    let compression = CompressionLayer::new().compress_when(
-        DefaultPredicate::new()
-            .and(SizeAbove::new(1024))
-            .and(NotImagePredicate),
-    );
+    let compression = CompressionLayer::new().compress_when(compression_predicate());
 
     let mut app = Router::new()
         .route("/_gio/health", get(health_handler))
@@ -1524,6 +1560,12 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
         }
         rules::RuleOutcome::None => {}
     }
+    // Past the guard phase, a guard covering the URL admitted this visitor:
+    // shared caches must not replay the page to anyone else.
+    let guarded = |path: &str| static_rules.guards_path(path) || worker_rules.guards_path(path);
+    if guarded(&path) || public_alias.as_deref().is_some_and(guarded) {
+        req.extensions_mut().insert(GuardAdmitted);
+    }
 
     let mut resp = next.run(req).await;
     // The alias's rules first, so the requested path's override them.
@@ -1632,9 +1674,6 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
     }
     let req = Request::from_parts(parts, body);
     let mut response = next.run(req).await;
-    if header_negotiated {
-        make_framework_cache_control_private(&mut response);
-    }
 
     if locale != i18n_cfg.default_locale {
         let is_html = response
@@ -1705,14 +1744,25 @@ async fn root_fallback_handler(
             return resp;
         }
     }
-    dynamic_handler(ws_upgrade, State(state), connect_info, req).await
+    // Decided once for the whole pipeline: the ETags it sends (inside), and
+    // its own Cache-Control (here, so every response path is covered).
+    let shared_audience = shared_cache_audience(&req);
+    let mut resp =
+        dynamic_handler(ws_upgrade, State(state), connect_info, req, shared_audience).await;
+    if !shared_audience {
+        make_framework_cache_control_private(&mut resp);
+    }
+    resp
 }
 
+/// The page pipeline. `shared_audience` (see `shared_cache_audience`) says
+/// whether a cached page may carry its ETag.
 async fn dynamic_handler(
     ws_upgrade: Option<WebSocketUpgrade>,
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
+    shared_audience: bool,
 ) -> Response {
     let start = std::time::Instant::now();
     let encoding = negotiate_encoding(&req);
@@ -1724,10 +1774,10 @@ async fn dynamic_handler(
         .get::<client_identity::ClientInfo>()
         .map(ipc::IpcClientFields::from)
         .unwrap_or_default();
-    // A hit's ETag must stand for one body under this URL: not with a
-    // header-negotiated locale, and not with CSP nonces (unique per body).
-    let etag_allowed = req.extensions().get::<HeaderNegotiatedLocale>().is_none()
-        && security::nonce_placeholder().is_none();
+    // A hit's ETag must stand for one body under this URL, for everyone:
+    // not for a URL with several audiences, and not with CSP nonces (unique
+    // per body).
+    let etag_allowed = shared_audience && security::nonce_placeholder().is_none();
     let if_none_match = req.headers().get(header::IF_NONE_MATCH).cloned();
     // Nothing under /_gio belongs to the app. path_hygiene_middleware already
     // 404s unrouted /_gio requests; this also covers paths that only land in
@@ -3208,7 +3258,23 @@ impl Stream for SseBodyStream {
     }
 }
 
-// ── Image compression predicate ──────────────────────────────────────────────
+// ── Compression predicate ────────────────────────────────────────────────────
+
+/// Which responses CompressionLayer compresses - and marks with
+/// `Vary: accept-encoding`, whatever encoding the client asked for.
+fn compression_predicate() -> impl Predicate {
+    DefaultPredicate::new()
+        .and(SizeAbove::new(1024))
+        .and(NotImagePredicate)
+}
+
+/// CompressionLayer's own checks, then the predicate: whether the layer
+/// compresses `resp` (so a 304 built from it must carry the same Vary).
+fn compressed_by_layer(resp: &Response) -> bool {
+    !resp.headers().contains_key(header::CONTENT_ENCODING)
+        && !resp.headers().contains_key(header::CONTENT_RANGE)
+        && compression_predicate().should_compress(resp)
+}
 
 #[derive(Clone, Copy)]
 struct NotImagePredicate;
@@ -4337,10 +4403,26 @@ fn stdin_is_pipe() -> bool {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn stdin_is_pipe() -> bool {
-    // Windows launchers set the flag only together with a piped stdin.
-    true
+    use std::os::windows::io::AsRawHandle;
+    // kernel32, linked by std on every Windows target.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileType(file: std::os::windows::io::RawHandle) -> u32;
+    }
+    const FILE_TYPE_PIPE: u32 = 0x0003;
+    let handle = std::io::stdin().as_raw_handle();
+    // No stdin at all (a detached service) is a null handle.
+    // SAFETY: GetFileType only queries the handle; an invalid one yields
+    // FILE_TYPE_UNKNOWN. NUL and consoles are FILE_TYPE_CHAR, files
+    // FILE_TYPE_DISK - only an anonymous or named pipe counts.
+    !handle.is_null() && unsafe { GetFileType(handle) } == FILE_TYPE_PIPE
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stdin_is_pipe() -> bool {
+    false
 }
 
 // ── TLS helpers ──────────────────────────────────────────────────────────────
@@ -5525,6 +5607,124 @@ mod tests {
             Some(&if_none_match)
         ));
         assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_304_carries_the_vary_compression_gives_its_200() {
+        const ETAG: &str = r#""abc123""#;
+        // `?<len>` picks the body size; the cache hit path, in miniature.
+        async fn page(req: Request<Body>) -> Response {
+            let len: usize = req.uri().query().unwrap().parse().unwrap();
+            let mut resp = Response::builder()
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .header(header::CONTENT_LENGTH, len)
+                .body(Body::from("x".repeat(len)))
+                .unwrap();
+            apply_entry_etag(
+                &mut resp,
+                Some(ETAG),
+                req.headers().get(header::IF_NONE_MATCH),
+            );
+            resp
+        }
+        let app = Router::new()
+            .route("/page", get(page))
+            .layer(CompressionLayer::new().compress_when(compression_predicate()));
+        let vary = |resp: &Response| -> Vec<String> {
+            resp.headers()
+                .get_all(header::VARY)
+                .iter()
+                .map(|v| v.to_str().unwrap().to_ascii_lowercase())
+                .collect()
+        };
+        // Compressible and too small to compress, for clients that take
+        // gzip and clients that do not: the layer marks the large 200 either way.
+        for (len, varies) in [(4096, true), (100, false)] {
+            for encoding in ["gzip", "identity"] {
+                let request = |conditional: bool| {
+                    let builder = Request::builder()
+                        .uri(format!("/page?{len}"))
+                        .header(header::ACCEPT_ENCODING, encoding);
+                    let builder = if conditional {
+                        builder.header(header::IF_NONE_MATCH, ETAG)
+                    } else {
+                        builder
+                    };
+                    builder.body(Body::empty()).unwrap()
+                };
+                let ok = app.clone().call(request(false)).await.unwrap();
+                let not_modified = app.clone().call(request(true)).await.unwrap();
+                assert_eq!(ok.status(), StatusCode::OK);
+                assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+                let expected: Vec<String> = if varies {
+                    vec!["accept-encoding".to_string()]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(vary(&ok), expected, "200, {len} bytes, {encoding}");
+                assert_eq!(
+                    vary(&not_modified),
+                    expected,
+                    "304, {len} bytes, {encoding}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_304_adds_accept_encoding_to_an_existing_vary_only_once() {
+        let etag = r#""abc123""#;
+        let if_none_match = HeaderValue::from_static(etag);
+        let page = |vary: &'static str| {
+            let mut resp = Response::builder()
+                .header(header::CONTENT_TYPE, "text/html")
+                .header(header::CONTENT_LENGTH, 4096)
+                .header(header::VARY, vary)
+                .body(Body::from("x".repeat(4096)))
+                .unwrap();
+            assert!(apply_entry_etag(
+                &mut resp,
+                Some(etag),
+                Some(&if_none_match)
+            ));
+            resp.headers()
+                .get_all(header::VARY)
+                .iter()
+                .map(|v| v.to_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(page("cookie"), ["cookie", "accept-encoding"]);
+        assert_eq!(page("Cookie, Accept-Encoding"), ["Cookie, Accept-Encoding"]);
+        assert_eq!(page("*"), ["*"]);
+    }
+
+    #[test]
+    fn pages_for_one_audience_never_reach_shared_caches() {
+        let request = |header: Option<(HeaderName, &'static str)>| {
+            let builder = Request::builder().uri("/report");
+            let builder = match header {
+                Some((name, value)) => builder.header(name, value),
+                None => builder,
+            };
+            builder.body(Body::empty()).unwrap()
+        };
+        assert!(shared_cache_audience(&request(None)));
+        // A cookie alone is no audience: a render that reads it is never cached.
+        assert!(shared_cache_audience(&request(Some((
+            header::COOKIE,
+            "theme=dark"
+        )))));
+        // RFC 9111 3.5: public/s-maxage would let a CDN reuse it for anyone.
+        assert!(!shared_cache_audience(&request(Some((
+            header::AUTHORIZATION,
+            "Basic YWxpY2U6c2VjcmV0"
+        )))));
+        let mut guarded = request(None);
+        guarded.extensions_mut().insert(GuardAdmitted);
+        assert!(!shared_cache_audience(&guarded));
+        let mut negotiated = request(None);
+        negotiated.extensions_mut().insert(HeaderNegotiatedLocale);
+        assert!(!shared_cache_audience(&negotiated));
     }
 
     #[test]

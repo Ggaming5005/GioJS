@@ -58,7 +58,8 @@ ETag: "4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
       <p>
         The ETag is strong: a hash of the stored page, computed once when it is cached. A
         request whose <code>If-None-Match</code> names it gets a 304 with the same headers
-        (<code>X-Request-Id</code>, security headers and header rules included). The dev
+        (<code>X-Request-Id</code>, security headers, header rules and the{' '}
+        <code>Vary: accept-encoding</code> of a compressed page included). The dev
         server sends no page ETags: it inlines your current CSS into every response, so a
         stylesheet edit always reaches the browser. Pages
         rendered per visitor - personalized, uncached, streamed, every{' '}
@@ -71,15 +72,32 @@ ETag: "4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
         A <code>Cache-Control</code> you set yourself always wins - from{' '}
         <code>getServerSideProps</code> <code>headers</code>, a route handler&apos;s{' '}
         <code>Response</code>, or a <code>[[headers]]</code> rule. Route handler responses
-        get no default at all, whatever their content type. In two cases GioJS never makes
-        a page <code>public</code> or sends an ETag, because one URL serves different bytes:
-        with <code>[i18n]</code> detecting the locale from <code>accept-language</code> or a
-        cookie, an unprefixed URL is <code>private, no-cache</code> (locale-prefixed URLs
-        like <code>/de/about</code> stay public); and with CSP nonces (<code>{'{nonce}'}</code>{' '}
-        in <code>[security] csp</code>) every response is unique, so even cached pages are{' '}
-        <code>private, no-cache</code> - a CDN replaying one would hand every visitor the
-        same nonce. GioJS still caches those pages itself and fills in a fresh nonce per
-        response.
+        get no default at all, whatever their content type. In these cases GioJS never makes
+        a page <code>public</code> or sends an ETag, because one URL is not the same page
+        for everyone who asks:
+      </p>
+      <ul>
+        <li>
+          A page behind a <a href="/docs/middleware">guard</a> (<code>[[guards]]</code> in
+          gio.toml or <code>guards</code> in middleware.ts), and any page requested with an{' '}
+          <code>Authorization</code> header, is <code>private, no-cache</code>. A CDN keys
+          by URL and never runs the guard: storing the page for an admitted visitor would
+          serve it to everyone the guard turns away.
+        </li>
+        <li>
+          With <code>[i18n]</code> detecting the locale from <code>accept-language</code> or
+          a cookie, an unprefixed URL is <code>private, no-cache</code> (locale-prefixed URLs
+          like <code>/de/about</code> stay public).
+        </li>
+        <li>
+          With CSP nonces (<code>{'{nonce}'}</code> in <code>[security] csp</code>) every
+          response is unique, so even cached pages are <code>private, no-cache</code> - a CDN
+          replaying one would hand every visitor the same nonce.
+        </li>
+      </ul>
+      <p>
+        GioJS still caches all of these pages itself (its guards run before its cache) and
+        fills in a fresh nonce per response.
       </p>
     </>
   );

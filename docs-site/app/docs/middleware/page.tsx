@@ -185,6 +185,12 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
           itself in <code>getServerSideProps</code> or a route handler.
         </li>
       </ul>
+      <p>
+        A page a guard lets through is for that visitor only: even when GioJS
+        caches it, it goes out as <code>Cache-Control: private, no-cache</code>{' '}
+        without an ETag, so a CDN (which never runs the guard) cannot serve it to
+        anyone else. See <a href="/docs/caching">Caching</a>.
+      </p>
 
       <h2>Header rules</h2>
       <p>
