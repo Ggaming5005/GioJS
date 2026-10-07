@@ -80,7 +80,7 @@ export default function DeploymentPage(): React.JSX.Element {
         worker is down at once), and <code>workers</code> counts the ready ones. Readiness
         probes should read <code>nodeReady</code>.
         Use it for readiness probes, load balancer health checks, and uptime monitors.
-        With <code>[health] details = false</code> it answers only{' '}
+        With <a href="/docs/configuration/health"><code>[health] details = false</code></a> it answers only{' '}
         <code>{'{'}&quot;status&quot;:&quot;ok&quot;,&quot;nodeReady&quot;:...{'}'}</code>; with{' '}
         <code>[health] enabled = false</code> it is a <code>404</code>, and probes must use
         a page of your own (the port only opens once a worker is ready, so{' '}
@@ -90,12 +90,17 @@ export default function DeploymentPage(): React.JSX.Element {
   "status": "ok",
   "http2": true,
   "tls": false,
-  "deploymentId": "abc12345",
+  "deploymentId": "0e92bc3a01f4ea44",
   "nodeReady": true,
   "workers": { "configured": 2, "ready": 2 },
   "cacheEntries": 42,
   "uptimeSecs": 3600
 }`} />
+      <p>
+        <code>deploymentId</code> is 16 hex characters derived from the build, or the value
+        of <a href="/docs/env-vars#gio-deployment-id"><code>GIO_DEPLOYMENT_ID</code></a> (up to 64 characters)
+        when you pin one - compare it across instances to see that a rollout has finished.
+      </p>
 
       <h2 id="reverse-proxy">Behind a reverse proxy or load balancer</h2>
       <p>

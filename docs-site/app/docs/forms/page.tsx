@@ -17,8 +17,8 @@ export default function Page(): React.JSX.Element {
       <p className="page-subtitle">Page actions and &lt;GioForm&gt;: forms that work without JavaScript and feel instant with it.</p>
 
       <p>
-        A page can handle its own form posts. Export an async <code>action</code> from{' '}
-        <code>page.tsx</code>: a <code>POST</code> to the page&apos;s URL runs it. Render the form
+        A page can handle its own form posts. Export an async <a href="/docs/page-exports/action"><code>action</code></a> from{' '}
+        <a href="/docs/file-conventions/page"><code>page.tsx</code></a>: a <code>POST</code> to the page&apos;s URL runs it. Render the form
         with <a href="/docs/components/gio-form"><code>&lt;GioForm&gt;</code></a> from <code>@gio.js/react</code> - a real{' '}
         <code>&lt;form method=&quot;post&quot;&gt;</code>, so it works before (or without) any
         JavaScript, and submits through the client router once the page has hydrated.
@@ -295,7 +295,7 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         </li>
         <li>
           Action answers and the pages they re-render are never cached, even on a page that
-          exports <code>revalidate</code>, and never replace the page&apos;s cached entry.
+          exports <a href="/docs/page-exports/revalidate"><code>revalidate</code></a>, and never replace the page&apos;s cached entry.
         </li>
         <li>
           <code>action</code> and everything only it imports are left out of the client bundle,

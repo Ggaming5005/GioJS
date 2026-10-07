@@ -46,7 +46,7 @@ export default function Page(): React.JSX.Element {
       <p>
         URLs that match no route always get the <a href="/docs/file-conventions/not-found"><code>app/not-found.tsx</code></a> - they belong
         to no folder. A 404 is never cached, even on a page that exports{' '}
-        <code>revalidate</code>: it can depend on anything <code>getServerSideProps</code>{' '}
+        <a href="/docs/page-exports/revalidate"><code>revalidate</code></a>: it can depend on anything <code>getServerSideProps</code>{' '}
         read, and a cached 404 would outlive the content appearing. When a cached page starts
         answering 404 - its data was deleted - the background revalidation that sees the 404
         evicts the cached copy, so the deleted page is not served for the rest of the
@@ -112,7 +112,7 @@ export default function Error({ error, reset }: ErrorPageProps) {
         It is now client code, bundled into every page below its folder (<a href="/docs/file-conventions/error"><code>app/error.tsx</code></a>{' '}
         into every page) - so it must be browser-safe like a page component. An existing{' '}
         <code>error.tsx</code> that imports server-only code (a <code>*.server.ts</code>{' '}
-        module, <code>server-only</code>, a Node builtin, a server-side logger) costs those
+        module, <a href="/docs/functions/server-only"><code>server-only</code></a>, a Node builtin, a server-side logger) costs those
         pages their client bundles: they are still server-rendered but no longer hydrate, and
         the build log names the <code>error.tsx</code>. Report errors from it through a{' '}
         <code>route.ts</code> instead.

@@ -126,7 +126,7 @@ export async function getServerSideProps(ctx: GsspContext) {
 }`} />
       <p>
         Redirect answers are never stored in the page cache, even on a page that exports{' '}
-        <code>revalidate</code>, and carry <code>Cache-Control: private, no-cache</code>{' '}
+        <a href="/docs/page-exports/revalidate"><code>revalidate</code></a>, and carry <code>Cache-Control: private, no-cache</code>{' '}
         unless their headers set one - a <code>301</code> is otherwise cacheable by default,
         and a CDN would replay one visitor&apos;s redirect to everyone. On a page cached with{' '}
         <a href="/docs/page-exports/shell"><code>shell = &apos;cache&apos;</code></a>, the

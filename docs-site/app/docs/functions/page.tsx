@@ -110,7 +110,8 @@ export default function Page(): React.JSX.Element {
 
       <h3 id="export-const-revalidate">export const revalidate</h3>
       <p>
-        Seconds a page is cached, or <code>false</code> to cache it until it is purged. Pages
+        Seconds a page is cached, or <code>false</code> for a one-year max age - in practice
+        until it is purged or a new deployment changes the cache key. Pages
         without it render on every request. See{' '}
         <a href="/docs/page-exports/revalidate">revalidate</a>.
       </p>
@@ -150,7 +151,12 @@ export default function Page(): React.JSX.Element {
         <code>useLocale()</code> and <code>useRouter()</code> from <code>@gio.js/react</code>{' '}
         read the page the router matched, on the server and in the browser alike. See{' '}
         <a href="/docs/hooks">Hooks</a>; outside components, use{' '}
-        <a href="/docs/functions/navigate"><code>navigate()</code></a>.
+        <a href="/docs/functions/navigate"><code>navigate()</code></a>. The pathname and
+        params stay percent-encoded apart from unreserved characters{' '}
+        (<code>/blog/caf%C3%A9</code> gives <code>caf%C3%A9</code>).{' '}
+        <code>useSearchParams()</code> keeps one value per key and not the order of the keys,
+        and is always empty in a <a href="/docs/cli/export">static export</a> (see{' '}
+        <a href="/docs/linking-and-navigating#router-hooks">Router hooks</a>).
       </p>
 
       <h3 id="broadcast">broadcast()</h3>

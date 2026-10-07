@@ -56,6 +56,13 @@ max_per_second = 20`} />
           A slot is released when its response is ready or when the client gives up, so cancelled
           prefetches never use up the budget.
         </li>
+        <li>
+          An admitted prefetch is an ordinary request: a page with{' '}
+          <a href="/docs/page-exports/revalidate"><code>revalidate</code></a> is served from
+          the <a href="/docs/caching">page cache</a> and stored in it like any other{' '}
+          <code>GET</code>, with the same <code>Cache-Control</code>: prefetching a cached
+          page costs no render, and a prefetch can fill the cache for the next visitor.
+        </li>
       </ul>
       <p>No key in this section logs a startup warning, <code>0</code> included.</p>
 

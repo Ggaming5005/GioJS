@@ -504,6 +504,13 @@ watch_ignore = ["data/**", "*.db.json", "public/uploads"]`} />
           <code>[cache] disk_path</code> puts them, so a visible cache directory needs no
           pattern. Other files in that directory still count.
         </li>
+        <li>
+          Editing <code>gio.toml</code> restarts the worker like any other source file, but
+          the new settings do not apply: the Rust server reads <code>gio.toml</code> once, at
+          startup. Stop and start <code>gio dev</code> after changing it.{' '}
+          <code>.env</code> files are read once too, and editing them restarts nothing:
+          restart <code>gio dev</code>.
+        </li>
       </ul>
 
       <h2 id="gioconfigts">gio.config.ts</h2>
@@ -522,7 +529,9 @@ export default defineConfig({
       <p>
         It is checked at boot like <code>gio.toml</code>: an unknown key (<code>plugin:</code>)
         or a plugin without a <code>name</code> stops the worker with an error naming the
-        file.
+        file. The <a href="/docs/gio-config"><code>gio.config.ts</code> reference</a> covers
+        the rest: every hook, which requests reach the plugins, and how they interact with
+        caching and streaming.
       </p>
 
       <h2 id="connection-limits">Connection limits</h2>
@@ -991,8 +1000,12 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
 
       <h2 id="environment-variables">Environment variables</h2>
       <p>
-        A few runtime knobs live in the environment rather than
-        <code>gio.toml</code>:
+        A few runtime knobs live in the environment rather than{' '}
+        <code>gio.toml</code>. The table below gives each one in a line;{' '}
+        <a href="/docs/env-vars">Environment variables</a> is the complete reference - which
+        process reads each variable, how it combines with <code>gio.toml</code> and{' '}
+        <code>.env</code> files, and the variables only the CLI, the exporter, the testing
+        kit and create-giojs read:
       </p>
       <table>
         <thead>
@@ -1005,9 +1018,10 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
           <tr><td><code>GIO_CACHE_DIR</code></td><td>Page cache directory, overriding <code>[cache] disk_path</code>; may be absolute</td><td><code>.gio/cache/pages</code></td></tr>
           <tr><td><code>GIO_ENV_FILES</code></td><td><code>0</code> skips the <a href="#env-files">.env files</a>, <code>1</code> loads them, whatever <code>[env] files</code> says (for platforms that inject the environment and should ignore stray files). Any other value stops startup</td><td>unset (<code>[env] files</code> decides)</td></tr>
           <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the client build the server produced at startup, the app&apos;s server-side sources, the gio.toml <code>[images]</code> settings and <code>[css] minify</code>, the served <code>[[fonts]]</code> files, <code>[i18n]</code> (<code>locales</code> and <code>default_locale</code>) and, in a standalone build, its <code>.gio/manifest.json</code>). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
-          <tr><td><code>GIO_SOCKET_PATH</code></td><td>Rust-to-Node IPC path; the server passes the resolved value to the Node worker (in a <a href="#render-workers">worker pool</a>, the other workers get it with a <code>-w&lt;N&gt;</code> suffix)</td><td>per-instance <code>.gio/ipc-&lt;pid&gt;-&lt;rand&gt;.sock</code> (Unix), unique named pipe (Windows)</td></tr>
+          <tr><td><code>GIO_SOCKET_PATH</code> / <code>GIO_WS_SOCKET_PATH</code></td><td>Rust-to-Node IPC paths, for HTTP and WebSocket traffic; the server passes the resolved values to the Node worker (in a <a href="#render-workers">worker pool</a>, the other workers get them with a <code>-w&lt;N&gt;</code> suffix)</td><td>per-instance <code>.gio/ipc-&lt;pid&gt;-&lt;rand&gt;.sock</code> and <code>.gio/ws-...</code> (Unix), unique named pipes (Windows)</td></tr>
           <tr><td><code>GIO_IMAGE_CACHE_DIR</code></td><td>Directory of the optimized-image disk cache (see <a href="/docs/configuration/images"><code>[images]</code></a>)</td><td><code>.gio/cache/images</code></td></tr>
           <tr><td><code>GIO_FONTS_DIR</code></td><td>Directory the <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a> files are fetched into and served from</td><td><code>.gio/fonts</code></td></tr>
+          <tr><td><code>GIO_STATIC_DIR</code></td><td>Directory of the built client assets (route chunks and stylesheets); a standalone bundle points it at its own <code>static/</code></td><td><code>.gio/build/static</code></td></tr>
           <tr><td><code>GIO_PUBLIC_DIR</code></td><td>Directory served at the site root and under <code>/public/*</code></td><td><code>public/</code> next to <code>app/</code></td></tr>
           <tr><td><code>GIO_REVALIDATE_TOKEN</code></td><td>Bearer token that enables <code>POST /_gio/revalidate</code> (<a href="/docs/caching">on-demand revalidation</a>); at least 32 bytes, or the server refuses to start. Overrides <code>[revalidate] token</code></td><td>unset (endpoint disabled)</td></tr>
           <tr><td><code>GIO_SESSION_SECRET</code></td><td>Key material for <a href="/docs/authentication">sessions</a> and <code>require_session</code> guards: at least 32 bytes, comma-separated to rotate (the first signs, all verify). Required in production once sessions are used</td><td>unset (development: an ephemeral secret per server start)</td></tr>
@@ -1015,8 +1029,13 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
           <tr><td><code>NODE_ENV</code></td><td><code>development</code> enables dev mode (file watcher, dev endpoints, error details) and selects the <code>.env.development*</code> files; anything else - unset included - is production and selects <code>.env.production*</code>. The server passes the decided mode to the Node worker it spawns</td><td>unset</td></tr>
           <tr><td><code>RUST_LOG</code></td><td>Rust log filter (info/debug/trace)</td><td>info</td></tr>
           <tr><td><code>GIO_LOG_FORMAT</code></td><td><code>json</code> or <code>text</code>: the server&apos;s log format, overriding <code>[logging] format</code> (see <a href="/docs/observability">Observability</a>)</td><td>text</td></tr>
+          <tr><td><code>GIO_LOG_LEVEL</code></td><td>The worker&apos;s minimum log level for the framework&apos;s own lines: <code>debug</code>, <code>info</code>, <code>warn</code> or <code>error</code>; your <code>console.log</code> output is never filtered</td><td>info</td></tr>
+          <tr><td><code>GIO_EDITOR</code> / <code>VISUAL</code> / <code>EDITOR</code></td><td>The editor the dev error overlay&apos;s file links open (the first one set wins); development only</td><td><code>code</code></td></tr>
           <tr><td><code>GIO_EXIT_ON_STDIN_EOF</code></td><td><code>1</code>: shut down gracefully when stdin reaches end-of-file. Set by launchers that start the server with a piped stdin they hold open (<code>gio</code>, a standalone <code>run.mjs</code>), so a launcher killed outright never leaves the server behind; ignored when stdin is not a pipe (see <a href="/docs/deployment">Deployment</a>)</td><td>unset</td></tr>
           <tr><td><code>GIO_WORKER_INDEX</code> / <code>GIO_WORKER_COUNT</code></td><td>Set by the server in each Node worker, for your code to read: the worker&apos;s index in the pool (<code>0</code> for the first) and the pool size (see <a href="#render-workers">Render workers</a>). Any value you set is replaced</td><td>set per worker</td></tr>
+          <tr><td><code>GIO_EXPORT</code></td><td>Set to <code>1</code> by <code>gio export</code> while it renders, for your code to read</td><td>set by <code>gio export</code></td></tr>
+          <tr><td><code>GIO_SERVER_BIN</code></td><td>Read by the <code>gio</code> CLI and <code>createTestServer()</code>, not the server: the <code>giojs-server</code> binary to run instead of the installed platform package</td><td>installed binary</td></tr>
+          <tr><td><code>GIO_OUT_DIR</code></td><td>Where <code>gio export</code> writes the static site</td><td><code>./out</code></td></tr>
           <tr><td><code>GIO_PUBLIC_*</code></td><td>Inlined into client bundles at build time (see below); every other variable is server-only</td><td>-</td></tr>
         </tbody>
       </table>
@@ -1166,7 +1185,7 @@ is removed from client code.`} />
       <p>
         Export <code>revalidate</code> from any page module to control caching:
       </p>
-      <CodeBlock lang="typescript" code={`// Cache forever (ISR: never revalidate)
+      <CodeBlock lang="typescript" code={`// Cache for a year (ISR: until a purge or a new deployment)
 export const revalidate = false;
 
 // Cache for 60 seconds, then revalidate
@@ -1176,7 +1195,8 @@ export const revalidate = 60;
 // (omit the export)`} />
       <div className="callout">
         <code>revalidate = false</code> maps to a one-year TTL (31536000 seconds) in the
-        Rust cache layer - the standard sentinel for "cache indefinitely."
+        Rust cache layer: in practice the page stays
+        cached until it is purged, evicted or a new deployment changes the cache key.
       </div>
       <p>
         To refresh a cached page as soon as its data changes, tag it and purge it with{' '}

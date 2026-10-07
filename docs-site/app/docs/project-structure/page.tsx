@@ -45,7 +45,7 @@ export default function Page(): React.JSX.Element {
         <a href="/docs/file-conventions/layout"><code>app/layout.tsx</code></a> renders the <code>&lt;html&gt;</code> document every
         page shares. It imports the global stylesheet and exports the site&apos;s default{' '}
         <a href="/docs/metadata">metadata</a> - a title template that each page&apos;s own{' '}
-        <code>metadata</code> fills in:
+        <a href="/docs/page-exports/metadata"><code>metadata</code></a> fills in:
       </p>
       <CodeBlock lang="tsx" title="app/layout.tsx" code={`import type { LayoutProps, Metadata } from '@gio.js/core';
 import './globals.css';
@@ -146,7 +146,7 @@ weight = 600`} />
       <h2 id="optional-files">Optional files</h2>
       <ul>
         <li><a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a> - redirects, rewrites, headers and guards in TypeScript (<a href="/docs/middleware">Middleware</a>)</li>
-        <li><a href="/docs/gio-config"><code>gio.config.ts</code></a> - Node plugins (<a href="/docs/configuration">Configuration</a>)</li>
+        <li><a href="/docs/gio-config"><code>gio.config.ts</code></a> - Node plugins and their hooks (<a href="/docs/configuration#gioconfigts">Configuration</a>)</li>
         <li><a href="/docs/file-conventions/sitemap"><code>app/sitemap.ts</code></a>, <a href="/docs/file-conventions/robots"><code>app/robots.ts</code></a>, <a href="/docs/file-conventions/manifest"><code>app/manifest.ts</code></a> - generated SEO files (<a href="/docs/metadata">Metadata &amp; SEO</a>)</li>
         <li><a href="/docs/file-conventions/route"><code>route.ts</code></a> in any folder - an API endpoint (<a href="/docs/route-handlers">Route Handlers</a>)</li>
       </ul>

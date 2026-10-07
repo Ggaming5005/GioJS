@@ -692,7 +692,10 @@ h3:hover > .heading-anchor,
 
 /* Reference tables (components/ReferenceTable.tsx). */
 .docs-prose .ref-table td:first-child { white-space: nowrap; }
-.docs-prose .ref-table td:nth-child(2) code { overflow-wrap: anywhere; }
+/* Types wrap between words (at the spaces around `|`); a word breaks only
+   when it alone is wider than the column. `anywhere` let the auto layout
+   squeeze the column to one character ('boole/an'). */
+.docs-prose .ref-table td:nth-child(2) code { overflow-wrap: break-word; }
 .ref-table__required { color: var(--muted); font-size: 0.78rem; }
 .docs-prose .ref-table--versions td:first-child { width: 1%; }
 /* gio.toml key tables (components/ConfigKeyTable.tsx): the type under the

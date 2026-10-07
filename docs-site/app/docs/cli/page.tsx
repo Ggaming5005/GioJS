@@ -101,9 +101,9 @@ gio --version          # CLI, server binary and @gio.js/core package versions (-
         The whole project is watched: changes in <code>app/</code>, source files elsewhere and
         root config files restart the Node worker and reload open tabs, and edits under{' '}
         <code>public/</code> only reload the browser. A <code>gio.toml</code> edit restarts
-        the worker too, but its new settings do not apply: the Rust server reads{' '}
-        <code>gio.toml</code> once, at startup, so stop <code>gio dev</code> and run it
-        again. <code>node_modules</code>, hidden
+        the worker too, but its settings do not apply: the Rust server reads{' '}
+        <code>gio.toml</code> (and the <code>.env</code> files) once, at startup, so stop and
+        start <code>gio dev</code> after changing it. <code>node_modules</code>, hidden
         directories and build output are never watched. The rules, and the{' '}
         <code>[dev] watch</code> / <code>watch_ignore</code> keys, are on the{' '}
         <a href="/docs/cli/dev#file-watching"><code>gio dev</code> page</a>.

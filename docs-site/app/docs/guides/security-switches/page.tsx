@@ -325,7 +325,7 @@ x-frame-options = ""                               # let partners frame one sect
             <td>Page cache (memory and disk)</td>
             <td><a href="/docs/configuration/cache"><code>[cache] enabled = true</code></a></td>
             <td><code>false</code></td>
-            <td>Every request renders (<code>X-Gio-Cache: bypass</code>). <code>Cache-Control</code> still follows <code>revalidate</code>, so a CDN can keep caching.</td>
+            <td>Every request renders (<code>X-Gio-Cache: bypass</code>). <code>Cache-Control</code> still follows <a href="/docs/page-exports/revalidate"><code>revalidate</code></a>, so a CDN can keep caching.</td>
           </tr>
           <tr>
             <td>Disk tier of the page cache</td>

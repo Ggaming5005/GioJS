@@ -15,6 +15,9 @@
  *     sections: [{ p: page index, h: heading ('' = the intro), a: anchor,
  *                  l: 1 | 2 | 3, x: plain text (code blocks left out),
  *                  k?: inline-code terms, one per line,
+ *                  d?: names the section defines - the first column of its
+ *                      reference tables (props, options, gio.toml keys) -
+ *                      one per line,
  *                  c?: words of the code blocks not in x }] }
  *
  * Types: search-index.d.mts.
@@ -59,6 +62,7 @@ export function extractSections(html) {
       level: current.level,
       text,
       code: codeTerms(prose),
+      defines: definedNames(prose),
       blockWords: blockWords(body, text),
     });
   };
@@ -89,6 +93,27 @@ function codeTerms(prose) {
     if (terms.size >= MAX_CODE_TERMS) break;
   }
   return [...terms];
+}
+
+/**
+ * The names a fragment's reference tables define: the first-column `<code>`
+ * of each row of a PropsTable or ConfigKeyTable (`<table class="ref-table">`;
+ * not a VersionHistory, whose first column is a release). A query naming
+ * one exactly - a prop, an option, a gio.toml key - leads to that table.
+ */
+function definedNames(prose) {
+  const names = new Set();
+  for (const table of prose.matchAll(/<table\b[^>]*\bclass="([^"]*)"[^>]*>([\s\S]*?)<\/table>/gi)) {
+    const classes = table[1].split(/\s+/);
+    if (!classes.includes('ref-table') || classes.includes('ref-table--versions')) continue;
+    const body = /<tbody\b[^>]*>([\s\S]*?)<\/tbody>/i.exec(table[2])?.[1] ?? '';
+    for (const row of body.matchAll(/<tr\b[^>]*>\s*<td\b[^>]*>([\s\S]*?)<\/td>/gi)) {
+      const code = /<code\b[^>]*>([\s\S]*?)<\/code>/i.exec(row[1]);
+      const name = code === null ? '' : stripTags(code[1]).trim();
+      if (name.length > 0 && name.length <= 60) names.add(name);
+    }
+  }
+  return [...names];
 }
 
 /** The distinct words of a fragment's code blocks that its text does not already hold. */
@@ -124,6 +149,7 @@ export function buildSearchIndex(pages, locate, fallbackSection = 'Docs') {
     for (const section of sections) {
       const entry = { p, h: section.heading, a: section.anchor, l: section.level, x: section.text };
       if (section.code.length > 0) entry.k = section.code.join('\n');
+      if (section.defines.length > 0) entry.d = section.defines.join('\n');
       if (section.blockWords.length > 0) entry.c = section.blockWords.join(' ');
       index.sections.push(entry);
     }

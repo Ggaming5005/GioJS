@@ -31,7 +31,7 @@ export default function Page(): React.JSX.Element {
           <tr><th>What</th><th>How you opt in</th><th>Section</th></tr>
         </thead>
         <tbody>
-          <tr><td>A page that suspends</td><td><code>loading.tsx</code> or <code>&lt;Suspense&gt;</code> on a page without <code>revalidate</code></td><td><a href="#streaming-pages">Streaming pages</a></td></tr>
+          <tr><td>A page that suspends</td><td><code>loading.tsx</code> or <code>&lt;Suspense&gt;</code> on a page without <a href="/docs/page-exports/revalidate"><code>revalidate</code></a></td><td><a href="#streaming-pages">Streaming pages</a></td></tr>
           <tr><td>A cached page with personal parts</td><td><code>export const shell = &apos;cache&apos;</code> next to <code>revalidate</code></td><td><a href="#partial-prerendering">Partial prerendering</a></td></tr>
           <tr><td>A route handler body</td><td>Return a <code>Response</code> with a <code>ReadableStream</code></td><td><a href="#streaming-route-handlers">Streaming route handlers</a></td></tr>
           <tr><td>A live feed</td><td>Return a <code>GioEventStream</code></td><td><a href="#server-sent-events">Server-Sent Events</a></td></tr>
@@ -417,8 +417,9 @@ export function Ticker(): React.JSX.Element {
         </li>
         <li>
           <strong>Compression</strong> (gzip or Brotli) applies to streamed pages and route
-          bodies as they stream - their length is unknown, so <code>[compression]
-          min_size_bytes</code> does not hold them back. Event streams are never compressed.
+          bodies as they stream - their length is unknown, so{' '}
+          <a href="/docs/configuration/compression"><code>[compression] min_size_bytes</code></a>{' '}
+          does not hold them back. Event streams are never compressed.
         </li>
         <li>
           <strong>Checking it:</strong> <code>curl -N</code> prints chunks as they arrive. A

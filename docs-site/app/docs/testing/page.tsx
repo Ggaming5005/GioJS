@@ -36,7 +36,7 @@ export default function TestingPage(): React.JSX.Element {
           </tr>
           <tr>
             <td><a href="/docs/functions/call-route"><code>callRoute(path, options)</code></a></td>
-            <td>Your <a href="/docs/file-conventions/route"><code>route.ts</code></a> handler (or a page <code>action</code>), in your test process</td>
+            <td>Your <a href="/docs/file-conventions/route"><code>route.ts</code></a> handler (or a page <a href="/docs/page-exports/action"><code>action</code></a>), in your test process</td>
             <td>API handlers and form posts: JSON/form bodies, status codes, cookies, event streams</td>
           </tr>
           <tr>
@@ -170,7 +170,7 @@ describe('/posts/[id]', () => {
         <li><code>html</code> - the full document, rendered with the hydration envelope and the route&apos;s stylesheet links like a served page.</li>
         <li><code>props</code> - the hydration props exactly as serialized into the page; <code>null</code> for redirects, 404s, errors, or props that are not JSON-serializable (that page renders but never hydrates).</li>
         <li><code>redirect</code> - <code>{`{ destination, permanent }`}</code> for 3xx answers.</li>
-        <li><code>cacheable</code> / <code>cacheMaxAge</code> - whether the Rust page cache would store this response, by the server&apos;s own rule: <code>revalidate</code> set, no cookies or per-request headers sent, and no credentials read (a page that reads <code>ctx.cookies</code> is never shared).</li>
+        <li><code>cacheable</code> / <code>cacheMaxAge</code> - whether the Rust page cache would store this response, by the server&apos;s own rule: <a href="/docs/page-exports/revalidate"><code>revalidate</code></a> set, no cookies or per-request headers sent, and no credentials read (a page that reads <code>ctx.cookies</code> is never shared).</li>
         <li><code>cacheTags</code> - the tags a cacheable page is stored under for <a href="/docs/functions/revalidate-tag"><code>revalidateTag()</code></a>: <code>export const tags</code> plus the ones <code>getServerSideProps</code> returns, validated and de-duplicated (empty when the page is not cacheable). The server also tags the page with its path for <a href="/docs/functions/revalidate-path"><code>revalidatePath()</code></a>.</li>
         <li><code>error</code> - set when the render failed and no <a href="/docs/file-conventions/error"><code>error.tsx</code></a> answered: <code>message</code> (generic in production), <code>digest</code>, and <code>stack</code> in development.</li>
       </ul>
@@ -297,7 +297,7 @@ it('blocks cross-site posts', async () => {
       <ul>
         <li><strong>Options:</strong> <code>appDir</code>, <code>env</code> (extra variables for the server and worker; <code>undefined</code> removes one - <code>{`{ NODE_ENV: 'development' }`}</code> gives a dev server), <code>port</code>, <code>binary</code>, <code>timeoutMs</code> (default 60 s).</li>
         <li><strong>Result:</strong> <code>url</code> (no trailing slash), <code>port</code>, <code>logs()</code> (server and worker output so far), <code>close()</code>.</li>
-        <li><strong>The binary</strong> is <code>GIO_SERVER_BIN</code> if set, else the platform binary <code>@gio.js/server</code> installed. Without one it throws, naming the package to install.</li>
+        <li><strong>The binary</strong> is the <code>binary</code> option if given, else <code>GIO_SERVER_BIN</code> if set (a path that does not exist throws, naming which of the two it came from), else the platform binary <code>@gio.js/server</code> installed, else - inside a checkout of the GioJS repository - <code>target/debug</code> or <code>target/release</code>. Without one it throws, naming the package to install.</li>
         <li><strong><code>close()</code></strong> kills the server and its worker&apos;s whole process group (the worker runs in its own group). Call it in <code>afterAll</code> / <code>after</code>: it frees the port and the processes right away.</li>
         <li><strong>A forgotten <code>close()</code></strong> leaves nothing behind either. A running server never keeps the test process alive, so the run still ends, and exit hooks take the servers down with it - also on a crash or Ctrl+C. Where no hook gets to run - the test process killed with <code>SIGKILL</code>, a vitest worker thread (<code>pool: &apos;threads&apos;</code>) torn down - each server&apos;s small watchdog process kills it as soon as the process or thread that started it is gone.</li>
         <li>The server speaks plain HTTP; a <code>gio.toml</code> with <a href="/docs/configuration/server-tls"><code>[server.tls]</code></a> enabled needs a test copy of the project without it.</li>

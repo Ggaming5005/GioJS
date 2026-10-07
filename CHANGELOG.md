@@ -78,13 +78,14 @@ first.
 - **The page cache directory** (`[cache] disk_path` or `GIO_CACHE_DIR`) may no
   longer be, contain or sit inside `app/` or `public/`.
 - **`0` lifts a limit everywhere in `gio.toml`,** as it already did in
-  `[server]`. `[prefetch] max_concurrent` or `max_per_second = 0` used to
-  refuse every prefetch, `[websocket] max_connections = 0` closed every socket
-  with 1013, `[websocket] ping_interval_secs = 0` crashed every WebSocket
-  connection, and `[images] max_remote_bytes = 0` rejected every remote image.
-  Each now means unlimited (no pings, for `ping_interval_secs`). To turn
-  prefetching off use `[prefetch] enabled = false`; to refuse WebSockets,
-  `[websocket] enabled = false`.
+  `[server]`. `[websocket] max_connections = 0` closed every socket with 1013,
+  `[websocket] ping_interval_secs = 0` crashed every WebSocket connection, and
+  `[images] max_remote_bytes = 0` rejected every remote image. Each now means
+  unlimited (no pings, for `ping_interval_secs`); to refuse WebSockets, set
+  `[websocket] enabled = false`. The `[prefetch]` keys, which no earlier
+  release read, follow the same rule from the start: `max_concurrent` or
+  `max_per_second = 0` lifts that budget, and `[prefetch] enabled = false`
+  turns prefetching off.
 - **CSRF protection is on.** Cross-site `POST`/`PUT`/`PATCH`/`DELETE` requests
   (judged by `Sec-Fetch-Site`, or `Origin` against the request's host) get
   `403` in Rust before Node runs. Requests without browser headers (curl,
@@ -988,8 +989,10 @@ first.
   `npm test` checks facts the docs state against the code.
 - The docs site is rebuilt around finding things. **Search** (Ctrl+K, Cmd+K
   or `/`) covers every page section by section, ranks an exact API name
-  first, tolerates typos and unfinished words, and runs in the browser
-  with no third-party service. The sidebar has four sections (Getting
+  first - an identifier-shaped gio.toml key or prop (`skew_protection`,
+  `onSuccess`) opens the reference table that defines it, a bare command
+  (`typegen`) its CLI page - tolerates typos and unfinished words, and runs
+  in the browser with no third-party service. The sidebar has four sections (Getting
   Started, Guides, API Reference, Architecture) with collapsible groups, and
   every page gets breadcrumbs, an "On this page" outline, `#` links on its
   headings, previous/next links, "Edit this page on GitHub", "Copy page" as
@@ -1217,8 +1220,10 @@ first.
   HTML arrives: the target's `loading.tsx` shows only if the new page suspends
   in the browser. A `notFound()` that runs in the browser (after a streamed
   page suspended) shows the nearest `error.tsx`, with status `200`.
-- `ctx.query` and `req.query` hold one value per key, so a server-rendered
-  `useSearchParams().getAll()` returns at most one.
+- `ctx.query` and `req.query` hold one value per key, in no particular
+  order, so a server-rendered `useSearchParams().getAll()` returns at most
+  one. In a static export `useSearchParams()` is always empty: each page is
+  rendered once, for no query.
 - Optimized images (`/_gio/image`) and remote `[[fonts]]` are cached as
   immutable under names that ignore the source's content: replacing
   `public/hero.png` or a remote font keeps serving the old one. Give a changed

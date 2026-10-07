@@ -61,7 +61,7 @@ export default function Page(): React.JSX.Element {
           <strong>Health:</strong> <code>GET /_gio/health</code> answers 200 with JSON. The
           port only opens once the first Node worker is up, so a platform&apos;s HTTP check
           passing means the app can render. Every health check on this page needs the
-          endpoint: with <code>[health] enabled = false</code> it is a <code>404</code> and
+          endpoint: with <a href="/docs/configuration/health"><code>[health] enabled = false</code></a> it is a <code>404</code> and
           the platform marks the app unhealthy, so point the check at a page of your own
           instead (<code>[health] details = false</code> is fine - it keeps{' '}
           <code>nodeReady</code>).

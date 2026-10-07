@@ -20,13 +20,28 @@ export default function Page(): React.JSX.Element {
       <CodeBlock lang="tsx" code={`// cache for 60s, then revalidate in the background
 export const revalidate = 60;
 
-// cache indefinitely
+// cache for a year (until a purge or a new deployment, in practice)
 export const revalidate = false;
 
 // never cache (default)
 // (omit the export)`} />
       <h2 id="how-it-works">How it works</h2>
-      <p>Cached pages are served from memory in microseconds. When a page is stale, GioJS serves the stale copy immediately and revalidates in the background - visitors never wait.</p>
+      <p>
+        Cached pages are served from memory in microseconds. When a page is past its{' '}
+        <a href="/docs/page-exports/revalidate"><code>revalidate</code></a> age, GioJS serves the stale copy immediately and renders a
+        fresh one in the background - but only until the page is{' '}
+        <a href="/docs/configuration/cache"><code>[cache] swr_multiplier</code></a> times{' '}
+        <code>revalidate</code> old (10 times by default: up to 10 minutes for{' '}
+        <code>revalidate = 60</code>). Past that window the entry is a miss, and the next
+        request waits for a fresh render, as it always does with{' '}
+        <code>swr_multiplier = 0</code> (or <code>1</code>). A page nobody visits for a
+        while is therefore rendered on demand, not served from a very old copy.
+      </p>
+      <p>
+        <code>revalidate = false</code> is a one-year max age (<code>31536000</code> seconds,
+        the <code>s-maxage</code> of a fresh render): in practice the page stays cached until it
+        is purged, evicted or a new deployment changes the cache key.
+      </p>
       <div className="callout">Cache keys are deployment-ID aware, and the derived ID changes with the app&apos;s client and server code, so a redeploy of changed code automatically invalidates stale entries. Data read at runtime (files, a database, <code>.env</code> values) is not part of the ID: purge after changing it. See <a href="/docs/caching-layers">Caching layers</a>.</div>
 
       <h2 id="on-demand-revalidation">On-demand revalidation</h2>
@@ -42,7 +57,7 @@ export const revalidate = false;
 
       <h3 id="tagging-pages">Tagging pages</h3>
       <p>
-        Give a page tags to purge it by. Static tags apply to every render of the page;
+        Give a page tags to purge it by. Static tags (<a href="/docs/page-exports/tags"><code>export const tags</code></a>) apply to every render of the page;
         tags returned next to <code>props</code> from <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a> are
         added per render:
       </p>
