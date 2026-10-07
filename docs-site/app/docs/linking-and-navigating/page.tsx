@@ -40,7 +40,9 @@ export default function Page(): React.JSX.Element {
         <code>503</code> from the server, a network error, a static host&apos;s{' '}
         <code>404.html</code>, or a link to another origin. After a redirect, the address bar
         and the router hooks show the URL the redirect landed on. When a new deployment went
-        live since the page loaded, the navigation becomes a full load of the new build.
+        live since the page loaded, the navigation becomes a full load of the new build (the
+        router sends the page&apos;s deployment id with every request; a prefetch that finds
+        a new deployment never reloads the page, the click does).
       </p>
       <div className="callout">
         The root layout (<code>app/layout.tsx</code>) is server-only HTML: a soft navigation

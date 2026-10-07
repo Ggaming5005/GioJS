@@ -2347,14 +2347,16 @@ async function main() {
         socket.setEncoding('latin1');
         socket.on('data', (chunk) => {
           data += chunk;
-          if (data.includes('\r\n')) {
+          if (data.includes('\r\n\r\n')) {
             socket.destroy();
-            resolve(Number(data.split(' ')[1]));
+            resolve(data);
           }
         });
         socket.on('error', reject);
       });
-      assert.equal(status, 413);
+      assert.equal(Number(status.split(' ')[1]), 413);
+      // Marked as refused unread: <GioForm> may send it again natively.
+      assert.match(status, /\r\nx-gio-refused: unread\r\n/i);
       // The worker connection is untouched: the next post goes through.
       const ok = await formPost('name=+');
       assert.equal(ok.status, 422);
@@ -2651,6 +2653,7 @@ async function untrustedProxyPhase() {
       assert.equal((await rawGet('/api/limited', { 'x-forwarded-for': '198.51.100.1' })).status, 200);
       const limited = await rawGet('/api/limited', { 'x-forwarded-for': '198.51.100.2' });
       assert.equal(limited.status, 429);
+      assert.equal(limited.headers['x-gio-refused'], 'unread', 'refused before the handler ran');
       // At RUST_LOG=warn the warning still carries the request's id.
       const id = limited.headers['x-request-id'];
       assert.match(id, /^[0-9a-f-]{36}$/);

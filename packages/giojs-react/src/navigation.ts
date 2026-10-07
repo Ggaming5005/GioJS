@@ -39,11 +39,21 @@ export interface NavigateOptions {
 
 let deploymentId: string | undefined;
 
+/** Snapshot the deployment id the server injected into this document. */
 export function initDeploymentId(): void {
   deploymentId = typeof window !== 'undefined' ? window.__GIO_DEPLOYMENT_ID__ : undefined;
 }
 
+/**
+ * The deployment that served this document: the id the Rust server injects
+ * as window.__GIO_DEPLOYMENT_ID__ (read on first use - nothing has to call
+ * initDeploymentId). Every page request the router makes carries it as
+ * x-deployment-id, and a server running another build answers 409
+ * hard-reload. Soft navigations never run the fetched page's scripts, so the
+ * value keeps naming the build whose code is running in this tab.
+ */
 export function getDeploymentId(): string | undefined {
+  if (deploymentId === undefined) initDeploymentId();
   return deploymentId;
 }
 
@@ -207,13 +217,10 @@ export function prefetch(href: string): void {
   const url = target.pathname + target.search;
   if (url === currentPageUrl() || cachedPage(url) !== undefined) return;
   ensureRouter();
-  const result = fetchPage(url, 'prefetch').then(page => {
-    if (page.kind === 'reload') {
-      prefetchEntries.delete(url);
-      handleHardReload();
-    }
-    return page;
-  });
+  // A deployment-skew answer is kept too: the click on the link becomes a
+  // full load of the new build. Reloading the page on hover (or as a link
+  // scrolls into view) would throw away what the user has on screen.
+  const result = fetchPage(url, 'prefetch');
   storePrefetch(url, { at: Date.now(), generation: cacheGeneration, result });
 }
 
@@ -574,13 +581,35 @@ function parsePage(html: string): ParsedPage | null {
     if (!isRecord(envelope) || typeof envelope['path'] !== 'string' || typeof envelope['pattern'] !== 'string') {
       return null;
     }
-    const entry = typeof envelope['entry'] === 'string' ? envelope['entry'] : '';
-    // The chunk is imported by URL: only ever a same-origin path.
-    if (entry !== '' && (!entry.startsWith('/') || entry.startsWith('//'))) return null;
+    const rawEntry = typeof envelope['entry'] === 'string' ? envelope['entry'] : '';
+    let entry = '';
+    if (rawEntry !== '') {
+      // The chunk is imported by URL: only ever a same-origin path, judged
+      // by the URL parser that import() resolves it with (which reads
+      // '/\host/x.js' as another origin), and imported as the normalized
+      // path it judged - never one that normalized into '//host/...'.
+      if (!rawEntry.startsWith('/')) return null;
+      const resolved = sameOriginUrl(rawEntry);
+      if (resolved === null || resolved.pathname.startsWith('//')) return null;
+      entry = resolved.pathname + resolved.search;
+    }
     return { doc, content, envelopeScript, entry, pattern: envelope['pattern'] };
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether `content` still holds a Suspense boundary that was pending when the
+ * shell streamed (React marks it `<!--$?-->`): its resolved HTML sits outside
+ * the #__gio boundary, behind a script.
+ */
+function hasPendingBoundary(content: Element): boolean {
+  const comments = content.ownerDocument.createTreeWalker(content, NodeFilter.SHOW_COMMENT);
+  for (let node = comments.nextNode(); node !== null; node = comments.nextNode()) {
+    if (node.nodeValue === '$?') return true;
+  }
+  return false;
 }
 
 /** The envelope, title and lang of the new page; #__gio is the runtime's. */
@@ -695,6 +724,13 @@ async function showPage(
   transition: TransitionPreset | false,
   seq: number,
 ): Promise<boolean> {
+  if (page.entry === '' && hasPendingBoundary(page.content)) {
+    // A streamed page without a client tree: its server HTML is shown as is,
+    // but the content its Suspense boundaries resolved to was streamed after
+    // #__gio (with the scripts that move it in, which never run here).
+    // Swapped in, it would show the loading fallback for good.
+    throw new Error('streamed server-only page: load it in full');
+  }
   if (page.entry !== '') {
     // The route chunk loads before anything changes on screen. Without a
     // runtime yet (the current page does not hydrate), importing the chunk

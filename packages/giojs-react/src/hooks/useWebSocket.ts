@@ -49,7 +49,9 @@ export interface UseWebSocketOptions {
   /**
    * Queue send() calls made while the socket is not open (connecting or
    * reconnecting) and flush them on open, instead of dropping them.
-   * `true` keeps up to 100 messages. Default: off.
+   * `true` keeps up to 100 messages. A message is only ever sent to the url
+   * it was queued for: when `url` changes, what is still queued is dropped.
+   * Default: off.
    */
   queueWhileDisconnected?: boolean | { maxMessages: number };
   protocols?: string | string[];
@@ -132,7 +134,11 @@ function reconnectSettings(reconnect: UseWebSocketOptions['reconnect']): Require
 export function useWebSocket(url: string, options: UseWebSocketOptions = {}): UseWebSocketResult {
   const isServer = typeof window === 'undefined';
   const wsRef = useRef<WebSocket | null>(null);
-  const queueRef = useRef<WebSocketSendData[]>([]);
+  // Each queued message with the url it was sent for.
+  const queueRef = useRef<Array<{ url: string; data: WebSocketSendData }>>([]);
+  // The url of the latest render: what a send() made now is meant for.
+  const urlRef = useRef(url);
+  urlRef.current = url;
   // True once the hook stopped for good (close(), gave up, unmounted): sends
   // have nothing to flush into. False while connecting or reconnecting.
   const stoppedRef = useRef(false);
@@ -178,7 +184,8 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
         setReadyState(OPEN);
         const queued = queueRef.current;
         queueRef.current = [];
-        for (const data of queued) ws.send(data);
+        // Messages queued for another url (the previous room) are dropped.
+        for (const item of queued) if (item.url === url) ws.send(item.data);
         optionsRef.current.onOpen?.(event);
       };
       ws.onmessage = (event: MessageEvent<WebSocketData>): void => {
@@ -255,8 +262,13 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}): Us
       const queue = optionsRef.current.queueWhileDisconnected;
       if (queue === undefined || queue === false || stoppedRef.current) return false;
       const max = queue === true ? DEFAULT_MAX_QUEUED : queue.maxMessages;
+      const target = urlRef.current;
+      // The url changed: what was queued for the old one is never sent.
+      if (queueRef.current.some(item => item.url !== target)) {
+        queueRef.current = queueRef.current.filter(item => item.url === target);
+      }
       if (queueRef.current.length >= max) return false;
-      queueRef.current.push(data);
+      queueRef.current.push({ url: target, data });
       return true;
     },
     [isServer],

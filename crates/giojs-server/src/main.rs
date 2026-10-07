@@ -1447,6 +1447,22 @@ async fn version_skew_middleware(
     next.run(req).await
 }
 
+/// Marks a refusal the server answers before any handler sees the request
+/// body - a rate-limit 429, a 413 over `max_body_bytes` - so the client can
+/// tell it from the same status returned by a page action or route.ts that
+/// already ran: `<GioForm>` re-sends only a submission refused this way.
+const REFUSED_UNREAD_HEADER: &str = "x-gio-refused";
+
+/// The 413 for a request body over `max_body_bytes`, read before any handler.
+fn payload_too_large() -> Response {
+    let mut resp = (StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large").into_response();
+    resp.headers_mut().insert(
+        HeaderName::from_static(REFUSED_UNREAD_HEADER),
+        HeaderValue::from_static("unread"),
+    );
+    resp
+}
+
 fn check_version_skew(req: &Request, server_id: &str) -> Option<Response> {
     // Only the GioJS client runtime sends x-deployment-id (soft navigations
     // and prefetches), so its presence IS the navigate signal. fetch() cannot
@@ -1613,6 +1629,7 @@ async fn rate_limit_middleware(
                 .header("retry-after", retry_after_secs.to_string())
                 .header("x-ratelimit-limit", limit.to_string())
                 .header("x-ratelimit-remaining", "0")
+                .header(REFUSED_UNREAD_HEADER, "unread")
                 .body(axum::body::Body::from(r#"{"error":"rate limit exceeded"}"#))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
@@ -2068,9 +2085,7 @@ async fn dynamic_handler(
         .await
         {
             BodyReadOutcome::Read(body, body_base64) => (body, body_base64),
-            BodyReadOutcome::TooLarge => {
-                return (StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large").into_response();
-            }
+            BodyReadOutcome::TooLarge => return payload_too_large(),
             BodyReadOutcome::TimedOut => {
                 return (StatusCode::REQUEST_TIMEOUT, "408 Request Timeout").into_response();
             }
@@ -3470,7 +3485,7 @@ fn respond_request_too_large(
         start.elapsed().as_millis() as u64,
         true,
     );
-    let mut resp = (status, "413 Payload Too Large").into_response();
+    let mut resp = payload_too_large();
     insert_cache_status_header(&mut resp, "bypass");
     resp
 }
@@ -5868,6 +5883,15 @@ mod tests {
             .unwrap();
         let resp = check_version_skew(&req, "new_id").unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn body_limit_413_is_marked_refused_unread() {
+        // <GioForm> re-sends natively only a refusal marked this way: an
+        // action's own 413 must never look like one.
+        let resp = payload_too_large();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(resp.headers().get(REFUSED_UNREAD_HEADER).unwrap(), "unread");
     }
 
     // ── request body forwarding ───────────────────────────────────────────────

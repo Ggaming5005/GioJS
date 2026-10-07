@@ -223,14 +223,16 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         </li>
         <li>
           A refusal that comes before the action runs - the server&apos;s 413 for a too-large
-          upload, a 429 from its rate limiter, a deployment change - <code>onError</code> runs
+          upload, a 429 from its rate limiter (both marked{' '}
+          <code>x-gio-refused: unread</code>), a deployment change - <code>onError</code> runs
           (for the 413 and 429), then the form is submitted natively so the browser shows the
           real response.
         </li>
         <li>
           Any other error that is not a GioJS page - a 500 when the action threw (and no{' '}
           <code>error.tsx</code> rendered it), a 502/504 from a proxy or a timeout while the
-          action may still be running, an error <code>Response</code> the action returned -
+          action may still be running, an error <code>Response</code> the action returned (a
+          413 or 429 of its own included) -
           goes to <code>onError</code> with <code>result.response</code>. Nothing changes on
           screen and nothing is re-sent: show the failure from <code>lastResult</code>.
         </li>
