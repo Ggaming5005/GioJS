@@ -734,7 +734,7 @@ test('the i18n guide states the default detection order and the cookie name', ()
 test('the i18n pages state how Accept-Language is read', () => {
   const lib = read('crates/giojs-i18n/src/lib.rs');
   // Highest q first, stable for ties; q=0 never chosen; the configured spelling.
-  assert.match(lib, /ranges\.sort_by\(\|a, b\| b\.1\.cmp\(&a\.1\)\)/, 'q-value ordering changed - update the docs');
+  assert.match(lib, /ranges\.sort_by_key\(\|&\(_, q\)\| std::cmp::Reverse\(q\)\)/, 'q-value ordering changed - update the docs');
   assert.match(lib, /\(q > 0\)\.then_some/, 'q=0 handling changed - update the docs');
   assert.doesNotMatch(lib, /to_ascii_lowercase/, 'a detected locale is the configured string');
   assert.ok(docsPage('i18n').includes('<code>de;q=0.1, en</code> picks{\' \'}'));

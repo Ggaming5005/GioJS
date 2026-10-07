@@ -116,7 +116,7 @@ fn detect_from_accept_language(
     let header = headers.get("accept-language")?;
     let mut ranges: Vec<(&str, u16)> = header.split(',').filter_map(parse_language_range).collect();
     // Stable: equal q-values keep the order the client wrote them in.
-    ranges.sort_by(|a, b| b.1.cmp(&a.1));
+    ranges.sort_by_key(|&(_, q)| std::cmp::Reverse(q));
     for (tag, _) in ranges {
         if let Some(locale) = locales.iter().find(|l| l.eq_ignore_ascii_case(tag)) {
             return Some(locale.clone());
