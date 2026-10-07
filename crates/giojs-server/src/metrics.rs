@@ -3,14 +3,18 @@
 //! Lock-free Prometheus metrics. Counters use AtomicU64. Labeled counters use
 //! DashMap keyed by NUL-delimited label values. Histograms store per-bucket
 //! cumulative counts (in nanoseconds) plus a running sum. Label maps fed by
-//! request data are capped at MAX_LABEL_SET_SIZE distinct keys; overflow
-//! aggregates into a reserved "_other" label.
+//! request data are capped in distinct keys; overflow aggregates into a
+//! reserved "_other" label.
 //!
 //! Request series carry a `route` label: the matched route pattern the worker
 //! reports (`/posts/:id`, never the raw path, so cardinality is bounded by
-//! the app's routes), or one of the reserved values below.
+//! the app's routes), or one of the reserved values below. Each request
+//! label is bounded on its own - methods outside the standard nine and
+//! routes past MAX_ROUTE_LABELS become `_other` - so the combined series
+//! count grows with the app, not with traffic, and stays far under its
+//! MAX_REQUEST_SERIES backstop.
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // Bucket upper bounds in nanoseconds: 1ms … 5s.
@@ -29,9 +33,34 @@ const DURATION_BUCKETS_NS: &[u64] = &[
 
 const BUCKET_COUNT: usize = DURATION_BUCKETS_NS.len() + 1; // +1 for +Inf
 
-// Caps cardinality of label maps whose keys derive from request data.
+// Caps cardinality of the rate-limit label maps (keyed by request paths).
 const MAX_LABEL_SET_SIZE: usize = 512;
 const OVERFLOW_LABEL: &str = "_other";
+
+/// Distinct route patterns kept as `route` label values; later ones are
+/// counted as `_other`. Patterns come from the app's route files, so only an
+/// app with more routes than this ever reaches it. The reserved labels below
+/// never count against it.
+const MAX_ROUTE_LABELS: usize = 1024;
+/// Series cap of the per-route histograms: every kept route plus the
+/// reserved labels and `_other`.
+const MAX_ROUTE_SERIES: usize = MAX_ROUTE_LABELS + 8;
+/// Backstop for gio_requests_total series. Its labels are bounded one by one
+/// (method normalized, route capped, cache tiers and statuses set by the
+/// server and the app), so real traffic stays far below this; past it, new
+/// combinations count under `_other` in every label.
+const MAX_REQUEST_SERIES: usize = 16_384;
+
+/// Methods that keep their name in the `method` label. Any other - an
+/// extension method a client made up - is `_other`.
+const KNOWN_METHODS: [&str; 9] = [
+    "GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "CONNECT", "TRACE",
+];
+
+/// Cache tiers of the dynamic pipeline, each a page-cache lookup: what the
+/// devtools hit ratio divides by. `static` files and the `bypass` /_gio
+/// endpoints never consult the page cache.
+const CACHE_LOOKUP_TIERS: [&str; 5] = ["hit", "stale", "miss", "stream", "error"];
 
 /// `route` label for public/ files, hashed chunks and app CSS.
 pub const ROUTE_STATIC: &str = "static";
@@ -46,15 +75,29 @@ pub fn route_label(route: Option<&str>) -> &str {
     route.filter(|r| !r.is_empty()).unwrap_or(ROUTE_UNMATCHED)
 }
 
-/// Increment `key` in `map`, but once the map holds MAX_LABEL_SET_SIZE distinct
-/// keys, route new keys into `overflow_key` so attacker-chosen values (paths,
+/// The `method` label: a standard method's name, else `_other`.
+fn method_label(method: &str) -> &'static str {
+    KNOWN_METHODS
+        .iter()
+        .find(|known| **known == method)
+        .copied()
+        .unwrap_or(OVERFLOW_LABEL)
+}
+
+/// Increment `key` in `map`, but once the map holds `cap` distinct keys,
+/// route new keys into `overflow_key` so attacker-chosen values (paths,
 /// methods) cannot grow the map without bound.
-fn increment_bounded(map: &DashMap<String, AtomicU64>, key: String, overflow_key: &str) {
+fn increment_bounded(
+    map: &DashMap<String, AtomicU64>,
+    key: String,
+    overflow_key: &str,
+    cap: usize,
+) {
     if let Some(counter) = map.get(&key) {
         counter.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    let effective_key = if map.len() >= MAX_LABEL_SET_SIZE {
+    let effective_key = if map.len() >= cap {
         overflow_key.to_string()
     } else {
         key
@@ -86,14 +129,14 @@ impl Histogram {
     }
 }
 
-/// Observe into the series for `key`, with the same cardinality cap as
+/// Observe into the series for `key`, capped at `cap` series like
 /// `increment_bounded`.
-fn observe_bounded(map: &DashMap<String, Histogram>, key: &str, value_ns: u64) {
+fn observe_bounded(map: &DashMap<String, Histogram>, key: &str, value_ns: u64, cap: usize) {
     if let Some(histogram) = map.get(key) {
         observe_histogram(&histogram.buckets, &histogram.sum_ns, value_ns);
         return;
     }
-    let effective_key = if map.len() >= MAX_LABEL_SET_SIZE {
+    let effective_key = if map.len() >= cap {
         OVERFLOW_LABEL
     } else {
         key
@@ -114,6 +157,9 @@ pub struct Metrics {
     // gio_node_ipc_latency_seconds{route} histogram - key: route
     pub ipc_latency: DashMap<String, Histogram>,
 
+    // Route patterns admitted as `route` label values (MAX_ROUTE_LABELS).
+    route_labels: DashSet<String>,
+
     // gio_prefetch_rejected_total
     pub prefetch_rejected_total: AtomicU64,
 
@@ -133,6 +179,7 @@ impl Metrics {
             requests_total: DashMap::new(),
             request_duration: DashMap::new(),
             ipc_latency: DashMap::new(),
+            route_labels: DashSet::new(),
             prefetch_rejected_total: AtomicU64::new(0),
             image_processed_total: DashMap::new(),
             ratelimit_checked_total: DashMap::new(),
@@ -148,33 +195,61 @@ impl Metrics {
         route: &str,
         duration_ns: u64,
     ) {
-        // Method is client-controlled (extension methods), so this map is bounded too.
+        // Method is client-controlled (extension methods): normalized, so a
+        // client inventing methods cannot fill the map.
+        let method = method_label(method);
+        let route = self.bounded_route(route);
         let key = format!("{method}\x00{status}\x00{cache}\x00{route}");
         increment_bounded(
             &self.requests_total,
             key,
             "_other\x00_other\x00_other\x00_other",
+            MAX_REQUEST_SERIES,
         );
-        observe_bounded(&self.request_duration, route, duration_ns);
+        observe_bounded(&self.request_duration, route, duration_ns, MAX_ROUTE_SERIES);
     }
 
     pub fn record_ipc_latency(&self, route: &str, duration_ns: u64) {
-        observe_bounded(&self.ipc_latency, route, duration_ns);
+        let route = self.bounded_route(route);
+        observe_bounded(&self.ipc_latency, route, duration_ns, MAX_ROUTE_SERIES);
     }
 
-    /// (cache hits incl. stale serves, all requests) - the devtools hit ratio.
+    /// `route` as a label value: kept while fewer than MAX_ROUTE_LABELS
+    /// distinct patterns have been seen (or once seen), else `_other`.
+    fn bounded_route<'a>(&self, route: &'a str) -> &'a str {
+        let reserved = matches!(
+            route,
+            ROUTE_STATIC | ROUTE_INTERNAL | ROUTE_UNMATCHED | OVERFLOW_LABEL
+        );
+        if reserved || self.route_labels.contains(route) {
+            return route;
+        }
+        if self.route_labels.len() >= MAX_ROUTE_LABELS {
+            return OVERFLOW_LABEL;
+        }
+        self.route_labels.insert(route.to_string());
+        route
+    }
+
+    /// (cache hits incl. stale serves, page-cache lookups) - the devtools hit
+    /// ratio. Static files and /_gio endpoints are requests but not lookups.
     pub fn cache_hits_and_lookups(&self) -> (u64, u64) {
         let mut hits = 0u64;
-        let mut total = 0u64;
+        let mut lookups = 0u64;
         for entry in self.requests_total.iter() {
+            let Some(cache) = entry.key().split('\x00').nth(2) else {
+                continue;
+            };
+            if !CACHE_LOOKUP_TIERS.contains(&cache) {
+                continue;
+            }
             let count = entry.value().load(Ordering::Relaxed);
-            total += count;
-            let cache = entry.key().split('\x00').nth(2);
-            if matches!(cache, Some("hit" | "stale")) {
+            lookups += count;
+            if matches!(cache, "hit" | "stale") {
                 hits += count;
             }
         }
-        (hits, total)
+        (hits, lookups)
     }
 
     /// IPC latency bucket counts (cumulative) summed over every route.
@@ -204,12 +279,18 @@ impl Metrics {
             &self.ratelimit_checked_total,
             path.to_string(),
             OVERFLOW_LABEL,
+            MAX_LABEL_SET_SIZE,
         );
     }
 
     pub fn record_ratelimit_rejected(&self, path: &str, rule: &str) {
         let key = format!("{path}\x00{rule}");
-        increment_bounded(&self.ratelimit_rejected_total, key, "_other\x00_other");
+        increment_bounded(
+            &self.ratelimit_rejected_total,
+            key,
+            "_other\x00_other",
+            MAX_LABEL_SET_SIZE,
+        );
     }
 
     /// Render all metrics in Prometheus text format (version 0.0.4).
@@ -486,13 +567,94 @@ mod tests {
         let m = Metrics::new();
         m.record_request("GET", 200, "miss", "/a\"b", 1);
         assert!(m.format_prometheus(0, 0, 0).contains("route=\"/a\\\"b\""));
-        for i in 0..(MAX_LABEL_SET_SIZE + 10) {
+        for i in 0..(MAX_ROUTE_LABELS + 10) {
             m.record_ipc_latency(&format!("/r{i}"), 1);
         }
-        assert!(m.ipc_latency.len() <= MAX_LABEL_SET_SIZE + 1);
+        assert!(m.ipc_latency.len() <= MAX_ROUTE_LABELS + 1);
         assert!(m.ipc_latency.contains_key(OVERFLOW_LABEL));
         let total: u64 = m.ipc_latency_buckets_total()[BUCKET_COUNT - 1];
-        assert_eq!(total as usize, MAX_LABEL_SET_SIZE + 10);
+        assert_eq!(total as usize, MAX_ROUTE_LABELS + 10);
+    }
+
+    fn requests_with(m: &Metrics, key: &str) -> Option<u64> {
+        m.requests_total
+            .get(key)
+            .map(|counter| counter.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn a_hundred_route_app_keeps_every_label_of_every_series() {
+        let m = Metrics::new();
+        // ~10 combinations per route, as real traffic produces: well past
+        // the old shared 512-key cap.
+        for i in 0..100 {
+            let route = format!("/section{i}/:id");
+            for method in ["GET", "HEAD"] {
+                for (status, cache) in [
+                    (200, "hit"),
+                    (200, "stale"),
+                    (200, "miss"),
+                    (304, "hit"),
+                    (500, "error"),
+                ] {
+                    m.record_request(method, status, cache, &route, 1);
+                }
+            }
+        }
+        assert_eq!(m.requests_total.len(), 1000);
+        assert_eq!(
+            requests_with(&m, "_other\x00_other\x00_other\x00_other"),
+            None
+        );
+        assert_eq!(
+            requests_with(&m, "HEAD\x00304\x00hit\x00/section99/:id"),
+            Some(1)
+        );
+        assert_eq!(m.request_duration.len(), 100);
+    }
+
+    #[test]
+    fn made_up_methods_collapse_without_crowding_out_routes() {
+        let m = Metrics::new();
+        for i in 0..5_000 {
+            m.record_request(&format!("X-METHOD-{i}"), 405, "miss", "/posts/:id", 1);
+        }
+        assert_eq!(
+            requests_with(&m, "_other\x00405\x00miss\x00/posts/:id"),
+            Some(5_000)
+        );
+        assert_eq!(m.requests_total.len(), 1);
+        // Methods are case-sensitive: `get` is not GET.
+        m.record_request("get", 200, "miss", "/", 1);
+        assert_eq!(requests_with(&m, "_other\x00200\x00miss\x00/"), Some(1));
+        m.record_request("PATCH", 200, "miss", "/", 1);
+        assert_eq!(requests_with(&m, "PATCH\x00200\x00miss\x00/"), Some(1));
+    }
+
+    #[test]
+    fn routes_past_the_cap_keep_their_method_status_and_cache_labels() {
+        let m = Metrics::new();
+        for i in 0..MAX_ROUTE_LABELS {
+            m.record_request("GET", 200, "miss", &format!("/r{i}"), 1);
+        }
+        m.record_request("GET", 200, "hit", "/one-too-many", 1);
+        assert_eq!(requests_with(&m, "GET\x00200\x00hit\x00_other"), Some(1));
+        // Reserved labels and already-known routes are never displaced.
+        m.record_request("GET", 200, "static", ROUTE_STATIC, 1);
+        m.record_request("GET", 200, "bypass", ROUTE_INTERNAL, 1);
+        m.record_request("GET", 404, "miss", ROUTE_UNMATCHED, 1);
+        m.record_request("GET", 200, "hit", "/r0", 1);
+        assert_eq!(requests_with(&m, "GET\x00200\x00static\x00static"), Some(1));
+        assert_eq!(
+            requests_with(&m, "GET\x00200\x00bypass\x00internal"),
+            Some(1)
+        );
+        assert_eq!(
+            requests_with(&m, "GET\x00404\x00miss\x00unmatched"),
+            Some(1)
+        );
+        assert_eq!(requests_with(&m, "GET\x00200\x00hit\x00/r0"), Some(1));
+        assert!(m.request_duration.len() <= MAX_ROUTE_SERIES);
     }
 
     #[test]
@@ -502,6 +664,20 @@ mod tests {
         m.record_request("GET", 200, "stale", "/", 1);
         m.record_request("GET", 200, "miss", "/hit", 1);
         assert_eq!(m.cache_hits_and_lookups(), (2, 3));
+    }
+
+    #[test]
+    fn cache_hit_ratio_ignores_static_files_and_internal_endpoints() {
+        let m = Metrics::new();
+        m.record_request("GET", 200, "hit", "/", 1);
+        m.record_request("GET", 200, "stream", "/slow", 1);
+        m.record_request("GET", 500, "error", ROUTE_UNMATCHED, 1);
+        // One page view's chunks, CSS, fonts and a health probe.
+        for _ in 0..6 {
+            m.record_request("GET", 200, "static", ROUTE_STATIC, 1);
+        }
+        m.record_request("GET", 200, "bypass", ROUTE_INTERNAL, 1);
+        assert_eq!(m.cache_hits_and_lookups(), (1, 3));
     }
 
     #[test]

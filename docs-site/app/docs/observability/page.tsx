@@ -46,9 +46,15 @@ token = "a-long-random-secret"   # secure it for production`} />
         (no app route: a 404 for an unknown path, or a render the worker never answered).{' '}
         <code>cache</code> is the tier that answered: <code>hit</code>, <code>stale</code>,{' '}
         <code>miss</code>, <code>stream</code>, <code>error</code>, <code>static</code>{' '}
-        or <code>bypass</code>. Every label set is capped (past 512 distinct values new
-        ones aggregate under <code>_other</code>), so request data can never grow the
-        exposition without bound. Slowest routes at the 95th percentile:
+        or <code>bypass</code>. Each label is bounded on its own, so request data can never
+        grow the exposition without bound: a <code>method</code> other than the nine
+        standard ones (<code>GET</code>, <code>POST</code>, ...) is reported as{' '}
+        <code>_other</code>, and so is any route pattern past the first 1024 distinct ones
+        (the reserved values always keep their name). The number of series therefore grows
+        with your routes, not with traffic; a backstop of 16384{' '}
+        <code>gio_requests_total</code> series, far above what an app&apos;s routes produce,
+        counts anything beyond it under <code>_other</code> in every label. The rate-limit counters key by
+        request path and cap at 512 values each. Slowest routes at the 95th percentile:
       </p>
       <CodeBlock lang="bash" code={`histogram_quantile(0.95,
   sum by (route, le) (rate(gio_request_duration_seconds_bucket[5m])))`} />
