@@ -47,6 +47,28 @@ pub struct CacheEntry {
     /// React flushed before the first Suspense boundary). A hit must append a
     /// per-request holes render instead of serving the entry as a full page.
     pub ppr_shell: bool,
+    /// The route pattern that rendered the entry (IPC `route`), so hits keep
+    /// their metrics label without asking the worker. None when no route
+    /// matched or for entries written before routes were stored.
+    pub route: Option<String>,
+    /// Strong ETag of `html` (a quoted hex digest). Filled in by `put` when
+    /// None, so the hash is computed once per stored render, never per hit;
+    /// disk entries written before ETags existed get it when loaded.
+    pub etag: Option<String>,
+}
+
+/// Strong ETag for a stored body: a quoted 128-bit SHA-256 prefix, hex.
+pub fn entry_etag(html: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(html);
+    let mut etag = String::with_capacity(34);
+    etag.push('"');
+    for byte in digest.iter().take(16) {
+        use std::fmt::Write;
+        let _ = write!(etag, "{byte:02x}");
+    }
+    etag.push('"');
+    etag
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +173,10 @@ impl PageCache {
     }
 
     /// Store an entry. Writes to memory immediately; disk write is non-blocking.
-    pub async fn put(&self, key: &str, entry: CacheEntry) -> Result<(), CacheError> {
+    pub async fn put(&self, key: &str, mut entry: CacheEntry) -> Result<(), CacheError> {
+        if entry.etag.is_none() {
+            entry.etag = Some(entry_etag(&entry.html));
+        }
         self.backend.put(key, entry).await
     }
 
@@ -212,7 +237,27 @@ mod tests {
             composed: false,
             tags: Vec::new(),
             ppr_shell: false,
+            route: None,
+            etag: None,
         }
+    }
+
+    #[tokio::test]
+    async fn put_stamps_a_strong_etag_of_the_body_once() {
+        let cache = cache_with_swr(10);
+        cache.put("etag-key", make_entry(3600, 0)).await.unwrap();
+        let (entry, _) = cache.get("etag-key", "deploy-1").await.unwrap();
+        let etag = entry.etag.expect("put fills the etag");
+        assert_eq!(etag, entry_etag(b"<h1>Test</h1>"));
+        assert!(etag.starts_with('"') && etag.ends_with('"') && etag.len() == 34);
+        assert_ne!(etag, entry_etag(b"<h1>Other</h1>"));
+
+        // A caller-provided value is kept as-is.
+        let mut preset = make_entry(3600, 0);
+        preset.etag = Some("\"preset\"".into());
+        cache.put("etag-preset", preset).await.unwrap();
+        let (entry, _) = cache.get("etag-preset", "deploy-1").await.unwrap();
+        assert_eq!(entry.etag.as_deref(), Some("\"preset\""));
     }
 
     fn cache_with_swr(multiplier: u64) -> PageCache {

@@ -8,6 +8,8 @@
  *                     second one (proves Rust neither duplicates nor drops)
  *   /rule-cookies - two cookies a middleware.ts header rule adds a third to
  *   /plugin-cookies-null - setCookies: null (must not stall the request)
+ *   /plugin-malformed-frame - a non-string header value: the response frame
+ *                     fails to parse in Rust (must 500 at once, not time out)
  */
 import type { GioConfig } from '../../../packages/giojs-core/src/config-loader.ts';
 import type { IPCRequest, IPCResponse } from '../../../packages/giojs-core/src/context.ts';
@@ -52,6 +54,11 @@ export default {
         if (req.path === '/plugin-cookies-null') {
           // A plugin "clearing" cookies with null must not fail the frame.
           return { ...text(req.id, 'no cookies'), setCookies: null as unknown as string[] };
+        }
+        if (req.path === '/plugin-malformed-frame') {
+          const res = text(req.id, 'malformed');
+          res.headers['x-count'] = 5 as unknown as string;
+          return res;
         }
         return req;
       },

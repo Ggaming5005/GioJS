@@ -756,6 +756,32 @@ describe('route.ts method handlers', () => {
     expect('setCookies' in result).toBe(false);
   });
 
+  it('flags every handler response routeHandler (HTML too), but never a page', async () => {
+    const html = '<!doctype html><p>from a handler</p>';
+    const handlers = makeHandlers('/report', {
+      GET: () => new Response(html, { headers: { 'content-type': 'text/html' } }),
+      POST: () => ({ ok: true }),
+      DELETE: () => undefined,
+    });
+    const routes = makeRoute('/report');
+    const outcomes = await Promise.all(['GET', 'POST', 'DELETE'].map(method =>
+      renderRoute({ ...makeRequest('/report'), method }, routes, noLayouts, undefined, undefined, undefined, {
+        handlers,
+      })));
+    for (const result of outcomes) {
+      expect('routeHandler' in result && result.routeHandler).toBe(true);
+    }
+    expect('body' in outcomes[0]! && outcomes[0].body).toBe(html);
+
+    // A route.ts without GET leaves GET to its sibling page: no flag there.
+    const postOnly = makeHandlers('/report', { POST: () => ({ ok: true }) });
+    const page = await renderRoute(makeRequest('/report'), routes, noLayouts, undefined, undefined, undefined, {
+      handlers: postOnly,
+    });
+    expect('body' in page && page.body).toContain('page content');
+    expect('routeHandler' in page).toBe(false);
+  });
+
   it('keeps every Set-Cookie of a Response as its own entry, verbatim', async () => {
     const headers = new Headers();
     headers.append('Set-Cookie', 'session=abc; Path=/; HttpOnly; Expires=Wed, 21 Oct 2026 07:28:00 GMT');

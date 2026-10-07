@@ -110,6 +110,14 @@ fn remove_stale_sockets() {
     }
 }
 
+/// Set on the worker (and honored by the server itself, see main.rs): exit
+/// gracefully when stdin reads EOF. The spawning parent holds the write end
+/// of a stdin pipe open for the child's lifetime and never writes; the OS
+/// closes it however the parent dies - SIGKILL and OOM kills included, which
+/// `kill_on_drop` never observes - so an orphan notices at once instead of
+/// running (and holding memory) forever.
+pub const EXIT_ON_STDIN_EOF_ENV: &str = "GIO_EXIT_ON_STDIN_EOF";
+
 /// Kill the worker and its entire process tree. Windows relies on the Job
 /// Object (KILL_ON_JOB_CLOSE). On Unix the worker runs in its own process
 /// group (`spawn_node_tsx` sets `process_group(0)`) and SIGKILL cannot be
@@ -184,6 +192,17 @@ pub enum IpcSendResult {
         response: IpcResponse,
         body_rx: mpsc::UnboundedReceiver<RenderFrame>,
     },
+}
+
+impl IpcSendResult {
+    /// The matched route pattern of the response (head), if any.
+    pub fn route(&self) -> Option<&str> {
+        match self {
+            IpcSendResult::Response(response)
+            | IpcSendResult::SseStream { response, .. }
+            | IpcSendResult::RenderStream { response, .. } => response.route.as_deref(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -279,6 +298,20 @@ pub struct IpcResponse {
     /// frame, whose body embeds the error message and, in dev, its stack.
     #[serde(skip)]
     pub worker_error: bool,
+    /// The matched route pattern (`/posts/:id`) - the metrics `route` label,
+    /// stored with cache entries for their hits. Absent when no route matched
+    /// (and from older workers); additive, protocol stays v3.
+    #[serde(default)]
+    pub route: Option<String>,
+    /// A route.ts handler answered: its Cache-Control is the app's call, so
+    /// the pipeline adds no default (whatever the content type). Additive,
+    /// protocol stays v3.
+    #[serde(rename = "routeHandler", default)]
+    pub route_handler: bool,
+    /// Never on the wire: set on the 500 built for a response frame that
+    /// failed to parse; `send_request` logs it inside the request's span.
+    #[serde(skip)]
+    pub frame_error: Option<MalformedFrame>,
     /// Set-Cookie values, one header each. They cannot ride in the
     /// single-valued `headers` map: cookies are not comma-joinable (Expires
     /// dates contain commas), so a map would keep only one of them.
@@ -290,11 +323,19 @@ pub struct IpcResponse {
     pub set_cookies: Vec<String>,
 }
 
-/// `setCookies` is plugin-writable, and a frame that fails to parse is
-/// skipped - its request then waits out IPC_RESPONSE_TIMEOUT. So a malformed
-/// value degrades instead of failing the frame: null (a natural "clear
-/// cookies") means none, a lone string is one cookie, and anything else that
-/// is not a string is dropped with a warning.
+/// Why a worker response frame was answered with a 500 instead of its own
+/// content, plus the digest the error page shows.
+#[derive(Debug, Clone)]
+pub struct MalformedFrame {
+    pub error: String,
+    pub digest: String,
+}
+
+/// `setCookies` is plugin-writable, and a frame that fails to parse fails
+/// its request with a 500. So a malformed value degrades instead of failing
+/// the frame: null (a natural "clear cookies") means none, a lone string is
+/// one cookie, and anything else that is not a string is dropped with a
+/// warning.
 fn deserialize_set_cookies<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -382,16 +423,23 @@ struct NodeWorker {
     extra_env: Vec<(String, String)>,
 }
 
+/// Write end of a worker's stdin pipe (see EXIT_ON_STDIN_EOF_ENV). Held next
+/// to the Child, never inside it: `Child::wait` closes the child's stdin
+/// before waiting, which would tell a healthy worker its server is gone.
+type StdinGuard = Option<tokio::process::ChildStdin>;
+
 impl NodeWorker {
-    fn spawn(&self) -> anyhow::Result<tokio::process::Child> {
-        spawn_node_tsx(
+    fn spawn(&self) -> anyhow::Result<(tokio::process::Child, StdinGuard)> {
+        let mut child = spawn_node_tsx(
             &self.script,
             &self.ipc_path,
             &self.ws_path,
             &self.token,
             self.dev_mode,
             &self.extra_env,
-        )
+        )?;
+        let stdin = child.stdin.take();
+        Ok((child, stdin))
     }
 }
 
@@ -411,7 +459,7 @@ impl IpcClient {
             dev_mode,
             extra_env,
         };
-        let mut child = worker.spawn()?;
+        let (mut child, stdin_guard) = worker.spawn()?;
         let spawned_pid = child.id();
         info!("Node process spawned (pid {:?})", spawned_pid);
 
@@ -462,7 +510,13 @@ impl IpcClient {
         // worker if it exits and reconnects on socket errors.
         let inner = client.inner.clone();
         tokio::spawn(ipc_supervisor(
-            worker, child, reader, writer, write_rx, restart_rx, inner,
+            worker,
+            (child, stdin_guard),
+            reader,
+            writer,
+            write_rx,
+            restart_rx,
+            inner,
         ));
 
         Ok(client)
@@ -505,6 +559,20 @@ impl IpcClient {
         match timeout(IPC_RESPONSE_TIMEOUT, rx).await {
             Ok(Ok(result)) => {
                 cancel_guard.armed = false;
+                // Logged here, not by the reader task: this runs in the
+                // request's span, so the line carries its request id.
+                if let IpcSendResult::Response(IpcResponse {
+                    frame_error: Some(frame_error),
+                    ..
+                }) = &result
+                {
+                    error!(
+                        id = %id,
+                        digest = %frame_error.digest,
+                        error = %frame_error.error,
+                        "worker response frame failed to parse - answered 500"
+                    );
+                }
                 Ok(result)
             }
             Ok(Err(_)) => {
@@ -855,7 +923,8 @@ fn set_worker_env(
         .env("NODE_ENV", worker_node_env(dev_mode))
         .env("GIO_SOCKET_PATH", ipc_path)
         .env("GIO_WS_SOCKET_PATH", ws_path)
-        .env("GIO_IPC_TOKEN", token);
+        .env("GIO_IPC_TOKEN", token)
+        .env(EXIT_ON_STDIN_EOF_ENV, "1");
 }
 
 /// Environment, stdio, and orphan protection shared by both worker launch
@@ -870,7 +939,10 @@ fn spawn_worker_command(
 ) -> anyhow::Result<tokio::process::Child> {
     set_worker_env(&mut cmd, ipc_path, ws_path, token, dev_mode, extra_env);
     cmd.envs(crate::session_token::worker_env())
-        .stdin(Stdio::null())
+        // Orphan protection (EXIT_ON_STDIN_EOF_ENV): the pipe's write end
+        // lives in the returned Child - never written, closed when the
+        // supervisor drops the child or this process dies in any way.
+        .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         // Reap the worker when the supervisor drops it (panic/unwind paths).
@@ -1094,7 +1166,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                             match serde_json::from_value::<IpcResponse>(val) {
                                 Ok(r) => r,
                                 Err(e) => {
-                                    error!("IPC parse error: {e}");
+                                    fail_malformed_response(&inner, &id, &e.to_string());
                                     continue;
                                 }
                             }
@@ -1163,6 +1235,38 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
     }
 }
 
+/// A response frame that fails to deserialize (a mistyped field from a plugin
+/// or a version-skewed worker) still names its request - the id was read
+/// leniently from the raw JSON. Answer that request with a 500 now instead
+/// of letting it wait out IPC_RESPONSE_TIMEOUT, and tell Node to stop any
+/// stream the frame may have opened.
+fn fail_malformed_response(inner: &IpcClientInner, id: &str, parse_error: &str) {
+    send_cancel_like_frame(inner, "cancel", id);
+    let Some((_, tx)) = inner.pending.remove(id) else {
+        error!(id = %id, error = %parse_error, "unparseable worker response frame for no pending request");
+        return;
+    };
+    let digest = error_digest(None);
+    let body = if inner.dev_mode {
+        crate::dev_overlay::error_page_html(
+            500,
+            &format!("The worker sent a response frame the server cannot parse: {parse_error}"),
+            None,
+        )
+    } else {
+        crate::dev_overlay::production_error_page_html(500, &digest)
+    };
+    let mut resp = unavailable_response(id);
+    resp.status = 500;
+    resp.body = body;
+    resp.worker_error = true;
+    resp.frame_error = Some(MalformedFrame {
+        error: parse_error.to_string(),
+        digest,
+    });
+    let _ = tx.send(IpcSendResult::Response(resp));
+}
+
 /// Tell Node to run cleanup for an SSE stream whose Rust-side receiver is gone.
 fn send_sse_close_frame(inner: &IpcClientInner, req_id: &str) {
     send_cancel_like_frame(inner, "sse_close", req_id);
@@ -1207,6 +1311,12 @@ fn error_frame_response(id: &str, val: &serde_json::Value, dev_mode: bool) -> Ip
         ppr_shell: false,
         worker_error: true,
         set_cookies: Vec::new(),
+        route: val
+            .get("route")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        route_handler: false,
+        frame_error: None,
     }
 }
 
@@ -1227,6 +1337,9 @@ fn unavailable_response(id: &str) -> IpcResponse {
         ppr_shell: false,
         worker_error: false,
         set_cookies: Vec::new(),
+        route: None,
+        route_handler: false,
+        frame_error: None,
     }
 }
 
@@ -1285,7 +1398,7 @@ enum ServeEnd {
 /// reason to give up.
 async fn ipc_supervisor(
     worker: NodeWorker,
-    mut child: tokio::process::Child,
+    (mut child, mut _stdin_guard): (tokio::process::Child, StdinGuard),
     mut reader: BoxReader,
     mut writer: BoxWriter,
     mut write_rx: mpsc::Receiver<Bytes>,
@@ -1366,8 +1479,10 @@ async fn ipc_supervisor(
             };
             if child_dead {
                 match worker.spawn() {
-                    Ok(new_child) => {
+                    Ok((new_child, new_stdin_guard)) => {
                         child = new_child;
+                        // Dropping the old guard closes the dead worker's pipe.
+                        _stdin_guard = new_stdin_guard;
                         worker_pid = child.id();
                         info!("Node worker respawned (pid {:?})", worker_pid);
                     }
@@ -1691,6 +1806,7 @@ mod tests {
         assert_eq!(get("GIO_IPC_TOKEN").unwrap(), "real-token");
         assert_eq!(get("NODE_ENV").unwrap(), "production");
         assert_eq!(get("GIO_SOCKET_PATH").unwrap(), "/tmp/ipc");
+        assert_eq!(get(EXIT_ON_STDIN_EOF_ENV).unwrap(), "1");
     }
 
     #[test]
@@ -1921,6 +2037,136 @@ mod tests {
             "chunk_end must unregister the stream"
         );
         reader_task.abort();
+    }
+
+    #[tokio::test]
+    async fn malformed_response_frames_answer_their_request_with_a_500_at_once() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client, mut write_rx) = test_client_with_write_channel();
+        let (tx, rx) = oneshot::channel();
+        client.inner.pending.insert("req-bad".into(), tx);
+        let (read_half, _keep_write_open) = tokio::io::split(server_io);
+        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), client.inner.clone()));
+
+        // `status` mistyped: the frame cannot become an IpcResponse.
+        let (_r, mut node_writer) = tokio::io::split(client_io);
+        let frame = serde_json::json!({
+            "id": "req-bad", "status": "200", "headers": {},
+            "body": "<p>x</p>", "cacheable": false, "cacheMaxAge": 0,
+        });
+        write_frame(&mut node_writer, &serde_json::to_vec(&frame).unwrap())
+            .await
+            .unwrap();
+        let resolved = timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("resolved immediately, not after IPC_RESPONSE_TIMEOUT")
+            .unwrap();
+        let IpcSendResult::Response(resp) = resolved else {
+            panic!("a malformed frame resolves to a plain response");
+        };
+        assert_eq!(resp.status, 500);
+        assert!(resp.worker_error);
+        let frame_error = resp.frame_error.expect("parse error carried for logging");
+        assert!(
+            frame_error.error.contains("invalid type"),
+            "{}",
+            frame_error.error
+        );
+        assert!(
+            resp.body.contains(&frame_error.digest),
+            "production page names the digest"
+        );
+        assert!(
+            !resp.body.contains("invalid type"),
+            "never echoes the parse error"
+        );
+        assert!(client.inner.pending.is_empty());
+
+        // Node is told to stop whatever the frame belonged to.
+        let cancel = write_rx.recv().await.expect("cancel frame queued");
+        let cancel: serde_json::Value = serde_json::from_slice(&cancel).unwrap();
+        assert_eq!(cancel["type"], "cancel");
+        assert_eq!(cancel["id"], "req-bad");
+
+        // The connection survives: the next frame is delivered normally.
+        let (tx, rx) = oneshot::channel();
+        client.inner.pending.insert("req-ok".into(), tx);
+        let good = serde_json::json!({
+            "id": "req-ok", "status": 200, "headers": {}, "body": "ok",
+            "cacheable": false, "cacheMaxAge": 0, "route": "/posts/:id",
+        });
+        write_frame(&mut node_writer, &serde_json::to_vec(&good).unwrap())
+            .await
+            .unwrap();
+        let IpcSendResult::Response(resp) = rx.await.unwrap() else {
+            panic!("plain response expected");
+        };
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.route.as_deref(), Some("/posts/:id"));
+        reader_task.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_stdin_pipe_stays_open_until_its_guard_drops() {
+        // Stands in for a worker blocked on its stdin watch: exits at EOF.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("cat >/dev/null; exit 7");
+        let mut child = spawn_worker_command(
+            cmd,
+            "/tmp/gio-test-ipc",
+            "/tmp/gio-test-ws",
+            "t",
+            false,
+            &[],
+        )
+        .unwrap();
+        let guard: StdinGuard = child.stdin.take();
+        assert!(guard.is_some(), "the worker's stdin is a pipe");
+        // Child::wait closes a stdin it still holds - the guard lives outside.
+        assert!(
+            timeout(Duration::from_millis(300), child.wait())
+                .await
+                .is_err(),
+            "the worker must keep running while the server holds the pipe"
+        );
+        // However the server goes away, its end of the pipe closes.
+        drop(guard);
+        let status = timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("EOF ends the worker")
+            .unwrap();
+        assert_eq!(status.code(), Some(7));
+    }
+
+    #[test]
+    fn ipc_response_route_is_optional_and_error_frames_keep_it() {
+        let plain: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"x","cacheable":false,"cacheMaxAge":0}"#,
+        )
+        .unwrap();
+        assert_eq!(plain.route, None);
+        let error = error_frame_response(
+            "a",
+            &serde_json::json!({"error": true, "code": "RENDER_ERROR", "route": "/boom"}),
+            false,
+        );
+        assert_eq!(error.route.as_deref(), Some("/boom"));
+        assert_eq!(unavailable_response("a").route, None);
+    }
+
+    #[test]
+    fn ipc_response_route_handler_flag_defaults_off() {
+        let page: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"x","cacheable":false,"cacheMaxAge":0}"#,
+        )
+        .unwrap();
+        assert!(!page.route_handler);
+        let handler: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"x","cacheable":false,"cacheMaxAge":0,"routeHandler":true}"#,
+        )
+        .unwrap();
+        assert!(handler.route_handler);
     }
 
     #[tokio::test]

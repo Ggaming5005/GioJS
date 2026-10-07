@@ -73,6 +73,8 @@ mod tests {
             composed: false,
             tags: Vec::new(),
             ppr_shell: false,
+            route: None,
+            etag: None,
         }
     }
 

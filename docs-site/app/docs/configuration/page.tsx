@@ -120,6 +120,9 @@ enabled = false         # expose /_gio/metrics (Prometheus); off when this secti
 token = ""              # require "Authorization: Bearer <token>" when set
 ip_allowlist = []       # restrict by client IP or CIDR, e.g. ["10.0.0.5", "10.1.0.0/16"]
 
+[logging]
+format = "text"         # "json": one JSON object per line (GIO_LOG_FORMAT overrides)
+
 [dev]                   # only read when NODE_ENV=development
 allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer to`} />
 
@@ -260,7 +263,7 @@ accept_request_id = false   # ignore incoming X-Request-Id, even from trusted pr
           <tr>
             <td><code>/_gio/metrics</code></td>
             <td>off</td>
-            <td>Prometheus exposition (request counts, latency histograms, cache hit ratio, IPC timing). Returns <code>404</code> until enabled via <code>[metrics]</code>.</td>
+            <td>Prometheus exposition (request counts and latency histograms labeled by route pattern, cache tiers, IPC timing - see <a href="/docs/observability">Observability</a>). Returns <code>404</code> until enabled via <code>[metrics]</code>.</td>
           </tr>
         </tbody>
       </table>
@@ -428,6 +431,8 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
           <tr><td><code>GIO_SITE_URL</code></td><td>Absolute base URL for <code>sitemap.xml</code> during <code>gio export</code></td><td>unset</td></tr>
           <tr><td><code>NODE_ENV</code></td><td><code>development</code> enables dev mode (file watcher, dev endpoints, error details) and selects the <code>.env.development*</code> files; anything else - unset included - is production and selects <code>.env.production*</code>. The server passes the decided mode to the Node worker it spawns</td><td>unset</td></tr>
           <tr><td><code>RUST_LOG</code></td><td>Rust log filter (info/debug/trace)</td><td>info</td></tr>
+          <tr><td><code>GIO_LOG_FORMAT</code></td><td><code>json</code> or <code>text</code>: the server&apos;s log format, overriding <code>[logging] format</code> (see <a href="/docs/observability">Observability</a>)</td><td>text</td></tr>
+          <tr><td><code>GIO_EXIT_ON_STDIN_EOF</code></td><td><code>1</code>: shut down gracefully when stdin reaches end-of-file. Set by launchers that start the server with a piped stdin they hold open (<code>gio</code>, a standalone <code>run.mjs</code>), so a launcher killed outright never leaves the server behind; ignored when stdin is not a pipe (see <a href="/docs/deployment">Deployment</a>)</td><td>unset</td></tr>
           <tr><td><code>GIO_PUBLIC_*</code></td><td>Inlined into client bundles at build time (see below); every other variable is server-only</td><td>-</td></tr>
         </tbody>
       </table>

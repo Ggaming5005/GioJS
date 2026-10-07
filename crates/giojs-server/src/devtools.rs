@@ -142,19 +142,7 @@ pub fn build_snapshot_json(
 ) -> String {
     let (cache_entries, cache_size_bytes) = cache.stats();
 
-    let (hits, lookups) = {
-        let mut hits = 0u64;
-        let mut total = 0u64;
-        for entry in metrics.requests_total.iter() {
-            let count = entry.value().load(Ordering::Relaxed);
-            total += count;
-            let key = entry.key();
-            if key.ends_with("\x00hit") || key.ends_with("\x00stale") {
-                hits += count;
-            }
-        }
-        (hits, total)
-    };
+    let (hits, lookups) = metrics.cache_hits_and_lookups();
 
     let http_in_flight = devtools.http_in_flight.load(Ordering::Relaxed);
     let ws_count = ws_registry.active_count();
@@ -206,11 +194,7 @@ pub fn build_snapshot_json(
 
     // Non-cumulative counts: count[i] = cumulative[i] - cumulative[i-1]
     let ipc_histogram: Vec<u64> = {
-        let raw: Vec<u64> = metrics
-            .ipc_latency_buckets
-            .iter()
-            .map(|b| b.load(Ordering::Relaxed))
-            .collect();
+        let raw = metrics.ipc_latency_buckets_total();
         let mut non_cumulative = Vec::with_capacity(raw.len());
         let mut prev = 0u64;
         for &v in &raw {

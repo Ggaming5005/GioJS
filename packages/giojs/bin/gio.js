@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const { execFileSync, spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { existsSync } = require('fs');
 const { join, dirname } = require('path');
 
@@ -145,11 +145,26 @@ function runRustServer() {
   const env = Object.assign({}, process.env);
   const nodeScript = findNodeScript();
   if (nodeScript) env.GIO_NODE_SCRIPT = nodeScript;
+  // stdin is a pipe this launcher holds open and never writes: if it dies -
+  // even by SIGKILL, which it cannot forward - the server reads EOF and shuts
+  // down instead of lingering on the port with its worker.
+  env.GIO_EXIT_ON_STDIN_EOF = '1';
 
-  try {
-    execFileSync(path, process.argv.slice(2), { stdio: 'inherit', env });
-  } catch (err) {
-    if (err.status != null) process.exit(err.status);
-    throw err;
+  const server = spawn(path, process.argv.slice(2), { stdio: ['pipe', 'inherit', 'inherit'], env });
+  server.stdin.on('error', () => {});
+  server.on('error', (err) => {
+    console.error(`gio: could not start the server: ${err.message}`);
+    process.exit(1);
+  });
+  // A terminal Ctrl+C reaches the server directly (same process group, or
+  // the same console on Windows); on Unix, forwarding covers signals sent to
+  // this launcher alone. Windows never forwards: kill() there is
+  // TerminateProcess, which would cut short the server's graceful shutdown.
+  // Either way the launcher stays until the server has exited.
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+      if (process.platform !== 'win32') server.kill(signal);
+    });
   }
+  server.on('exit', (code, signal) => process.exit(code ?? (signal === null ? 0 : 1)));
 }

@@ -262,6 +262,33 @@ accept_request_id = false   # the LB would pass a client's X-Request-Id through`
         <a href="/docs/observability">Observability</a>.
       </p>
 
+      <h2>Process supervision</h2>
+      <p>
+        One GioJS server is two processes: the Rust server (the one your supervisor -
+        systemd, Docker, Kubernetes, PM2 - starts) and the Node worker it spawns and
+        restarts on its own. Send the server <code>SIGTERM</code> to stop: it stops
+        accepting, closes idle keep-alive connections at once, lets in-flight requests
+        finish (8 seconds at most), and takes the worker down with it.
+      </p>
+      <p>
+        A server that dies without that chance - <code>SIGKILL</code>, the OOM killer, a
+        crash, a container runtime that kills only the main process - never leaves its
+        worker behind. The worker&apos;s stdin is a pipe the server holds open and never
+        writes; the operating system closes it however the server dies, and the worker
+        reads end-of-file and exits within moments (Windows uses a job object for the
+        same guarantee). Launchers apply the same scheme one level up: <code>gio</code>{' '}
+        and a standalone <code>run.mjs</code> start the server with a piped stdin and{' '}
+        <code>GIO_EXIT_ON_STDIN_EOF=1</code>, so killing the launcher outright stops the
+        server and frees the port too.
+      </p>
+      <div className="callout">
+        In a container, run the server (or <code>run.mjs</code>) as the main process so
+        your runtime&apos;s stop signal reaches it - and keep{' '}
+        <code>GIO_EXIT_ON_STDIN_EOF</code> unset when you start the server binary
+        directly: with stdin attached to <code>/dev/null</code> or a terminal it is
+        ignored anyway, but it exists for launchers that hold the pipe.
+      </div>
+
       <h2>Multi-instance deployments</h2>
       <p>
         The page cache is per-instance (in-memory LRU plus a local disk tier) - there is no

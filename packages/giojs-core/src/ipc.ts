@@ -14,6 +14,7 @@ import type { IPCRequest, IPCOutbound, IPCError } from './context.ts';
 import type { RouteModule, LayoutEntry } from './router.ts';
 import {
   renderRoute,
+  resolveRoutePattern,
   type RenderExtras,
   type SseRouteResult,
   type StreamRenderResult,
@@ -187,9 +188,15 @@ export function createIPCServer(
       // Every line logged while handling the request (render, handlers,
       // stream pumping, SSE callbacks) carries its id.
       const logContext = req.requestId !== undefined ? { requestId: req.requestId } : undefined;
+      // Rust's metrics label, stamped on whatever answers: the route of the
+      // path as requested, until renderRoute reports the path it routes by
+      // (a plugin onRequest hook may have rewritten it).
+      const label: RouteLabel = {
+        route: resolveRoutePattern(req.path, routes, renderExtras.handlers),
+      };
       await withRequestLogContext(logContext, async () => {
         try {
-          await handleRequest(req);
+          await handleRequest(req, label);
         } catch (requestError) {
           const digest = createErrorDigest();
           logger.error('request handling failed', {
@@ -198,7 +205,7 @@ export function createIPCServer(
             digest,
             ...describeError(requestError),
           });
-          writeFrame(socket, {
+          writeFrame(socket, withRoute({
             id: req.id,
             error: true,
             code: 'INTERNAL',
@@ -207,24 +214,29 @@ export function createIPCServer(
               : 'Internal Server Error',
             digest,
             ...logContext,
-          } satisfies IPCError);
+          } satisfies IPCError, label.route));
         }
       });
     }
 
-    async function handleRequest(req: IPCRequest): Promise<void> {
+    async function handleRequest(req: IPCRequest, label: RouteLabel): Promise<void> {
       const abort = new AbortController();
       activeRenders.set(req.id, abort);
       let routeResult;
       try {
-        routeResult = await renderRoute(req, routes, layouts, registry, abort.signal, clientScripts, renderExtras);
+        routeResult = await renderRoute(req, routes, layouts, registry, abort.signal, clientScripts, {
+          ...renderExtras,
+          onRouted: routed => {
+            label.route = resolveRoutePattern(routed.path, routes, renderExtras.handlers);
+          },
+        });
 
         if (isStreamRenderResult(routeResult)) {
           // Head first: Rust registers the chunk stream under this id before
           // any chunk frame can arrive (frames are processed in order). The
           // abort entry stays registered while pumping so a cancel frame
           // mid-stream aborts the React render and stops the pump.
-          writeFrame(socket, routeResult.head);
+          writeFrame(socket, withRoute(routeResult.head, label.route));
           await pumpRenderStream(socket, req.id, routeResult);
           return;
         }
@@ -233,12 +245,12 @@ export function createIPCServer(
       }
 
       if (!isSseResult(routeResult)) {
-        writeFrame(socket, routeResult);
+        writeFrame(socket, withRoute(routeResult, label.route));
         return;
       }
 
       // Send initial SSE response so Rust switches to streaming mode
-      writeFrame(socket, {
+      writeFrame(socket, withRoute({
         id: req.id,
         status: 200,
         headers: {
@@ -249,7 +261,7 @@ export function createIPCServer(
         body: '',
         cacheable: false,
         cacheMaxAge: 0,
-      } satisfies IPCOutbound);
+      } satisfies IPCOutbound, label.route));
 
       const sseStream: SseStream = {
         send(data: unknown, event?: string, id?: string): void {
@@ -349,6 +361,28 @@ export function createIPCServer(
 }
 
 type RouteResult = IPCOutbound | SseRouteResult | StreamRenderResult;
+
+/** One request's metrics route label, updated once renderRoute has routed. */
+interface RouteLabel {
+  route: string | null;
+}
+
+/**
+ * `frame` with the optional `route` field (the matched pattern) set, or
+ * unchanged when no route matched - Rust then labels the request
+ * `unmatched`. Stamped on the frame after plugins ran, so no hook can spoof
+ * the label; resolved from the path routing went by (see
+ * RenderExtras.onRouted).
+ */
+export function withRoute<T extends IPCOutbound>(frame: T, route: string | null): T {
+  const stamped: T = { ...frame };
+  if (route === null) {
+    delete stamped.route;
+  } else {
+    stamped.route = route;
+  }
+  return stamped;
+}
 
 function isSseResult(result: RouteResult): result is SseRouteResult {
   return 'type' in result && result.type === 'sse';

@@ -119,6 +119,13 @@ export interface RenderExtras {
    * forever. Any error React reported fails the render instead.
    */
   staticExport?: boolean;
+  /**
+   * Called with the request routing goes by: after plugin onRequest hooks
+   * (which may rewrite its path) ran, right before matching. Not called
+   * when a hook answers the request itself. The IPC server resolves Rust's
+   * metrics `route` label from it.
+   */
+  onRouted?: (req: IPCRequest) => void;
 }
 
 /** What production responses say instead of the real error message. */
@@ -195,6 +202,25 @@ function matchRoute(
 ): { module: RouteModule; params: Record<string, string> } | null {
   const match = matchIn(path, routes);
   return match === null ? null : { module: match.entry, params: match.params };
+}
+
+/**
+ * The route pattern that owns `path` (e.g. "/posts/:id"), or null when none
+ * matches - the IPC `route` field Rust labels its metrics with. Same
+ * precedence as renderRoute: the more specific of the page and route.ts
+ * matches, equal patterns being one folder's pair.
+ */
+export function resolveRoutePattern(
+  path: string,
+  routes: Map<string, RouteModule>,
+  handlers?: Map<string, HandlerEntry>,
+): string | null {
+  const page = matchIn(path, routes);
+  const handler = handlers !== undefined ? matchIn(path, handlers) : null;
+  if (handler !== null && (page === null || compareSpecificity(handler.pattern, page.pattern) <= 0)) {
+    return handler.pattern;
+  }
+  return page?.pattern ?? null;
 }
 
 /** Build the request object handed to route.ts handlers. */
@@ -595,6 +621,7 @@ export async function renderRoute(
     }
   }
 
+  extras?.onRouted?.(req);
   const match = matchRoute(req.path, routes);
 
   // ── route.ts method handlers (API routes + SSE) ───────────────────────────
@@ -1079,14 +1106,15 @@ function methodNotAllowed(req: IPCRequest, allowed: string[]): IPCResponse {
  * Invoke a route.ts method handler. The result contract:
  * `GioEventStream` → SSE; web `Response` → converted; null/undefined → 204;
  * anything else → JSON 200; notFound() → JSON 404. Handler responses are
- * never cacheable.
+ * never cacheable, and are flagged `routeHandler` so Rust leaves their
+ * Cache-Control to the app.
  */
 async function runRouteHandler(
   req: IPCRequest,
   handler: (gioReq: GioRequest) => unknown,
   params: Record<string, string>,
 ): Promise<IPCResponse | SseRouteResult> {
-  const base = { id: req.id, cacheable: false, cacheMaxAge: 0 };
+  const base = { id: req.id, cacheable: false, cacheMaxAge: 0, routeHandler: true };
   try {
     const result = await handler(makeGioRequest(req, params));
 
