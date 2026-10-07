@@ -147,6 +147,29 @@ describe('route stylesheets in the server render', () => {
     expect(docs).toBeLessThan(out.body.indexOf('<div id="__gio">'));
   });
 
+  it('streams them at the top of <body> of a complete document when there is no root layout', async () => {
+    const out = (await renderRoute(
+      makeRequest('/docs'),
+      routes(),
+      layouts(false),
+      undefined,
+      undefined,
+      undefined,
+      { stylesheets: manifest(), streaming: true },
+    )) as StreamRenderResult;
+    expect(out.type).toBe('stream');
+    const html = await streamed(out);
+    expect(html.startsWith('<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>')).toBe(true);
+    expect(html.endsWith('</body></html>')).toBe(true);
+    const body = html.slice(html.indexOf('<body>'));
+    const root = body.indexOf(`<link rel="stylesheet" href="${ROOT_CSS}" data-precedence="default"/>`);
+    const docs = body.indexOf(`<link rel="stylesheet" href="${DOCS_CSS}" data-precedence="default"/>`);
+    expect(root).toBeGreaterThan(0);
+    expect(docs).toBeGreaterThan(root);
+    expect(docs).toBeLessThan(body.indexOf('<div id="__gio">'));
+    expect(/<div id="__gio">([\s\S]*?)<\/div>/.exec(html)?.[1]).not.toContain('<link');
+  });
+
   it('links nothing for routes the manifest does not know', async () => {
     const out = (await renderRoute(
       makeRequest('/docs'),
@@ -216,5 +239,43 @@ describe('route stylesheets in the server render', () => {
     expect(container?.innerHTML).toBe('<section><h1 class="docs_123abc_title">docs</h1></section>');
     // The server's links were adopted, not duplicated.
     expect(document.head.querySelectorAll(`link[href="${DOCS_CSS}"]`)).toHaveLength(1);
+  });
+
+  it('hydrates a page without a root layout, adopting the links in <body>', async () => {
+    const out = (await renderRoute(
+      makeRequest('/docs'),
+      routes({ revalidate: 60 }),
+      layouts(false),
+      undefined,
+      undefined,
+      new Map([['/docs', '/_next/static/chunks/route-docs-X.js']]),
+      { stylesheets: manifest() },
+    )) as IPCResponse;
+    // A document of its own: React keeps its stylesheet records per
+    // document, and the test above already hydrated these URLs.
+    const doc = document.implementation.createHTMLDocument('');
+    doc.documentElement.innerHTML = out.body.replace(/^<!DOCTYPE html><html>|<\/html>$/g, '');
+    expect(doc.body.querySelectorAll('link[rel="stylesheet"]')).toHaveLength(2);
+    const container = doc.getElementById('__gio');
+    expect(container).not.toBeNull();
+    const recoverable: unknown[] = [];
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const tree = withStylesheets(
+      buildSegmentTree(React.createElement(DocsPage), '/docs', [{ layout: DocsLayout, error: null, loading: null }]),
+      [ROOT_CSS, DOCS_CSS],
+    );
+    await act(async () => {
+      hydrateRoot(container as HTMLElement, tree, {
+        onRecoverableError: error => recoverable.push(error),
+      });
+    });
+    consoleError.mockRestore();
+    expect(recoverable).toEqual([]);
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(container?.innerHTML).toBe('<section><h1 class="docs_123abc_title">docs</h1></section>');
+    // Found where the server put them, so neither stylesheet loads twice.
+    for (const href of [ROOT_CSS, DOCS_CSS]) {
+      expect(doc.querySelectorAll(`link[href="${href}"]`)).toHaveLength(1);
+    }
   });
 });
