@@ -59,7 +59,12 @@ export interface RouteTableEntry {
 
 export interface RouteTable {
   routes: RouteTableEntry[];
-  /** Patterns .gio/routes.d.ts types: pages plus route.ts HTTP handlers. */
+  /**
+   * Patterns .gio/routes.d.ts types: pages plus route.ts HTTP handlers, and
+   * route.ts files that failed to import - those usually need runtime env (a
+   * session secret, a database URL) that CI lacks, and the types must not
+   * depend on the environment `gio typegen` runs in.
+   */
   typedPatterns: string[];
 }
 
@@ -120,6 +125,7 @@ export async function collectRouteTable(appDir: string): Promise<RouteTable> {
   }
 
   const handlers = new Map<string, HandlerEntry>();
+  const unloaded: string[] = [];
   for (const routeFile of routeFiles) {
     const row = {
       pattern: routeFile.urlPattern,
@@ -140,6 +146,7 @@ export async function collectRouteTable(appDir: string): Promise<RouteTable> {
         methods: [],
         loadError: loadError instanceof Error ? loadError.message : String(loadError),
       });
+      unloaded.push(routeFile.urlPattern);
       continue;
     }
     const wsHandlers = new Map<string, WsHandlerFn>();
@@ -168,6 +175,7 @@ export async function collectRouteTable(appDir: string): Promise<RouteTable> {
   }
 
   table.sort((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : 0));
-  // The same patterns main.ts hands writeRouteTypes at boot.
-  return { routes: table, typedPatterns: [...routes.keys(), ...handlers.keys()] };
+  // The patterns main.ts hands writeRouteTypes at boot, plus the route
+  // files that did not load here (see RouteTable.typedPatterns).
+  return { routes: table, typedPatterns: [...routes.keys(), ...handlers.keys(), ...unloaded] };
 }

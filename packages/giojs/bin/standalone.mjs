@@ -20,10 +20,10 @@
  * `gio` run.
  */
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { chmod, copyFile, cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, extname, join, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const TARGETS = [
@@ -79,6 +79,48 @@ function parseArgs(argv) {
     }
   }
   return options;
+}
+
+/** `path` with symlinks resolved as far as it exists. */
+function realPath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    const parent = dirname(path);
+    return parent === path ? path : join(realPath(parent), basename(path));
+  }
+}
+
+/** Whether `inner` is `outer` or below it. */
+function isWithin(outer, inner) {
+  const rel = relative(outer, inner);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/**
+ * The build replaces --out wholesale (rm -rf, then write), so it must be a
+ * directory this command owns: never the project, an ancestor of it or the
+ * app directory, and never a non-empty directory without the files a
+ * previous standalone build leaves (run.mjs and .gio/manifest.json).
+ */
+function outDirProblem(out, projectRoot, appDir) {
+  const target = realPath(out);
+  const project = realPath(projectRoot);
+  const app = realPath(appDir);
+  if (isWithin(target, project)) {
+    return `--out ${out} is the project directory or contains it - the build empties --out first`;
+  }
+  if (isWithin(app, target)) {
+    return `--out ${out} is inside the app directory ${appDir}`;
+  }
+  if (!existsSync(target)) return null;
+  if (!statSync(target).isDirectory()) return `--out ${out} exists and is not a directory`;
+  if (readdirSync(target).length === 0) return null;
+  if (existsSync(join(target, 'run.mjs')) && existsSync(join(target, '.gio', 'manifest.json'))) return null;
+  return (
+    `--out ${out} is not empty and is not a previous standalone build - the build empties --out first.\n` +
+    '  Pick a new directory, or remove this one yourself.'
+  );
 }
 
 function findCoreDir(requireFromHere) {
@@ -174,6 +216,8 @@ async function main() {
   const appDir = resolve(process.env.GIO_APP_DIR ?? join(process.cwd(), 'app'));
   if (!existsSync(appDir)) fail(`app directory not found: ${appDir}`);
   const projectRoot = dirname(appDir);
+  const outProblem = outDirProblem(options.out, projectRoot, appDir);
+  if (outProblem !== null) fail(outProblem);
 
   const coreDir = findCoreDir(requireFromHere);
   if (coreDir === null) fail('@gio.js/core not found - run `npm install` first');

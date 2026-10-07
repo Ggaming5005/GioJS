@@ -122,8 +122,29 @@ describe('collectRouteTable', () => {
   it('types pages and HTTP handlers, like the boot', async () => {
     const { typedPatterns } = await collectRouteTable(appDir);
     expect([...typedPatterns].sort()).toEqual(
-      ['/', '/about', '/api/hello', '/docs/*slug?', '/live', '/posts/:id', '/posts/new'].sort(),
+      ['/', '/about', '/api/hello', '/broken', '/docs/*slug?', '/live', '/posts/:id', '/posts/new'].sort(),
     );
+  });
+
+  it('types a route.ts that needs runtime env the same with and without it', async () => {
+    // The auth starter's logout route: createSessionStorage() at module
+    // level throws in production without GIO_SESSION_SECRET (CI's typegen).
+    const envApp = await writeApp('env', {
+      'page.tsx': PAGE,
+      'logout/route.ts':
+        'if (!process.env.ROUTE_TABLE_TEST_SECRET) throw new Error("ROUTE_TABLE_TEST_SECRET is not set");\n' +
+        'export function POST() { return {}; }',
+    });
+    const without = await collectRouteTable(envApp);
+    expect(without.routes.find(r => r.pattern === '/logout')?.loadError).toContain('not set');
+    process.env.ROUTE_TABLE_TEST_SECRET = 'x';
+    try {
+      const withEnv = await collectRouteTable(envApp);
+      expect([...new Set(without.typedPatterns)].sort()).toEqual([...new Set(withEnv.typedPatterns)].sort());
+      expect(withEnv.typedPatterns).toContain('/logout');
+    } finally {
+      delete process.env.ROUTE_TABLE_TEST_SECRET;
+    }
   });
 
   it('refuses the conflicts the boot refuses', async () => {
