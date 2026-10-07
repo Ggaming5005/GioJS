@@ -1087,6 +1087,22 @@ async function main() {
       assert.match(secondRes.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/);
     });
 
+    await test('buffered responses carry a Content-Length, compressed ones none', async () => {
+      // After the cache test above: /cached is stored.
+      const hit = await rawGet('/cached');
+      assert.match(hit.headers['x-gio-cache'] ?? '', /^hit/);
+      // A small route body, a cache hit and /_gio/health: each body is known
+      // in full, below the compression threshold or not asked to compress.
+      for (const res of [hit, await rawGet('/api/notes'), await rawGet('/_gio/health')]) {
+        assert.equal(res.headers['transfer-encoding'], undefined);
+        assert.equal(res.headers['content-length'], String(Buffer.byteLength(res.body)));
+      }
+      // Compressed, the length is unknown until the encoder finishes.
+      const compressed = await rawGet('/cached', { 'accept-encoding': 'gzip' });
+      assert.equal(compressed.headers['content-encoding'], 'gzip');
+      assert.equal(compressed.headers['content-length'], undefined);
+    });
+
     await test('cached pages: CDN Cache-Control, a weak ETag, and 304 for If-None-Match', async () => {
       const hit = await fetch(`${BASE}/cached`);
       const body = await hit.text();

@@ -400,6 +400,34 @@ fn static_file_stamp_layer() -> SetResponseHeaderLayer<HeaderValue> {
     )
 }
 
+/// A `Content-Length` for every body whose size is known (buffered pages,
+/// cache hits, small route bodies, /_gio/health). hyper derives it from the
+/// body's size hint, but CompressionLayer wraps every body - also the ones
+/// it leaves uncompressed - in a type that drops the hint, so they went out
+/// chunked. A header survives the wrapper; a body the layer does compress
+/// loses it there, as it must. Streams have no exact size and stay chunked.
+async fn exact_length_middleware(req: Request, next: Next) -> Response {
+    use axum::body::HttpBody as _;
+    // A HEAD answer may carry a GET's length or none; hyper decides.
+    let head = req.method() == axum::http::Method::HEAD;
+    let mut resp = next.run(req).await;
+    let status = resp.status();
+    if head
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+        || resp.headers().contains_key(header::CONTENT_LENGTH)
+        || resp.headers().contains_key(header::TRANSFER_ENCODING)
+    {
+        return resp;
+    }
+    if let Some(length) = resp.body().size_hint().exact() {
+        resp.headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    }
+    resp
+}
+
 /// Headers that must never be stored in the shared cache: set-cookie is
 /// per-user (replaying it would hand one visitor's session to every cache
 /// hit), the rest are hop-by-hop and describe the original connection.
@@ -1224,6 +1252,9 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             security,
             security::security_headers_middleware,
         ))
+        // Right inside compression, whose body wrapper hides the size of a
+        // body it leaves uncompressed.
+        .layer(axum::middleware::from_fn(exact_length_middleware))
         // Compression is added last so it is the outermost response transform:
         // it must run after i18n injects <html lang>, otherwise it compresses
         // the body first and the lang injection silently no-ops.
@@ -8844,4 +8875,55 @@ Z1uis5x6LpdQ/f48fePWB4bJazo1nu0iiDgI5KKq1gGbWFFjVjMISa/m
         assert_eq!(label("/_gio/fonts/a.woff2").await.as_deref(), Some("static"));
     }
 
+    #[tokio::test]
+    async fn known_size_bodies_keep_their_content_length_through_compression() {
+        async fn page(req: Request<Body>) -> Response {
+            let len: usize = req.uri().query().unwrap().parse().unwrap();
+            ([(header::CONTENT_TYPE, "text/html")], "x".repeat(len)).into_response()
+        }
+        async fn streamed() -> Response {
+            Body::from_stream(tokio_stream::iter([Ok::<_, Infallible>(Bytes::from("x"))]))
+                .into_response()
+        }
+        async fn empty() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+        let app = Router::new()
+            .route("/page", get(page))
+            .route("/stream", get(streamed))
+            .route("/empty", get(empty))
+            .layer(axum::middleware::from_fn(exact_length_middleware))
+            .layer(compression_layer(config::CompressionConfig::default()));
+        let call = |method: &'static str, uri: &'static str| {
+            let mut app = app.clone();
+            async move {
+                app.call(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::ACCEPT_ENCODING, "gzip")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let length = |resp: &Response| {
+            resp.headers()
+                .get(header::CONTENT_LENGTH)
+                .map(|value| value.to_str().unwrap().to_string())
+        };
+        // Below the compression threshold: sent as is, with its size.
+        let small = call("GET", "/page?100").await;
+        assert_eq!(small.headers().get(header::CONTENT_ENCODING), None);
+        assert_eq!(length(&small).as_deref(), Some("100"));
+        // Compressed: the length is unknown until the encoder is done.
+        let large = call("GET", "/page?4096").await;
+        assert_eq!(large.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(length(&large), None);
+        assert_eq!(length(&call("GET", "/stream").await), None);
+        assert_eq!(length(&call("GET", "/empty").await), None);
+        assert_eq!(length(&call("HEAD", "/page?100").await), None);
+    }
 }

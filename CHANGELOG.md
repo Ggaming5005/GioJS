@@ -1033,6 +1033,11 @@ first.
   and other parameterized `Purpose` / `Sec-Purpose` values did not count as
   prefetches. Both headers are now read as lists, and an item `prefetch`
   with or without parameters marks a prefetch.
+- Responses whose body is known in full - page cache hits, small route
+  handler bodies, `/_gio/health` - lost their `Content-Length` and went out
+  chunked over HTTP/1.1: the compression layer hid the body's size even when
+  it left the body uncompressed. They now carry one; a compressed body still
+  has none.
 
 ### Known limitations
 
