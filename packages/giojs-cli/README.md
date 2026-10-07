@@ -28,6 +28,16 @@ npm create giojs@latest my-app -- --ts --server
 #   -y, --yes            accept defaults
 ```
 
+## Migrating from Next.js
+
+```bash
+npm create giojs@latest -- migrate [dir]
+#   --dry-run   show the plan and a diff of every change, write nothing
+#   -y, --yes   apply without the confirmation prompt
+```
+
+Moves `pages/` to `app/`, rewrites `next/*` imports (`next/link`, `next/image`, `next/router`, `next/head`, ...), converts `next.config` redirects/rewrites/headers/images/i18n to `gio.toml` (never overwriting an existing one), updates `package.json` (GioJS packages, `"type": "module"`), renames `.js` files with JSX to `.jsx`, and writes `MIGRATION_REPORT.md` with every change and TODO. The `gio-migrate` bin runs the same command. Details: https://giojs.com/docs/migration
+
 ## What you get
 
 A minimal app using file-based routing (`app/page.tsx`, `layout.tsx`, dynamic `[id]` routes), `getServerSideProps` for server data, and the `@gio.js/react` components (`GioLink`, `GioImage`).

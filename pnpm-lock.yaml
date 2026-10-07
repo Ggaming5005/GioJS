@@ -46,13 +46,14 @@ importers:
         version: link:../../platform/giojs-win32-x64
 
   packages/giojs-cli:
+    dependencies:
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
     devDependencies:
       '@types/node':
         specifier: ^25.8.0
         version: 25.9.5
-      typescript:
-        specifier: ^5.4.0
-        version: 5.9.3
 
   packages/giojs-core:
     dependencies:
