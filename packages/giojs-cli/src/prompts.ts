@@ -1,5 +1,7 @@
 import { createInterface } from 'readline/promises';
 import { select } from './select.js';
+import { chooseFeatures } from './overlays/cli.js';
+import type { FeatureName } from './overlays/types.js';
 
 export type Language = 'ts' | 'js';
 export type Mode = 'server' | 'static';
@@ -10,6 +12,8 @@ export interface ProjectConfig {
   mode: Mode;
   template: 'default' | 'default-js';
   installDeps: boolean;
+  /** Feature overlays to apply (overlays/). */
+  features: FeatureName[];
 }
 
 export interface CliArgs {
@@ -17,6 +21,8 @@ export interface CliArgs {
   language?: Language;
   mode?: Mode;
   installDeps?: boolean;
+  /** Feature flags (overlays/cli.ts extractFeatureArgs); undefined = ask. */
+  features?: FeatureName[];
   /** Skip interactive prompts and accept defaults for anything not provided. */
   yes: boolean;
 }
@@ -30,12 +36,14 @@ export async function gatherConfig(args: CliArgs): Promise<ProjectConfig> {
 
   if (!interactive) {
     const language = args.language ?? 'ts';
+    const mode = args.mode ?? 'server';
     return {
       projectName: args.projectName?.trim() || 'my-giojs-app',
       language,
-      mode: args.mode ?? 'server',
+      mode,
       template: templateFor(language),
       installDeps: args.installDeps ?? true,
+      features: await chooseFeatures(args.features, mode, false),
     };
   }
 
@@ -71,6 +79,9 @@ export async function gatherConfig(args: CliArgs): Promise<ProjectConfig> {
     0,
   ));
 
+  // overlays: the "Add features" multi-select (skipped when flags chose).
+  const features = await chooseFeatures(args.features, mode, true);
+
   if (args.installDeps !== undefined) {
     installDeps = args.installDeps;
   } else {
@@ -83,5 +94,5 @@ export async function gatherConfig(args: CliArgs): Promise<ProjectConfig> {
     }
   }
 
-  return { projectName, language, mode, template: templateFor(language), installDeps };
+  return { projectName, language, mode, template: templateFor(language), installDeps, features };
 }

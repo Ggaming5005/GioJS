@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 import { create } from './create.js';
+import { FEATURE_USAGE } from './overlays/cli.js';
 
 const USAGE = `Usage:
   npm create giojs@latest [name] -- [options]   Scaffold a new GioJS app
   npm create giojs@latest -- migrate [dir]      Migrate a Next.js app (see migrate --help)
+  npx create-giojs add <feature...>             Add a feature to an existing app (see add --help)
 
 Options:
   --ts / --js          language
   --server / --static  build target
   --no-install         skip dependency install
-  -y, --yes            accept defaults`;
+  -y, --yes            accept defaults
+
+${FEATURE_USAGE}`;
 
 async function main(argv: string[]): Promise<void> {
   if (argv[0] === 'migrate') {
@@ -17,6 +21,11 @@ async function main(argv: string[]): Promise<void> {
     // which scaffolding never needs.
     const { runMigrate } = await import('./migrate-command.js');
     process.exitCode = await runMigrate(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'add') {
+    const { runAdd } = await import('./overlays/add.js');
+    process.exitCode = await runAdd(argv.slice(1));
     return;
   }
   if (argv[0] === '--help' || argv[0] === '-h') {

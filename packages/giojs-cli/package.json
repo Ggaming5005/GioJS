@@ -10,12 +10,13 @@
   },
   "exports": {
     "./migrate": "./dist/migrate-command.js",
+    "./add": "./dist/overlays/add.js",
     "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "tsc && node --test test/copy-template.test.ts test/templates.test.ts test/create.test.ts test/template-typecheck.test.ts test/migrate-transforms.test.ts test/migrate-pages.test.ts test/next-config-converter.test.ts test/migrate-project.test.ts test/migrate-render.test.ts"
+    "test": "tsc && node --test test/copy-template.test.ts test/templates.test.ts test/create.test.ts test/template-typecheck.test.ts test/migrate-transforms.test.ts test/migrate-pages.test.ts test/next-config-converter.test.ts test/migrate-project.test.ts test/migrate-render.test.ts test/overlays.test.ts test/overlay-typecheck.test.ts test/overlay-boot.test.ts"
   },
   "files": [
     "dist",
@@ -25,7 +26,8 @@
     "typescript": "^5.4.0"
   },
   "devDependencies": {
-    "@types/node": "^25.8.0"
+    "@types/node": "^25.8.0",
+    "drizzle-orm": "^0.45.3"
   },
   "homepage": "https://giojs.com",
   "repository": {

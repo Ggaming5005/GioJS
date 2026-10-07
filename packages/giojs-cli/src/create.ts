@@ -4,6 +4,8 @@ import { readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { copyTemplate } from './copy-template.js';
+import { applyCreateFeatures, extractFeatureArgs } from './overlays/cli.js';
+import { packageManager } from './overlays/package-manager.js';
 import { gatherConfig, type CliArgs, type Language, type Mode } from './prompts.js';
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -90,7 +92,9 @@ async function patchPackageJson(destDir: string, mode: Mode): Promise<boolean> {
 }
 
 export async function create(argv: string[]): Promise<void> {
-  const config = await gatherConfig(parseArgs(argv));
+  // overlays: feature flags are taken out before the create flow parses argv.
+  const { features, rest } = extractFeatureArgs(argv);
+  const config = await gatherConfig({ ...parseArgs(rest), ...(features !== undefined ? { features } : {}) });
   const destDir = join(process.cwd(), config.projectName);
 
   const langLabel = config.language === 'js' ? 'JavaScript (.jsx)' : 'TypeScript (.tsx)';
@@ -99,6 +103,13 @@ export async function create(argv: string[]): Promise<void> {
   await copyTemplate(config.template, destDir, config.projectName);
   const linksMonorepo = await patchPackageJson(destDir, config.mode);
   console.log('Template copied.');
+  // overlays: before the install, so their dependencies are installed too.
+  // The package manager is the one this flow installs with (below).
+  const featureSteps = await applyCreateFeatures(
+    destDir,
+    { projectName: config.projectName, language: config.language, mode: config.mode, packageManager: packageManager('npm') },
+    config.features,
+  );
 
   if (config.installDeps) {
     console.log('Installing dependencies...');
@@ -117,4 +128,5 @@ export async function create(argv: string[]): Promise<void> {
       `this app links: run it again after changing them.\n`
     : '';
   console.log(`\nDone! To get started:\n\n${steps}\n${rebuild}`);
+  if (featureSteps !== '') console.log(`Your features:\n${featureSteps}\n`);
 }
