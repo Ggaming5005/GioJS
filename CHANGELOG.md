@@ -1032,6 +1032,9 @@ first.
   `tsconfig.json` (else `jsconfig.json`) as `TSX_TSCONFIG_PATH`, the file
   the client bundles already used; a `TSX_TSCONFIG_PATH` the environment
   sets wins.
+- `handleHardReload()` from `@gio.js/react` threw `window is not defined`
+  when called during server rendering; like the other deployment helpers,
+  it now does nothing there.
 
 ### Known limitations
 

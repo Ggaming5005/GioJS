@@ -61,7 +61,9 @@ export function isHardReloadResponse(resp: Response): boolean {
   return resp.status === 409 && resp.headers.get('x-gio-action') === 'hard-reload';
 }
 
+/** Reload the tab onto the server's build. A no-op on the server, like the rest of this module. */
 export function handleHardReload(): void {
+  if (typeof window === 'undefined') return;
   window.location.reload();
 }
 

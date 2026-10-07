@@ -73,10 +73,10 @@ export default function Page(): React.JSX.Element {
       <h2 id="handlehardreload">handleHardReload</h2>
       <CodeBlock lang="ts" code={`handleHardReload(): void`} />
       <p>
-        <code>handleHardReload()</code> reloads the page (
-        <code>window.location.reload()</code>), so the tab fetches the new build&apos;s HTML and
-        scripts. Browser only: unlike the other helpers it has no server-side guard, so
-        calling it during server rendering throws (there is no <code>window</code>).
+        <code>handleHardReload()</code> reloads the page{' '}
+        (<code>window.location.reload()</code>), so the tab fetches the new build&apos;s HTML
+        and scripts. On the server, where there is no <code>window</code>, it does nothing,
+        like the other helpers.
       </p>
 
       <h2 id="initdeploymentid">initDeploymentId</h2>
@@ -143,7 +143,9 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
               The router sends the id on navigations, prefetches, refreshes and{' '}
               <code>{'<GioForm>'}</code> posts, and <code>getDeploymentId()</code> reads it on
               first use - <code>initDeploymentId()</code> is no longer needed.{' '}
-              <code>[server] skew_protection</code> can turn the <code>409</code> off.
+              <code>[server] skew_protection</code> can turn the <code>409</code> off.{' '}
+              <code>handleHardReload()</code> does nothing on the server instead of
+              throwing.
             </>
           ),
         },
