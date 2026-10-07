@@ -51,9 +51,10 @@ export async function getServerSideProps(ctx) {
   };
 }`} />
       <p>
-        A tag is a string of 1-256 bytes without control characters; a render keeps at
-        most 64 (duplicates are dropped), and tags starting with <code>_gio:</code> are
-        reserved. Invalid tags are ignored with a warning in the log rather than failing the
+        A tag is a string of 1-256 bytes without control characters, and well-formed
+        Unicode (an emoji cut in half by <code>title.slice(0, 20)</code> is not); a render
+        keeps at most 64 (duplicates are dropped), and tags starting with{' '}
+        <code>_gio:</code> are reserved. Invalid tags are ignored with a warning in the log rather than failing the
         render. Tags only matter on pages that are cached (<code>revalidate</code> set).
         Every cached page is also purgeable by its path - no tag needed.
       </p>
@@ -81,8 +82,17 @@ export async function PUT(req) {
           path and everything below it, at segment boundaries (<code>/blog</code> covers{' '}
           <code>/blog/a</code>, not <code>/blogger</code>). A query or fragment in the path is
           ignored, and so is a leading locale segment (<code>/fr/about</code> purges{' '}
-          <code>/about</code> in every locale). The path is the one the page renders at -
-          after any <code>[[rewrites]]</code>.
+          <code>/about</code> in every locale - pages are cached under their locale-free
+          path, so a bare <code>/fr</code> with <code>{"{ type: 'prefix' }"}</code> purges
+          every page of the site, and the server logs a warning when it does). The path is
+          the one the page renders at - after any <code>[[rewrites]]</code>.
+        </li>
+        <li>
+          Paths may be given decoded or percent-encoded: <code>/blog/café</code> and{' '}
+          <code>/blog/caf%C3%A9</code> (or <code>/blog/a b</code> and{' '}
+          <code>/blog/a%20b</code>) purge the same page, so a slug straight from your CMS or
+          database works. A <code>%</code> always starts an escape - write a literal{' '}
+          <code>%</code> as <code>%25</code>.
         </li>
       </ul>
       <p>
@@ -91,15 +101,18 @@ export async function PUT(req) {
         query-string and locale variant counts). If the confirmation does not arrive within
         5 seconds, or the server connection drops, they resolve with <code>ok: false</code>{' '}
         and an <code>error</code>, and log a warning - they do not throw, so a write that
-        already succeeded is not failed over its cache refresh. An invalid tag or path is a
-        programming error and rejects with a <code>TypeError</code>. Under{' '}
+        already succeeded is not failed over its cache refresh. An invalid tag or path - an
+        unpaired surrogate, a <code>.</code> or <code>..</code> segment, a <code>%</code>{' '}
+        that does not start an escape, a path under <code>/_gio</code> - is a programming
+        error and rejects with a <code>TypeError</code>. Under{' '}
         <code>gio export</code> (and in unit tests) there is no cache to purge: they do
         nothing and warn once.
       </p>
       <p>
         A render that was already running when the purge happened (a cache miss or a
-        background refresh) is still answered, but its result is not cached - it may have
-        read the old data - so the purge always wins.
+        background refresh) still answers the requests that were waiting for it, but its
+        result is not cached - it may have read the old data - and a request that arrives
+        after the purge renders on its own instead of joining it, so the purge always wins.
       </p>
 
       <h3>From outside: POST /_gio/revalidate</h3>

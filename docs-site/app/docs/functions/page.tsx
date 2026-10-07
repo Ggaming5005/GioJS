@@ -66,7 +66,9 @@ export async function getServerSideProps(ctx) {
         Purge cached pages from server code, so the next request renders them fresh.{' '}
         <code>revalidatePath</code> takes <code>{"{ type: 'page' }"}</code> (default: that
         page, every query string and locale) or <code>{"{ type: 'prefix' }"}</code> (the path
-        and everything below it). Both resolve with <code>{'{ ok, purged, error? }'}</code>{' '}
+        and everything below it); the path may be decoded (<code>/blog/café</code>) or
+        percent-encoded (<code>/blog/caf%C3%A9</code>). Both resolve with{' '}
+        <code>{'{ ok, purged, error? }'}</code>{' '}
         once the server confirmed the purge, and resolve <code>ok: false</code> instead of
         throwing when it could not be confirmed in time.
       </p>

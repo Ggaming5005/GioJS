@@ -3,8 +3,10 @@
  *
  * Publishes a new version of an article, then purges the cached page the
  * way the `by` query names: `tag` (revalidateTag('article:<id>')), `path`
- * (revalidatePath('/articles/<id>')), `all` (revalidateTag('articles'), the
- * page's static tag) or `prefix` (revalidatePath('/articles', prefix)).
+ * (revalidatePath('/articles/<id>')), `decoded` (the same with the id
+ * percent-decoded, as a CMS would know the slug), `all`
+ * (revalidateTag('articles'), the page's static tag) or `prefix`
+ * (revalidatePath('/articles', prefix)).
  * Answers with the RevalidateResult, so the test sees the purge count.
  */
 import type { GioRequest } from '../../../../../../../packages/giojs-core/src/context.ts';
@@ -25,6 +27,8 @@ export async function POST(req: GioRequest): Promise<unknown> {
   switch (req.query['by']) {
     case 'path':
       return revalidatePath(`/articles/${id}`);
+    case 'decoded':
+      return revalidatePath(`/articles/${decodeURIComponent(id)}`);
     case 'prefix':
       return revalidatePath('/articles', { type: 'prefix' });
     case 'all':

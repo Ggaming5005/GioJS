@@ -16,7 +16,9 @@
 //! The cache is per server instance: with several instances, every one of
 //! them must be called.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -25,8 +27,9 @@ use giojs_cache::{path_tag, PageCache, PathMatch};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracing::warn;
 
-use crate::path_hygiene;
+use crate::path_hygiene::{self, PathRejection};
 
 pub const TOKEN_ENV: &str = "GIO_REVALIDATE_TOKEN";
 /// Same floor as GIO_SESSION_SECRET: the endpoint is reachable by anyone,
@@ -117,6 +120,9 @@ pub struct Targets {
     tags: Vec<String>,
     paths: Vec<String>,
     prefix: bool,
+    /// Requested paths that were only a locale segment (`/fr`): they became
+    /// `/`, which as a prefix purges every page in every locale.
+    bare_locales: Vec<String>,
 }
 
 impl Targets {
@@ -150,10 +156,14 @@ impl Targets {
             }
         }
         let mut paths = Vec::with_capacity(request.paths.len());
+        let mut bare_locales = Vec::new();
         for raw in request.paths {
             let Some(path) = normalize_path(&raw, locales) else {
                 return Err(TargetError::InvalidPath(raw));
             };
+            if path == "/" && !strip_query(&raw).trim_matches('/').is_empty() {
+                bare_locales.push(raw);
+            }
             if !paths.contains(&path) {
                 paths.push(path);
             }
@@ -162,6 +172,7 @@ impl Targets {
             tags,
             paths,
             prefix: request.prefix,
+            bare_locales,
         })
     }
 
@@ -172,6 +183,14 @@ impl Targets {
         } else {
             PathMatch::Exact
         };
+        if self.prefix && !self.bare_locales.is_empty() {
+            // Pages are cached under their locale-free path, so there is no
+            // "every page of one locale" to purge: the prefix is the root.
+            warn!(
+                paths = %self.bare_locales.join(","),
+                "prefix revalidation of a bare locale path purges every page in every locale"
+            );
+        }
         cache.invalidate_tags(&self.tags).await + cache.invalidate_paths(&self.paths, kind).await
     }
 }
@@ -183,17 +202,81 @@ fn is_valid_tag(tag: &str) -> bool {
         && !tag.starts_with(RESERVED_TAG_PREFIX)
 }
 
+/// `raw` without its query or fragment.
+fn strip_query(raw: &str) -> &str {
+    raw.split(['?', '#']).next().unwrap_or_default()
+}
+
 /// The canonical, locale-free form of a requested path, or None when it is
 /// not a path a page could be cached under. A query or fragment is dropped:
-/// a path purge covers every query string of the page.
+/// a path purge covers every query string of the page. The path may be
+/// given decoded (`/café`, `/a b`, as a CMS stores a slug) or encoded
+/// (`/caf%C3%A9`, as a browser requests it); see `tag_path`.
 fn normalize_path(raw: &str, locales: &[String]) -> Option<String> {
-    let path = raw.split(['?', '#']).next().unwrap_or_default();
+    let path = strip_query(raw);
     if !path.starts_with('/') || path.len() > MAX_PATH_BYTES || path.chars().any(char::is_control) {
         return None;
     }
-    let canonical = path_hygiene::canonical(path).ok()?.into_owned();
+    let canonical = tag_path(path).ok()?;
     let path = strip_locale(&canonical, locales).to_string();
     (!path_hygiene::is_gio_namespace(&path)).then_some(path)
+}
+
+/// The spelling of `path` that path tags use, whichever way it was written.
+/// Bytes a URI path cannot carry raw (non-ASCII, space, `"`, `{` ...) are
+/// percent-encoded with uppercase hex first; `path_hygiene::canonical` then
+/// decodes the escapes of unreserved characters and uppercases the rest. So
+/// `/café`, `/caf%c3%a9` and `/caf%C3%A9` all name the same page - both for
+/// purge requests and for the paths entries are tagged with (hyper accepts
+/// raw UTF-8 and a few unescaped characters in a request path too). A `%`
+/// always starts an escape: a literal one is written `%25`.
+fn tag_path(path: &str) -> Result<String, PathRejection> {
+    let encoded = encode_path_bytes(path);
+    Ok(path_hygiene::canonical(&encoded)?.into_owned())
+}
+
+/// RFC 3986 `pchar`s plus the segment separator, and `%` (escapes are
+/// validated by `canonical`): everything a path may carry unencoded.
+fn is_path_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'!'
+                | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b':'
+                | b'@'
+                | b'/'
+                | b'%'
+        )
+}
+
+/// Percent-encode every byte of `path` that is not a path byte. Borrows
+/// when there is none.
+fn encode_path_bytes(path: &str) -> Cow<'_, str> {
+    if path.bytes().all(is_path_byte) {
+        return Cow::Borrowed(path);
+    }
+    let mut out = String::with_capacity(path.len() + 16);
+    for byte in path.bytes() {
+        if is_path_byte(byte) {
+            out.push(byte as char);
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// Drop a leading configured-locale segment, the way the i18n layer does
@@ -226,16 +309,17 @@ pub fn entry_tags(path: &str, declared: &[String]) -> Vec<String> {
             tags.push(tag.clone());
         }
     }
-    let canonical =
-        path_hygiene::canonical(path).map_or_else(|_| path.to_string(), |p| p.into_owned());
+    let canonical = tag_path(path).unwrap_or_else(|_| path.to_string());
     tags.push(path_tag(&canonical));
     tags
 }
 
 /// Constant-time token check. Both sides are hashed first, so neither the
 /// content nor the length of the configured token leaks through timing.
+/// The scheme is case-insensitive (RFC 7235 §2.1): `bearer <token>` is as
+/// good as `Bearer <token>`.
 pub fn token_matches(authorization: Option<&str>, token: &str) -> bool {
-    let Some(presented) = authorization.and_then(|value| value.strip_prefix("Bearer ")) else {
+    let Some(presented) = authorization.and_then(bearer_credentials) else {
         return false;
     };
     let presented = Sha256::digest(presented.as_bytes());
@@ -245,6 +329,15 @@ pub fn token_matches(authorization: Option<&str>, token: &str) -> bool {
         .zip(expected.iter())
         .fold(0u8, |acc, (a, b)| acc | (a ^ b))
         == 0
+}
+
+/// The credentials of a `Bearer` authorization value, or None for another
+/// scheme or none at all.
+fn bearer_credentials(value: &str) -> Option<&str> {
+    let (scheme, credentials) = value.trim().split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| credentials.trim())
 }
 
 /// Per-client failed-attempt counter (fixed window). IPv6 clients are
@@ -365,13 +458,29 @@ mod tests {
         let token = "t".repeat(40);
         assert!(token_matches(Some(&format!("Bearer {token}")), &token));
         assert!(!token_matches(Some(&format!("Bearer {token}x")), &token));
-        assert!(!token_matches(Some(&format!("bearer {token}")), &token));
         assert!(
             !token_matches(Some(&token), &token),
             "the scheme is required"
         );
+        assert!(!token_matches(Some(&format!("Basic {token}")), &token));
+        assert!(!token_matches(Some(&format!("Bearer{token}")), &token));
         assert!(!token_matches(Some("Bearer "), &token));
+        assert!(!token_matches(Some("Bearer"), &token));
         assert!(!token_matches(None, &token));
+    }
+
+    #[test]
+    fn the_bearer_scheme_is_case_insensitive_and_extra_spaces_are_ignored() {
+        let token = "t".repeat(40);
+        for value in [
+            format!("bearer {token}"),
+            format!("BEARER {token}"),
+            format!("bEaReR {token}"),
+            format!("Bearer   {token}"),
+            format!(" Bearer {token} "),
+        ] {
+            assert!(token_matches(Some(&value), &token), "{value:?}");
+        }
     }
 
     #[test]
@@ -425,13 +534,114 @@ mod tests {
             targets.paths,
             vec!["/blog", "/about", "/", "/cafe", "/frank"]
         );
-        for bad in ["blog", "/a/../b", "/%zz", "/_gio/health", ""] {
+        for bad in [
+            "blog",
+            "/a/../b",
+            "/%zz",
+            "/100%",
+            "/_gio/health",
+            "/fr/_gio/x",
+            "",
+        ] {
             assert_eq!(
                 Targets::validate(request(&[], &[bad], false), &locales()),
                 Err(TargetError::InvalidPath(bad.to_string())),
                 "{bad}"
             );
         }
+    }
+
+    /// Purge paths often come from decoded CMS slugs; the cache tags pages
+    /// with the path as requested (percent-encoded). Both spellings must
+    /// meet in one tag.
+    #[test]
+    fn decoded_and_encoded_paths_name_the_same_page() {
+        let targets = Targets::validate(
+            request(
+                &[],
+                &[
+                    "/café",
+                    "/caf%c3%a9",
+                    "/caf%C3%A9",
+                    "/blog/a b",
+                    "/blog/a%20b",
+                    "/fr/été",
+                    "/q/\"{x}\"",
+                    "/sub-delims!$&'()*+,;=:@",
+                ],
+                false,
+            ),
+            &locales(),
+        )
+        .unwrap();
+        assert_eq!(
+            targets.paths,
+            vec![
+                "/caf%C3%A9",
+                "/blog/a%20b",
+                "/%C3%A9t%C3%A9",
+                "/q/%22%7Bx%7D%22",
+                "/sub-delims!$&'()*+,;=:@",
+            ]
+        );
+        for (requested, purge) in [
+            ("/caf%C3%A9", "/café"),
+            ("/café", "/caf%C3%A9"),
+            ("/blog/a%20b", "/blog/a b"),
+            ("/q/%22%7Bx%7D%22", "/q/\"{x}\""),
+            ("/q/\"{x}\"", "/q/%22%7Bx%7D%22"),
+        ] {
+            let purge = Targets::validate(request(&[], &[purge], false), &[]).unwrap();
+            assert_eq!(
+                entry_tags(requested, &[]),
+                vec![path_tag(&purge.paths[0])],
+                "{requested} is purged by {:?}",
+                purge.paths
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_decoded_purge_path_reaches_a_page_cached_under_its_encoded_path() {
+        let dir = std::env::temp_dir().join(format!("giojs-revalidate-enc-{}", std::process::id()));
+        let cache = PageCache::new(giojs_cache::CacheConfig {
+            memory_max_entries: std::num::NonZeroUsize::new(10).unwrap(),
+            disk_dir: dir.clone(),
+            swr_multiplier: 10,
+            disk_max_bytes: 0,
+        });
+        let entry = |path: &str| giojs_cache::CacheEntry {
+            html: bytes::Bytes::from_static(b"<p>x</p>"),
+            status: 200,
+            headers: HashMap::new(),
+            created_at: std::time::SystemTime::now(),
+            max_age_secs: 60,
+            deployment_id: "d".into(),
+            composed: false,
+            tags: entry_tags(path, &[]),
+            ppr_shell: false,
+        };
+        cache.put("cafe", entry("/blog/caf%C3%A9")).await.unwrap();
+        cache.put("space", entry("/blog/a%20b")).await.unwrap();
+
+        let exact = Targets::validate(request(&[], &["/blog/café"], false), &[]).unwrap();
+        assert_eq!(exact.apply(&cache).await, 1);
+        assert!(cache.get("cafe", "d").await.is_none());
+        let prefix = Targets::validate(request(&[], &["/blog/a b"], true), &[]).unwrap();
+        assert_eq!(prefix.apply(&cache).await, 1);
+        assert!(cache.get("space", "d").await.is_none());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn bare_locale_paths_are_noted() {
+        let targets = Targets::validate(
+            request(&[], &["/fr", "/en/", "/", "/about"], true),
+            &locales(),
+        )
+        .unwrap();
+        assert_eq!(targets.paths, vec!["/", "/about"]);
+        assert_eq!(targets.bare_locales, vec!["/fr", "/en/"]);
     }
 
     #[test]

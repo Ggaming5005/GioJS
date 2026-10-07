@@ -120,31 +120,72 @@ fn lock(index: &Mutex<TagIndex>) -> MutexGuard<'_, TagIndex> {
     index.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// What a disk read found once it is checked against the index.
+#[derive(Debug)]
+enum Promotion {
+    /// Indexed and now in memory: serve the file's entry.
+    Promoted(CacheEntry),
+    /// The key changed while the file was read (stored again, possibly
+    /// after a purge, or promoted by another lookup): serve whatever memory
+    /// holds now, never the file, which may predate it.
+    Superseded(Option<CacheEntry>),
+    /// Purged or replaced while it sat on disk: delete the file.
+    Stale,
+}
+
+impl LocalBackend {
+    /// Promote `entry`, read from `key`'s disk file, to memory. `seen` is
+    /// the key's record generation taken before the read started: the read
+    /// is an await, and a purge followed by a fresh fill can land during it.
+    /// Promoting the file then would overwrite the fresh memory entry with
+    /// the purged content.
+    async fn promote(&self, key: &str, entry: CacheEntry, seen: Option<u64>) -> Option<CacheEntry> {
+        let promotion = {
+            let mut index = self.index();
+            match index.generation(key) {
+                Some(current) if Some(current) != seen => {
+                    Promotion::Superseded(self.memory.get(key))
+                }
+                // Indexed before the read, gone now: purged or removed while
+                // it was being read.
+                None if seen.is_some() => Promotion::Stale,
+                _ => match self.memory.get(key) {
+                    // Another lookup promoted the same file meanwhile.
+                    Some(promoted) => Promotion::Superseded(Some(promoted)),
+                    None => match index.admit_disk_entry(key, &entry.tags, true) {
+                        DiskAdmission::Live => {
+                            if let Some(evicted) = self.memory.put(key.to_string(), entry.clone()) {
+                                index.evicted_from_memory(&evicted);
+                            }
+                            Promotion::Promoted(entry)
+                        }
+                        DiskAdmission::Stale => Promotion::Stale,
+                    },
+                },
+            }
+        };
+        match promotion {
+            Promotion::Promoted(entry) => Some(entry),
+            Promotion::Superseded(current) => current,
+            Promotion::Stale => {
+                self.disk.remove(key).await;
+                None
+            }
+        }
+    }
+}
+
 impl CacheBackend for LocalBackend {
     async fn get(&self, key: &str) -> Option<CacheEntry> {
         if let Some(entry) = self.memory.get(key) {
             return Some(entry);
         }
         // Promote disk hit to memory - unless the file belongs to an entry
-        // that was purged (its removal may still be in flight).
+        // that was purged (its removal may still be in flight) or the key
+        // was stored again while the file was read.
+        let seen = self.index().generation(key);
         let entry = self.disk.get(key).await?;
-        let admission = {
-            let mut index = self.index();
-            let admission = index.admit_disk_entry(key, &entry.tags, true);
-            if admission == DiskAdmission::Live {
-                if let Some(evicted) = self.memory.put(key.to_string(), entry.clone()) {
-                    index.evicted_from_memory(&evicted);
-                }
-            }
-            admission
-        };
-        match admission {
-            DiskAdmission::Live => Some(entry),
-            DiskAdmission::Stale => {
-                self.disk.remove(key).await;
-                None
-            }
-        }
+        self.promote(key, entry, seen).await
     }
 
     async fn put(&self, key: &str, entry: CacheEntry) -> Result<(), CacheError> {
@@ -274,6 +315,65 @@ mod tests {
             vec!["new"],
             "a key still in memory stays purgeable"
         );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    fn page(tag: &str, html: &'static str) -> CacheEntry {
+        CacheEntry {
+            html: Bytes::from_static(html.as_bytes()),
+            ..entry(tag, 0)
+        }
+    }
+
+    /// The promotion race, step by step: a lookup misses memory and starts
+    /// reading the key's disk file; a purge and a fresh fill land while the
+    /// read is in flight; the read returns the purged content. It must not
+    /// replace the fresh entry in memory, nor be served.
+    #[tokio::test]
+    async fn a_disk_read_racing_a_purge_and_refill_does_not_restore_the_purged_entry() {
+        let dir =
+            std::env::temp_dir().join(format!("giojs-backend-promote-race-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let backend = LocalBackend::new(NonZeroUsize::new(1).unwrap(), dir.clone(), 0);
+        backend.put("k", page("t", "old")).await.unwrap();
+        wait_for_file(&dir, "k").await;
+        backend.put("other", entry("u", 8)).await.unwrap(); // evicts "k" from memory
+
+        // get("k"): memory miss, so the file is read...
+        assert!(backend.memory.get("k").is_none());
+        let seen = backend.index().generation("k");
+        let read = backend.disk.get("k").await.expect("the old file");
+        // ...while a purge and a render that started after it land.
+        let purge = Invalidation::Tags(["t".to_string()].into_iter().collect());
+        assert_eq!(backend.invalidate(purge).await, 1);
+        let ticket = backend.fill_ticket();
+        assert!(backend
+            .put_fresh("k", page("t", "fresh"), ticket)
+            .await
+            .unwrap());
+
+        let served = backend.promote("k", read, seen).await;
+        assert_eq!(
+            served.map(|entry| entry.html),
+            Some(Bytes::from_static(b"fresh")),
+            "the lookup is answered with the live entry, not the file it read"
+        );
+        assert_eq!(
+            backend.memory.get("k").map(|entry| entry.html),
+            Some(Bytes::from_static(b"fresh")),
+            "the purged content did not overwrite the fresh fill"
+        );
+
+        // Purged during the read with nothing refilled: a miss, and the
+        // file is not promoted back.
+        backend.put("other", entry("u", 8)).await.unwrap(); // evicts "k" again
+        wait_for_file(&dir, "k").await;
+        let seen = backend.index().generation("k");
+        let read = backend.disk.get("k").await.expect("the fresh file");
+        let purge = Invalidation::Tags(["t".to_string()].into_iter().collect());
+        assert_eq!(backend.invalidate(purge).await, 1);
+        assert!(backend.promote("k", read, seen).await.is_none());
+        assert!(backend.memory.get("k").is_none());
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

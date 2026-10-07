@@ -1915,11 +1915,13 @@ async fn dynamic_handler(
         Arc::new(tokio::sync::Mutex::new(None));
     // Taken before the render: if a revalidation purges this page while it
     // renders, the result is served but not cached (it may predate the purge).
+    // It is part of the coalesce key too, so a request that missed after a
+    // purge never joins a render that started before it.
     let fill_ticket = state.cache.fill_ticket();
 
     let coalesced = {
         let coalesce = state.coalesce.clone();
-        let coalesce_key = build_coalesce_key(&cache_key, &headers);
+        let coalesce_key = build_coalesce_key(&cache_key, &headers, fill_ticket);
         let state_c = state.clone();
         let cache_key_c = cache_key.clone();
         let method_c = method.clone();
@@ -2190,7 +2192,17 @@ async fn read_request_body(
 /// Coalesce key = cache key + hash of the caller's credential headers, so
 /// concurrent requests only share a render when their cookies/authorization
 /// match. Belt-and-braces on top of the cacheable-only sharing rule.
-fn build_coalesce_key(cache_key: &str, headers: &HashMap<String, String>) -> String {
+///
+/// It also carries the fill ticket: renders only coalesce when no
+/// invalidation happened between their misses. Otherwise a request that
+/// arrives after `revalidateTag()` returned would be handed the in-flight
+/// render that read the old data - `put_fresh` refuses to cache it, but it
+/// would still be served.
+fn build_coalesce_key(
+    cache_key: &str,
+    headers: &HashMap<String, String>,
+    fill_ticket: FillTicket,
+) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(headers.get("cookie").map(String::as_str).unwrap_or(""));
@@ -2205,10 +2217,11 @@ fn build_coalesce_key(cache_key: &str, headers: &HashMap<String, String>) -> Str
     let mut key = String::with_capacity(cache_key.len() + 1 + 16);
     key.push_str(cache_key);
     key.push(':');
+    use std::fmt::Write;
     for byte in digest.iter().take(8) {
-        use std::fmt::Write;
         let _ = write!(key, "{byte:02x}");
     }
+    let _ = write!(key, ":{}", fill_ticket.sequence());
     key
 }
 
@@ -5275,38 +5288,107 @@ mod tests {
         }
     }
 
+    /// A ticket from a cache no invalidation ever ran on.
+    fn first_ticket() -> FillTicket {
+        let (cache, _dir) = temp_cache("coalesce-ticket");
+        cache.fill_ticket()
+    }
+
     #[test]
     fn coalesce_key_separates_different_cookies() {
+        let ticket = first_ticket();
         let anon: HashMap<String, String> = HashMap::new();
         let user_a = HashMap::from([("cookie".to_string(), "session=aaa".to_string())]);
         let user_b = HashMap::from([("cookie".to_string(), "session=bbb".to_string())]);
-        let key_anon = build_coalesce_key("cachekey", &anon);
-        let key_a = build_coalesce_key("cachekey", &user_a);
-        let key_b = build_coalesce_key("cachekey", &user_b);
+        let key_anon = build_coalesce_key("cachekey", &anon, ticket);
+        let key_a = build_coalesce_key("cachekey", &user_a, ticket);
+        let key_b = build_coalesce_key("cachekey", &user_b, ticket);
         assert_ne!(key_a, key_b, "different cookies must not coalesce");
         assert_ne!(key_a, key_anon, "cookie and anonymous must not coalesce");
     }
 
     #[test]
     fn coalesce_key_is_stable_for_same_credentials() {
+        let ticket = first_ticket();
         let headers = HashMap::from([
             ("cookie".to_string(), "session=aaa".to_string()),
             ("authorization".to_string(), "Bearer t".to_string()),
         ]);
         assert_eq!(
-            build_coalesce_key("cachekey", &headers),
-            build_coalesce_key("cachekey", &headers)
+            build_coalesce_key("cachekey", &headers, ticket),
+            build_coalesce_key("cachekey", &headers, ticket)
         );
     }
 
     #[test]
     fn coalesce_key_separates_authorization_header() {
+        let ticket = first_ticket();
         let bearer_a = HashMap::from([("authorization".to_string(), "Bearer a".to_string())]);
         let bearer_b = HashMap::from([("authorization".to_string(), "Bearer b".to_string())]);
         assert_ne!(
-            build_coalesce_key("cachekey", &bearer_a),
-            build_coalesce_key("cachekey", &bearer_b)
+            build_coalesce_key("cachekey", &bearer_a, ticket),
+            build_coalesce_key("cachekey", &bearer_b, ticket)
         );
+    }
+
+    /// A miss for a page whose render is in flight joins it - unless a purge
+    /// happened in between: that render read the data from before the
+    /// purge, and once the purge returned nobody may be served that version.
+    #[tokio::test]
+    async fn misses_on_either_side_of_a_purge_never_share_a_render() {
+        let (cache, dir) = temp_cache("coalesce-purge");
+        let headers = HashMap::new();
+        let leader = cache.fill_ticket();
+        assert_eq!(
+            build_coalesce_key("cachekey", &headers, leader),
+            build_coalesce_key("cachekey", &headers, cache.fill_ticket()),
+            "no purge in between: the second miss shares the first render"
+        );
+        cache.invalidate_tags(&["article:1"]).await;
+        let after_purge = cache.fill_ticket();
+        assert_ne!(
+            build_coalesce_key("cachekey", &headers, leader),
+            build_coalesce_key("cachekey", &headers, after_purge),
+            "a miss after the purge renders on its own"
+        );
+
+        // Through SingleFlight: the post-purge miss gets its own render while
+        // the pre-purge one is still running.
+        let flights: Arc<SingleFlight<u32>> = Arc::new(SingleFlight::new());
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let leader_key = build_coalesce_key("cachekey", &headers, leader);
+        let first = {
+            let flights = flights.clone();
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                flights
+                    .run(&leader_key, move || {
+                        let gate = gate.clone();
+                        async move {
+                            gate.notified().await;
+                            1 // rendered from the old data
+                        }
+                    })
+                    .await
+            })
+        };
+        tokio::task::yield_now().await; // the first render is in flight
+        let second = tokio::time::timeout(
+            Duration::from_secs(5),
+            flights.run(
+                &build_coalesce_key("cachekey", &headers, after_purge),
+                || async { 2 },
+            ),
+        )
+        .await;
+        assert_eq!(
+            second.ok(),
+            Some(2),
+            "served a render that started after the purge"
+        );
+        gate.notify_one();
+        assert_eq!(first.await.unwrap(), 1);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     // ── streaming SSR body ────────────────────────────────────────────────────

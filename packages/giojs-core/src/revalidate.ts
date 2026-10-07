@@ -99,6 +99,11 @@ function bridge(): RevalidationBridge {
 
 // C0/C1 control characters - what Rust's char::is_control rejects.
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+// A UTF-16 surrogate without its pair - e.g. an emoji cut in half by
+// `title.slice(0, 20)`. JSON.stringify writes it as a `\ud83d` escape that
+// no JSON parser on the Rust side accepts, so the whole frame carrying it
+// (a page render, a revalidate call) would be lost.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 
 /** Why `tag` cannot be a cache tag, or null when it can. */
 function tagProblem(tag: unknown): string | null {
@@ -108,7 +113,43 @@ function tagProblem(tag: unknown): string | null {
     return `tags are at most ${MAX_CACHE_TAG_BYTES} bytes`;
   }
   if (CONTROL_CHARS.test(tag)) return 'tags must not contain control characters';
+  if (LONE_SURROGATE.test(tag)) return 'tags must be well-formed Unicode (no unpaired surrogate)';
   if (tag.startsWith(RESERVED_TAG_PREFIX)) return `tags must not start with "${RESERVED_TAG_PREFIX}"`;
+  return null;
+}
+
+const UNRESERVED = /^[A-Za-z0-9\-._~]$/;
+
+/** Decode the escapes of RFC 3986 unreserved characters, as Rust does. */
+function decodeUnreserved(segment: string): string {
+  return segment.replace(/%([0-9A-Fa-f]{2})/g, (escape, hex: string) => {
+    const char = String.fromCharCode(parseInt(hex, 16));
+    return UNRESERVED.test(char) ? char : escape;
+  });
+}
+
+/**
+ * Why `path` (query and fragment already dropped) is not a path a page can
+ * be cached under, or null when it is. Mirrors the server's checks
+ * (giojs-server/src/revalidate.rs and path_hygiene.rs), so a bad path is a
+ * TypeError here instead of an `ok: false` from the server. Only a
+ * `/<locale>/_gio/...` path is left for the server, which knows the locales.
+ */
+function pathProblem(path: string): string | null {
+  if (!path.startsWith('/')) return 'expected a URL path starting with "/"';
+  if (Buffer.byteLength(path, 'utf8') > MAX_PATH_BYTES) return `paths are at most ${MAX_PATH_BYTES} bytes`;
+  if (CONTROL_CHARS.test(path)) return 'paths must not contain control characters';
+  if (LONE_SURROGATE.test(path)) return 'paths must be well-formed Unicode (no unpaired surrogate)';
+  if (/%(?![0-9A-Fa-f]{2})/.test(path)) {
+    return 'a "%" must start an escape like %20 (write a literal "%" as %25)';
+  }
+  const segments = path.split('/').map(decodeUnreserved);
+  if (segments.some(segment => segment === '.' || segment === '..')) {
+    return 'paths must not contain "." or ".." segments';
+  }
+  if (segments.find(segment => segment !== '') === '_gio') {
+    return 'paths under /_gio are the server\'s own and never cached';
+  }
   return null;
 }
 
@@ -187,9 +228,13 @@ export function revalidateTag(tag: string): Promise<RevalidateResult> {
 /**
  * Purge the cached page at `path` - every query string and locale variant
  * of it - or, with `{ type: 'prefix' }`, everything at and below it. `path`
- * is the URL path the page is served at (a query or fragment is ignored; a
- * leading locale segment is dropped, so all locales are purged). Same
- * resolution and per-instance rules as revalidateTag().
+ * is the URL path the page is served at, decoded (`/blog/café`, as a CMS
+ * stores a slug) or percent-encoded (`/blog/caf%C3%A9`, as a browser sends
+ * it) - both purge the same page; a `%` always starts an escape. A query or
+ * fragment is ignored, and a leading locale segment is dropped, so all
+ * locales are purged - which makes a bare `/<locale>` prefix purge every
+ * page of the site. Same resolution and per-instance rules as
+ * revalidateTag(); throws a TypeError for an invalid path.
  */
 export function revalidatePath(
   path: string,
@@ -202,17 +247,9 @@ export function revalidatePath(
     );
   }
   const bare = typeof path === 'string' ? path.split(/[?#]/, 1)[0] ?? '' : '';
-  if (
-    !bare.startsWith('/') ||
-    Buffer.byteLength(bare, 'utf8') > MAX_PATH_BYTES ||
-    CONTROL_CHARS.test(bare)
-  ) {
-    return Promise.reject(
-      new TypeError(
-        `revalidatePath(${JSON.stringify(path)}): expected a URL path starting with "/" ` +
-          `(at most ${MAX_PATH_BYTES} bytes, no control characters)`,
-      ),
-    );
+  const problem = typeof path === 'string' ? pathProblem(bare) : 'paths must be strings';
+  if (problem !== null) {
+    return Promise.reject(new TypeError(`revalidatePath(${JSON.stringify(path)}): ${problem}`));
   }
   return sendRevalidation({ tags: [], paths: [bare], prefix: type === 'prefix' });
 }

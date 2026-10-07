@@ -121,6 +121,20 @@ describe('cache tags', () => {
     expect(cacheTagsOf(result)).toEqual(['ok']);
   });
 
+  it('drops a tag with an unpaired surrogate, so the response frame stays valid JSON for Rust', async () => {
+    const routes = makeRoute('/posts/:id', {
+      revalidate: 60,
+      getServerSideProps: async () => ({
+        props: {},
+        tags: ['post:42', `title:${'😀 launch'.slice(0, 1)}`],
+      }),
+    }, 'posts/[id]');
+    const result = await renderRoute({ ...makeRequest('/posts/42'), params: {} }, routes, noLayouts);
+    expect('status' in result && result.status).toBe(200);
+    expect(cacheTagsOf(result)).toEqual(['post:42']);
+    expect(JSON.stringify(cacheTagsOf(result))).not.toMatch(/\\u[dD][89abAB]/);
+  });
+
   it('caps a render at 64 tags and ignores a non-array declaration', async () => {
     const many = Array.from({ length: 80 }, (_, i) => `t${i}`);
     const routes = makeRoute('/', {

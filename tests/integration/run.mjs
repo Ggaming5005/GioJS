@@ -823,6 +823,24 @@ async function main() {
       assert.deepEqual(await getArticle('/articles/2'), { version: 1, cache: 'miss; stored' });
     });
 
+    await test('path purges reach pages with non-ASCII or space in their URL, given decoded or encoded', async () => {
+      // A browser requests /articles/café as /articles/caf%C3%A9 - the
+      // path the page is cached under - while a CMS knows the slug decoded.
+      assert.equal((await getArticle('/articles/caf%C3%A9')).cache, 'miss; stored');
+      assert.match((await getArticle('/articles/caf%C3%A9')).cache, /^hit/);
+      const viaHandler = await fetch(`${BASE}/api/articles/caf%C3%A9?by=decoded`, { method: 'POST' });
+      assert.deepEqual(await viaHandler.json(), { ok: true, purged: 1 }, "revalidatePath('/articles/café')");
+      assert.deepEqual(await getArticle('/articles/caf%C3%A9'), { version: 1, cache: 'miss; stored' });
+
+      await getArticle('/articles/a%20b');
+      assert.match((await getArticle('/articles/a%20b')).cache, /^hit/);
+      const viaEndpoint = await revalidateRequest({ paths: ['/articles/a b', '/articles/café'] });
+      assert.equal(viaEndpoint.status, 200, viaEndpoint.body);
+      assert.deepEqual(JSON.parse(viaEndpoint.body), { ok: true, purged: 2 });
+      assert.equal((await getArticle('/articles/a%20b')).cache, 'miss; stored');
+      assert.equal((await getArticle('/articles/caf%C3%A9')).cache, 'miss; stored');
+    });
+
     await test('POST /_gio/revalidate: bearer token required, wrong ones are 401', async () => {
       const none = await rawRequest('POST', '/_gio/revalidate', { 'content-type': 'application/json' }, '{"tags":["articles"]}');
       assert.equal(none.status, 401);
@@ -832,6 +850,8 @@ async function main() {
       assert.equal(wrong.status, 401);
       const scheme = await revalidateRequest({ tags: ['articles'] }, { authorization: REVALIDATE_TOKEN });
       assert.equal(scheme.status, 401, 'the Bearer scheme is required');
+      const lowercase = await revalidateRequest({ tags: ['nothing-carries-this'] }, { authorization: `bearer ${REVALIDATE_TOKEN}` });
+      assert.equal(lowercase.status, 200, 'the scheme is case-insensitive');
       const get = await rawRequest('GET', '/_gio/revalidate', { authorization: `Bearer ${REVALIDATE_TOKEN}` });
       assert.equal(get.status, 405);
     });

@@ -123,7 +123,7 @@ ip_allowlist = []       # restrict by client IP or CIDR, e.g. ["10.0.0.5", "10.1
 [revalidate]            # see Caching; unknown keys here are a startup error
 token = ""              # enables POST /_gio/revalidate (>= 32 bytes); GIO_REVALIDATE_TOKEN wins
 
-[dev]                 # only read when NODE_ENV=development
+[dev]                   # only read when NODE_ENV=development
 allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer to`} />
 
       <h2>Connection limits</h2>

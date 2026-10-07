@@ -54,6 +54,15 @@ pub fn path_has_prefix(path: &str, prefix: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FillTicket(pub(crate) u64);
 
+impl FillTicket {
+    /// The sequence number itself. Two tickets are equal exactly when no
+    /// invalidation happened between them - e.g. to keep renders started on
+    /// either side of a purge from being shared.
+    pub fn sequence(self) -> u64 {
+        self.0
+    }
+}
+
 /// How `PageCache::invalidate_paths` matches cached pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathMatch {
@@ -184,6 +193,13 @@ impl TagIndex {
                 self.unlink(key);
             }
         }
+    }
+
+    /// The generation of `key`'s record, None when it is not indexed. A disk
+    /// read compares it before and after: a record that changed meanwhile
+    /// means the file may predate the live entry.
+    pub(crate) fn generation(&self, key: &str) -> Option<u64> {
+        self.records.get(key).map(|record| record.generation)
     }
 
     /// Whether a background disk write of `key` (put at `since` with

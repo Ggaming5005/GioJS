@@ -57,20 +57,63 @@ afterEach(() => {
 
 describe('input validation', () => {
   it('rejects tags the server would refuse', async () => {
-    connect();
+    const { frames } = connect();
     for (const tag of ['', 'x'.repeat(257), 'a\nb', '_gio:path:/x', 42 as unknown as string]) {
       await expect(revalidateTag(tag)).rejects.toThrow(TypeError);
     }
+    expect(frames).toEqual([]);
+  });
+
+  it('rejects tags with an unpaired surrogate (their frame would not parse in Rust)', async () => {
+    const { frames } = connect();
+    const cut = `post:${'😀'.slice(0, 1)}`; // an emoji cut in half
+    for (const tag of [cut, '\ud83d', '\ude00x', 'a\ude00\ud83d']) {
+      await expect(revalidateTag(tag)).rejects.toThrow(/surrogate/);
+    }
+    expect(frames).toEqual([]);
+    void revalidateTag('post:😀');
+    await flush();
+    expect(frames.map(f => f.tags)).toEqual([['post:😀']]);
   });
 
   it('rejects paths that are not URL paths, and unknown types', async () => {
-    connect();
+    const { frames } = connect();
     for (const path of ['posts', '', 'http://x/y', '/a\u0000b', 7 as unknown as string]) {
       await expect(revalidatePath(path)).rejects.toThrow(TypeError);
     }
     await expect(
       revalidatePath('/x', { type: 'layout' as unknown as 'page' }),
     ).rejects.toThrow(/type must be/);
+    expect(frames).toEqual([]);
+  });
+
+  it('rejects the paths the server refuses, instead of an ok:false from it', async () => {
+    const { frames } = connect();
+    for (const [path, reason] of [
+      ['/a/../b', /segments/],
+      ['/a/./b', /segments/],
+      ['/a/%2e%2E/b', /segments/],
+      ['/..', /segments/],
+      ['/100%', /escape/],
+      ['/%zz', /escape/],
+      ['/a%2', /escape/],
+      ['/_gio/health', /_gio/],
+      ['//_gio', /_gio/],
+      ['/%5Fgio/x', /_gio/],
+      [`/caf${'é'.slice(0, 1)}\ud83d`, /surrogate/],
+    ] as const) {
+      await expect(revalidatePath(path), path).rejects.toThrow(reason);
+      await expect(revalidatePath(path, { type: 'prefix' }), path).rejects.toThrow(TypeError);
+    }
+    expect(frames).toEqual([]);
+  });
+
+  it('sends decoded and encoded paths as given (the server encodes them the same way)', async () => {
+    const { frames } = connect();
+    const paths = ['/blog/café', '/blog/caf%C3%A9', '/blog/a b', '/100%25', '/a..b', '/.well-known/x', '/blog/_gio'];
+    for (const path of paths) void revalidatePath(path);
+    await flush();
+    expect(frames.map(f => f.paths[0])).toEqual(paths);
   });
 });
 
@@ -104,7 +147,8 @@ describe('frames and acks', () => {
 
   it('resolves ok:false with the reason when the server refuses', async () => {
     const { frames } = connect();
-    const pending = revalidatePath('/a/../b');
+    // Only the server knows the locales: /fr/_gio/x is /_gio/x there.
+    const pending = revalidatePath('/fr/_gio/x');
     await flush();
     settleRevalidateAck({
       type: 'revalidate_ack',
@@ -214,6 +258,16 @@ describe('sanitizeCacheTags', () => {
 
   it('ignores a declaration that is not an array', () => {
     expect(sanitizeCacheTags([{ source: 'export const tags', value: 'posts' }], '/')).toEqual([]);
+  });
+
+  it('drops tags with an unpaired surrogate, keeps whole emoji', () => {
+    const title = '😀 launch day';
+    expect(
+      sanitizeCacheTags(
+        [{ source: 'getServerSideProps tags', value: [`post:${title.slice(0, 1)}`, `post:${title.slice(0, 2)}`, '\udc00'] }],
+        '/posts/:id',
+      ),
+    ).toEqual(['post:😀']);
   });
 
   it('caps at 64 tags and counts bytes, not characters', () => {
