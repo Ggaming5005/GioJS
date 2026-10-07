@@ -226,6 +226,22 @@ test('a rich next.config converts every supported setting and flags the rest', (
   assert.match(config.notes.join('\n'), /wrapped in withBundleAnalyzer/);
 });
 
+test('experimental flags GioJS has its own form of point at it; the rest are listed', () => {
+  const config = convertConfigSource(
+    "export default { typedRoutes: true, experimental: { serverActions: { bodySizeLimit: '5mb' }, ppr: 'incremental', typedRoutes: true, optimizeCss: true, scrollRestoration: true } };",
+    'next.config.mjs',
+  );
+  assert.deepEqual(config.todos, [
+    'experimental.serverActions: Server Actions become page actions (export async function action) posted by <GioForm> - see the TODOs in the code; bodySizeLimit → gio.toml [server] max_body_bytes, allowedOrigins → [security.csrf] trusted_origins',
+    "experimental.ppr: partial prerendering is per page in GioJS - export const shell = 'cache' next to export const revalidate on the pages that should serve a cached shell",
+    'experimental: optimizeCss, scrollRestoration - no GioJS equivalent',
+  ]);
+  assert.deepEqual(config.notes, [
+    'typedRoutes: GioJS always generates typed routes (.gio/routes.d.ts, used by href() from @gio.js/react)',
+    'experimental.typedRoutes: GioJS always generates typed routes (.gio/routes.d.ts, used by href() from @gio.js/react)',
+  ]);
+});
+
 test('a config that cannot be read statically produces a TODO, not a guess', () => {
   const config = convertConfigSource("module.exports = require('./config.json');\n", 'next.config.js');
   assert.deepEqual(config.entries, []);

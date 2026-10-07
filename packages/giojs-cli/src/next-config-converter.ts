@@ -270,11 +270,11 @@ const NO_EQUIVALENT_NEEDED: Record<string, string> = {
   poweredByHeader: 'GioJS never sends X-Powered-By',
   compress: 'the Rust server compresses responses itself',
   generateEtags: 'the Rust server sets ETags itself',
+  typedRoutes: 'GioJS always generates typed routes (.gio/routes.d.ts, used by href() from @gio.js/react)',
 };
 
 const NOT_CONVERTED: Record<string, string> = {
   webpack: 'GioJS bundles with esbuild - a custom webpack config does not apply; port what it does (aliases → tsconfig paths, loaders → esbuild-compatible imports)',
-  experimental: 'experimental.* flags have no GioJS equivalent',
   transpilePackages: 'esbuild transpiles dependencies as needed - nothing to configure',
   serverExternalPackages: 'the Node worker loads node_modules packages directly - nothing to configure',
   pageExtensions: 'GioJS pages are page.tsx/page.jsx/page.js, route handlers route.ts/route.js',
@@ -292,7 +292,34 @@ const NOT_CONVERTED: Record<string, string> = {
   staticPageGenerationTimeout: 'no GioJS equivalent',
   cacheHandler: 'GioJS caches pages in Rust (memory + disk); no custom handler',
   logging: 'set gio.toml [logging] format instead',
+  cacheComponents: "GioJS caches whole pages in Rust: export const revalidate (and export const tags) on each page; partial prerendering is export const shell = 'cache'",
 };
+
+/** experimental.* flags whose feature GioJS has in its own form. */
+const EXPERIMENTAL: Record<string, { note?: string; todo?: string }> = {
+  serverActions: {
+    todo: 'experimental.serverActions: Server Actions become page actions (export async function action) posted by <GioForm> - see the TODOs in the code; bodySizeLimit → gio.toml [server] max_body_bytes, allowedOrigins → [security.csrf] trusted_origins',
+  },
+  ppr: { todo: "experimental.ppr: partial prerendering is per page in GioJS - export const shell = 'cache' next to export const revalidate on the pages that should serve a cached shell" },
+  typedRoutes: { note: 'experimental.typedRoutes: GioJS always generates typed routes (.gio/routes.d.ts, used by href() from @gio.js/react)' },
+  dynamicIO: { todo: "experimental.dynamicIO: GioJS caches whole pages in Rust - export const revalidate (and export const tags) on each page" },
+  useCache: { todo: "experimental.useCache: 'use cache' has no GioJS equivalent - export const revalidate (and export const tags) on each page" },
+};
+
+function convertExperimental(value: Value, result: ConvertedConfig): void {
+  if (!isRecord(value)) {
+    result.todos.push(`experimental ${describe(value)}: experimental flags have no GioJS equivalent`);
+    return;
+  }
+  const other: string[] = [];
+  for (const key of Object.keys(value)) {
+    const known = EXPERIMENTAL[key];
+    if (known?.note !== undefined) result.notes.push(known.note);
+    else if (known?.todo !== undefined) result.todos.push(known.todo);
+    else other.push(key);
+  }
+  if (other.length > 0) result.todos.push(`experimental: ${other.join(', ')} - no GioJS equivalent`);
+}
 
 export function convertConfigSource(source: string, fileName: string): ConvertedConfig {
   const result: ConvertedConfig = { tables: [], entries: [], todos: [], converted: [], notes: [], staticExport: false, envKeys: [] };
@@ -339,6 +366,9 @@ export function convertConfigSource(source: string, fileName: string): Converted
         } else {
           result.todos.push(`output: ${describe(value)} has no GioJS equivalent`);
         }
+        break;
+      case 'experimental':
+        convertExperimental(value, result);
         break;
       case 'env':
         if (isRecord(value)) result.envKeys.push(...Object.keys(value));
