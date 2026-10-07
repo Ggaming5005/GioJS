@@ -391,6 +391,14 @@ x-gio-refused: unread
         sent. Clients that honor it stop reusing the socket first, instead of racing the
         server&apos;s close. Keep a proxy&apos;s upstream idle timeout below it.
       </p>
+      <p>
+        The value is always the server&apos;s: a <code>Keep-Alive</code> or{' '}
+        <code>Connection</code> header a page or <code>route.ts</code> sets is dropped,
+        like the other connection-specific headers (<code>Transfer-Encoding</code>,{' '}
+        <code>Upgrade</code>, <code>TE</code>, <code>Trailer</code>,{' '}
+        <code>Proxy-Connection</code>), which describe one hop and are not allowed on
+        HTTP/2.
+      </p>
 
       <h2 id="examples">Examples</h2>
 
@@ -487,8 +495,9 @@ export function GET(req: GioRequest) {
               refusals carry <code>X-Gio-Cache: bypass</code> instead of{' '}
               <code>static</code>, and self-hosted fonts carry <code>static</code>.{' '}
               <code>Sec-Purpose: prefetch;prerender</code> counts as a prefetch. Server-sent
-              event streams no longer repeat <code>Cache-Control</code> or send{' '}
-              <code>Connection</code>.
+              event streams no longer repeat <code>Cache-Control</code>, and no response
+              forwards a <code>Connection</code> or <code>Keep-Alive</code> header the app
+              set.
             </>
           ),
         },

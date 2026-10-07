@@ -424,8 +424,12 @@ export function Ticker(): React.JSX.Element {
           <strong>Checking it:</strong> <code>curl -N</code> prints chunks as they arrive. A
           streamed page answers with <code>X-Gio-Cache: bypass</code> (or{' '}
           <code>ppr; ...</code>), and its Suspense fallback appears in the HTML before the
-          content. <code>transfer-encoding: chunked</code> alone proves nothing: dynamic
-          responses carry it over HTTP/1.1 whether they streamed or not.
+          content. Over HTTP/1.1, a response rendered or buffered whole carries a{' '}
+          <code>Content-Length</code> unless it is compressed, so a{' '}
+          <code>transfer-encoding: chunked</code> response without{' '}
+          <code>Content-Encoding</code> streamed. A compressed response (<code>curl
+          --compressed</code>, every browser) is chunked whether it streamed or not: look at{' '}
+          <code>X-Gio-Cache</code> and where the fallback sits in the HTML instead.
         </li>
       </ul>
 

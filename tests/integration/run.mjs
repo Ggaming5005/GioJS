@@ -823,6 +823,19 @@ async function main() {
       assert.match(rest, /data: second/, 'the stream ends after its last event');
     });
 
+    await test('route.ts Connection and Keep-Alive headers never reach the client', async () => {
+      // The handler sets `keep-alive: timeout=99`: forwarded, it replaced the
+      // server's hint while the server still closed idle sockets on its own.
+      for (const path of ['/api/hop-headers', '/api/hop-headers?stream=1']) {
+        const res = await rawRequest('GET', path);
+        assert.equal(res.status, 200, path);
+        assert.equal(res.headers['x-app'], 'kept', path);
+        assert.equal(res.headers.connection, undefined, path);
+        assert.match(res.headers['keep-alive'] ?? '', /^timeout=\d+$/, path);
+        assert.notEqual(res.headers['keep-alive'], 'timeout=99', path);
+      }
+    });
+
     await test('a streamed route.ts HTML body without a head arrives chunk by chunk', async () => {
       // No </head> to find: a head-injecting scan would hold the first token
       // back until the stream ended (1.5s later).
@@ -5667,7 +5680,9 @@ async function featureSwitchesPhase() {
         '[prefetch]', 'max_concurrent = 0', 'max_per_second = 0', '',
         '[cache]', 'disk_enabled = false', 'etag = false', 'swr_multiplier = 0', '',
         '[[rate_limits]]', 'path = "/keyed-limit"', 'per_ip = 1', 'window_seconds = 3600',
-        'burst = 0', 'key_header = "x-api-key"', 'max_keys_per_client = 0',
+        'burst = 0', 'key_header = "x-api-key"', 'max_keys_per_client = 0', '',
+        '[[rate_limits]]', 'path = "/_gio/image"', 'per_ip = 1', 'window_seconds = 3600',
+        'burst = 0',
       ],
     }), async ({ cacheDir, env, log }) => {
       const expected = [
@@ -5750,6 +5765,18 @@ async function featureSwitchesPhase() {
         const html = await (await fetch(`${BASE}/styled`)).text();
         const sheets = await linkedStylesheets(html);
         assert.ok(sheets.every((css) => !css.includes('\n  color:')), 'production CSS is minified by default');
+      });
+
+      await test('a rate-limited /_gio/image answers 429 with X-Gio-Cache: bypass', async () => {
+        // per_ip = 1: the request above spent the budget (or this one does).
+        let res;
+        for (let i = 0; i < 2; i++) {
+          res = await fetch(`${BASE}/_gio/image?src=/gio-test.png&w=48`, { headers: { accept: 'image/webp' } });
+          await res.arrayBuffer();
+          if (res.status === 429) break;
+        }
+        assert.equal(res.status, 429);
+        assert.equal(res.headers.get('x-gio-cache'), 'bypass');
       });
 
       await test('[server] render_timeout_secs = 0 serves renders as usual', async () => {

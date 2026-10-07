@@ -15,7 +15,7 @@ const EXPLANATIONS = {
   hit: 'Served from the Rust page cache without touching Node. "ttl" is the\n    seconds until this entry goes stale.',
   stale: 'Served instantly from the cache past its TTL while ONE background\n    render refreshes the entry (stale-while-revalidate). "age" is seconds\n    since the entry was rendered.',
   'miss; stored': 'Rendered by the Node worker and stored in the cache - the next\n    request for this key is a hit. Pages opt in via `export const revalidate`.',
-  bypass: 'Rendered by the Node worker and NOT cached: the page cache is off\n    (`[cache] enabled = false`), the page did not declare `revalidate`, the\n    request was not GET/HEAD, the response varies per user, or it set\n    per-request headers. The server\'s own refusals (a rate-limit 429, a\n    skew 409, a CSRF 403) are never cached either.',
+  bypass: 'NOT served from the cache. Either rendered by the Node worker but not\n    stored - the page cache is off (`[cache] enabled = false`), the page did\n    not declare `revalidate`, the request was not GET/HEAD, the response\n    varies per user, or it set per-request headers - or refused by the\n    server itself before Node (a rate-limit 429, a skew 409, a CSRF 403).',
   static: 'Served directly by the Rust static file layer (public/ assets,\n    hashed chunks, fonts) - never touches the cache or Node.',
   ppr: 'Partial prerendering: the shared shell came from (or went into) the\n    cache and the Suspense holes rendered for this request.',
 };

@@ -22,7 +22,7 @@ const { serverEnv, browserCommand, formatBanner } = require('../bin/lib/server.j
 const {
   execCommand, declaresSubcommand, parseViewOutput, registryManifest, installDevCommand, shellQuote,
 } = require('../bin/lib/delegate.js');
-const { targetUrl } = require('../bin/lib/cache-explain.js');
+const { targetUrl, explanationFor } = require('../bin/lib/cache-explain.js');
 const { detectPackageManager } = require('../bin/lib/project.js');
 
 describe('didYouMean', () => {
@@ -262,6 +262,12 @@ describe('URLs', () => {
   test('cache explain targets', () => {
     assert.equal(targetUrl('/posts/1', 'http://127.0.0.1:4000/'), 'http://127.0.0.1:4000/posts/1');
     assert.equal(targetUrl('https://example.com/a', 'http://127.0.0.1:4000'), 'https://example.com/a');
+  });
+
+  test('cache explain: bypass covers refusals that never reached Node', () => {
+    const bypass = explanationFor('bypass');
+    assert.doesNotMatch(bypass, /^Rendered/, 'a refused request was not rendered');
+    assert.match(bypass, /refused by the\s+server itself/);
   });
 });
 

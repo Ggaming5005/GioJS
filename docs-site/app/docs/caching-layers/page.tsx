@@ -74,9 +74,10 @@ disk_max_bytes = 536870912          # L2 cap; 0 = unbounded`} />
       <p>
         The server&apos;s own refusals - a rate-limit <code>429</code>, a refused prefetch, a
         deployment-skew <code>409</code>, a CSRF <code>403</code> - never reach the cache and
-        carry <code>bypass</code>. The other internal <code>/_gio/*</code> endpoints are not
-        stamped (<code>/_gio/image</code> reports its own image cache as{' '}
-        <code>HIT</code>/<code>MISS</code>).
+        carry <code>bypass</code>, also when they refuse a <code>/_gio/*</code> request (a
+        rate-limited <code>/_gio/image</code>). Otherwise the internal{' '}
+        <code>/_gio/*</code> endpoints are not stamped (<code>/_gio/image</code> reports its
+        own image cache as <code>HIT</code>/<code>MISS</code>).
       </p>
       <p>The CLI decodes the header for you:</p>
       <CodeBlock lang="bash" code={`$ gio cache explain /posts/1

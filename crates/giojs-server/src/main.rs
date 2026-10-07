@@ -371,7 +371,8 @@ fn varies_by(headers: &axum::http::HeaderMap, field: &str) -> bool {
 /// prefetch refusal) never reached the page cache. `static` is stamped only
 /// where a file is served (`stamp_static_file`), never by default: it also
 /// exempts a body from CSP nonce substitution. Internal /_gio endpoints and
-/// protocol upgrades stay unstamped.
+/// protocol upgrades stay unstamped, except where the server refused the
+/// request itself (`server_refusal` and the rate-limit 429 label their own).
 async fn cache_status_stamp_middleware(req: Request, next: Next) -> Response {
     let internal = req.uri().path().starts_with("/_gio/");
     let mut resp = next.run(req).await;
@@ -449,9 +450,10 @@ fn cacheable_response_headers(headers: &HashMap<String, String>) -> HashMap<Stri
     headers
         .iter()
         .filter(|(name, _)| {
-            !NONCACHEABLE_RESPONSE_HEADERS
-                .iter()
-                .any(|blocked| name.eq_ignore_ascii_case(blocked))
+            !is_hop_by_hop(name)
+                && !NONCACHEABLE_RESPONSE_HEADERS
+                    .iter()
+                    .any(|blocked| name.eq_ignore_ascii_case(blocked))
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
@@ -1710,12 +1712,21 @@ fn check_version_skew(req: &Request, server_id: &str, protection: bool) -> Optio
         path = %req.uri().path(),
         "version skew detected"
     );
-    let mut resp = StatusCode::CONFLICT.into_response();
+    let mut resp = server_refusal(StatusCode::CONFLICT);
     resp.headers_mut().insert(
         HeaderName::from_static("x-gio-action"),
         HeaderValue::from_static("hard-reload"),
     );
     Some(resp)
+}
+
+/// A refusal the server answers itself, labeled `X-Gio-Cache: bypass` here
+/// rather than by cache_status_stamp_middleware, which skips /_gio paths:
+/// a prefetch, a skewed client or a rate limit can be refused there too.
+fn server_refusal(status: StatusCode) -> Response {
+    let mut resp = status.into_response();
+    insert_cache_status_header(&mut resp, "bypass");
+    resp
 }
 
 async fn prefetch_budget_middleware(
@@ -1732,12 +1743,12 @@ async fn prefetch_budget_middleware(
         PrefetchAdmission::Admitted(slot) => slot,
         PrefetchAdmission::Disabled => {
             state.metrics.record_prefetch_rejected();
-            return StatusCode::TOO_MANY_REQUESTS.into_response();
+            return server_refusal(StatusCode::TOO_MANY_REQUESTS);
         }
         PrefetchAdmission::OverBudget => {
             warn!(ip = %ip, path = %req.uri().path(), "prefetch budget exceeded");
             state.metrics.record_prefetch_rejected();
-            return StatusCode::TOO_MANY_REQUESTS.into_response();
+            return server_refusal(StatusCode::TOO_MANY_REQUESTS);
         }
     };
     next.run(req).await
@@ -1913,8 +1924,10 @@ async fn rate_limit_middleware(
                 .metrics
                 .record_ratelimit_rejected(&path, &rule_pattern);
             warn!(ip = %ip, path = %path, rule = %rule_pattern, "rate limit exceeded");
+            // Labeled here like server_refusal: /_gio/image is rate-limited too.
             Response::builder()
                 .status(StatusCode::TOO_MANY_REQUESTS)
+                .header("x-gio-cache", "bypass")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("retry-after", retry_after_secs.to_string())
                 .header("x-ratelimit-limit", limit.to_string())
@@ -3213,8 +3226,9 @@ fn respond_sse(
 }
 
 /// Connection-specific headers: they describe one hop, not the response,
-/// and HTTP/2 forbids them outright. The connection layer owns keep-alive,
-/// so a worker's copy is never forwarded.
+/// and HTTP/2 forbids them outright. The connection layer owns keep-alive
+/// and framing, so a worker's copy is never forwarded - on any page, route
+/// or event-stream response (`is_hop_by_hop`).
 const HOP_BY_HOP_HEADERS: [&str; 7] = [
     "connection",
     "keep-alive",
@@ -3224,6 +3238,15 @@ const HOP_BY_HOP_HEADERS: [&str; 7] = [
     "transfer-encoding",
     "upgrade",
 ];
+
+/// True for a header name (any case) in `HOP_BY_HOP_HEADERS`. Without this
+/// filter an app's `Keep-Alive: timeout=99` replaced the server's own idle
+/// hint over HTTP/1.1 while the server still closed after its own timeout.
+fn is_hop_by_hop(name: &str) -> bool {
+    HOP_BY_HOP_HEADERS
+        .iter()
+        .any(|hop| name.eq_ignore_ascii_case(hop))
+}
 
 /// The head of an SSE response: the event-stream type and `no-cache` once
 /// each, then the worker's head - which repeats both - without them and
@@ -3248,7 +3271,7 @@ fn sse_response_headers(worker_headers: &HashMap<String, String>) -> axum::http:
         };
         if name == header::CONTENT_TYPE
             || name == header::CACHE_CONTROL
-            || HOP_BY_HOP_HEADERS.contains(&name.as_str())
+            || is_hop_by_hop(name.as_str())
         {
             continue;
         }
@@ -3408,7 +3431,7 @@ fn respond_stream(
     for (name, value) in &response.headers {
         // A streamed body has no known length; a stale content-length would
         // corrupt framing.
-        if name.eq_ignore_ascii_case("content-length") {
+        if name.eq_ignore_ascii_case("content-length") || is_hop_by_hop(name) {
             continue;
         }
         if let Ok(header_value) = HeaderValue::from_str(value) {
@@ -4855,6 +4878,9 @@ fn build_html_response(
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder().status(status);
     for (k, v) in headers {
+        if is_hop_by_hop(k) {
+            continue;
+        }
         if let Ok(val) = HeaderValue::from_str(v) {
             builder = builder.header(k.as_str(), val);
         }
@@ -5126,7 +5152,8 @@ async fn devtools_stream_handler(State(state): State<AppState>) -> Response {
         .status(200)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
-        .header("connection", "keep-alive")
+        // No Connection header: the connection layer owns keep-alive
+        // (HOP_BY_HOP_HEADERS), and HTTP/2 forbids it.
         .body(axum::body::Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -5765,11 +5792,12 @@ async fn run_connection<I>(
                 let mut resp = app.call(req).await.unwrap_or_else(|_| {
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
                 });
+                // The server's hint always wins: it states when this server
+                // closes an idle socket, which no handler or rule can change.
                 if let Some(hint) = keep_alive_hint {
                     if resp.status() != axum::http::StatusCode::SWITCHING_PROTOCOLS {
                         resp.headers_mut()
-                            .entry(axum::http::HeaderName::from_static("keep-alive"))
-                            .or_insert(hint);
+                            .insert(axum::http::HeaderName::from_static("keep-alive"), hint);
                     }
                 }
                 Ok::<_, Infallible>(resp.map(|body| conn::TrackedBody::new(body, guard)))
@@ -7135,6 +7163,8 @@ mod tests {
         let resp = check_version_skew(&req, "new_id", true).unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         assert_eq!(resp.headers().get("x-gio-action").unwrap(), "hard-reload");
+        // Labeled by the refusal itself: the stamp layer skips /_gio paths.
+        assert_eq!(resp.headers().get("x-gio-cache").unwrap(), "bypass");
     }
 
     #[test]
@@ -8799,6 +8829,37 @@ Z1uis5x6LpdQ/f48fePWB4bJazo1nu0iiDgI5KKq1gGbWFFjVjMISa/m
         assert_eq!(all("x-stream"), ["ticker"]);
         for name in ["connection", "keep-alive", "transfer-encoding"] {
             assert!(all(name).is_empty(), "{name} must not be forwarded");
+        }
+    }
+
+    #[test]
+    fn page_and_route_heads_forward_nothing_hop_by_hop() {
+        // What a route.ts may set itself, in any case.
+        let worker: HashMap<String, String> = [
+            ("Connection", "keep-alive"),
+            ("keep-alive", "timeout=99"),
+            ("Transfer-Encoding", "chunked"),
+            ("proxy-connection", "keep-alive"),
+            ("upgrade", "h2c"),
+            ("content-type", "text/plain"),
+            ("x-app", "kept"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        let resp = buffered_response(&worker, &[]);
+        assert_eq!(resp.headers()["x-app"], "kept");
+        assert_eq!(resp.headers()["content-type"], "text/plain");
+        let cached = cacheable_response_headers(&worker);
+        for name in HOP_BY_HOP_HEADERS {
+            assert!(
+                !resp.headers().contains_key(name),
+                "{name} must not be forwarded"
+            );
+            assert!(
+                !cached.keys().any(|key| key.eq_ignore_ascii_case(name)),
+                "{name} must not be stored"
+            );
         }
     }
 

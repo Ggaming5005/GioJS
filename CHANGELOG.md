@@ -1019,9 +1019,17 @@ first.
   `Connection: keep-alive, keep-alive`. They now carry `Cache-Control` once
   and no `Connection` header, which is connection-specific and not allowed on
   HTTP/2.
+- Connection-specific headers a page or `route.ts` set itself (`Connection`,
+  `Keep-Alive`, `Transfer-Encoding`, `Upgrade`, `TE`, `Trailer`,
+  `Proxy-Connection`) were forwarded over HTTP/1.1, and an app's
+  `Keep-Alive: timeout=N` replaced the server's own hint while the server
+  still closed idle sockets on its own schedule. They are now dropped from
+  every page, route and event-stream response; `Keep-Alive` always states
+  the server's idle timeout.
 - The server's own refusals - the rate-limit `429`, the deployment-skew
   `409`, a refused prefetch's `429` - were labeled `X-Gio-Cache: static`; they
-  now say `bypass`. `static` is for files only (`public/`, `/_next/static`,
+  now say `bypass`, also on `/_gio/*` paths (a rate-limited `/_gio/image`).
+  `static` is for files only (`public/`, `/_next/static`,
   the CSS compiled at startup), and the self-hosted fonts under
   `/_gio/fonts/` now carry it too.
 - `X-RateLimit-Remaining` could be larger than `X-RateLimit-Limit`: the limit
