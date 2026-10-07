@@ -77,17 +77,23 @@ export default function Page(): React.JSX.Element {
         git. Copy it to start your own:
       </p>
       <CodeBlock lang="bash" code={`cp .env.example .env.local     # local values and secrets, never committed`} />
-      <p>The file reads along these lines:</p>
-      <CodeBlock lang="bash" code={`# .env.example - committed: names and harmless defaults, no real secrets
-# Session encryption key, 32+ bytes. Generate one with:
+      <p>The starter&apos;s file:</p>
+      <CodeBlock lang="bash" code={`# Copy to .env.local (git-ignored) and fill in. Env files load at server
+# start - restart after editing. Order: .env.{mode}.local, .env.local,
+# .env.{mode}, .env; the first file that sets a variable wins, and real
+# environment variables always win over files.
+
+# Session secret for createSessionStorage() and [[guards]] require_session.
+# Required in production (dev generates a temporary one). Generate with:
 #   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
-GIO_SESSION_SECRET=
+# GIO_SESSION_SECRET=
 
-# Inlined into the browser bundle - public by definition.
-GIO_PUBLIC_SITE_NAME="My App"
+# Only GIO_PUBLIC_* variables reach browser code (process.env.GIO_PUBLIC_X),
+# so never put a secret in one.
+# GIO_PUBLIC_SITE_NAME=My GioJS app
 
-# The listen port. Hosting platforms set PORT for you; gio.toml's [server] port
-# is the default when it is unset.
+# The port the server listens on (overrides [server] port in gio.toml).
+# Hosting platforms usually set PORT for you.
 # PORT=3000`} />
       <p>
         Keep <code>.env.example</code> current as you add variables: it is the list a

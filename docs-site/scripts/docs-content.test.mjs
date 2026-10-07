@@ -88,6 +88,12 @@ test("the docs show the starter's real [[fonts]], and its files exist", () => {
   assert.deepEqual(fontUrls(tomlSamples(docsPage('font-optimization'))), starter);
 });
 
+test("the environment variables guide shows the starter's .env.example", () => {
+  const starter = read('packages/giojs-cli/templates/default/.env.example').trimEnd();
+  assert.equal(read('packages/giojs-cli/templates/default-js/.env.example').trimEnd(), starter);
+  assert.ok(docsPage('guides/environment-variables').includes(starter), 'the guide no longer matches the template');
+});
+
 test('no [[fonts]] sample in the docs downloads from a placeholder host', () => {
   // A failed download stops startup, so a copied example.com URL breaks the app.
   for (const file of pageFiles()) {
