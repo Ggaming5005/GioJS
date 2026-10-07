@@ -108,7 +108,9 @@ export const DELETE: RouteHandler<'/api/items/:id'> = async (req) => {
         <li>
           <strong>Never cached.</strong> Handler responses are not stored or shared between
           requests, and get no default <code>Cache-Control</code> (an event stream gets{' '}
-          <code>no-cache</code>). Set one on the <code>Response</code> for browsers and CDNs.
+          <code>no-cache</code>, a <code>redirect()</code> gets{' '}
+          <code>private, no-cache</code> unless its headers set one). Set one on the{' '}
+          <code>Response</code> for browsers and CDNs.
         </li>
         <li>
           <strong>Checks before the handler.</strong> A cross-site <code>POST</code>,{' '}

@@ -94,6 +94,9 @@ export async function POST(req: GioRequest) {
         <li>
           <strong>Never cached.</strong> Handler responses are not stored or coalesced, and
           GioJS adds no <code>Cache-Control</code> to them: set your own when you want one.
+          A <code>redirect()</code> is the exception: as from an action, it gets{' '}
+          <code>private, no-cache</code> unless its headers set one, so no CDN stores a
+          per-user guard&apos;s <code>301</code> or <code>308</code>.
         </li>
         <li>
           <strong>Before your code runs</strong>, the Rust server applies guards, redirects,

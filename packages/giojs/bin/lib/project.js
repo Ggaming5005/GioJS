@@ -8,13 +8,37 @@
  * upwards rather than require.resolve('<pkg>/package.json'): @gio.js/react's
  * exports map does not expose its package.json.
  */
-const { existsSync, readFileSync, realpathSync } = require('fs');
+const { existsSync, readFileSync, realpathSync, statSync } = require('fs');
 const { dirname, join, resolve } = require('path');
 
 /** The project root and its app/ directory (GIO_APP_DIR, else ./app). */
 function projectPaths(env = process.env, cwd = process.cwd()) {
   const appDir = env.GIO_APP_DIR ? resolve(cwd, env.GIO_APP_DIR) : join(cwd, 'app');
   return { projectRoot: dirname(appDir), appDir };
+}
+
+/**
+ * `env` for a tsx child that compiles app code, with TSX_TSCONFIG_PATH set
+ * to the project's own tsconfig.json (else jsconfig.json) - as the server
+ * sets it on its worker (ipc.rs worker_tsconfig). tsx otherwise reads the
+ * tsconfig of the cwd, so a command run from outside the project (with
+ * GIO_APP_DIR) compiled the app with another project's settings, or none:
+ * a starter page without a React import failed with `React is not
+ * defined`. A TSX_TSCONFIG_PATH already in `env` wins.
+ */
+function tsxEnv(env, projectRoot) {
+  if (env.TSX_TSCONFIG_PATH) return env;
+  for (const name of ['tsconfig.json', 'jsconfig.json']) {
+    const candidate = resolve(projectRoot, name);
+    let isFile = false;
+    try {
+      isFile = statSync(candidate).isFile();
+    } catch (_) {
+      // Missing: try the next name.
+    }
+    if (isFile) return { ...env, TSX_TSCONFIG_PATH: candidate };
+  }
+  return env;
 }
 
 function readJson(path) {
@@ -101,6 +125,7 @@ function detectPackageManager(env = process.env, projectRoot = process.cwd(), ex
 
 module.exports = {
   projectPaths,
+  tsxEnv,
   readJson,
   findPackage,
   ownPackage,

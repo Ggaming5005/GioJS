@@ -807,6 +807,25 @@ describe('callRoute', () => {
     await reader.cancel();
     expect(counter()).toBe(before + 1);
   });
+
+  it('reports a throwing cleanup: rejects cancel(), or logs it when an async handler resolves later', async () => {
+    const errorSpy = vi.mocked(logger.error);
+    errorSpy.mockClear();
+    const cleanupLogs = () => errorSpy.mock.calls.filter(([msg]) => msg === 'sse cleanup threw');
+
+    const sync = await callRoute('/api/events?count=1&open&throwCleanup', { appDir });
+    const reader = sync.stream!.getReader();
+    await reader.read();
+    await expect(reader.cancel()).rejects.toThrow('cleanup failed');
+    expect(cleanupLogs()).toHaveLength(1);
+
+    // Cancelled before the async handler resolves: its cleanup runs once it
+    // does, after cancel() has returned - only the log can report it.
+    const late = await callRoute('/api/events?count=1&open&async&throwCleanup', { appDir });
+    await late.stream!.cancel();
+    await vi.waitFor(() => expect(cleanupLogs()).toHaveLength(2));
+    expect(cleanupLogs()[1]![1]).toEqual({ error: 'cleanup failed' });
+  });
 });
 
 describe('server-only', () => {

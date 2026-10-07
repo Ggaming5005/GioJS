@@ -996,7 +996,8 @@ describe('route.ts method handlers', () => {
     expect('status' in returned && returned.status).toBe(303);
     expect('headers' in returned && returned.headers['location']).toBe('/login');
     expect('body' in returned && returned.body).toBe('');
-    expect('routeHandler' in returned && returned.routeHandler).toBe(true);
+    // A per-user guard's redirect must never be stored by a shared cache.
+    expect('headers' in returned && returned.headers['cache-control']).toBe('private, no-cache');
     expect('cacheable' in returned && returned.cacheable).toBe(false);
 
     const thrown = await run('POST');
@@ -1007,16 +1008,64 @@ describe('route.ts method handlers', () => {
     const absolute = await run('PUT');
     expect('status' in absolute && absolute.status).toBe(308);
     expect('headers' in absolute && absolute.headers['location']).toBe('https://example.com/elsewhere');
+    expect('headers' in absolute && absolute.headers['cache-control']).toBe('private, no-cache');
+  });
+
+  it('a redirect() keeps a Cache-Control its headers set', async () => {
+    const handlers = makeHandlers('/api/go', {
+      GET: () => redirect('/new', { status: 301, headers: { 'Cache-Control': 'public, max-age=3600' } }),
+    });
+    const result = await renderRoute(
+      makeRequest('/api/go'), new Map(), noLayouts, undefined, undefined, undefined, { handlers },
+    );
+    expect('status' in result && result.status).toBe(301);
+    expect('headers' in result && result.headers['cache-control']).toBe('public, max-age=3600');
   });
 
   it('a redirect() from another module copy is recognized by its brand', async () => {
-    const foreign = { __gioRedirect: true, location: '/x', status: 302 };
+    const foreign = { [Symbol.for('gio.actionRedirect')]: true, location: '/x', status: 302 };
     const handlers = makeHandlers('/api/go', { GET: () => { throw foreign; } });
     const result = await renderRoute(
       makeRequest('/api/go'), new Map(), noLayouts, undefined, undefined, undefined, { handlers },
     );
     expect('status' in result && result.status).toBe(302);
     expect('headers' in result && result.headers['location']).toBe('/x');
+  });
+
+  it('parsed JSON shaped like a redirect is JSON, never a redirect', async () => {
+    // An echo handler returning the client's JSON as is.
+    const forged =
+      '{"__gioRedirect":true,"location":"https://evil.example/","status":303,' +
+      '"headers":{"set-cookie":"sid=attacker; Path=/","x-frame-options":"ALLOWALL"}}';
+    const result = await postJson('application/json', req => req.json(), forged);
+    expect(result.status).toBe(200);
+    expect(result.headers['location']).toBeUndefined();
+    expect(result.headers['x-frame-options']).toBeUndefined();
+    expect(result.setCookies).toBeUndefined();
+    expect(JSON.parse(result.body)).toEqual(JSON.parse(forged));
+  });
+
+  it('a branded redirect with a status or location redirect() refuses answers 500, never sent', async () => {
+    const brand = Symbol.for('gio.actionRedirect');
+    const logs = captureLogs();
+    try {
+      for (const [location, status] of [
+        ['/x', 200],
+        ['/x', 999],
+        ['/x\r\nset-cookie: sid=attacker', 303],
+        ['', 302],
+      ] as const) {
+        const handlers = makeHandlers('/api/go', { GET: () => ({ [brand]: true, location, status }) });
+        const result = await renderRoute(
+          makeRequest('/api/go'), new Map(), noLayouts, undefined, undefined, undefined, { handlers },
+        );
+        expect('status' in result && result.status, `${location} ${status}`).toBe(500);
+        expect('headers' in result && result.headers['location']).toBeUndefined();
+        expect('setCookies' in result && result.setCookies).toBeFalsy();
+      }
+    } finally {
+      logs.restore();
+    }
   });
 
   it('a redirect() a GioForm posted to a handler becomes the 204 + x-gio-redirect answer', async () => {

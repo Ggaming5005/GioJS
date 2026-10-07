@@ -247,7 +247,9 @@ export default function EditPost({ post, draft, actionData }: Props) {
           around it swallows it: call it outside the <code>try</code>, or rethrow.
         </li>
         <li>
-          A 404, a redirect and an error page are never cached.
+          A 404, a redirect and an error page are never cached. A redirect also carries{' '}
+          <code>Cache-Control: private, no-cache</code> unless its headers set one, so a
+          CDN never stores it either.
         </li>
         <li>
           Any object with a <code>redirect</code> key is treated as a redirect, and{' '}

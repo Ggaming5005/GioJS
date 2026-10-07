@@ -112,8 +112,12 @@ export function POST(req: GioRequest) {
         <li>
           <a href="/docs/functions/redirect"><code>redirect(url)</code></a>, returned or thrown -
           its status (<code>303</code> by default), headers and <code>Location</code>, with the
-          URL sent as written, so a relative path works. <code>Response.redirect()</code>{' '}
-          accepts only absolute URLs and throws (a <code>500</code>) on a path.
+          URL sent as written, so a relative path works, and{' '}
+          <code>Cache-Control: private, no-cache</code> unless its headers set one.{' '}
+          <code>Response.redirect()</code> accepts only absolute URLs and throws (a{' '}
+          <code>500</code>) on a path. Only the value <code>redirect()</code> returns is a
+          redirect: a plain object such as parsed request JSON is always sent as JSON,
+          whatever its keys.
         </li>
         <li>A <a href="/docs/functions/gio-event-stream"><code>GioEventStream</code></a> - switches the connection to SSE. Any method may return one; a browser&apos;s <code>EventSource</code> always sends <code>GET</code>.</li>
       </ul>

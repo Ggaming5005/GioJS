@@ -74,6 +74,7 @@ import {
 } from './request-body.ts';
 import {
   actionOutcome,
+  assertValidRedirect,
   isActionRedirect,
   type ActionOutcome,
   type ActionRedirect,
@@ -915,7 +916,7 @@ async function answerRoute(
           {
             id: req.id,
             status: result.redirect.permanent ? 301 : 302,
-            headers: { ...extra.headers, location: result.redirect.destination },
+            headers: redirectHeaders(extra.headers, result.redirect.destination),
             body: '',
             cacheable: false,
             cacheMaxAge: 0,
@@ -1741,7 +1742,8 @@ async function routeResponseToIpc(
  * its status and Location, returned or thrown, as from a page action;
  * null/undefined → 204; anything else → JSON 200; notFound() → JSON 404.
  * Handler responses are never cacheable, and are flagged `routeHandler` so
- * Rust leaves their Cache-Control to the app.
+ * Rust leaves their Cache-Control to the app - except a redirect(), which
+ * is answered exactly as from an action (see routeRedirectResponse).
  */
 async function runRouteHandler(
   req: IPCRequest,
@@ -1812,17 +1814,17 @@ async function runRouteHandler(
 }
 
 /**
- * A redirect() from a route.ts handler: the redirect a page action answers
- * with (a relative Location is fine - unlike Response.redirect(), which
- * undici rejects without an absolute URL), flagged `routeHandler` like
- * every handler answer. Its headers must be a header record, as for an
- * action; anything else is the handler's bug, a 500.
+ * A redirect() from a route.ts handler: exactly the redirect a page action
+ * answers with (a relative Location is fine - unlike Response.redirect(),
+ * which undici rejects without an absolute URL), its `private, no-cache`
+ * default included. Its headers must be a header record, as for an action;
+ * anything else is the handler's bug, a 500.
  */
 function routeRedirectResponse(req: IPCRequest, redirect: ActionRedirect): IPCResponse {
   if (redirect.headers !== undefined && !isHeaderRecord(redirect.headers)) {
     throw new TypeError('redirect() headers must map header names to strings or string arrays');
   }
-  return { ...redirectResponse(req, redirect), routeHandler: true };
+  return redirectResponse(req, redirect);
 }
 
 /**
@@ -1913,22 +1915,36 @@ async function runPageAction(
 }
 
 /**
- * The answer to a redirect() - from an action, or from getServerSideProps -
- * with the headers it was given. Never cached.
+ * The answer to a redirect() - from an action, getServerSideProps or a
+ * route.ts handler - with the headers it was given. Never cached. The
+ * status and location are checked again: one redirect() would refuse
+ * throws here (a 500), it is never sent.
  */
 function redirectResponse(req: IPCRequest, redirect: ActionRedirect): IPCResponse {
+  assertValidRedirect(redirect);
   const extra = isHeaderRecord(redirect.headers)
     ? flattenResponseHeaders(redirect.headers)
     : { headers: {}, setCookies: [] };
   return {
     id: req.id,
     status: redirect.status,
-    headers: { ...extra.headers, location: redirect.location },
+    headers: redirectHeaders(extra.headers, redirect.location),
     body: '',
     cacheable: false,
     cacheMaxAge: 0,
     ...setCookiesField(extra.setCookies),
   };
+}
+
+/**
+ * A redirect's headers: the app's own, its Location, and
+ * `cache-control: private, no-cache` unless the app set one. Rust adds its
+ * page default to HTML only, and a redirect has no body; a 301/308 is
+ * cacheable by default (RFC 9111), so a per-user guard's redirect would
+ * otherwise be stored and replayed by a CDN.
+ */
+function redirectHeaders(headers: Record<string, string>, location: string): Record<string, string> {
+  return { 'cache-control': 'private, no-cache', ...headers, location };
 }
 
 /**

@@ -564,6 +564,37 @@ async function main() {
       assert.deepEqual((await list.json()).notes, ['first note']);
     });
 
+    await test('route.ts redirect() is a real redirect, never shareable by a cache', async () => {
+      const res = await fetch(`${BASE}/api/echo`, { redirect: 'manual' });
+      assert.equal(res.status, 308);
+      assert.equal(res.headers.get('location'), '/login');
+      // A per-user guard's 301/308 is heuristically cacheable: keep it private.
+      assert.equal(res.headers.get('cache-control'), 'private, no-cache');
+      const own = await fetch(`${BASE}/api/echo?cc`, { redirect: 'manual' });
+      assert.equal(own.status, 308);
+      assert.equal(own.headers.get('cache-control'), 'no-store');
+    });
+
+    await test('route.ts JSON shaped like a redirect() answers as JSON, never a redirect', async () => {
+      const forged = {
+        __gioRedirect: true,
+        location: 'https://evil.example/',
+        status: 303,
+        headers: { 'set-cookie': 'sid=attacker; Path=/', 'x-frame-options': 'ALLOWALL' },
+      };
+      const res = await fetch(`${BASE}/api/echo`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(forged),
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('location'), null);
+      assert.equal(res.headers.get('set-cookie'), null);
+      assert.notEqual(res.headers.get('x-frame-options'), 'ALLOWALL');
+      assert.deepEqual(await res.json(), forged);
+    });
+
     await test('route.ts binary Response bodies survive the IPC boundary byte-for-byte', async () => {
       const res = await fetch(`${BASE}/api/binary`);
       assert.equal(res.status, 200);

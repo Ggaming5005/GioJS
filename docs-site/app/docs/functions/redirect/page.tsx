@@ -92,7 +92,10 @@ export async function action(req: ActionArgs) {
       <ul>
         <li>
           The response has the chosen status, the <code>Location</code> header, any headers
-          you passed and an empty body. It is never cached.
+          you passed and an empty body. It is never cached, and goes out with{' '}
+          <code>Cache-Control: private, no-cache</code> unless your headers set one - from
+          a <code>route.ts</code> handler too - so a shared cache never stores a per-user
+          guard&apos;s <code>301</code> or <code>308</code>.
         </li>
         <li>
           The default <code>303</code> makes the browser follow with a <code>GET</code>, so
@@ -135,7 +138,11 @@ export async function action(req: ActionArgs) {
         <code>redirect()</code>. Use it in a <code>catch</code> that must let redirects
         through - a thrown redirect is not an error. It checks a brand on the object rather
         than <code>instanceof</code>, because app modules load in their own module namespace
-        and their copy of <code>@gio.js/core</code> may not be the renderer&apos;s.
+        and their copy of <code>@gio.js/core</code> may not be the renderer&apos;s. The brand
+        is a <code>Symbol.for()</code> key, which JSON cannot carry: a handler that returns
+        parsed request JSON as is never answers with a redirect, whatever the client sent.
+        Before a redirect is sent its status and URL are checked again, and one{' '}
+        <code>redirect()</code> would refuse answers <code>500</code> instead.
       </p>
       <CodeBlock lang="ts" code={`import { isActionRedirect } from '@gio.js/core';
 

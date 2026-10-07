@@ -178,7 +178,11 @@ expect(await res.text()).toContain('event: tick');   // waits for close()`} />
           what its promise resolves to. A client that leaves before the promise settles
           still gets the cleanup run, as soon as it does - so set up what the cleanup undoes
           only after the last <code>await</code>, or undo it yourself when the work before it
-          fails.
+          fails. Await only the setup, then return the cleanup: an <code>async</code> handler
+          that keeps sending in a loop (<code>{'for (;;) stream.send(await next())'}</code>)
+          never resolves, so its cleanup never runs and the loop outlives the client. Run
+          long-lived work outside the awaited body - a timer or a subscription the cleanup
+          stops.
         </li>
         <li>
           <strong>Clean up before <code>close()</code>.</strong> Calling{' '}

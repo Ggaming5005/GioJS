@@ -624,9 +624,11 @@ function routeResponse(
  * rejects errors the stream (the server can only end it - its headers are
  * gone); cancelling the stream runs the handler's cleanup like a client
  * disconnect - once an async handler resolves to it - while a stream the
- * handler closed itself is done with. A cleanup that throws rejects
- * cancel(); a handler result that is not a cleanup function logs the
- * server's warning.
+ * handler closed itself is done with. A cleanup that throws logs the
+ * server's error, and rejects cancel() when it ran during it (an async
+ * handler still running when the stream is cancelled runs its cleanup
+ * later: only the log shows that failure); a handler result that is not a
+ * cleanup function logs the server's warning.
  */
 function eventStream(source: GioEventStream): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -654,6 +656,11 @@ function eventStream(source: GioEventStream): ReadableStream<Uint8Array> {
             controller.error(error);
           },
           onCleanupError(error) {
+            // As ipc.ts logs it: a cleanup an async handler resolves to
+            // after cancel() has returned has no caller left to reject.
+            logger.error('sse cleanup threw', {
+              error: error instanceof Error ? error.message : String(error),
+            });
             cleanupFailure = { error };
           },
           onInvalidCleanup(value) {

@@ -387,8 +387,13 @@ first.
 - `redirect()` also works in `getServerSideProps` and `route.ts` handlers,
   returned or thrown, with a relative URL sent as written
   (`Response.redirect('/path')` throws: the web standard wants an absolute
-  URL). Headers an action returns with its data are sent even when
-  `getServerSideProps` then redirects or calls `notFound()`. Typed contract:
+  URL). Only the value `redirect()` returns is a redirect: a handler that
+  returns parsed JSON with the same keys answers JSON. Every `redirect()`
+  answer (and the `{ redirect }` form of `getServerSideProps`) carries
+  `Cache-Control: private, no-cache` unless its headers set one, so a shared
+  cache never stores a per-user `301`/`308`. Headers an action returns with
+  its data are sent even when `getServerSideProps` then redirects or calls
+  `notFound()`. Typed contract:
   `ActionArgs<Params>`,
   `ActionResult`, `ActionData<typeof action>` and
   `WithActionData<typeof action, Props>`.
@@ -1027,14 +1032,16 @@ first.
   `SseHandler`, `(stream) => SseCleanupFn | void | Promise<SseCleanupFn | void>`.
   A result that is not a function is logged as a warning, and a cleanup
   that throws is logged instead of failing the frame. The testing kit's
-  `callRoute` streams behave the same.
+  `callRoute` streams behave the same (a throwing cleanup also rejects the
+  stream's `cancel()` when it runs during it).
 - A server started outside the project (`GIO_APP_DIR=/srv/app/app` from
   another directory) compiled app code with the working directory's
   tsconfig, or none: a starter layout without a React import answered `500`
   with `React is not defined`. The worker now gets the project's
   `tsconfig.json` (else `jsconfig.json`) as `TSX_TSCONFIG_PATH`, the file
   the client bundles already used; a `TSX_TSCONFIG_PATH` the environment
-  sets wins.
+  sets wins. `gio export`, `gio routes` and `gio typegen` run from another
+  directory do the same.
 - `handleHardReload()` from `@gio.js/react` threw `window is not defined`
   when called during server rendering; like the other deployment helpers,
   it now does nothing there.
