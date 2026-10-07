@@ -26,7 +26,6 @@ use crate::client_identity::ProxyHeaders;
 use crate::config::{self, ConfigError, GioConfig};
 use crate::env_files::{EnvFileError, LoadedEnvFiles};
 use crate::revalidate;
-use crate::rules::RuleSet;
 use crate::security::SecurityPolicy;
 use crate::session_token::{self, SessionKeys};
 
@@ -389,7 +388,7 @@ pub fn run(env_files: Result<&LoadedEnvFiles, &EnvFileError>) -> i32 {
 
 fn report(
     env_files: &LoadedEnvFiles,
-    config: Result<GioConfig, ConfigError>,
+    config: Result<GioConfig, Vec<ConfigError>>,
     env: &CheckEnv,
 ) -> Value {
     let base = json!({
@@ -401,7 +400,10 @@ fn report(
     });
     let config = match config {
         Ok(config) => config,
-        Err(error) => return with_fields(base, json!({ "ok": false, "errors": [error.to_string()] })),
+        Err(errors) => {
+            let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
+            return with_fields(base, json!({ "ok": false, "errors": errors }));
+        }
     };
 
     let errors = validate(&config, &env.startup).err().unwrap_or_default();
@@ -446,11 +448,10 @@ fn report(
 }
 
 /// Everything startup would warn about in this configuration: loosened
-/// protections, ignored `[dev] allowed_hosts` entries, skipped rules.
+/// protections and ignored `[dev] allowed_hosts` entries.
 fn warnings(config: &GioConfig) -> Vec<String> {
     let mut warnings = protections_off_warnings(config);
     warnings.extend(invalid_allowed_hosts_warnings(config));
-    warnings.extend(RuleSet::skipped_rules(&config.middleware_rules()));
     warnings
 }
 
@@ -510,8 +511,8 @@ mod tests {
         }
     }
 
-    fn parse(raw: &str) -> Result<GioConfig, ConfigError> {
-        GioConfig::parse(raw, "gio.toml")
+    fn parse(raw: &str) -> Result<GioConfig, Vec<ConfigError>> {
+        GioConfig::parse_all(raw, "gio.toml")
     }
 
     /// A project root that is never created: the report only compares paths.
@@ -940,15 +941,62 @@ mod tests {
     }
 
     #[test]
-    fn rules_the_server_would_skip_are_warnings() {
+    fn an_unparseable_rate_limit_path_fails_the_check() {
         let root = test_root();
         let report = report(
             &loaded(&[]),
-            parse("[[redirects]]\nfrom = \"/old\"\nto = \"/new\"\nstatus = 200\n"),
+            parse("[[rate_limits]]\npath = \"api/*rest\"\n"),
             &env_in(&root),
         );
-        assert_eq!(report["ok"], true, "a skipped rule does not stop startup");
-        let warning = report["warnings"][0].as_str().unwrap();
-        assert!(warning.starts_with("[[redirects]] /old: "), "{warning}");
+        assert_eq!(
+            report["errors"],
+            json!(["gio.toml:2: invalid `rate_limits[0].path`: path \"api/*rest\" must start with '/'"])
+        );
+    }
+
+    #[test]
+    fn rules_that_cannot_be_enforced_fail_the_check() {
+        let root = test_root();
+        let report = report(
+            &loaded(&[]),
+            parse(
+                "[[redirects]]\nfrom = \"/old\"\nto = \"/new\"\nstatus = 200\n\n\
+                 [[guards]]\npath = \"members/*rest\"\nrequire_cookie = \"s\"\nredirect_to = \"/\"\n",
+            ),
+            &env_in(&root),
+        );
+        assert_eq!(report["ok"], false, "{report}");
+        assert_eq!(
+            report["errors"],
+            json!([
+                "gio.toml:1: invalid [[redirects]] entry for \"/old\": redirect status must be 301, 302, 307, or 308 (got 200)",
+                "gio.toml:6: invalid [[guards]] entry for \"members/*rest\": pattern must start with '/': members/*rest",
+            ])
+        );
+    }
+
+    #[test]
+    fn every_unknown_key_is_reported_in_one_run() {
+        let root = test_root();
+        let report = report(
+            &loaded(&[]),
+            parse(
+                "[server]\nprot = 3000\n\n[cache]\nmemory_mb = 64\nswr_multipler = 2\n\n\
+                 [image]\nquality = 80\n",
+            ),
+            &env_in(&root),
+        );
+        assert_eq!(report["ok"], false);
+        let errors: Vec<&str> = report["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|error| error.as_str().unwrap())
+            .collect();
+        assert_eq!(errors.len(), 4, "{errors:#?}");
+        assert!(errors[0].starts_with("gio.toml:2: unknown key `server.prot` - did you mean `server.port`?"));
+        assert!(errors[1].starts_with("gio.toml:5: unknown key `cache.memory_mb` - "));
+        assert!(errors[2].starts_with("gio.toml:6: unknown key `cache.swr_multipler` - did you mean"));
+        assert!(errors[3].starts_with("gio.toml:8: unknown key [image] - did you mean [images]?"));
     }
 }

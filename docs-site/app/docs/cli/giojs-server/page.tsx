@@ -160,8 +160,8 @@ node standalone/run.mjs --check-config                 # a standalone build`} />
       <h3 id="report">Report</h3>
       <PropsTable kind="Field" rows={[
         { name: 'ok', type: 'boolean', description: 'Whether the server would start.' },
-        { name: 'errors', type: 'string[]', description: 'Every refusal, worded as startup prints it after "configuration error:".' },
-        { name: 'warnings', type: 'string[]', description: <>Protections the file turns off or loosens, ignored <code>[dev] allowed_hosts</code> entries, and middleware rules startup would skip - the same lines startup logs.</> },
+        { name: 'errors', type: 'string[]', description: <>Every refusal, worded as startup prints it after <code>configuration error:</code>, in line order: every unknown key and section, rules that cannot be enforced, and the other checks startup makes. A value error behind unknown keys shows once they are fixed.</> },
+        { name: 'warnings', type: 'string[]', description: <>Protections the file turns off or loosens and ignored <code>[dev] allowed_hosts</code> entries - the same lines startup logs.</> },
         { name: 'mode', type: 'string', description: <><code>development</code> or <code>production</code>, from <code>NODE_ENV</code>.</> },
         { name: 'envFiles', type: 'string[]', description: <>The <code>.env</code> files loaded, by name, highest precedence first.</> },
         { name: 'envFilesDisabledBy', type: 'string | null', description: <>What turned <code>.env</code> loading off: <code>GIO_ENV_FILES</code> or <code>[env] files</code>.</> },
@@ -224,8 +224,9 @@ redirect_to = "/login"`} />
       </p>
 
       <h3 id="a-refused-configuration">A refused configuration</h3>
+      <p>Every unknown key and section is reported in one run:</p>
       <CodeBlock lang="text" code={`$ npx giojs-server --check-config
-{"configFile":"gio.toml","envFiles":[],"envFilesDisabledBy":null,"errors":["gio.toml:2: unknown key \`server.prot\` - did you mean \`server.port\`?"],"mode":"production","ok":false}
+{"configFile":"gio.toml","envFiles":[],"envFilesDisabledBy":null,"errors":["gio.toml:2: unknown key \`server.prot\` - did you mean \`server.port\`?","gio.toml:7: unknown key [image] - did you mean [images]?"],"mode":"production","ok":false}
 $ echo $?
 1`} />
       <p>A syntax error is reported by line and column, without quoting the line (it may hold a token):</p>
@@ -281,7 +282,7 @@ node -e 'const r = require("./check.json"); if (r.warnings.length) { console.log
       <VersionHistory entries={[
         {
           version: 'v0.1.0-beta.8',
-          changes: <><code>--check-config</code> introduced. The server loads <code>.env</code> files, decides the worker&apos;s mode from <code>NODE_ENV</code>, rejects unknown <code>gio.toml</code> keys, reports every startup refusal at once, and logs a warning per loosened protection. The bin became a separate launcher: <code>gio</code> got commands, <code>giojs-server</code> kept starting the server.</>,
+          changes: <><code>--check-config</code> introduced. The server loads <code>.env</code> files, decides the worker&apos;s mode from <code>NODE_ENV</code>, rejects unknown <code>gio.toml</code> keys, reports every startup refusal at once (every unknown key in one run), and logs a warning per loosened protection. The bin became a separate launcher: <code>gio</code> got commands, <code>giojs-server</code> kept starting the server.</>,
         },
         { version: 'v0.1.0-beta.1', changes: <>Introduced, as a second name for the <code>gio</code> bin.</> },
       ]} />

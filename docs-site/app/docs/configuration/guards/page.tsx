@@ -67,8 +67,10 @@ redirect_to = "/login"`} />
 
       <h3 id="errors">Errors</h3>
       <p>A guard that would leave its path open stops startup instead of being skipped:</p>
-      <CodeBlock lang="text" code={`invalid [[guards]] entry for "/admin/*rest" in gio.toml: names no requirement: set require_session = true or a non-empty require_cookie
-invalid [[guards]] entry for "/admin/*rest" in gio.toml: pattern must start with '/': login
+      <CodeBlock lang="text" code={`gio.toml:1: invalid [[guards]] entry for "/admin/*rest": names no requirement: set require_session = true or a non-empty require_cookie
+gio.toml:1: invalid [[guards]] entry for "/admin/*rest": pattern must start with '/': login
+gio.toml:5: invalid [[guards]] entry for "members/*rest": pattern must start with '/': members/*rest
+gio.toml:9: invalid [[guards]] entry for "/a/*rest/c": catch-all segment must be the last segment: /a/*rest/c
 gio.toml:3: unknown key \`guards[0].require_sesion\` - did you mean \`guards[0].require_session\`?`} />
 
       <h2 id="examples">Examples</h2>

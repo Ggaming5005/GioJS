@@ -7,13 +7,17 @@
 //! `:param` captures, `*rest` catch-all (zero or more segments, so
 //! `/admin/*rest` also covers `/admin` itself). Callers match the canonical
 //! request path (path_hygiene.rs). Evaluation order per request:
-//! guards, then redirects, then rewrites - first match wins within each phase,
-//! and when two rule sets are merged the static (gio.toml) set is checked
-//! before the worker set inside every phase. Header rules stamp responses
-//! independently of the short-circuiting phases. All header names/values and
-//! redirect statuses are validated once at compile/load time (invalid entries
-//! are skipped with a warning), never at request time. Guards fail closed
-//! instead wherever they can: see `GuardRule`.
+//! guards, then redirects, then rewrites. Every matching guard must admit the
+//! request (the first that refuses decides the redirect); among redirects and
+//! among rewrites the first match wins. When two rule sets are merged the
+//! static (gio.toml) set is checked before the worker set inside every phase.
+//! Header rules stamp responses independently of the short-circuiting phases.
+//!
+//! Patterns, targets, header names/values and redirect statuses are
+//! validated once at load time, never at request time, and a rule that fails
+//! is a load error (`RuleSet::problems`): gio.toml refuses to start, and a
+//! worker whose middleware.ts READY frame carries one is refused - a skipped
+//! rule would leave the path it was meant to protect open.
 
 use std::sync::Arc;
 
@@ -92,9 +96,9 @@ pub struct HeaderRule {
 /// A broken guard must never leave its path open. Unknown keys are a parse
 /// error, so a misspelled `require_session` stops gio.toml from loading
 /// instead of being ignored (sanitizeMiddlewareRules sends the READY frame
-/// only these keys). A guard that names no requirement fails `validate`, so
-/// gio.toml refuses to load it, and compiles to deny-all - the shape
-/// middleware.ts sends for a guard whose requirement was malformed.
+/// only these keys). A guard that names no requirement is one of
+/// `RuleSet::problems`, so neither gio.toml nor middleware.ts loads it; were
+/// one compiled anyway, it would deny every request.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -132,16 +136,27 @@ fn guard_rule_schema_aliases(schema: &mut schemars::Schema) {
 }
 
 impl GuardRule {
-    /// The strict load-time check for gio.toml: the guard compiles and names
-    /// a requirement. `RuleSet::compile` is lenient instead (it skips what it
-    /// cannot compile and keeps a requirement-less guard as deny-all), which
-    /// suits rules from a worker that a restart can fix.
+    /// The strict load-time check: the guard compiles and names a
+    /// requirement.
     pub fn validate(&self) -> Result<(), RuleError> {
         match CompiledGuard::compile(self)?.check {
             GuardCheck::DenyAll => Err(RuleError::NoGuardRequirement),
             GuardCheck::Cookie(_) | GuardCheck::Session(_) => Ok(()),
         }
     }
+}
+
+/// A rule that cannot be enforced as written, from `RuleSet::problems`.
+#[derive(Debug)]
+pub struct RuleProblem {
+    /// `guards`, `redirects`, `rewrites` or `headers`: the gio.toml table
+    /// and the middleware.ts key alike.
+    pub kind: &'static str,
+    /// The rule's position in its list.
+    pub index: usize,
+    /// The rule's pattern (`path`, or `from` for redirects and rewrites).
+    pub pattern: String,
+    pub error: RuleError,
 }
 
 /// The raw, wire/config-shaped bundle of all rule kinds. Deserializes from
@@ -455,10 +470,11 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
-    /// Compile raw rules, skipping (with a warning) any entry that fails
-    /// validation. This is the load-time gate: nothing after this point can
-    /// fail or panic at request time. Session guards verify with the
-    /// process-wide secrets from `session_token::init`.
+    /// Compile raw rules. Callers refuse rules with `problems` first, so
+    /// every entry compiles; one that does not is skipped with a warning (and
+    /// a guard without a requirement denies everything). Nothing after this
+    /// point can fail or panic at request time. Session guards verify with
+    /// the process-wide secrets from `session_token::init`.
     pub fn compile(raw: &MiddlewareRules) -> Self {
         Self::compile_with_session_keys(raw, session_token::keys())
     }
@@ -518,25 +534,47 @@ impl RuleSet {
         compiled
     }
 
-    /// The entries `compile` would skip, one message each, for
-    /// `--check-config`: the warnings it logs scroll past at startup.
-    pub fn skipped_rules(raw: &MiddlewareRules) -> Vec<String> {
-        let guards = raw.guards.iter().filter_map(|rule| {
-            let error = CompiledGuard::compile(rule).err()?;
-            Some(format!("[[guards]] {}: {error}", rule.path))
-        });
-        let redirects = raw.redirects.iter().filter_map(|rule| {
-            let error = CompiledRedirect::compile(rule).err()?;
-            Some(format!("[[redirects]] {}: {error}", rule.from))
-        });
-        let rewrites = raw.rewrites.iter().filter_map(|rule| {
-            let error = CompiledRewrite::compile(rule).err()?;
-            Some(format!("[[rewrites]] {}: {error}", rule.from))
-        });
-        let headers = raw.headers.iter().filter_map(|rule| {
-            let error = CompiledHeaderRule::compile(rule).err()?;
-            Some(format!("[[headers]] {}: {error}", rule.path))
-        });
+    /// Every rule `compile` could not enforce as written: one it cannot
+    /// compile (a relative or malformed pattern, an unknown capture in a
+    /// target, a bad status or header), and a guard that names no
+    /// requirement. Both rule sources refuse to load with any - gio.toml at
+    /// startup, middleware.ts when the worker reports its rules.
+    pub fn problems(raw: &MiddlewareRules) -> Vec<RuleProblem> {
+        fn collect<'r, T>(
+            kind: &'static str,
+            rules: &'r [T],
+            pattern: impl Fn(&T) -> &str + 'r,
+            check: impl Fn(&T) -> Result<(), RuleError> + 'r,
+        ) -> impl Iterator<Item = RuleProblem> + 'r {
+            rules.iter().enumerate().filter_map(move |(index, rule)| {
+                let error = check(rule).err()?;
+                Some(RuleProblem {
+                    kind,
+                    index,
+                    pattern: pattern(rule).to_string(),
+                    error,
+                })
+            })
+        }
+        let guards = collect("guards", &raw.guards, |r| &r.path, GuardRule::validate);
+        let redirects = collect(
+            "redirects",
+            &raw.redirects,
+            |r| &r.from,
+            |r| CompiledRedirect::compile(r).map(drop),
+        );
+        let rewrites = collect(
+            "rewrites",
+            &raw.rewrites,
+            |r| &r.from,
+            |r| CompiledRewrite::compile(r).map(drop),
+        );
+        let headers = collect(
+            "headers",
+            &raw.headers,
+            |r| &r.path,
+            |r| CompiledHeaderRule::compile(r).map(drop),
+        );
         guards.chain(redirects).chain(rewrites).chain(headers).collect()
     }
 
@@ -755,7 +793,48 @@ mod tests {
     }
 
     #[test]
-    fn skipped_rules_lists_exactly_what_compile_skips() {
+    fn problems_list_every_rule_that_would_not_be_enforced() {
+        let raw = MiddlewareRules {
+            redirects: vec![redirect("/old", "/new", 301), redirect("/a", "/b", 200)],
+            rewrites: vec![RewriteRule {
+                from: "no-slash".to_string(),
+                to: "/x".to_string(),
+            }],
+            headers: vec![HeaderRule {
+                path: "/*rest".to_string(),
+                headers: [("bad header".to_string(), "v".to_string())].into(),
+            }],
+            guards: vec![
+                guard("/admin", "session", "/login"),
+                guard("members/*rest", "session", "/login"),
+                guard("/a/*rest/c", "session", "/login"),
+                guard("/b", "", "/login"),
+            ],
+        };
+        let problems: Vec<String> = RuleSet::problems(&raw)
+            .iter()
+            .map(|p| format!("{}[{}] {}: {}", p.kind, p.index, p.pattern, p.error))
+            .collect();
+        assert_eq!(
+            problems,
+            [
+                "guards[1] members/*rest: pattern must start with '/': members/*rest",
+                "guards[2] /a/*rest/c: catch-all segment must be the last segment: /a/*rest/c",
+                "guards[3] /b: names no requirement: set require_session = true or a non-empty require_cookie",
+                "redirects[1] /a: redirect status must be 301, 302, 307, or 308 (got 200)",
+                "rewrites[0] no-slash: pattern must start with '/': no-slash",
+                "headers[0] /*rest: invalid header name: bad header",
+            ]
+        );
+        assert!(RuleSet::problems(&MiddlewareRules {
+            guards: vec![guard("/admin", "session", "/login")],
+            ..Default::default()
+        })
+        .is_empty());
+    }
+
+    #[test]
+    fn compile_skips_what_it_cannot_compile() {
         let raw = MiddlewareRules {
             redirects: vec![redirect("/old", "/new", 301), redirect("/a", "/b", 200)],
             rewrites: vec![RewriteRule {
@@ -768,11 +847,6 @@ mod tests {
             }],
             guards: vec![guard("/admin", "session", "/login")],
         };
-        let skipped = RuleSet::skipped_rules(&raw);
-        assert_eq!(skipped.len(), 3, "{skipped:?}");
-        assert!(skipped[0].starts_with("[[redirects]] /a: "), "{skipped:?}");
-        assert!(skipped[1].starts_with("[[rewrites]] no-slash: "), "{skipped:?}");
-        assert!(skipped[2].starts_with("[[headers]] /*rest: "), "{skipped:?}");
         let compiled = RuleSet::compile(&raw);
         assert_eq!(compiled.redirects.len(), 1);
         assert!(compiled.rewrites.is_empty() && compiled.headers.is_empty());

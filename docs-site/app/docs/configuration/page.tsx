@@ -310,17 +310,17 @@ giojs-server: configuration error: gio.toml:21: invalid \`server.port\`: invalid
         <li>
           Wrong values fail the same way: a malformed <code>trusted_proxies</code> entry, a{' '}
           <code>host</code> that is not an IP address, an unknown <code>[logging] format</code>,
-          a <code>[[guards]]</code> entry that would not protect its path, a page cache
+          a <code>[[guards]]</code>, <code>[[redirects]]</code>, <code>[[rewrites]]</code> or{' '}
+          <code>[[headers]]</code> rule that cannot be enforced as written, a{' '}
+          <code>[[rate_limits]] path</code> that cannot be parsed, an <code>[i18n]</code> whose{' '}
+          <code>default_locale</code> is not one of its <code>locales</code>, a page cache
           directory inside <code>app/</code> or <code>public/</code>.
         </li>
         <li>
-          Startup reports every refusal at once - the TLS certificate, <code>[security]</code>,
-          the revalidation token and local <code>[[fonts]]</code> files included - before the
-          worker starts.
-        </li>
-        <li>
-          A <code>[[redirects]]</code>, <code>[[rewrites]]</code> or <code>[[headers]]</code> rule
-          that cannot be compiled is skipped with a warning instead: the server starts without it.
+          Startup reports every refusal at once - every unknown key and section, the TLS
+          certificate, <code>[security]</code>, the revalidation token and local{' '}
+          <code>[[fonts]]</code> files included - before the worker starts. After the unknown
+          keys, a value error that follows them is reported once those are fixed.
         </li>
       </ul>
       <p>

@@ -69,8 +69,8 @@ access-control-allow-origin = "https://app.example.com"`} />
       </ul>
 
       <h3 id="invalid-rules">Invalid rules</h3>
-      <p>A rule with an invalid header name or value, or a bad pattern, is skipped with a startup warning (<code>invalid header rule skipped</code>), and <code>--check-config</code> lists it under <code>warnings</code>:</p>
-      <CodeBlock lang="text" code={`[[headers]] /x: invalid header name: bad header`} />
+      <p>A rule with an invalid header name or value, or a bad pattern, stops startup with the file, line and reason - a skipped rule would leave its paths without the headers - and <code>--check-config</code> reports it under <code>errors</code>:</p>
+      <CodeBlock lang="text" code={`gio.toml:3: invalid [[headers]] entry for "/x": invalid header name: bad header`} />
 
       <h2 id="examples">Examples</h2>
       <h3 id="let-partners-embed-one-section">Let partners embed one section</h3>

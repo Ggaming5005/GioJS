@@ -2,9 +2,10 @@
 //!
 //! gio.toml parsing into typed config structs with serde defaults.
 //! A missing file falls back to defaults; a file that exists but cannot be
-//! read or parsed is a startup-time failure: print the error and exit(1).
-//! So is a `[[guards]]` entry that would not protect its path - other rules
-//! are skipped with a warning, but a skipped guard leaves its path open.
+//! read or parsed is a startup-time failure: print the errors and exit(1).
+//! So is a rule (`[[guards]]`, `[[redirects]]`, `[[rewrites]]`,
+//! `[[headers]]`) that cannot be enforced as written - a skipped guard would
+//! leave its path open - and an `[i18n]` whose locales do not add up.
 //!
 //! Strict: an unknown key anywhere is a startup error naming the key path,
 //! the line and the closest valid key (see config_diagnostics.rs), because a
@@ -12,7 +13,8 @@
 //! author thinks they changed. Every struct below denies unknown fields; the
 //! top level is checked against `SECTIONS` instead, so `[x-...]` tables stay
 //! free for other tools. Keys earlier releases documented that never did
-//! anything are rejected with what to do instead (`RETIRED_KEYS`).
+//! anything are rejected with what to do instead (`RETIRED_KEYS`). Every
+//! problem is reported in one run, not just the first (`GioConfig::parse_all`).
 //!
 //! The listen address resolves env > gio.toml > default: `GIO_HOST` /
 //! `GIO_PORT`, then `PORT` (set by Heroku, Render, Railway, Fly.io, Cloud
@@ -56,10 +58,12 @@ pub enum ConfigError {
         key: String,
         message: String,
     },
-    #[error("invalid [[guards]] entry for \"{guard}\" in {path}: {source}")]
-    InvalidGuard {
-        path: String,
-        guard: String,
+    /// `location` is `path:line`; `kind` the rule table (`guards`).
+    #[error("{location}: invalid [[{kind}]] entry for \"{pattern}\": {source}")]
+    InvalidRule {
+        location: String,
+        kind: &'static str,
+        pattern: String,
         source: crate::rules::RuleError,
     },
     #[error("invalid {name}={value:?}: {reason}")]
@@ -537,8 +541,89 @@ pub struct I18nConfig {
     #[serde(default = "default_locale")]
     pub default_locale: String,
     /// Detection order: any of "path", "accept-language", "cookie".
-    #[serde(default = "default_detect_from")]
+    #[serde(
+        default = "default_detect_from",
+        deserialize_with = "deserialize_detect_from"
+    )]
+    #[cfg_attr(test, schemars(with = "Vec<DetectStrategy>"))]
     pub detect_from: Vec<String>,
+}
+
+/// The `[i18n] detect_from` strategies giojs-i18n knows. An unknown one is
+/// an error, not a strategy that silently never detects anything.
+pub const DETECT_STRATEGIES: &[&str] = &["path", "accept-language", "cookie"];
+
+/// `DETECT_STRATEGIES`, for the schema.
+#[cfg(test)]
+#[derive(schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+#[allow(dead_code)]
+enum DetectStrategy {
+    Path,
+    AcceptLanguage,
+    Cookie,
+}
+
+fn deserialize_detect_from<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error> {
+    struct Strategy(String);
+    impl<'de> Deserialize<'de> for Strategy {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let name = String::deserialize(deserializer)?;
+            if DETECT_STRATEGIES.contains(&name.as_str()) {
+                Ok(Strategy(name))
+            } else {
+                Err(serde::de::Error::unknown_variant(&name, DETECT_STRATEGIES))
+            }
+        }
+    }
+    let strategies = Vec::<Strategy>::deserialize(deserializer)?;
+    Ok(strategies.into_iter().map(|Strategy(name)| name).collect())
+}
+
+impl I18nConfig {
+    /// What startup refuses once the section parsed, as (key, message):
+    /// an empty or duplicate locale (case-insensitively - Accept-Language
+    /// matching would never tell them apart), and a `default_locale` that is
+    /// not one of a non-empty `locales`.
+    fn problems(&self) -> Vec<(&'static str, String)> {
+        let mut problems = Vec::new();
+        for (index, locale) in self.locales.iter().enumerate() {
+            if locale.trim().is_empty() {
+                problems.push(("locales", "a locale must not be empty".to_string()));
+            } else if let Some(first) = self.locales[..index]
+                .iter()
+                .find(|earlier| earlier.eq_ignore_ascii_case(locale))
+            {
+                problems.push((
+                    "locales",
+                    format!("{locale:?} is listed twice (as {first:?} before)"),
+                ));
+            }
+        }
+        if !self.locales.is_empty() && !self.locales.contains(&self.default_locale) {
+            let hint = config_diagnostics::closest(
+                &self.default_locale,
+                self.locales.iter().map(String::as_str),
+            )
+            .map(|locale| format!(" - did you mean {locale:?}?"))
+            .unwrap_or_default();
+            problems.push((
+                "default_locale",
+                format!(
+                    "{:?} is not one of locales ({}){hint}",
+                    self.default_locale,
+                    self.locales
+                        .iter()
+                        .map(|locale| format!("{locale:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+        problems
+    }
 }
 
 fn default_locale() -> String {
@@ -1471,21 +1556,26 @@ impl GioConfig {
     pub fn load() -> Self {
         match Self::try_load() {
             Ok(config) => config,
-            Err(error) => {
-                eprintln!("giojs-server: configuration error: {error}");
+            Err(errors) => {
+                for error in errors {
+                    eprintln!("giojs-server: configuration error: {error}");
+                }
                 std::process::exit(1);
             }
         }
     }
 
-    /// `load` without the exit: the config, or why startup would refuse it.
-    pub fn try_load() -> Result<Self, ConfigError> {
-        let mut config = Self::load_from_path(&Self::path())?;
-        config.apply_listen_overrides(
-            std::env::var("GIO_HOST").ok().as_deref(),
-            std::env::var("GIO_PORT").ok().as_deref(),
-            std::env::var("PORT").ok().as_deref(),
-        )?;
+    /// `load` without the exit: the config, or every reason startup would
+    /// refuse it.
+    pub fn try_load() -> Result<Self, Vec<ConfigError>> {
+        let mut config = Self::read_path(&Self::path())?;
+        config
+            .apply_listen_overrides(
+                std::env::var("GIO_HOST").ok().as_deref(),
+                std::env::var("GIO_PORT").ok().as_deref(),
+                std::env::var("PORT").ok().as_deref(),
+            )
+            .map_err(|error| vec![error])?;
         Ok(config)
     }
 
@@ -1502,39 +1592,89 @@ impl GioConfig {
             .unwrap_or_else(|| std::path::PathBuf::from("gio.toml"))
     }
 
+    #[cfg(test)]
     fn load_from_path(path: &std::path::Path) -> Result<Self, ConfigError> {
+        Self::read_path(path).map_err(first_error)
+    }
+
+    fn read_path(path: &std::path::Path) -> Result<Self, Vec<ConfigError>> {
         if !path.exists() {
             return Ok(Self {
                 port_source: "default",
                 ..Self::default()
             });
         }
-        let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
-            path: path.display().to_string(),
-            source,
+        let raw = std::fs::read_to_string(path).map_err(|source| {
+            vec![ConfigError::Read {
+                path: path.display().to_string(),
+                source,
+            }]
         })?;
-        Self::parse(&raw, &path.display().to_string())
+        Self::parse_all(&raw, &path.display().to_string())
     }
 
-    /// Parse gio.toml's contents; `file` names it in errors.
+    /// Parse gio.toml's contents; `file` names it in errors. The first
+    /// problem by line - see `parse_all` for all of them.
+    #[cfg(test)]
     pub(crate) fn parse(raw: &str, file: &str) -> Result<Self, ConfigError> {
-        let parsed = toml::from_str::<Self>(raw);
+        Self::parse_all(raw, file).map_err(first_error)
+    }
+
+    /// Parse gio.toml's contents, reporting every problem in line order:
+    /// each unknown section and key, then - once the rest deserializes -
+    /// rules that cannot be enforced and an inconsistent `[i18n]`. serde
+    /// stops at its first error, so an unknown key is blanked out of the
+    /// text (line breaks kept, so every other key stays on its line) and the
+    /// text parsed again, until it parses or fails another way - reported
+    /// only when it is the first error, as it may be fallout otherwise.
+    pub(crate) fn parse_all(raw: &str, file: &str) -> Result<Self, Vec<ConfigError>> {
         // A syntax error leaves no document: toml's own error (line,
-        // snippet) is then the best there is.
+        // column) is then the best there is.
         let doc = toml_edit::ImDocument::parse(raw).ok();
+        let mut errors: Vec<(usize, ConfigError)> = Vec::new();
         if let Some(doc) = &doc {
-            check_sections(doc, raw, file)?;
+            errors.extend(unknown_sections(doc, raw, file));
         }
-        let mut config =
-            parsed.map_err(|source| describe_error(source, doc.as_ref(), raw, file))?;
-        for guard in &config.guards {
-            guard
-                .validate()
-                .map_err(|source| ConfigError::InvalidGuard {
-                    path: file.to_string(),
-                    guard: guard.path.clone(),
-                    source,
-                })?;
+        let mut text = raw.to_string();
+        let parsed = loop {
+            let source = match toml::from_str::<Self>(&text) {
+                Ok(config) => break Some(config),
+                Err(source) => source,
+            };
+            let offset = source.span().map(|span| span.start);
+            let line = offset.map_or(0, |offset| config_diagnostics::line_of(&text, offset));
+            let current = toml_edit::ImDocument::parse(text.as_str()).ok();
+            let error = describe_error(source, current.as_ref(), &text, file);
+            let blank = match (&error, &current, offset) {
+                (ConfigError::UnknownKey { .. }, Some(current), Some(offset)) => {
+                    config_diagnostics::item_extent(current, offset)
+                }
+                _ => None,
+            };
+            // Once something is blanked, only further unknown keys are sure
+            // to be the author's: a missing field or a broken inline table
+            // may be the blanking's own doing.
+            if text == raw || blank.is_some() {
+                errors.push((line, error));
+            }
+            match blank {
+                Some(ranges) if errors.len() < MAX_REPORTED_ERRORS => {
+                    text = config_diagnostics::blank_out(&text, &ranges);
+                }
+                _ => break None,
+            }
+        };
+        let Some(mut config) = parsed else {
+            return Err(in_line_order(errors));
+        };
+        // On blanked text the rest would be fallout (a guard whose misspelled
+        // requirement was blanked names none).
+        if let Some(doc) = doc.as_ref().filter(|_| text == raw) {
+            errors.extend(rule_problems(&config, doc, raw, file));
+            errors.extend(i18n_problems(&config.i18n, doc, raw, file));
+        }
+        if !errors.is_empty() {
+            return Err(in_line_order(errors));
         }
         let port_in_file = doc
             .as_ref()
@@ -1604,15 +1744,92 @@ fn project_root_of(app_dir: Option<&str>) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-/// Top-level keys must be a `SECTIONS` entry or start with `x-` (left for
-/// other tools). `GioConfig` itself does not deny unknown fields, so this is
-/// the only check at this level.
-fn check_sections(
+/// Past this many, a report stops looking: the rest is likely fallout.
+const MAX_REPORTED_ERRORS: usize = 50;
+
+fn first_error(mut errors: Vec<ConfigError>) -> ConfigError {
+    errors.swap_remove(0)
+}
+
+/// Errors sorted by line (a stable sort: same-line errors keep their order).
+fn in_line_order(mut errors: Vec<(usize, ConfigError)>) -> Vec<ConfigError> {
+    errors.sort_by_key(|(line, _)| *line);
+    errors.into_iter().map(|(_, error)| error).collect()
+}
+
+/// The line of the value at `path` (`["i18n", "locales"]`, `["guards"]`
+/// then an index), when the document spells it out.
+fn line_of_key(doc: &toml_edit::ImDocument<&str>, raw: &str, path: &[&str], index: Option<usize>) -> Option<usize> {
+    let (last, parents) = path.split_last()?;
+    let mut table = doc.as_table();
+    for name in parents {
+        table = table.get(name)?.as_table()?;
+    }
+    let span = match (table.get(last)?, index) {
+        (toml_edit::Item::ArrayOfTables(array), Some(index)) => array.get(index)?.span(),
+        (item, _) => table.key(last).and_then(|key| key.span()).or_else(|| item.span()),
+    }?;
+    Some(config_diagnostics::line_of(raw, span.start))
+}
+
+/// Rules that parsed but cannot be enforced as written (`RuleSet::problems`).
+fn rule_problems(
+    config: &GioConfig,
     doc: &toml_edit::ImDocument<&str>,
     raw: &str,
     file: &str,
-) -> Result<(), ConfigError> {
+) -> Vec<(usize, ConfigError)> {
+    crate::rules::RuleSet::problems(&config.middleware_rules())
+        .into_iter()
+        .map(|problem| {
+            let line = line_of_key(doc, raw, &[problem.kind], Some(problem.index));
+            (
+                line.unwrap_or(0),
+                ConfigError::InvalidRule {
+                    location: location(file, line),
+                    kind: problem.kind,
+                    pattern: problem.pattern,
+                    source: problem.error,
+                },
+            )
+        })
+        .collect()
+}
+
+fn i18n_problems(
+    i18n: &I18nConfig,
+    doc: &toml_edit::ImDocument<&str>,
+    raw: &str,
+    file: &str,
+) -> Vec<(usize, ConfigError)> {
+    i18n.problems()
+        .into_iter()
+        .map(|(key, message)| {
+            // A default_locale left at its default is reported on locales.
+            let line = line_of_key(doc, raw, &["i18n", key], None)
+                .or_else(|| line_of_key(doc, raw, &["i18n", "locales"], None));
+            (
+                line.unwrap_or(0),
+                ConfigError::InvalidValue {
+                    location: location(file, line),
+                    key: format!("`i18n.{key}`"),
+                    message,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Top-level keys must be a `SECTIONS` entry or start with `x-` (left for
+/// other tools). `GioConfig` itself does not deny unknown fields, so this is
+/// the only check at this level. One error per unknown key, with its line.
+fn unknown_sections(
+    doc: &toml_edit::ImDocument<&str>,
+    raw: &str,
+    file: &str,
+) -> Vec<(usize, ConfigError)> {
     let root = doc.as_table();
+    let mut errors = Vec::new();
     for (name, item) in root.iter() {
         if name.starts_with("x-") || SECTIONS.iter().any(|(section, _)| *section == name) {
             continue;
@@ -1635,15 +1852,18 @@ fn check_sections(
                         config_diagnostics::display_key(section, kind)
                     )
                 });
-        return Err(ConfigError::UnknownKey {
-            location: location(file, line),
-            key: config_diagnostics::display_key(name, config_diagnostics::kind_of(item)),
-            hint: suggestion.unwrap_or_else(|| {
-                " - tables for other tools must be named x-... ([x-mytool])".to_string()
-            }),
-        });
+        errors.push((
+            line.unwrap_or(0),
+            ConfigError::UnknownKey {
+                location: location(file, line),
+                key: config_diagnostics::display_key(name, config_diagnostics::kind_of(item)),
+                hint: suggestion.unwrap_or_else(|| {
+                    " - tables for other tools must be named x-... ([x-mytool])".to_string()
+                }),
+            },
+        ));
     }
-    Ok(())
+    errors
 }
 
 /// `file:line`, or just `file` without a line.
@@ -2139,6 +2359,87 @@ redirect_to    = "/"
     }
 
     #[test]
+    fn i18n_must_add_up() {
+        for (body, expected) in [
+            (
+                "[i18n]\nlocales = [\"en\", \"de\"]\ndetect_from = [\"path\", \"acept-language\"]\n",
+                "gio.toml:3: invalid `i18n.detect_from`: unknown variant `acept-language`, expected \
+                 one of `path`, `accept-language`, `cookie` - did you mean \"accept-language\"?",
+            ),
+            (
+                "[i18n]\nlocales = [\"en-US\", \"de\"]\ndefault_locale = \"en-us\"\n",
+                "gio.toml:3: invalid `i18n.default_locale`: \"en-us\" is not one of locales \
+                 (\"en-US\", \"de\") - did you mean \"en-US\"?",
+            ),
+            (
+                // Left at its default ("en"): reported where locales are.
+                "[i18n]\nlocales = [\"de\", \"fr\"]\n",
+                "gio.toml:2: invalid `i18n.default_locale`: \"en\" is not one of locales (\"de\", \"fr\")",
+            ),
+            (
+                "[i18n]\nlocales = [\"en\", \"de\", \"EN\"]\n",
+                "gio.toml:2: invalid `i18n.locales`: \"EN\" is listed twice (as \"en\" before)",
+            ),
+            (
+                "[i18n]\nlocales = [\"en\", \"\"]\n",
+                "gio.toml:2: invalid `i18n.locales`: a locale must not be empty",
+            ),
+        ] {
+            let text = error_text(body);
+            assert_eq!(text, expected, "{body:?}");
+        }
+        // No locales: i18n is off, and default_locale only names <html lang>.
+        parse("[i18n]\ndefault_locale = \"de\"\n").unwrap();
+        let config = parse(
+            "[i18n]\nlocales = [\"en\", \"de\"]\ndefault_locale = \"de\"\ndetect_from = [\"cookie\", \"path\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.i18n.detect_from, ["cookie", "path"]);
+    }
+
+    #[test]
+    fn every_rule_that_cannot_be_enforced_stops_startup() {
+        let errors = GioConfig::parse_all(
+            "[[redirects]]\nfrom = \"old\"\nto = \"/new\"\n\n\
+             [[rewrites]]\nfrom = \"/a/*rest/b\"\nto = \"/b\"\n\n\
+             [[headers]]\npath = \"/x\"\n[headers.headers]\n\"bad name\" = \"1\"\n\n\
+             [[guards]]\npath = \"/ok\"\nrequire_cookie = \"s\"\nredirect_to = \"/\"\n\n\
+             [[guards]]\npath = \"members/*rest\"\nrequire_cookie = \"s\"\nredirect_to = \"/\"\n",
+            "gio.toml",
+        )
+        .unwrap_err();
+        let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            errors,
+            [
+                "gio.toml:1: invalid [[redirects]] entry for \"old\": pattern must start with '/': old",
+                "gio.toml:5: invalid [[rewrites]] entry for \"/a/*rest/b\": catch-all segment must be the last segment: /a/*rest/b",
+                "gio.toml:9: invalid [[headers]] entry for \"/x\": invalid header name: bad name",
+                "gio.toml:19: invalid [[guards]] entry for \"members/*rest\": pattern must start with '/': members/*rest",
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_all_reported_with_their_own_lines() {
+        let errors = GioConfig::parse_all(
+            "[server]\nprot = 3000\nhots = \"0.0.0.0\"\n\n[cache.redis]\nurl = \"redis://x\"\n\n\
+             [[guards]]\npath = \"/a\"\nrequire_sesion = true\nredirect_to = \"/\"\n\n[imgaes]\n",
+            "gio.toml",
+        )
+        .unwrap_err();
+        let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert_eq!(errors.len(), 5, "{errors:#?}");
+        assert!(errors[0].starts_with("gio.toml:2: unknown key `server.prot`"), "{errors:#?}");
+        assert!(errors[1].starts_with("gio.toml:3: unknown key `server.hots`"), "{errors:#?}");
+        assert!(errors[2].starts_with("gio.toml:5: unknown key [cache.redis]"), "{errors:#?}");
+        assert!(errors[3].starts_with("gio.toml:10: unknown key `guards[0].require_sesion`"), "{errors:#?}");
+        assert!(errors[4].starts_with("gio.toml:13: unknown key [imgaes] - did you mean [images]?"), "{errors:#?}");
+        // The first by line is what `parse` returns.
+        assert!(error_text("[server]\nprot = 3000\nhots = \"x\"\n").starts_with("gio.toml:2:"));
+    }
+
+    #[test]
     fn rate_limit_paths_take_rule_syntax() {
         let config = parse(
             "[[rate_limits]]\npath = \"/api/*rest\"\n\n[[rate_limits]]\npath = \"/api/*\"\n\n\
@@ -2542,7 +2843,7 @@ check_origin = true
         ] {
             let result = load_guard_toml(name, body);
             assert!(
-                matches!(result, Err(ConfigError::InvalidGuard { .. })),
+                matches!(result, Err(ConfigError::InvalidRule { kind: "guards", .. })),
                 "{name}: {result:?}"
             );
         }
@@ -3102,6 +3403,12 @@ check_origin = true
                 "ImageFormat" => enum_spellings::<ImageFormat>(),
                 "LogFormat" => enum_spellings::<LogFormat>(),
                 "ProxyHeaders" => enum_spellings::<ProxyHeaders>(),
+                // The parser's own list (deserialize_detect_from).
+                "DetectStrategy" => serde_spellings(
+                    toml::from_str::<I18nConfig>("detect_from = [\"__probe__\"]")
+                        .unwrap_err()
+                        .message(),
+                ),
                 // true | false | a string | HstsPolicy, checked above.
                 "HstsSetting" => continue,
                 // A count or "auto": WorkersSetting's hand-written parser,

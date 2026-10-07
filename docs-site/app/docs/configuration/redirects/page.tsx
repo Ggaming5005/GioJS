@@ -66,14 +66,14 @@ status = 301`} />
 
       <h3 id="invalid-rules">Invalid rules</h3>
       <p>
-        A rule that cannot be compiled is skipped with a startup warning (
-        <code>invalid redirect rule skipped</code>, with the rule&apos;s <code>from</code> and the
-        error), and the server still starts. <code>giojs-server --check-config</code> lists the
-        same problems under <code>warnings</code>:
+        A rule that cannot be compiled stops startup, naming the file, the line, the rule&apos;s{' '}
+        <code>from</code> and the reason - a skipped rule would leave its old URL serving.{' '}
+        <code>giojs-server --check-config</code> reports the same problems under{' '}
+        <code>errors</code>, all of them at once:
       </p>
-      <CodeBlock lang="text" code={`[[redirects]] /old: pattern must start with '/': https://example.com/new
-[[redirects]] /old: redirect status must be 301, 302, 307, or 308 (got 303)
-[[redirects]] /a/:id: target references unknown capture 'slug'`} />
+      <CodeBlock lang="text" code={`gio.toml:4: invalid [[redirects]] entry for "/old": pattern must start with '/': https://example.com/new
+gio.toml:9: invalid [[redirects]] entry for "/old": redirect status must be 301, 302, 307, or 308 (got 303)
+gio.toml:13: invalid [[redirects]] entry for "/a/:id": target references unknown capture 'slug'`} />
       <p>A misspelled key (<code>stauts</code>) is a startup error, like everywhere in <code>gio.toml</code>.</p>
 
       <h2 id="examples">Examples</h2>
@@ -109,7 +109,7 @@ to = "/p/:post/by/:user"     # /u/alice/p/42 -> /p/42/by/alice`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <><code>*rest</code> matches zero segments, rules match the canonical path, header rules are stamped on redirect responses, and <code>--check-config</code> lists skipped rules.</> },
+        { version: 'v0.1.0-beta.8', changes: <><code>*rest</code> matches zero segments, rules match the canonical path, header rules are stamped on redirect responses, and a rule that cannot be compiled stops startup (it was skipped with a warning).</> },
         { version: 'v0.1.0-beta.6', changes: 'Introduced.' },
       ]} />
     </>

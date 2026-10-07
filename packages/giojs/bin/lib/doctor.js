@@ -352,8 +352,8 @@ function configCheck(facts) {
       fix: 'Fix the setting named above (the server prints the same message at startup).',
     });
   }
-  // Rules the server would skip, and protections the file turns off or
-  // loosens - each line names its setting.
+  // Protections the file turns off or loosens - each line names its
+  // setting.
   if (config.warnings && config.warnings.length > 0) {
     const count = config.warnings.length;
     return check('config', 'warn', `gio.toml: ${count} warning${count === 1 ? '' : 's'} the server logs at startup`, {

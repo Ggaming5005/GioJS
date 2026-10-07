@@ -164,6 +164,76 @@ fn visit_value(value: &Value, path: &mut Vec<String>, offset: usize, best: &mut 
     }
 }
 
+/// The bytes the key whose name covers `offset` occupies: its name and
+/// value, or for a table its header and everything in it. Blanking them out
+/// leaves a document without that key whose other keys sit on the same
+/// lines - how one check reports every unknown key, not just the first. None
+/// when no key name covers `offset`.
+pub fn item_extent(doc: &ImDocument<&str>, offset: usize) -> Option<Vec<Range<usize>>> {
+    let mut best = None;
+    extent_in_table(doc.as_table(), 0, offset, &mut best);
+    best.map(|(_, ranges)| ranges)
+}
+
+type Extent = Option<(usize, Vec<Range<usize>>)>;
+
+fn extent_in_table(table: &Table, depth: usize, offset: usize, best: &mut Extent) {
+    for (name, item) in table.iter() {
+        let key_span = table.key(name).and_then(|key| key.span());
+        if covers(key_span.clone(), offset) && best.as_ref().is_none_or(|(d, _)| depth >= *d) {
+            let mut ranges = Vec::new();
+            item_ranges(key_span, item, &mut ranges);
+            *best = Some((depth, ranges));
+        }
+        match item {
+            Item::Table(child) => extent_in_table(child, depth + 1, offset, best),
+            Item::ArrayOfTables(array) => {
+                for child in array.iter() {
+                    extent_in_table(child, depth + 1, offset, best);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Everything `item`, named at `key_span`, spans in the text.
+fn item_ranges(key_span: Option<Range<usize>>, item: &Item, ranges: &mut Vec<Range<usize>>) {
+    match item {
+        Item::Value(value) => {
+            if let (Some(key), Some(value)) = (key_span, value.span()) {
+                ranges.push(key.start..value.end);
+            }
+        }
+        Item::Table(table) => table_ranges(table, ranges),
+        Item::ArrayOfTables(array) => array.iter().for_each(|table| table_ranges(table, ranges)),
+        Item::None => {}
+    }
+}
+
+fn table_ranges(table: &Table, ranges: &mut Vec<Range<usize>>) {
+    ranges.extend(table.span());
+    for (name, item) in table.iter() {
+        item_ranges(table.key(name).and_then(|key| key.span()), item, ranges);
+    }
+}
+
+/// `raw` with every byte in `ranges` turned into a space, line breaks kept.
+pub fn blank_out(raw: &str, ranges: &[Range<usize>]) -> String {
+    let mut bytes = raw.as_bytes().to_vec();
+    for range in ranges {
+        let end = range.end.min(bytes.len());
+        for byte in &mut bytes[range.start.min(end)..end] {
+            if *byte != b'\n' && *byte != b'\r' {
+                *byte = b' ';
+            }
+        }
+    }
+    // Ranges are spans of whole keys and values, so they start and end on
+    // character boundaries; anything else would only lose the report.
+    String::from_utf8(bytes).unwrap_or_else(|_| raw.to_string())
+}
+
 /// serde's "unknown field `x`, expected one of `a`, `b`" (or "unknown
 /// variant ..."): the unknown name and the valid ones.
 #[derive(Debug, Clone, PartialEq, Eq)]

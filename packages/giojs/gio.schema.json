@@ -328,6 +328,15 @@
       },
       "additionalProperties": false
     },
+    "DetectStrategy": {
+      "description": "`DETECT_STRATEGIES`, for the schema.",
+      "type": "string",
+      "enum": [
+        "path",
+        "accept-language",
+        "cookie"
+      ]
+    },
     "DevConfig": {
       "description": "`[dev]`: settings that only apply when NODE_ENV=development.",
       "type": "object",
@@ -561,7 +570,7 @@
             "cookie"
           ],
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/DetectStrategy"
           }
         },
         "locales": {

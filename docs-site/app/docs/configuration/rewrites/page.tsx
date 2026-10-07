@@ -51,8 +51,8 @@ to = "/posts/newest"`} />
       </ul>
 
       <h3 id="invalid-rules">Invalid rules</h3>
-      <p>A rule that cannot be compiled is skipped with a startup warning (<code>invalid rewrite rule skipped</code>), and <code>--check-config</code> lists it under <code>warnings</code>:</p>
-      <CodeBlock lang="text" code={`[[rewrites]] /a/:id: target references unknown capture 'slug'`} />
+      <p>A rule that cannot be compiled stops startup with the file, line and reason, and <code>--check-config</code> reports it under <code>errors</code>:</p>
+      <CodeBlock lang="text" code={`gio.toml:7: invalid [[rewrites]] entry for "/a/:id": target references unknown capture 'slug'`} />
 
       <h2 id="examples">Examples</h2>
       <h3 id="a-friendly-url-for-a-dynamic-route">A friendly URL for a dynamic route</h3>

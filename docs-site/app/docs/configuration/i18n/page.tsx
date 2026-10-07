@@ -33,9 +33,9 @@ default_locale = "en"`} />
 
       <h2 id="reference">Reference</h2>
       <ConfigKeyTable rows={[
-        { key: 'locales', type: 'string[]', default: '[]', zero: <>Empty: i18n is off</>, description: <>The locales the site serves, as they appear in URLs (<code>/de/about</code>).</> },
-        { key: 'default_locale', type: 'string', default: '"en"', description: <>The locale when nothing else decides. Pages in it are served without a prefix, and <code>&lt;html lang&gt;</code> is left as the root layout renders it.</> },
-        { key: 'detect_from', type: 'string[]', default: '["path", "accept-language", "cookie"]', description: <>Where the locale comes from, tried in this order: <code>&quot;path&quot;</code> (the first URL segment), <code>&quot;accept-language&quot;</code> (the header), <code>&quot;cookie&quot;</code> (<code>gio_locale</code>). The first that names a configured locale wins.</> },
+        { key: 'locales', type: 'string[]', default: '[]', zero: <>Empty: i18n is off</>, description: <>The locales the site serves, as they appear in URLs (<code>/de/about</code>). An empty entry, or one listed twice (ignoring case), stops startup.</> },
+        { key: 'default_locale', type: 'string', default: '"en"', description: <>The locale when nothing else decides. Pages in it are served without a prefix, and <code>&lt;html lang&gt;</code> is left as the root layout renders it. With <code>locales</code> set it must be one of them, spelled the same way, or startup stops.</> },
+        { key: 'detect_from', type: 'string[]', default: '["path", "accept-language", "cookie"]', description: <>Where the locale comes from, tried in this order: <code>&quot;path&quot;</code> (the first URL segment), <code>&quot;accept-language&quot;</code> (the header), <code>&quot;cookie&quot;</code> (<code>gio_locale</code>). The first that names a configured locale wins. Any other value stops startup, with the closest valid one.</> },
       ]} />
 
       <h3 id="behavior">Behavior</h3>
@@ -66,6 +66,19 @@ default_locale = "en"`} />
       </ul>
       <p>No key in this section logs a warning. Startup logs the locales when i18n is on.</p>
 
+      <h3 id="startup-errors">Startup errors</h3>
+      <p>
+        Startup and <a href="/docs/cli/giojs-server#check-config"><code>--check-config</code></a>{' '}
+        refuse a section that cannot work as written:
+      </p>
+      <CodeBlock lang="text" code={`gio.toml:3: invalid \`i18n.detect_from\`: unknown variant \`acept-language\`, expected one of \`path\`, \`accept-language\`, \`cookie\` - did you mean "accept-language"?
+gio.toml:2: invalid \`i18n.default_locale\`: "en" is not one of locales ("de", "fr")
+gio.toml:2: invalid \`i18n.locales\`: "EN" is listed twice (as "en" before)`} />
+      <p>
+        A <code>default_locale</code> left at its default (<code>&quot;en&quot;</code>) is reported
+        on the <code>locales</code> line: set it to one of your locales.
+      </p>
+
       <h2 id="examples">Examples</h2>
       <h3 id="url-prefixes-only">URL prefixes only</h3>
       <p>Every language has its own URLs, which CDNs can cache:</p>
@@ -81,14 +94,6 @@ detect_from = ["path", "cookie", "accept-language"]`} />
 
       <h2 id="good-to-know">Good to know</h2>
       <ul>
-        <li>
-          A value in <code>detect_from</code> other than the three above is ignored without an
-          error, so check the spelling (<code>&quot;accept-language&quot;</code>).
-        </li>
-        <li>
-          <code>default_locale</code> is not checked against <code>locales</code>; keep it in the
-          list.
-        </li>
         <li>
           Prefer lowercase locale names: an exact <code>Accept-Language</code> match yields the
           tag in lowercase (<code>pt-br</code>), while the URL prefix and the cookie keep the
@@ -110,7 +115,7 @@ detect_from = ["path", "cookie", "accept-language"]`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Pages whose locale was negotiated from request headers are never <code>public</code> and get no ETag. <code>useLocale()</code> returns the request locale during server rendering too.</> },
+        { version: 'v0.1.0-beta.8', changes: <>An unknown <code>detect_from</code> value, a <code>default_locale</code> outside a non-empty <code>locales</code>, and an empty or duplicate locale stop startup (they were ignored). Pages whose locale was negotiated from request headers are never <code>public</code> and get no ETag. <code>useLocale()</code> returns the request locale during server rendering too.</> },
         { version: 'v0.1.0-beta.1', changes: <>Introduced with <code>locales</code>, <code>default_locale</code> and <code>detect_from</code>.</> },
       ]} />
     </>

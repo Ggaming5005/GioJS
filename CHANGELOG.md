@@ -40,13 +40,19 @@ first.
   Tables for other tools must be named `[x-...]`. A malformed
   `[metrics] ip_allowlist` entry stops startup like a malformed
   `trusted_proxies` one (it used to match nobody, so every scrape got `403`).
-  `giojs-server --check-config` lists every problem at once.
+  `giojs-server --check-config` lists every problem at once, every unknown
+  key and section included.
 - **`gio.config.ts` is validated at boot:** unknown keys and plugins without a
   `name` are errors.
-- **Broken guards stop startup.** A `[[guards]]` entry with a misspelled key,
+- **Broken rules stop startup.** A `[[guards]]` entry with a misspelled key,
   no requirement or an invalid path now fails startup instead of being skipped
-  with a warning. A malformed `middleware.ts` guard denies every request to
-  its path.
+  with a warning, and so does a `[[redirects]]`, `[[rewrites]]` or
+  `[[headers]]` rule that cannot be compiled (a relative pattern, a
+  catch-all that is not last, an unknown capture, a bad status or header).
+  A malformed `middleware.ts` guard denies every request to its path.
+- **`[i18n]` is checked.** An unknown `detect_from` value (with the closest
+  valid one), a `default_locale` that is not one of a non-empty `locales`,
+  and an empty or duplicate locale stop startup; they used to be ignored.
 - **The page cache directory** (`[cache] disk_path` or `GIO_CACHE_DIR`) may no
   longer be, contain or sit inside `app/` or `public/`.
 - **`0` lifts a limit everywhere in `gio.toml`,** as it already did in
@@ -746,8 +752,8 @@ first.
   exactly as startup does, runs startup's validation (gio.toml, cache
   placement, `[security]`, the revalidation token, local `[[fonts]]` files,
   TLS) and prints a JSON
-  report: the listen address, errors, rules startup would skip, and guard and
-  proxy settings. It exits 1 when the server would refuse to start, never
+  report: the listen address, every error (each unknown key and section, not
+  just the first), warnings, and guard and proxy settings. It exits 1 when the server would refuse to start, never
   binds a port and never prints secrets, so it works as a CI step.
 - Startup reports every configuration refusal at once and checks the TLS
   certificate and key, and fetches the `[[fonts]]`, before starting the
