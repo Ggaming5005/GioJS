@@ -127,6 +127,7 @@ export function GET() {
   return new GioEventStream((stream) => {
     stream.send({ hello: 'world' });
     stream.close();
+    return () => {};                               // nothing to clean up
   });
 }`} />
       <ul>

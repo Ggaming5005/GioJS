@@ -142,6 +142,7 @@ export const getStaticPaths: GetStaticPaths<'/docs/*slug?'> = () => ({
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
         { version: 'v0.1.0-beta.8', changes: <>Catch-all and optional catch-all routes, with strings or segment arrays; invalid entries are skipped with a reason; nothing is written outside <code>out/</code>; typed with <code>GetStaticPaths</code>.</> },
+        { version: 'v0.1.0-beta.5', changes: 'Removed from browser bundles, with the modules only it imports.' },
         { version: 'v0.1.0-beta.2', changes: <>Introduced, with <code>gio export</code>.</> },
       ]} />
     </>

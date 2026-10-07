@@ -185,3 +185,18 @@ test('the page-exports reference states the limits and codes the code decides', 
   assert.match(ws, /<code>4401<\/code> <code>unauthorized<\/code>/);
   assert.match(ws, /<code>4404<\/code> <code>no websocket handler<\/code>/);
 });
+
+test('the shell and getServerSideProps references match the PPR path and query parsing', () => {
+  const ssr = read('packages/giojs-core/src/ssr.ts');
+  const main = read('crates/giojs-server/src/main.rs');
+  const shell = docsPage('page-exports/shell');
+  // PPR streams GET renders only, so a HEAD request (curl -I) never shows a ppr X-Gio-Cache.
+  assert.match(ssr, /const streamingAvailable =\s*extras\?\.streaming === true &&\s*req\.method === 'GET'/);
+  assert.doesNotMatch(shell, /curl -sI/);
+  // The holes fallback reloads once with this cookie.
+  assert.match(main, /const PPR_BYPASS_COOKIE: &str = "__gio_ppr_bypass";/);
+  assert.match(shell, /<code>__gio_ppr_bypass<\/code>/);
+  // A query string becomes one value per name, the last one winning (a HashMap collect).
+  assert.match(main, /fn parse_query\(query_str: &str\) -> HashMap<String, String> \{[\s\S]{0,400}?\.collect\(\)/);
+  assert.match(docsPage('page-exports/get-server-side-props'), /the last one when a name repeats/);
+});

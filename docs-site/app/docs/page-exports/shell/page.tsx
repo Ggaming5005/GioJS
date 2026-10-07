@@ -50,8 +50,11 @@ export const shell = 'cache';`} />
           personal.
         </li>
         <li>
-          If the holes render fails or times out, the body ends after the shell and the
-          Suspense fallbacks stay on screen.
+          If the holes render times out or the worker connection fails, the body ends after
+          the shell and the Suspense fallbacks stay on screen. If{' '}
+          <code>getServerSideProps</code> answers this visitor with a redirect, a{' '}
+          <code>404</code> or an error page instead, the page goes there itself (see{' '}
+          <a href="#good-to-know">Good to know</a>).
         </li>
       </ul>
 
@@ -136,8 +139,12 @@ export default function Store({ who }: InferPageProps<typeof getServerSideProps>
     </main>
   );
 }`} />
-      <CodeBlock lang="bash" code={`curl -sI http://localhost:3000/store | grep -i x-gio-cache   # ppr; shell=stored
-curl -sI http://localhost:3000/store | grep -i x-gio-cache   # ppr; shell=hit`} />
+      <p>
+        Check it with <code>GET</code> requests: a <code>HEAD</code> request (<code>curl -I</code>)
+        never takes the PPR path.
+      </p>
+      <CodeBlock lang="bash" code={`curl -s -o /dev/null -D - http://localhost:3000/store | grep -i x-gio-cache   # ppr; shell=stored
+curl -s -o /dev/null -D - http://localhost:3000/store | grep -i x-gio-cache   # ppr; shell=hit`} />
 
       <h2 id="good-to-know">Good to know</h2>
       <ul>
@@ -146,11 +153,13 @@ curl -sI http://localhost:3000/store | grep -i x-gio-cache   # ppr; shell=hit`} 
           whose content suspends, the stored shell ends there.
         </li>
         <li>
-          A per-visitor <code>redirect()</code> or <code>notFound()</code> from{' '}
+          A per-visitor <code>redirect()</code>, <code>notFound()</code> or error from{' '}
           <code>getServerSideProps</code> on a shell hit arrives after the shell&apos;s{' '}
-          <code>200</code>. The page then finishes itself: a redirect that sets no cookies
-          becomes <code>location.replace()</code>; anything else reloads once, skipping the
-          stored shell, to get the real status. A <a href="/docs/configuration/guards">guard</a>{' '}
+          <code>200</code>. The page then finishes itself: an <code>http(s)</code> or relative
+          redirect that sets no cookies becomes <code>location.replace()</code> (with a{' '}
+          <code>&lt;meta refresh&gt;</code> for visitors without JavaScript); anything else
+          reloads once with a short-lived <code>__gio_ppr_bypass</code> cookie that skips the
+          stored shell, to get the real status, <code>Location</code> and cookies. A <a href="/docs/configuration/guards">guard</a>{' '}
           answers before any shell is sent.
         </li>
         <li>

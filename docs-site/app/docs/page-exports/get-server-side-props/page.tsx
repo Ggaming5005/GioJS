@@ -49,7 +49,7 @@ export default function PostPage({ post }: InferPageProps<typeof getServerSidePr
         { name: 'method', type: 'string', description: <><code>&apos;GET&apos;</code> or <code>&apos;HEAD&apos;</code>, or <code>&apos;POST&apos;</code> on the render that answers a page <a href="/docs/page-exports/action">action</a>.</> },
         { name: 'path', type: 'string', description: <>The routed path, without the query string or a locale prefix (after <code>[[rewrites]]</code>).</> },
         { name: 'params', type: 'ParamsOf<Route>', description: <>The dynamic segments: <code>[id]</code> gives <code>{'{ id: string }'}</code>. A catch-all is one <code>/</code>-joined string (<code>&apos;a/b&apos;</code>), and an optional catch-all that matched nothing is <code>&apos;&apos;</code>.</> },
-        { name: 'query', type: 'Record<string, string>', description: 'The query string, one value per name.' },
+        { name: 'query', type: 'Record<string, string>', description: 'The query string, one value per name: the last one when a name repeats.' },
         { name: 'headers', type: 'Record<string, string>', description: <>The request headers, names lowercase. A tracked view (a <code>Proxy</code>): see <a href="#personalized-renders">personalized renders</a>.</> },
         { name: 'cookies', type: 'Record<string, string>', description: <>The <code>Cookie</code> header, parsed. Reading it makes the render personal.</> },
         { name: 'locale', type: 'string | undefined', description: <>The request locale with <code>[i18n]</code> configured; absent without it.</> },
@@ -110,8 +110,10 @@ export default function PostPage({ post }: InferPageProps<typeof getServerSidePr
         </li>
         <li>
           <strong>Props reach the browser.</strong> The props are serialized into the page as
-          JSON for hydration, so never return secrets. Props that are not JSON-serializable
-          (a function, a <code>BigInt</code>, a cycle) render the page without hydration, with a
+          JSON for hydration, so never return secrets. The browser gets what{' '}
+          <code>JSON.stringify</code> makes of them: a <code>Date</code> arrives as a string,
+          and functions and <code>undefined</code> values are dropped. Props JSON cannot hold at
+          all (a <code>BigInt</code>, a cycle) render the page without hydration, with a
           warning.
         </li>
         <li>
@@ -141,10 +143,10 @@ export default function PostPage({ post }: InferPageProps<typeof getServerSidePr
       <table>
         <thead><tr><th>Type</th><th>What it types</th></tr></thead>
         <tbody>
-          <tr><td><code>{'GetServerSideProps<Props, Route>'}</code></td><td>The function: <code>ctx</code> and the result variants. <code>Route</code> is a pattern of your app (<code>{"'/posts/:id'"}</code>) or a params shape (<code>{'{ id: string }'}</code>).</td></tr>
-          <tr><td><code>{'InferPageProps<typeof getServerSideProps>'}</code></td><td>The props the page renders with, read off the function.</td></tr>
-          <tr><td><code>{'GsspContext<Route>'}</code> / <code>{'GetServerSidePropsContext<Route>'}</code></td><td>The context alone.</td></tr>
-          <tr><td><code>{'GetServerSidePropsResult<Props>'}</code></td><td>The result union. Flat props are left out of it: a typed result always uses <code>props</code>.</td></tr>
+          <tr><td><code>GetServerSideProps</code></td><td><code>{'GetServerSideProps<Props, Route>'}</code> types the function: <code>ctx</code> and the result variants. <code>Route</code> is a pattern of your app (<code>{"'/posts/:id'"}</code>) or a params shape (<code>{'{ id: string }'}</code>).</td></tr>
+          <tr><td><code>InferPageProps</code></td><td><code>{'InferPageProps<typeof getServerSideProps>'}</code>: the props the page renders with, read off the function.</td></tr>
+          <tr><td><code>GetServerSidePropsContext</code>, <code>GsspContext</code></td><td><code>{'GetServerSidePropsContext<Route>'}</code> (or <code>{'GsspContext<Route>'}</code>, the same type): the context alone.</td></tr>
+          <tr><td><code>GetServerSidePropsResult</code></td><td><code>{'GetServerSidePropsResult<Props>'}</code>: the result union. Flat props are left out of it: a typed result always uses <code>props</code>.</td></tr>
         </tbody>
       </table>
 
@@ -185,7 +187,7 @@ export default function Logout() {
 }`} />
 
       <h3 id="tag-a-cached-render">Tag a cached render</h3>
-      <CodeBlock lang="tsx" title="app/posts/[id]/page.tsx" code={`import { notFound, type GetServerSideProps } from '@gio.js/core';
+      <CodeBlock lang="tsx" title="app/posts/[id]/page.tsx" code={`import { notFound, type GetServerSideProps, type InferPageProps } from '@gio.js/core';
 import { db, type Post } from '../../../lib/db.server.ts';
 
 export const revalidate = 3600;
@@ -196,17 +198,46 @@ export const getServerSideProps: GetServerSideProps<{ post: Post }, '/posts/:id'
   if (post === null) notFound();
   // revalidateTag(\`post:\${id}\`) purges exactly the pages that showed this post.
   return { props: { post }, tags: [\`post:\${post.id}\`, \`author:\${post.authorId}\`] };
-};`} />
+};
+
+export default function PostPage({ post }: InferPageProps<typeof getServerSideProps>) {
+  return <article><h1>{post.title}</h1><p>{post.body}</p></article>;
+}`} />
 
       <h3 id="keep-what-the-visitor-typed">Keep what the visitor typed</h3>
       <p>
         On the render that answers a page action, <code>ctx.actionData</code> holds the
         action&apos;s result, and <code>ctx.method</code> is <code>&apos;POST&apos;</code>:
       </p>
-      <CodeBlock lang="tsx" code={`export async function getServerSideProps(ctx) {
+      <CodeBlock lang="tsx" title="app/posts/[id]/edit/page.tsx" code={`import { notFound, redirect, type ActionArgs, type GetServerSideProps, type InferPageProps, type WithActionData } from '@gio.js/core';
+import { GioForm } from '@gio.js/react';
+import { db, type Post } from '../../../../lib/db.server.ts';
+
+export async function action(req: ActionArgs<'/posts/:id/edit'>) {
+  const draft = String((await req.formData()).get('body') ?? '');
+  if (draft.length > 280) return { status: 422, data: { draft, error: 'At most 280 characters' } };
+  await db.posts.update(req.params.id, { body: draft });
+  return redirect(\`/posts/\${req.params.id}\`);
+}
+
+export const getServerSideProps: GetServerSideProps<{ post: Post; draft: string }, '/posts/:id/edit'> = async (ctx) => {
   const post = await db.posts.find(ctx.params.id);
-  const draft = (ctx.actionData as { draft?: string } | undefined)?.draft ?? '';
-  return { props: { post, draft } };
+  if (post === null) notFound();
+  const failed = ctx.actionData as { draft: string } | undefined;   // only on the POST re-render
+  return { props: { post, draft: failed?.draft ?? post.body } };
+};
+
+type Props = WithActionData<typeof action, InferPageProps<typeof getServerSideProps>>;
+
+export default function EditPost({ post, draft, actionData }: Props) {
+  return (
+    <GioForm>
+      <h1>{post.title}</h1>
+      <textarea name="body" defaultValue={draft} aria-invalid={actionData ? true : undefined} />
+      {actionData && <p role="alert">{actionData.error}</p>}
+      <button>Save</button>
+    </GioForm>
+  );
 }`} />
 
       <h2 id="good-to-know">Good to know</h2>
@@ -229,8 +260,8 @@ export const getServerSideProps: GetServerSideProps<{ post: Post }, '/posts/:id'
           <code>{'{ ...ctx.headers }'}</code>, which counts as reading every header.
         </li>
         <li>
-          <code>ctx.query</code> holds one value per name, so of <code>?tag=a&amp;tag=b</code>{' '}
-          only one value arrives.
+          <code>ctx.query</code> holds one value per name: of <code>?tag=a&amp;tag=b</code>{' '}
+          only the last, <code>&apos;b&apos;</code>, arrives.
         </li>
         <li>
           A <code>getServerSideProps</code> built by a module-scope call (
@@ -258,7 +289,7 @@ export const getServerSideProps: GetServerSideProps<{ post: Post }, '/posts/:id'
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Returned or thrown <code>redirect()</code>; <code>set-cookie</code> arrays and <code>headers</code> on redirects; per-render <code>tags</code>; <code>ctx.ip</code>, <code>ctx.scheme</code>, <code>ctx.host</code>, <code>ctx.requestId</code> and <code>ctx.actionData</code>; renders that read credentials are no longer cached; typed with <code>GetServerSideProps</code> and <code>InferPageProps</code>.</> },
+        { version: 'v0.1.0-beta.8', changes: <><code>notFound()</code> and <code>{'{ notFound: true }'}</code> answer <code>404</code>; returned or thrown <code>redirect()</code>; <code>set-cookie</code> arrays and <code>headers</code> on redirects; per-render <code>tags</code>; <code>ctx.ip</code>, <code>ctx.scheme</code>, <code>ctx.host</code>, <code>ctx.requestId</code> and <code>ctx.actionData</code>; renders that read credentials are no longer cached; typed with <code>GetServerSideProps</code> and <code>InferPageProps</code>.</> },
         { version: 'v0.1.0-beta.5', changes: <><code>ctx</code> carries <code>method</code>, <code>path</code>, <code>headers</code> and <code>cookies</code>; <code>{'{ props, headers }'}</code> sets response headers and makes the page uncacheable; removed from browser bundles.</> },
         { version: 'v0.1.0-beta.2', changes: <>Runs at build time under <code>gio export</code>.</> },
         { version: 'v0.1.0-beta.1', changes: 'Introduced, with props and redirects.' },

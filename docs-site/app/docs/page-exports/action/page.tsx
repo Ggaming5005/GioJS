@@ -62,10 +62,11 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
         { name: 'json()', type: 'T', description: <>Parses a body sent as <code>application/json</code> or <code>application/*+json</code>; anything else throws <code>UnsupportedMediaTypeError</code> (<code>415</code>).</> },
         { name: 'body', type: 'string | null', description: <>The raw body: UTF-8 text, or base64 when <code>bodyBase64</code> is <code>true</code>.</> },
         { name: 'params', type: 'ParamsOf<Route>', description: 'The dynamic segments of the page.' },
-        { name: 'query', type: 'Record<string, string>', description: 'The query string, one value per name.' },
+        { name: 'query', type: 'Record<string, string>', description: 'The query string, one value per name: the last one when a name repeats.' },
         { name: 'headers', type: 'Record<string, string>', description: 'The request headers, names lowercase.' },
         { name: 'cookies', type: 'Record<string, string>', description: <>The <code>Cookie</code> header, parsed (<code>sessions.getSession(req)</code> reads it).</> },
-        { name: 'method, path, locale, ip, scheme, host, requestId', type: 'string', description: <>As on a route handler&apos;s <code>GioRequest</code>; <code>method</code> is always <code>&apos;POST&apos;</code>.</> },
+        { name: 'method, path', type: 'string', description: <><code>method</code> is always <code>&apos;POST&apos;</code>; <code>path</code> is the routed path.</> },
+        { name: 'locale, ip, scheme, host, requestId', type: 'string | undefined', description: <>As on a <a href="/docs/page-exports/http-methods#parameters">route handler&apos;s request</a>.</> },
       ]} />
 
       <h3 id="returns">Returns</h3>
@@ -136,38 +137,55 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
       <table>
         <thead><tr><th>Type</th><th>What it types</th></tr></thead>
         <tbody>
-          <tr><td><code>{'ActionArgs<Route>'}</code></td><td>The request. <code>Route</code> is a pattern of your app (<code>{"'/posts/:id'"}</code>) or a params shape.</td></tr>
-          <tr><td><code>{'ActionResult<Data>'}</code></td><td>Everything an action may return.</td></tr>
-          <tr><td><code>{'ActionDataResult<Data>'}</code></td><td>The <code>{'{ data, status?, headers? }'}</code> form.</td></tr>
-          <tr><td><code>{'ActionData<typeof action>'}</code></td><td>The <code>actionData</code> the page receives. <code>Response</code> and <code>redirect()</code> results never re-render, so they are left out.</td></tr>
-          <tr><td><code>{'WithActionData<typeof action, Props>'}</code></td><td><code>Props</code> plus an optional, typed <code>actionData</code>.</td></tr>
+          <tr><td><code>ActionArgs</code></td><td><code>{'ActionArgs<Route>'}</code>: the request. <code>Route</code> is a pattern of your app (<code>{"'/posts/:id'"}</code>) or a params shape.</td></tr>
+          <tr><td><code>ActionResult</code></td><td><code>{'ActionResult<Data>'}</code>: everything an action may return.</td></tr>
+          <tr><td><code>ActionDataResult</code></td><td><code>{'ActionDataResult<Data>'}</code>: the <code>{'{ data, status?, headers? }'}</code> form.</td></tr>
+          <tr><td><code>ActionData</code></td><td><code>{'ActionData<typeof action>'}</code>: the <code>actionData</code> the page receives. <code>Response</code> and <code>redirect()</code> results never re-render, so they are left out.</td></tr>
+          <tr><td><code>WithActionData</code></td><td><code>{'WithActionData<typeof action, Props>'}</code>: <code>Props</code> plus an optional, typed <code>actionData</code>.</td></tr>
         </tbody>
       </table>
 
       <h2 id="examples">Examples</h2>
       <h3 id="several-buttons-in-one-form">Several buttons in one form</h3>
       <p>The clicked button&apos;s <code>name</code> and <code>value</code> are part of the form data:</p>
-      <CodeBlock lang="tsx" title="app/lists/[id]/page.tsx" code={`import { redirect, type ActionArgs } from '@gio.js/core';
-import { db } from '../../../lib/db.server.ts';
+      <CodeBlock lang="tsx" title="app/lists/[id]/page.tsx" code={`import { redirect, type ActionArgs, type GetServerSideProps, type InferPageProps } from '@gio.js/core';
+import { GioForm } from '@gio.js/react';
+import { db, type Todo } from '../../../lib/db.server.ts';
 
 export async function action(req: ActionArgs<'/lists/:id'>) {
   const form = await req.formData();
-  if (form.get('intent') === 'delete') {
-    await db.todos.delete(String(form.get('todoId')));
+  const deleteId = form.get('delete');                 // sent only by a Delete button
+  if (deleteId !== null) {
+    await db.todos.delete(String(deleteId));
   } else {
-    await db.todos.insert({ list: req.params.id, title: String(form.get('title')) });
+    await db.todos.insert({ list: req.params.id, title: String(form.get('title') ?? '') });
   }
-  return redirect(\`/lists/\${req.params.id}\`);   // reload-safe: the browser GETs the list
+  return redirect(\`/lists/\${req.params.id}\`);         // reload-safe: the browser GETs the list
 }
 
-// In the component:
-// <GioForm>
-//   <input type="hidden" name="todoId" value={todo.id} />
-//   <button name="intent" value="delete">Delete</button>
-// </GioForm>`} />
+export const getServerSideProps: GetServerSideProps<{ todos: Todo[] }, '/lists/:id'> = async (ctx) => ({
+  props: { todos: await db.todos.inList(ctx.params.id) },
+});
+
+export default function List({ todos }: InferPageProps<typeof getServerSideProps>) {
+  return (
+    <GioForm>
+      <input name="title" aria-label="New todo" />
+      <button>Add</button>{/* first in the form: Enter in the field adds */}
+      <ul>
+        {todos.map((todo) => (
+          <li key={todo.id}>
+            {todo.title} <button name="delete" value={todo.id}>Delete</button>
+          </li>
+        ))}
+      </ul>
+    </GioForm>
+  );
+}`} />
 
       <h3 id="set-a-cookie-on-the-way-out">Set a cookie on the way out</h3>
-      <CodeBlock lang="tsx" title="app/login/page.tsx" code={`import { redirect, type ActionArgs } from '@gio.js/core';
+      <CodeBlock lang="tsx" title="app/login/page.tsx" code={`import { redirect, type ActionArgs, type WithActionData } from '@gio.js/core';
+import { GioForm } from '@gio.js/react';
 import { sessions } from '../../lib/session.server.ts';
 import { verifyPassword } from '../../lib/users.server.ts';
 
@@ -179,6 +197,17 @@ export async function action(req: ActionArgs) {
   const session = sessions.getSession(req);
   session.set('userId', user.id);
   return redirect('/dashboard', { headers: { 'set-cookie': sessions.commitSession(session) } });
+}
+
+export default function Login({ actionData }: WithActionData<typeof action>) {
+  return (
+    <GioForm>
+      <input name="email" type="email" autoComplete="username" aria-label="Email" />
+      <input name="password" type="password" autoComplete="current-password" aria-label="Password" />
+      {actionData && <p role="alert">{actionData.error}</p>}
+      <button>Sign in</button>
+    </GioForm>
+  );
 }`} />
 
       <h3 id="answer-with-your-own-response">Answer with your own Response</h3>
@@ -192,6 +221,15 @@ export async function action() {
       'content-disposition': 'attachment; filename="report.csv"',
     },
   });
+}
+
+// A plain form: the browser saves the file and stays on the page.
+export default function ExportPage() {
+  return (
+    <form method="post">
+      <button>Download the report</button>
+    </form>
+  );
 }`} />
 
       <h2 id="good-to-know">Good to know</h2>

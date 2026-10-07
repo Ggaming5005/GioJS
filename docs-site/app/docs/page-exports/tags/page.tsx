@@ -64,7 +64,7 @@ export const tags = ['posts'];          // await revalidateTag('posts') purges t
 
       <h2 id="examples">Examples</h2>
       <h3 id="tags-from-the-data-a-render-used">Tags from the data a render used</h3>
-      <CodeBlock lang="tsx" title="app/posts/[id]/page.tsx" code={`import { notFound, type GetServerSideProps } from '@gio.js/core';
+      <CodeBlock lang="tsx" title="app/posts/[id]/page.tsx" code={`import { notFound, type GetServerSideProps, type InferPageProps } from '@gio.js/core';
 import { db, type Post } from '../../../lib/db.server.ts';
 
 export const revalidate = 3600;
@@ -74,7 +74,11 @@ export const getServerSideProps: GetServerSideProps<{ post: Post }, '/posts/:id'
   const post = await db.posts.find(ctx.params.id);
   if (post === null) notFound();
   return { props: { post }, tags: [\`post:\${post.id}\`, \`author:\${post.authorId}\`] };
-};`} />
+};
+
+export default function PostPage({ post }: InferPageProps<typeof getServerSideProps>) {
+  return <article><h1>{post.title}</h1><p>{post.body}</p></article>;
+}`} />
 
       <h3 id="purge-after-a-write">Purge after a write</h3>
       <CodeBlock lang="ts" title="app/api/posts/[id]/route.ts" code={`import { revalidateTag, type RouteHandler } from '@gio.js/core';

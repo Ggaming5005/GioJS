@@ -46,12 +46,12 @@ export const DELETE: RouteHandler<'/api/items/:id'> = async (req) => {
         { name: 'method', type: 'string', description: <>The request method. When the <code>GET</code> handler answers a <code>HEAD</code> request, it is <code>&apos;HEAD&apos;</code>.</> },
         { name: 'path', type: 'string', description: 'The routed path, without the query string.' },
         { name: 'params', type: 'ParamsOf<Route>', description: <>The dynamic segments. A catch-all is one <code>/</code>-joined string.</> },
-        { name: 'query', type: 'Record<string, string>', description: 'The query string, one value per name.' },
+        { name: 'query', type: 'Record<string, string>', description: 'The query string, one value per name: the last one when a name repeats.' },
         { name: 'headers', type: 'Record<string, string>', description: 'The request headers, names lowercase.' },
         { name: 'cookies', type: 'Record<string, string>', description: <>The <code>Cookie</code> header, parsed.</> },
         { name: 'body', type: 'string | null', description: <>The raw body: UTF-8 text, or base64 when <code>bodyBase64</code> is <code>true</code>. <code>null</code> without one.</> },
         { name: 'bodyBase64', type: 'boolean', description: 'Whether body is base64 (a binary upload).' },
-        { name: 'json()', type: 'T', description: <>Parses a body sent as <code>application/json</code> or <code>application/*+json</code>. Another content type throws <code>UnsupportedMediaTypeError</code> (<code>415</code> unless caught); an absent, base64 or malformed body throws too.</> },
+        { name: 'json()', type: 'T', description: <>Parses a body sent as <code>application/json</code> or <code>application/*+json</code>. Another content type throws <code>UnsupportedMediaTypeError</code> (<code>415</code> unless caught). An absent or base64 body, or JSON that does not parse, throws a plain error: a <code>500</code> unless you catch it.</> },
         { name: 'formData()', type: 'Promise<FormData>', description: <>Parses <code>application/x-www-form-urlencoded</code> and <code>multipart/form-data</code>; files are <code>File</code> objects. Another content type is a <code>415</code>, a body that does not parse a <code>400</code> (<code>MalformedBodyError</code>).</> },
         { name: 'locale', type: 'string | undefined', description: <>The request locale, with <code>[i18n]</code>.</> },
         { name: 'ip', type: 'string | undefined', description: <>The client&apos;s address; behind a proxy only when it is in <code>[server] trusted_proxies</code>. Never read <code>x-forwarded-for</code> yourself.</> },
@@ -116,9 +116,10 @@ export const DELETE: RouteHandler<'/api/items/:id'> = async (req) => {
 
       <h3 id="types">Types</h3>
       <p>
-        <code>{'RouteHandler<Route>'}</code> types a whole handler; <code>{'GioRequest<Route>'}</code>{' '}
-        types the request alone. <code>Route</code> is a pattern of your app (
-        <code>{"'/api/items/:id'"}</code>) or a params shape (<code>{'{ id: string }'}</code>).
+        <code>RouteHandler</code> (<code>{'RouteHandler<Route>'}</code>) types a whole handler, and{' '}
+        <code>GioRequest</code> (<code>{'GioRequest<Route>'}</code>) the request alone.{' '}
+        <code>Route</code> is a pattern of your app (<code>{"'/api/items/:id'"}</code>) or a
+        params shape (<code>{'{ id: string }'}</code>).
       </p>
 
       <h2 id="examples">Examples</h2>
@@ -202,7 +203,7 @@ export function POST() {
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <><code>req.formData()</code>, <code>req.ip</code>, <code>req.scheme</code>, <code>req.host</code> and <code>req.requestId</code>; <code>json()</code> requires a JSON content type (<code>415</code>); every <code>Set-Cookie</code> of a <code>Response</code> is sent; <code>ReadableStream</code> bodies stream; a <code>route.ts</code> that throws while it is imported answers <code>500</code>; typed with <code>RouteHandler</code>.</> },
+        { version: 'v0.1.0-beta.8', changes: <><code>notFound()</code> answers a JSON <code>404</code>; <code>req.formData()</code>, <code>req.ip</code>, <code>req.scheme</code>, <code>req.host</code> and <code>req.requestId</code>; <code>json()</code> requires a JSON content type (<code>415</code>); every <code>Set-Cookie</code> of a <code>Response</code> is sent; <code>ReadableStream</code> bodies stream; a <code>route.ts</code> that throws while it is imported answers <code>500</code>; typed with <code>RouteHandler</code>.</> },
         { version: 'v0.1.0-beta.5', changes: 'Introduced: method handlers returning a Response, a GioEventStream, null (204) or JSON, with 405 and Allow for other methods.' },
       ]} />
     </>

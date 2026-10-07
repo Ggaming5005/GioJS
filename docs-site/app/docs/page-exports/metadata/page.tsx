@@ -116,16 +116,26 @@ export const metadata: Metadata = {
 export const metadata: Metadata = {
   title: 'Your account',
   robots: { index: false, follow: true },   // <meta name="robots" content="noindex, follow">
-};`} />
+};
+
+export default function Account() {
+  return <h1>Your account</h1>;
+}`} />
 
       <h3 id="alternate-languages">Alternate languages</h3>
-      <CodeBlock lang="tsx" title="app/pricing/page.tsx" code={`export const metadata: Metadata = {
+      <CodeBlock lang="tsx" title="app/pricing/page.tsx" code={`import type { Metadata } from '@gio.js/core';
+
+export const metadata: Metadata = {
   title: 'Pricing',
   alternates: {
     canonical: '/pricing',
     languages: { de: '/de/pricing', 'x-default': '/pricing' },
   },
-};`} />
+};
+
+export default function Pricing() {
+  return <h1>Pricing</h1>;
+}`} />
 
       <h3 id="a-not-found-page-that-is-not-indexed">A not-found page that is not indexed</h3>
       <CodeBlock lang="tsx" title="app/not-found.tsx" code={`import type { Metadata } from '@gio.js/core';

@@ -102,26 +102,35 @@ export const generateMetadata: GenerateMetadata<'/posts/:id'> = (ctx, { props })
       <h2 id="examples">Examples</h2>
       <h3 id="title-from-the-url">Title from the URL</h3>
       <p>Without <code>getServerSideProps</code>, read <code>ctx.params</code> directly:</p>
-      <CodeBlock lang="tsx" title="app/tags/[tag]/page.tsx" code={`import type { GenerateMetadata } from '@gio.js/core';
+      <CodeBlock lang="tsx" title="app/tags/[tag]/page.tsx" code={`import type { GenerateMetadata, PageProps } from '@gio.js/core';
 
 export const generateMetadata: GenerateMetadata<'/tags/:tag'> = (ctx) => ({
   title: \`Posts tagged \${ctx.params.tag}\`,
   alternates: { canonical: \`/tags/\${ctx.params.tag}\` },
-});`} />
+});
 
-      <h3 id="search-pages-out-of-the-index">Search pages out of the index</h3>
-      <CodeBlock lang="tsx" title="app/search/page.tsx" code={`import type { GenerateMetadata } from '@gio.js/core';
+export default function TagPage({ params }: PageProps<'/tags/:tag'>) {
+  return <h1>Posts tagged {params.tag}</h1>;
+}`} />
+
+      <h3 id="keep-search-results-out-of-the-index">Keep search results out of the index</h3>
+      <CodeBlock lang="tsx" title="app/search/page.tsx" code={`import type { GenerateMetadata, PageProps } from '@gio.js/core';
 
 export const generateMetadata: GenerateMetadata = (ctx) => ({
   title: ctx.query.q ? \`Results for \${ctx.query.q}\` : 'Search',
   robots: { index: false },
-});`} />
+});
+
+export default function Search({ searchParams }: PageProps) {
+  return <h1>{searchParams.q ? \`Results for \${searchParams.q}\` : 'Search'}</h1>;
+}`} />
 
       <h3 id="a-layout-for-a-section">A layout for a section</h3>
       <CodeBlock lang="tsx" title="app/shop/[category]/layout.tsx" code={`import type { GenerateMetadata, LayoutProps } from '@gio.js/core';
 import { db } from '../../../lib/db.server.ts';
 
-export const generateMetadata: GenerateMetadata<'/shop/:category'> = async (ctx) => {
+// A params shape, not a pattern: the layout also wraps pages below /shop/:category.
+export const generateMetadata: GenerateMetadata<{ category: string }> = async (ctx) => {
   const category = await db.categories.find(ctx.params.category);
   return { title: { default: category.name, template: \`%s - \${category.name}\` } };
 };

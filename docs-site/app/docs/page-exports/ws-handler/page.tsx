@@ -21,7 +21,7 @@ export default function Page(): React.JSX.Element {
       <CodeBlock lang="ts" title="app/chat/[room]/route.ts" code={`import { broadcast, type GioSocket } from '@gio.js/core';
 
 export function wsHandler(socket: GioSocket) {
-  const room = socket.params.room;                // ws://host/chat/lobby → 'lobby'
+  const room = socket.params.room ?? 'lobby';    // ws://host/chat/news → 'news'
   socket.join(room);
   socket.send(\`welcome to \${room}\`);
   socket.on('message', (text) => broadcast(room, String(text)));
@@ -135,9 +135,10 @@ export async function wsHandler(socket: GioSocket) {
     setTimeout(() => resolve(null), 5_000);             // never wait forever
   });
   const user = token === null ? null : await verifyToken(token);
-  if (user === null) return false;
+  if (user === null) return false;                    // close 4401 'unauthorized'
 
   socket.send('accepted');
+  return true;
 }`} />
 
       <h3 id="publish-from-an-http-request">Publish from an HTTP request</h3>
@@ -186,6 +187,7 @@ export const POST: RouteHandler<'/api/rooms/:room'> = (req) => {
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
         { version: 'v0.1.0-beta.8', changes: <>Page routing for WebSocket paths (<code>socket.params</code>); <code>path</code>, <code>query</code>, <code>headers</code>, <code>cookies</code>, <code>ip</code> and <code>requestId</code> on the socket; return <code>false</code> to reject (<code>4401</code>); async handlers decide the connection; rooms; <code>4404</code> for a path without a handler.</> },
+        { version: 'v0.1.0-beta.5', changes: <>Binary frames arrive as a <code>Buffer</code> and <code>send()</code> accepts one; connections survive worker restarts.</> },
         { version: 'v0.1.0-beta.1', changes: 'Introduced.' },
       ]} />
     </>

@@ -108,8 +108,14 @@ export default function Home({ posts }: InferPageProps<typeof getServerSideProps
       <p>
         Keep the page until you purge it, and purge it where the data changes:
       </p>
-      <CodeBlock lang="tsx" title="app/docs/[slug]/page.tsx" code={`export const revalidate = false;
-export const tags = ['docs'];`} />
+      <CodeBlock lang="tsx" title="app/docs/[slug]/page.tsx" code={`import type { PageProps } from '@gio.js/core';
+
+export const revalidate = false;
+export const tags = ['docs'];
+
+export default function Doc({ params }: PageProps<'/docs/:slug'>) {
+  return <h1>{params.slug}</h1>;
+}`} />
       <CodeBlock lang="ts" title="app/api/cms-webhook/route.ts" code={`import { revalidateTag, type GioRequest } from '@gio.js/core';
 import { verifySignature } from '../../../lib/cms.server.ts';
 
