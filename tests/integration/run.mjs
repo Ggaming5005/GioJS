@@ -1774,6 +1774,17 @@ async function main() {
       assert.match(await res.text(), /GUESTBOOK_UPLOAD name=photo\.bin size=4 hex=ff00fe80/);
     });
 
+    await test('page action: an upload over max_body_bytes is a 413 before the action runs', async () => {
+      const form = new FormData();
+      form.append('attachment', new Blob([Buffer.alloc(3 * 1024 * 1024, 0xab)]), 'big.bin');
+      const res = await fetch(`${BASE}/guestbook`, { method: 'POST', body: form });
+      assert.equal(res.status, 413);
+      assert.doesNotMatch(await res.text(), /GUESTBOOK_UPLOAD/);
+      // The worker connection is untouched: the next post goes through.
+      const ok = await formPost('name=+');
+      assert.equal(ok.status, 422);
+    });
+
     await test('page action: cross-site form posts are refused by CSRF, other methods get 405', async () => {
       const forged = await formPost('name=Mallory', { origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' });
       assert.equal(forged.status, 403);

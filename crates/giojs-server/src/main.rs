@@ -2475,6 +2475,12 @@ async fn render_uncoalesced(
             )
         }
         Err(e) => {
+            // A body within max_body_bytes whose frame the worker cannot take
+            // (base64 / JSON escaping grew it): the client's to shrink.
+            if let Some(too_large) = e.downcast_ref::<ipc::RequestTooLarge>() {
+                warn!(path = %path, frame_bytes = too_large.frame_bytes, "request body too large to forward to the worker - answered 413");
+                return (StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large").into_response();
+            }
             state.metrics.record_ipc_latency(
                 metrics::ROUTE_UNMATCHED,
                 ipc_start.elapsed().as_nanos() as u64,
