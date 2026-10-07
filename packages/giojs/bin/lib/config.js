@@ -177,11 +177,16 @@ function envFileCandidates(mode) {
 /**
  * What turns the server's .env loading off: GIO_ENV_FILES (`0` / `false`
  * off, `1` / `true` on) over gio.toml's `[env] files`. Null when it loads.
+ * Any other GIO_ENV_FILES value throws the error the server refuses to
+ * start with.
  */
 function envFilesDisabledBy(env, toml) {
   const value = String(env.GIO_ENV_FILES || '').trim();
   if (value === '0' || value === 'false') return 'GIO_ENV_FILES';
   if (value === '1' || value === 'true') return null;
+  if (value !== '') {
+    throw new Error(`cannot load the .env files: GIO_ENV_FILES=${JSON.stringify(value)} must be 0 (skip them) or 1 (load them)`);
+  }
   return toml.env && toml.env.files === false ? '[env] files' : null;
 }
 
@@ -212,8 +217,10 @@ function envWithFiles(env, projectRoot, mode, names, loadFiles = true) {
 const LISTEN_VARS = ['GIO_HOST', 'GIO_PORT', 'PORT', 'GIO_SESSION_SECRET'];
 
 /**
- * A report shaped like --check-config's, from the lenient reader. `ok` is
- * true and `fallback` marks it: nothing was validated.
+ * A report shaped like --check-config's, from the lenient reader, marked
+ * `fallback`: nothing in gio.toml was validated, so `ok` is true - unless
+ * GIO_ENV_FILES is invalid, which the server refuses before it reads
+ * anything else. That report, like the server's, holds only the error.
  */
 function fallbackReport(env, projectRoot) {
   const mode = env.NODE_ENV === 'development' ? 'development' : 'production';
@@ -229,7 +236,18 @@ function fallbackReport(env, projectRoot) {
     }
   }
   const server = toml.server || {};
-  const envFilesOff = envFilesDisabledBy(env, toml);
+  let envFilesOff;
+  try {
+    envFilesOff = envFilesDisabledBy(env, toml);
+  } catch (err) {
+    return {
+      ok: false,
+      fallback: true,
+      errors: [err.message],
+      warnings: [],
+      configFile: configText === null ? null : configFile,
+    };
+  }
   const vars = envWithFiles(env, projectRoot, mode, LISTEN_VARS, envFilesOff === null);
   let port = Number.isInteger(server.port) ? server.port : 3000;
   let portSource = Number.isInteger(server.port) ? 'gio.toml' : 'default';

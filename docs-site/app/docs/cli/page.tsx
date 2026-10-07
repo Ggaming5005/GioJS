@@ -209,7 +209,7 @@ gio bench --suite /,/posts/1 [--base <url>]`} />
           <tr><td><code>GIO_APP_DIR</code></td><td>all</td><td>The <code>app/</code> directory; the project root is its parent</td></tr>
           <tr><td><code>GIO_PORT</code> / <code>PORT</code> / <code>GIO_HOST</code></td><td><code>dev</code>, <code>start</code>, <code>cache explain</code>, <code>bench</code>, <code>doctor</code></td><td>The listen address (<code>--port</code> / <code>--host</code> set the <code>GIO_*</code> ones)</td></tr>
           <tr><td><code>NODE_ENV</code></td><td><code>export</code>, <code>routes</code>, <code>typegen</code>, <code>doctor</code>, <code>giojs-server</code></td><td><code>development</code> selects development mode and the <code>.env.development*</code> files; <code>gio dev</code> / <code>gio start</code> set it themselves</td></tr>
-          <tr><td><code>GIO_ENV_FILES</code></td><td>all that read <code>.env</code> files</td><td><code>0</code> loads no <code>.env</code> files, <code>1</code> loads them whatever <code>[env] files</code> says</td></tr>
+          <tr><td><code>GIO_ENV_FILES</code></td><td>all that read <code>.env</code> files</td><td><code>0</code> loads no <code>.env</code> files, <code>1</code> loads them whatever <code>[env] files</code> says; any other value is the error the server refuses to start with (<code>gio doctor</code> reports it)</td></tr>
           <tr><td><code>GIO_OUT_DIR</code>, <code>GIO_SITE_URL</code></td><td><code>export</code></td><td>The output directory; the site origin for <code>sitemap.xml</code></td></tr>
           <tr><td><code>GIO_STANDALONE_SERVER_BIN</code></td><td><code>build standalone</code></td><td>The binary to package, over <code>--target</code></td></tr>
         </tbody>

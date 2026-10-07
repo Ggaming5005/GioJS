@@ -203,6 +203,21 @@ describe('fallbackReport', () => {
     assert.equal(fallbackReport({ GIO_ENV_FILES: '0' }, on).envFilesDisabledBy, 'GIO_ENV_FILES');
     assert.equal(fallbackReport({ GIO_ENV_FILES: '1' }, off).listen.port, 5000, 'the variable wins');
   });
+
+  test('an invalid GIO_ENV_FILES is the error the server refuses to start with, not "load"', () => {
+    const project = tempProject({ '.env': 'GIO_PORT=5000\n', 'gio.toml': '[server]\nport = 4000\n' });
+    for (const value of ['yes', 'off', '2']) {
+      const report = fallbackReport({ GIO_ENV_FILES: value }, project);
+      assert.equal(report.ok, false, value);
+      assert.equal(report.fallback, true);
+      assert.deepEqual(report.errors,
+        [`cannot load the .env files: GIO_ENV_FILES="${value}" must be 0 (skip them) or 1 (load them)`]);
+      assert.equal(report.listen, undefined, 'nothing past the error is reported, as by --check-config');
+      assert.equal(report.configFile, join(project, 'gio.toml'));
+    }
+    // Blank (or only spaces) is unset, as in the server.
+    assert.equal(fallbackReport({ GIO_ENV_FILES: '  ' }, project).listen.port, 5000);
+  });
 });
 
 describe('URLs', () => {

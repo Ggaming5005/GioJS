@@ -803,8 +803,10 @@ first.
   server itself), `tsconfig.json` including `.gio/routes.d.ts`,
   `GIO_SESSION_SECRET` for `require_session` guards, a free port,
   `trusted_proxies` behind a proxy and a writable cache directory, with a fix
-  for every problem. **`gio info [--json]`** prints versions and environment
-  details for bug reports.
+  for every problem. When the server cannot read the configuration, the checks
+  that depend on it are reported as skipped, with the reason.
+  **`gio info [--json]`** prints versions and environment details for bug
+  reports.
 - **`gio migrate` and `gio add <feature>`** run the matching `create-giojs`
   commands, using the installed `create-giojs` or the same version through
   npx, pnpm dlx or bunx.
