@@ -33,7 +33,7 @@ export default function Page(): React.JSX.Element {
       <table>
         <thead><tr><th>Function</th><th>What it does</th></tr></thead>
         <tbody>
-          <tr><td><a href="/docs/functions/redirect"><code>redirect()</code></a>, <code>isActionRedirect()</code></td><td>Answer an action or <code>getServerSideProps</code> with a redirect (303 by default), returned or thrown.</td></tr>
+          <tr><td><a href="/docs/functions/redirect"><code>redirect()</code></a>, <code>isActionRedirect()</code></td><td>Answer an action, <code>getServerSideProps</code> or a route handler with a redirect (303 by default), returned or thrown.</td></tr>
           <tr><td><a href="/docs/functions/not-found"><code>notFound()</code></a></td><td>Answer 404 with the nearest <code>not-found.tsx</code>, or a JSON 404 in a route handler.</td></tr>
           <tr><td><a href="/docs/functions/revalidate-path"><code>revalidatePath()</code></a></td><td>Purge the cached page at a path, or everything below it.</td></tr>
           <tr><td><a href="/docs/functions/revalidate-tag"><code>revalidateTag()</code></a></td><td>Purge every cached page carrying a tag.</td></tr>

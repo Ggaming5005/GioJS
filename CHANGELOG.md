@@ -78,7 +78,10 @@ first.
 - **`req.json()` requires a JSON content type.** In route handlers it throws
   `UnsupportedMediaTypeError` - a `415` unless caught - for a body not sent as
   `application/json` or `application/*+json`. Make `fetch()` callers send
-  `Content-Type`.
+  `Content-Type`. An empty, non-UTF-8 or unparseable JSON body throws
+  `MalformedBodyError` - a `400` unless caught - instead of a `SyntaxError`
+  or a plain `Error` (a `500`); a `catch` testing `err instanceof SyntaxError`
+  should test `isMalformedBodyError(err)`.
 - **Personalized renders are no longer cached.** A page that exports
   `revalidate` but whose `getServerSideProps` reads `ctx.cookies`, the
   `cookie` or `authorization` header, `ctx.ip`, `ctx.host` or `ctx.scheme` (or
@@ -381,14 +384,17 @@ first.
   refused before the action ran (`x-gio-refused: unread` on its rate-limit
   `429` and `max_body_bytes` `413`), never a `413` or `429` the action or a
   `route.ts` returned itself.
-- `redirect()` also works in `getServerSideProps`, returned or thrown. Headers
-  an action returns with its data are sent even when `getServerSideProps` then
-  redirects or calls `notFound()`. Typed contract: `ActionArgs<Params>`,
+- `redirect()` also works in `getServerSideProps` and `route.ts` handlers,
+  returned or thrown, with a relative URL sent as written
+  (`Response.redirect('/path')` throws: the web standard wants an absolute
+  URL). Headers an action returns with its data are sent even when
+  `getServerSideProps` then redirects or calls `notFound()`. Typed contract:
+  `ActionArgs<Params>`,
   `ActionResult`, `ActionData<typeof action>` and
   `WithActionData<typeof action, Props>`.
 - Route handlers get `req.formData()` too. A body sent as something other than
   a form is a `415`, and a malformed one a `400` (`MalformedBodyError`)
-  instead of a `500`.
+  instead of a `500` - for `req.json()` as well.
 - **Several cookies per response.** Each `Set-Cookie` of a route-handler
   `Response` (`headers.append('Set-Cookie', ...)`) is sent as its own header,
   byte for byte; before, only the last one arrived. `getServerSideProps`

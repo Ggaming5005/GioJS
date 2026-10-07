@@ -6,7 +6,7 @@ import { PropsTable, VersionHistory } from '../../../../components/ReferenceTabl
 export const metadata: Metadata = {
   title: 'redirect',
   description:
-    'Answer a page action or getServerSideProps with a redirect to another URL - 303 See Other by default, optionally with cookies.',
+    'Answer a page action, getServerSideProps or a route handler with a redirect to another URL - 303 See Other by default, optionally with cookies.',
 };
 
 export const revalidate = false;
@@ -16,8 +16,9 @@ export default function Page(): React.JSX.Element {
     <>
       <h1>redirect</h1>
       <p className="page-subtitle">
-        Answer a page action or <code>getServerSideProps</code> with a redirect to another
-        URL - <code>303 See Other</code> by default, optionally with cookies.
+        Answer a page action, <code>getServerSideProps</code> or a route handler with a
+        redirect to another URL - <code>303 See Other</code> by default, optionally with
+        cookies.
       </p>
       <CodeBlock lang="tsx" title="app/contact/page.tsx" code={`import { redirect, type ActionArgs } from '@gio.js/core';
 
@@ -82,8 +83,8 @@ export async function action(req: ActionArgs) {
       <h3 id="returns">Returns</h3>
       <p>
         An <code>ActionRedirect</code> object. It does nothing by itself: the renderer acts on
-        it when an <code>action</code> or <code>getServerSideProps</code> returns it or
-        throws it. Throwing is what makes it useful in shared helpers - a{' '}
+        it when an <code>action</code>, <code>getServerSideProps</code> or a{' '}
+        <code>route.ts</code> method handler returns it or throws it. Throwing is what makes it useful in shared helpers - a{' '}
         <code>requireUser()</code> deep inside a loader can end the request.
       </p>
 
@@ -176,7 +177,8 @@ export default function Contact({ actionData }: WithActionData<typeof action>) {
       <h3 id="a-guard-shared-by-pages-and-actions">A guard shared by pages and actions</h3>
       <p>
         Throw the redirect from a helper. It works the same from{' '}
-        <code>getServerSideProps</code> and from an <code>action</code>:
+        <code>getServerSideProps</code>, from an <code>action</code> and from a{' '}
+        <code>route.ts</code> handler:
       </p>
       <CodeBlock lang="ts" title="lib/auth.server.ts" code={`import { redirect, type GetServerSidePropsContext } from '@gio.js/core';
 import { sessions } from './session.server.ts';
@@ -223,11 +225,13 @@ export default function OldPricing() {
       <h2 id="good-to-know">Good to know</h2>
       <ul>
         <li>
-          <strong>Only actions and <code>getServerSideProps</code>.</strong> A{' '}
-          <code>route.ts</code> handler that returns <code>redirect()</code> answers{' '}
-          <code>200</code> with the object as JSON, and one that throws it answers{' '}
-          <code>500</code>. In a route handler, return a <code>Response</code>:{' '}
-          <code>{"new Response(null, { status: 303, headers: { location: '/done' } })"}</code>.
+          <strong>Route handlers too.</strong> A <code>route.ts</code> handler that returns
+          or throws <code>redirect()</code> answers with the same redirect, so a guard like{' '}
+          <code>requireUserId()</code> works there as well. Prefer it to{' '}
+          <code>Response.redirect()</code>, which accepts only absolute URLs: a relative
+          one such as <code>/done</code> makes it throw a <code>TypeError</code>, and the
+          handler answers <code>500</code>. <code>redirect()</code> sends a path as
+          written.
         </li>
         <li>
           <strong>Open redirects.</strong> The URL is used as given. Check a target that comes
@@ -271,7 +275,8 @@ export default function OldPricing() {
           changes: (
             <>
               Introduced <code>redirect()</code> and <code>isActionRedirect()</code>, for page
-              actions and <code>getServerSideProps</code> (returned or thrown).
+              actions, <code>getServerSideProps</code> and <code>route.ts</code> handlers
+              (returned or thrown).
             </>
           ),
         },

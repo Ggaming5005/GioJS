@@ -51,7 +51,7 @@ export const DELETE: RouteHandler<'/api/items/:id'> = async (req) => {
         { name: 'cookies', type: 'Record<string, string>', description: <>The <code>Cookie</code> header, parsed.</> },
         { name: 'body', type: 'string | null', description: <>The raw body: UTF-8 text, or base64 when <code>bodyBase64</code> is <code>true</code>. <code>null</code> without one.</> },
         { name: 'bodyBase64', type: 'boolean', description: 'Whether body is base64 (a binary upload).' },
-        { name: 'json()', type: 'T', description: <>Parses a body sent as <code>application/json</code> or <code>application/*+json</code>. Another content type throws <code>UnsupportedMediaTypeError</code> (<code>415</code> unless caught). An absent or base64 body, or JSON that does not parse, throws a plain error: a <code>500</code> unless you catch it.</> },
+        { name: 'json()', type: 'T', description: <>Parses a body sent as <code>application/json</code> or <code>application/*+json</code>. Another content type throws <code>UnsupportedMediaTypeError</code> (<code>415</code> unless caught). An empty or non-UTF-8 body, or JSON that does not parse, throws <code>MalformedBodyError</code> (<code>400</code> unless caught).</> },
         { name: 'formData()', type: 'Promise<FormData>', description: <>Parses <code>application/x-www-form-urlencoded</code> and <code>multipart/form-data</code>; files are <code>File</code> objects. Another content type is a <code>415</code>, a body that does not parse a <code>400</code> (<code>MalformedBodyError</code>).</> },
         { name: 'locale', type: 'string | undefined', description: <>The request locale, with <code>[i18n]</code>.</> },
         { name: 'ip', type: 'string | undefined', description: <>The client&apos;s address; behind a proxy only when it is in <code>[server] trusted_proxies</code>. Never read <code>x-forwarded-for</code> yourself.</> },
@@ -64,7 +64,8 @@ export const DELETE: RouteHandler<'/api/items/:id'> = async (req) => {
         <thead><tr><th>Return value</th><th>Response</th></tr></thead>
         <tbody>
           <tr><td>A web <code>Response</code></td><td>Its status, headers and body. Binary bodies arrive byte for byte; each <code>Set-Cookie</code> is sent as its own header. Without a <code>Content-Type</code>, <code>text/plain; charset=utf-8</code>. A <code>ReadableStream</code> body streams.</td></tr>
-          <tr><td>A <code>GioEventStream</code></td><td>Server-Sent Events (<code>text/event-stream</code>). Meant for <code>GET</code>.</td></tr>
+          <tr><td>A <code>GioEventStream</code></td><td>Server-Sent Events (<code>text/event-stream</code>), from any method. A browser&apos;s <code>EventSource</code> sends <code>GET</code>; <code>fetch()</code> can read a stream from a <code>POST</code>.</td></tr>
+          <tr><td><a href="/docs/functions/redirect"><code>redirect()</code></a>, returned or thrown</td><td>Its status (<code>303</code> by default), its headers and <code>Location</code> with the URL as written, an empty body.</td></tr>
           <tr><td><code>null</code> or <code>undefined</code></td><td><code>204 No Content</code>.</td></tr>
           <tr><td>Any other value</td><td><code>200</code>, the value as JSON (<code>application/json; charset=utf-8</code>).</td></tr>
         </tbody>
@@ -91,7 +92,10 @@ export const DELETE: RouteHandler<'/api/items/:id'> = async (req) => {
         </li>
         <li>
           <strong>Errors.</strong> <code>notFound()</code> answers <code>404</code>{' '}
-          <code>{'{"error":"Not Found"}'}</code>. Any other thrown error answers <code>500</code>{' '}
+          <code>{'{"error":"Not Found"}'}</code>. A body error from <code>json()</code> or{' '}
+          <code>formData()</code> answers <code>415</code> or <code>400</code> (see{' '}
+          <a href="/docs/functions/request-errors">request body errors</a>) and is not logged.
+          Any other thrown error answers <code>500</code>{' '}
           <code>{'{"error":"Internal Server Error","digest":"..."}'}</code>; the message and stack
           are logged under the digest, never sent.
         </li>
@@ -135,11 +139,12 @@ export async function POST(req: GioRequest) {
 
       <h3 id="redirect-from-a-handler">Redirect from a handler</h3>
       <p>
-        Return a <code>Response</code> with a <code>Location</code> header. A relative URL
-        works:
+        Return (or throw) <code>redirect()</code>. A relative URL is sent as written:
       </p>
-      <CodeBlock lang="ts" title="app/api/go/route.ts" code={`export function POST() {
-  return new Response(null, { status: 303, headers: { location: '/thanks' } });
+      <CodeBlock lang="ts" title="app/api/go/route.ts" code={`import { redirect } from '@gio.js/core';
+
+export function POST() {
+  return redirect('/thanks');                     // 303, Location: /thanks
 }`} />
 
       <h3 id="server-sent-events">Server-Sent Events</h3>
@@ -165,11 +170,10 @@ export function POST() {
       <h2 id="good-to-know">Good to know</h2>
       <ul>
         <li>
-          <code>redirect()</code> from <code>@gio.js/core</code> is for pages, actions and{' '}
-          <code>getServerSideProps</code>. In this release a route handler that returns it
-          sends its internal object as JSON with status <code>200</code>, and one that throws
-          it answers <code>500</code>: return a <code>Response</code> as above.{' '}
-          <code>Response.redirect(&apos;/path&apos;)</code> throws on a relative URL in Node.
+          <code>Response.redirect(&apos;/path&apos;)</code> throws a <code>TypeError</code>{' '}
+          (a <code>500</code>): the web standard accepts only an absolute URL there. Use{' '}
+          <code>redirect()</code>, or a <code>Response</code> with a <code>location</code>{' '}
+          header.
         </li>
         <li>
           A redirect answering a <code>&lt;GioForm&gt;</code> submission (a{' '}
@@ -203,7 +207,7 @@ export function POST() {
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <><code>notFound()</code> answers a JSON <code>404</code>; <code>req.formData()</code>, <code>req.ip</code>, <code>req.scheme</code>, <code>req.host</code> and <code>req.requestId</code>; <code>json()</code> requires a JSON content type (<code>415</code>); every <code>Set-Cookie</code> of a <code>Response</code> is sent; <code>ReadableStream</code> bodies stream; a <code>route.ts</code> that throws while it is imported answers <code>500</code>; typed with <code>RouteHandler</code>.</> },
+        { version: 'v0.1.0-beta.8', changes: <><code>notFound()</code> answers a JSON <code>404</code>; <code>req.formData()</code>, <code>req.ip</code>, <code>req.scheme</code>, <code>req.host</code> and <code>req.requestId</code>; <code>json()</code> requires a JSON content type (<code>415</code>); every <code>Set-Cookie</code> of a <code>Response</code> is sent; <code>ReadableStream</code> bodies stream; <code>redirect()</code>, returned or thrown, redirects; a <code>json()</code> body that does not parse is a <code>400</code> (<code>MalformedBodyError</code>) instead of a <code>500</code>; a <code>route.ts</code> that throws while it is imported answers <code>500</code>; typed with <code>RouteHandler</code>.</> },
         { version: 'v0.1.0-beta.5', changes: 'Introduced: method handlers returning a Response, a GioEventStream, null (204) or JSON, with 405 and Allow for other methods.' },
       ]} />
     </>

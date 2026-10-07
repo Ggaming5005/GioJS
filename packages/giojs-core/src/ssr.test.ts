@@ -18,9 +18,12 @@ import { clearClientBuildErrors, recordClientBuildError } from './client-build-e
 import { cspNonce } from './csp.ts';
 import {
   isJsonContentType,
+  isMalformedBodyError,
   isUnsupportedMediaTypeError,
+  MalformedBodyError,
   UnsupportedMediaTypeError,
 } from './request-body.ts';
+import { redirect } from './action.ts';
 import { installImageConfig, installedImageConfig } from './image-config.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import { pumpRenderStream } from './ipc.ts';
@@ -976,12 +979,68 @@ describe('route.ts method handlers', () => {
     expect('status' in result && result.status).toBe(204);
   });
 
-  async function postJson(contentType: string | undefined, handler: RouteHandlerFn) {
+  it('redirect() returned or thrown from a handler is a real redirect, relative Location kept', async () => {
+    const handlers = makeHandlers('/api/go', {
+      GET: () => redirect('/login'),
+      POST: () => {
+        throw redirect('../done?x=1', { status: 307, headers: { 'set-cookie': 'flash=1', 'x-why': 'moved' } });
+      },
+      PUT: async () => redirect('https://example.com/elsewhere', 308),
+    });
+    const run = (method: string) =>
+      renderRoute({ ...makeRequest('/api/go'), method }, new Map(), noLayouts, undefined, undefined, undefined, {
+        handlers,
+      });
+
+    const returned = await run('GET');
+    expect('status' in returned && returned.status).toBe(303);
+    expect('headers' in returned && returned.headers['location']).toBe('/login');
+    expect('body' in returned && returned.body).toBe('');
+    expect('routeHandler' in returned && returned.routeHandler).toBe(true);
+    expect('cacheable' in returned && returned.cacheable).toBe(false);
+
+    const thrown = await run('POST');
+    expect('status' in thrown && thrown.status).toBe(307);
+    expect('headers' in thrown && thrown.headers).toMatchObject({ location: '../done?x=1', 'x-why': 'moved' });
+    expect('setCookies' in thrown && thrown.setCookies).toEqual(['flash=1']);
+
+    const absolute = await run('PUT');
+    expect('status' in absolute && absolute.status).toBe(308);
+    expect('headers' in absolute && absolute.headers['location']).toBe('https://example.com/elsewhere');
+  });
+
+  it('a redirect() from another module copy is recognized by its brand', async () => {
+    const foreign = { __gioRedirect: true, location: '/x', status: 302 };
+    const handlers = makeHandlers('/api/go', { GET: () => { throw foreign; } });
+    const result = await renderRoute(
+      makeRequest('/api/go'), new Map(), noLayouts, undefined, undefined, undefined, { handlers },
+    );
+    expect('status' in result && result.status).toBe(302);
+    expect('headers' in result && result.headers['location']).toBe('/x');
+  });
+
+  it('a redirect() a GioForm posted to a handler becomes the 204 + x-gio-redirect answer', async () => {
+    const handlers = makeHandlers('/api/go', { POST: () => redirect('/thanks') });
+    const req = { ...makeRequest('/api/go'), method: 'POST', headers: { 'x-gio-form': '1' } };
+    const result = await renderRoute(req, new Map(), noLayouts, undefined, undefined, undefined, {
+      handlers,
+    });
+    expect('status' in result && result.status).toBe(204);
+    expect('headers' in result && result.headers['x-gio-redirect']).toBe('/thanks');
+  });
+
+  async function postJson(
+    contentType: string | undefined,
+    handler: RouteHandlerFn,
+    body: string | null = '{"a":1}',
+    bodyBase64 = false,
+  ) {
     const handlers = makeHandlers('/api/json', { POST: handler });
     const req: IPCRequest = {
       ...makeRequest('/api/json'),
       method: 'POST',
-      body: '{"a":1}',
+      body,
+      bodyBase64,
       headers: contentType === undefined ? {} : { 'content-type': contentType },
     };
     const result = await renderRoute(req, new Map(), noLayouts, undefined, undefined, undefined, {
@@ -1012,6 +1071,40 @@ describe('route.ts method handlers', () => {
       expect(result.headers['content-type']).toContain('application/json');
       expect(JSON.parse(result.body)).toMatchObject({ error: 'Unsupported Media Type' });
     }
+  });
+
+  it('json() on a body that is not JSON throws MalformedBodyError: a 400, not a 500', async () => {
+    const logs = captureLogs();
+    try {
+      for (const [body, base64] of [['{oops', false], ['', false], [null, false], ['/w==', true]] as const) {
+        const result = await postJson('application/json', req => req.json(), body, base64);
+        expect(result.status, String(body)).toBe(400);
+        expect(result.headers['content-type']).toContain('application/json');
+        const answer = JSON.parse(result.body) as { error: string; message: string; digest?: string };
+        expect(answer.error).toBe('Bad Request');
+        expect(answer.message).toMatch(/^request body is not valid JSON/);
+        expect(answer.digest).toBeUndefined();
+      }
+      // A client error: nothing logged as a handler failure.
+      expect(logs.lines().filter(line => line['level'] === 'error')).toEqual([]);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it('a handler can catch the MalformedBodyError of json()', async () => {
+    const result = await postJson('application/json', req => {
+      try {
+        return req.json();
+      } catch (err) {
+        if (!isMalformedBodyError(err)) throw err;
+        expect(err).toBeInstanceOf(MalformedBodyError);
+        expect(err.status).toBe(400);
+        return { fallback: true };
+      }
+    }, '[1,');
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ fallback: true });
   });
 
   it('a handler can catch the 415 error and still read the raw body', async () => {

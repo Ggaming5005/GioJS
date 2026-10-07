@@ -69,6 +69,7 @@ import {
   isMalformedBodyError,
   isUnsupportedMediaTypeError,
   parseFormData,
+  parseJsonBody,
   UnsupportedMediaTypeError,
 } from './request-body.ts';
 import {
@@ -327,9 +328,7 @@ function makeGioRequest(req: IPCRequest, params: Record<string, string>): GioReq
     json<T = unknown>(): T {
       const contentType = req.headers['content-type'];
       if (!isJsonContentType(contentType)) throw new UnsupportedMediaTypeError(contentType);
-      if (req.body === null) throw new Error('request has no body');
-      if (req.bodyBase64) throw new Error('request body is binary (base64) - decode it manually');
-      return JSON.parse(req.body) as T;
+      return parseJsonBody<T>(req.body, req.bodyBase64);
     },
     formData(): Promise<FormData> {
       return parseFormData(req.body, req.bodyBase64, req.headers['content-type']);
@@ -1738,10 +1737,11 @@ async function routeResponseToIpc(
 /**
  * Invoke a route.ts method handler. The result contract:
  * `GioEventStream` → SSE; web `Response` → converted (its body streamed
- * when it is still being produced, see routeResponseToIpc); null/undefined
- * → 204; anything else → JSON 200; notFound() → JSON 404. Handler responses
- * are never cacheable, and are flagged `routeHandler` so Rust leaves their
- * Cache-Control to the app.
+ * when it is still being produced, see routeResponseToIpc); redirect() →
+ * its status and Location, returned or thrown, as from a page action;
+ * null/undefined → 204; anything else → JSON 200; notFound() → JSON 404.
+ * Handler responses are never cacheable, and are flagged `routeHandler` so
+ * Rust leaves their Cache-Control to the app.
  */
 async function runRouteHandler(
   req: IPCRequest,
@@ -1751,7 +1751,14 @@ async function runRouteHandler(
 ): Promise<IPCResponse | SseRouteResult | RouteStreamResult> {
   const base = { id: req.id, cacheable: false, cacheMaxAge: 0, routeHandler: true };
   try {
-    const result = await handler(makeGioRequest(req, params));
+    let result: unknown;
+    try {
+      result = await handler(makeGioRequest(req, params));
+    } catch (err) {
+      // A thrown redirect() answers like a returned one, as in a page action.
+      if (!isActionRedirect(err)) throw err;
+      result = err;
+    }
 
     if (isGioEventStream(result)) {
       return { type: 'sse', stream: result };
@@ -1759,6 +1766,9 @@ async function runRouteHandler(
     if (result instanceof Response) {
       return await routeResponseToIpc(req, result, bodyStreaming);
     }
+    // Checked before the JSON fallback, which would send the redirect's
+    // internal shape as a 200 body.
+    if (isActionRedirect(result)) return routeRedirectResponse(req, result);
     if (result === undefined || result === null) {
       return { ...base, status: 204, headers: {}, body: '' };
     }
@@ -1799,6 +1809,20 @@ async function runRouteHandler(
       body: JSON.stringify({ error: message, digest }),
     };
   }
+}
+
+/**
+ * A redirect() from a route.ts handler: the redirect a page action answers
+ * with (a relative Location is fine - unlike Response.redirect(), which
+ * undici rejects without an absolute URL), flagged `routeHandler` like
+ * every handler answer. Its headers must be a header record, as for an
+ * action; anything else is the handler's bug, a 500.
+ */
+function routeRedirectResponse(req: IPCRequest, redirect: ActionRedirect): IPCResponse {
+  if (redirect.headers !== undefined && !isHeaderRecord(redirect.headers)) {
+    throw new TypeError('redirect() headers must map header names to strings or string arrays');
+  }
+  return { ...redirectResponse(req, redirect), routeHandler: true };
 }
 
 /**
