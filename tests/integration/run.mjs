@@ -2156,22 +2156,30 @@ async function devWatchPhase() {
     });
 
     await test('dev endpoints: a symlink named like source cannot expose other files', async () => {
-      // Outside app/ so the dev watcher does not restart the worker under
-      // the watch tests below.
-      await writeFile(join(devDir, 'secret.env'), 'TOKEN=integration-secret\n');
+      // In a hidden directory: the dev watcher covers the whole project and
+      // restarts the worker for a `.ts` anywhere else, racing the watch
+      // tests below. Hidden directories are ignored at every depth.
+      const restarts = () => (log.match(/dev watch: change detected/g) ?? []).length;
+      const restartsBefore = restarts();
+      const scratch = join(devDir, '.scratch');
+      await mkdir(scratch, { recursive: true });
+      await writeFile(join(scratch, 'secret.env'), 'TOKEN=integration-secret\n');
       // Symlinks need Developer Mode / admin rights on Windows.
       if (process.platform !== 'win32') {
-        await symlink(join(devDir, 'secret.env'), join(devDir, 'leak.ts'));
-        const res = await rawRequest('GET', '/_gio/devtools/codeframe?file=leak.ts&line=1', {
+        await symlink(join(scratch, 'secret.env'), join(scratch, 'leak.ts'));
+        const res = await rawRequest('GET', '/_gio/devtools/codeframe?file=.scratch%2Fleak.ts&line=1', {
           host: trustedHost,
         });
         assert.equal(res.status, 400);
         assert.doesNotMatch(res.body, /integration-secret/);
       }
-      const direct = await rawRequest('GET', '/_gio/devtools/codeframe?file=secret.env&line=1', {
+      const direct = await rawRequest('GET', '/_gio/devtools/codeframe?file=.scratch%2Fsecret.env&line=1', {
         host: trustedHost,
       });
       assert.equal(direct.status, 400);
+      // Past the watcher's 300ms batching window: still no restart.
+      await sleep(1_000);
+      assert.equal(restarts(), restartsBefore, 'the fixture files must not restart the worker');
     });
 
     await test('dev error pages: message and stack only reach localhost hosts', async () => {
