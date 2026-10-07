@@ -67,6 +67,14 @@ async fn run_connection(
     let route_id = info.route_id.clone();
     if ws_registry.active_count() >= max_connections {
         warn!(route = %route_id, addr = %addr, "WebSocket connection limit reached");
+        // 1013 "try again later": clients back off and retry, where a bare
+        // drop would read as a network failure.
+        let _ = socket
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::AGAIN,
+                reason: std::borrow::Cow::Borrowed("too many connections"),
+            })))
+            .await;
         return;
     }
 
