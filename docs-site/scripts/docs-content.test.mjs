@@ -150,3 +150,105 @@ test("the releases page highlights the release tagged 'latest', which is release
     assert.match(source, new RegExp(`\\$\\{isLatest\\(rel\\) \\? ' ${cls}' : ''\\}`), cls);
   }
 });
+
+// ── CLI reference (/docs/cli/*, /docs/create-giojs, /docs/gio-config) ──────
+
+/** A command of `gio` (packages/giojs/bin/lib/commands.js) and its reference page. */
+const CLI_PAGES = {
+  dev: 'cli/dev', start: 'cli/start', build: 'cli/build', export: 'cli/export', routes: 'cli/routes',
+  typegen: 'cli/typegen', doctor: 'cli/doctor', info: 'cli/info', cache: 'cli/cache-explain',
+  bench: 'cli/bench', migrate: 'cli/migrate', add: 'cli/add', help: 'cli/help',
+};
+
+test('every gio command has a reference page, linked from the CLI overview', () => {
+  const commands = read('packages/giojs/bin/lib/commands.js');
+  const table = /const COMMANDS = \{([\s\S]*?)\n\};/.exec(commands);
+  assert.ok(table, 'COMMANDS not found in commands.js - update this test');
+  const names = [...table[1].matchAll(/^ {2}(\w+): \{/gm)].map((m) => m[1]);
+  assert.deepEqual(names.sort(), Object.keys(CLI_PAGES).sort(), 'a gio command without a docs page (CLI_PAGES)');
+  const overview = docsPage('cli');
+  for (const [name, route] of Object.entries(CLI_PAGES)) {
+    assert.ok(existsSync(join(siteDir, 'app', 'docs', ...route.split('/'), 'page.tsx')), `gio ${name}: /docs/${route}`);
+    assert.ok(overview.includes(`href="/docs/${route}"`), `the CLI overview does not link /docs/${route}`);
+  }
+});
+
+test("gio bench's documented defaults are bench.mjs's", () => {
+  const bench = read('packages/giojs/bin/bench.mjs');
+  const page = docsPage('cli/bench');
+  for (const [constant, flag] of [
+    ['DEFAULT_CONNECTIONS', 'connections'],
+    ['DEFAULT_DURATION_SECONDS', 'duration'],
+    ['DEFAULT_WARMUP_SECONDS', 'warmup'],
+  ]) {
+    const value = new RegExp(`const ${constant} = (\\d+);`).exec(bench)?.[1];
+    assert.ok(value, `${constant} not found in bench.mjs - update this test`);
+    assert.match(page, new RegExp(`name: '--${flag} <[a-z]+>',[^}]*default: '${value}'`), `--${flag} default`);
+    assert.ok(page.includes(`[--${flag} ${value}]`), `the usage line shows --${flag} ${value}`);
+  }
+});
+
+test('gio build standalone: the documented targets are the ones it accepts', () => {
+  const list = /const TARGETS = \[([\s\S]*?)\];/.exec(read('packages/giojs/bin/standalone.mjs'));
+  assert.ok(list, 'TARGETS not found in standalone.mjs - update this test');
+  const targets = [...list[1].matchAll(/'([\w-]+)'/g)].map((m) => m[1]).sort();
+  const row = /name: '--target <platform>',[\s\S]*?description: <>([\s\S]*?)<\/>,/.exec(docsPage('cli/build-standalone'));
+  assert.ok(row, 'the --target row is missing');
+  const shown = [...row[1].matchAll(/<code>((?:linux|win32|darwin)-[\w-]+)<\/code>/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(shown)].sort(), targets);
+});
+
+test("gio doctor's documented checks are the ones it runs, in order", () => {
+  const doctor = read('packages/giojs/bin/lib/doctor.js');
+  const run = /function runChecks\(facts\) \{\s*return \[([\s\S]*?)\];/.exec(doctor);
+  assert.ok(run, 'runChecks not found in doctor.js - update this test');
+  const ids = [...run[1].matchAll(/(\w+)Check\(facts\)/g)].map(([, fn]) => {
+    const id = new RegExp(`function ${fn}Check\\(facts\\) \\{[\\s\\S]*?check\\('(\\w+)'`).exec(doctor)?.[1];
+    assert.ok(id, `${fn}Check has no check id`);
+    return id;
+  });
+  const page = docsPage('cli/doctor');
+  const table = page.slice(page.indexOf('id="checks"'), page.indexOf('id="output"'));
+  const documented = [...table.matchAll(/<tr><td><code>(\w+)<\/code><\/td>/g)].map((m) => m[1]);
+  assert.deepEqual(documented, ids);
+});
+
+test('giojs-server --check-config: every report field is documented', () => {
+  const check = read('crates/giojs-server/src/config_check.rs');
+  const body = check.slice(check.indexOf('fn run('), check.indexOf('fn warnings('));
+  const fields = new Set([...body.matchAll(/^\s+"(\w+)": /gm)].map((m) => m[1]));
+  for (const nested of ['host', 'port', 'portSource', 'tls']) fields.delete(nested);
+  assert.ok(fields.size > 10, 'no report fields parsed - update this test');
+  const page = docsPage('cli/giojs-server');
+  const table = page.slice(page.indexOf('id="report"'), page.indexOf('id="examples"'));
+  for (const field of [...fields, 'ok', 'errors']) {
+    assert.ok(table.includes(`name: '${field}'`), `report field ${field} is undocumented`);
+  }
+});
+
+test("giojs-server's documented shutdown time is the server's", () => {
+  const drain = rustSeconds('crates/giojs-server/src/main.rs', 'SHUTDOWN_DRAIN_TIMEOUT');
+  const grace = rustSeconds('crates/giojs-server/src/ipc.rs', 'WORKER_SHUTDOWN_GRACE');
+  const page = docsPage('cli/giojs-server');
+  assert.match(page, new RegExp(`up to ${drain}\\s+seconds to drain`));
+  assert.match(page, new RegExp(`up to ${grace} seconds for each worker`));
+  assert.match(page, new RegExp(`at least ${drain + grace} seconds`));
+});
+
+test('every create-giojs option in its --help is on the create-giojs page', () => {
+  const usage = /export const USAGE = `([\s\S]*?)`;/.exec(read('packages/giojs-cli/src/args.ts'));
+  assert.ok(usage, 'USAGE not found in packages/giojs-cli/src/args.ts - update this test');
+  const page = docsPage('create-giojs');
+  for (const flag of new Set(usage[1].match(/(?<![\w-])--?[a-z][\w-]*/g))) {
+    assert.ok(page.includes(flag), `create-giojs ${flag} is not on /docs/create-giojs`);
+  }
+});
+
+test('gio.config.ts: the documented keys are the ones validateGioConfig accepts', () => {
+  const keys = /const CONFIG_KEYS: [^=]*= \[([^\]]*)\]/.exec(read('packages/giojs-core/src/gio-config.ts'));
+  assert.ok(keys, 'CONFIG_KEYS not found in gio-config.ts - update this test');
+  const accepted = [...keys[1].matchAll(/'(\w+)'/g)].map((m) => m[1]);
+  const page = docsPage('gio-config');
+  const table = page.slice(page.indexOf('id="keys"'), page.indexOf('id="gionodeplugin"'));
+  assert.deepEqual([...table.matchAll(/name: '(\w+)'/g)].map((m) => m[1]), accepted);
+});
