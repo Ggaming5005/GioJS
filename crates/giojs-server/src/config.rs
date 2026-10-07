@@ -487,6 +487,11 @@ pub struct RateLimitEntry {
     pub burst: u64,
     /// Key buckets on this request header's value instead of the client IP.
     pub key_header: Option<String>,
+    /// With `key_header`: distinct header values one client may hold a
+    /// budget for; past it they share the client's own bucket. 0 =
+    /// unlimited (many API keys behind one NAT address).
+    #[serde(default = "default_max_keys_per_client")]
+    pub max_keys_per_client: u64,
 }
 
 fn default_per_ip() -> u64 {
@@ -497,6 +502,9 @@ fn default_window_seconds() -> u64 {
 }
 fn default_burst() -> u64 {
     20
+}
+fn default_max_keys_per_client() -> u64 {
+    giojs_ratelimit::DEFAULT_MAX_KEYS_PER_CLIENT
 }
 
 /// `[websocket]`: WebSocket routes (`route.ts` exporting `WS`).
@@ -1116,6 +1124,11 @@ pub struct ServerConfig {
     #[serde(default)]
     #[cfg_attr(test, schemars(with = "WorkersSchema"))]
     pub workers: WorkersSetting,
+    /// Live `[[rate_limits]]` buckets kept across all rules and clients;
+    /// past it refilled buckets are dropped, then the least recently seen.
+    /// 0 = unlimited.
+    #[serde(default = "default_rate_limit_max_buckets")]
+    pub rate_limit_max_buckets: usize,
     #[serde(default)]
     pub tls: TlsConfig,
 }
@@ -1226,6 +1239,10 @@ fn default_http2() -> bool {
     true
 }
 
+fn default_rate_limit_max_buckets() -> usize {
+    giojs_ratelimit::DEFAULT_MAX_BUCKETS
+}
+
 fn default_accept_request_id() -> bool {
     true
 }
@@ -1321,6 +1338,7 @@ impl Default for ServerConfig {
             proxy_headers: Default::default(),
             accept_request_id: default_accept_request_id(),
             workers: WorkersSetting::default(),
+            rate_limit_max_buckets: default_rate_limit_max_buckets(),
             tls: TlsConfig::default(),
         }
     }
@@ -1980,6 +1998,21 @@ redirect_to    = "/"
         let bundle = config.middleware_rules();
         assert_eq!(bundle.redirects.len(), 2);
         assert_eq!(bundle.guards.len(), 1);
+    }
+
+    #[test]
+    fn rate_limiter_caps_default_and_zero_lifts_them() {
+        let defaults =
+            parse("[[rate_limits]]\npath = \"/api/*\"\nkey_header = \"x-api-key\"\n").unwrap();
+        assert_eq!(defaults.server.rate_limit_max_buckets, 100_000);
+        assert_eq!(defaults.rate_limits[0].max_keys_per_client, 64);
+        let lifted = parse(
+            "[server]\nrate_limit_max_buckets = 0\n\n\
+             [[rate_limits]]\npath = \"/api/*\"\nkey_header = \"x-api-key\"\nmax_keys_per_client = 0\n",
+        )
+        .unwrap();
+        assert_eq!(lifted.server.rate_limit_max_buckets, 0);
+        assert_eq!(lifted.rate_limits[0].max_keys_per_client, 0);
     }
 
     #[test]

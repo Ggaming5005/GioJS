@@ -862,10 +862,14 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
                 window_seconds: e.window_seconds,
                 burst: e.burst,
                 key_header: e.key_header.clone(),
+                max_keys_per_client: e.max_keys_per_client,
             })
             .collect();
         info!("Rate limiting enabled: {} rule(s)", rules.len());
-        let rl = Arc::new(RateLimiter::new(rules));
+        let rl = Arc::new(RateLimiter::with_max_buckets(
+            rules,
+            cfg.server.rate_limit_max_buckets,
+        ));
         let rl_evict = rl.clone();
         tokio::spawn(async move {
             loop {
@@ -6106,6 +6110,7 @@ mod tests {
             window_seconds: 3600,
             burst: 0,
             key_header: None,
+            max_keys_per_client: giojs_ratelimit::DEFAULT_MAX_KEYS_PER_CLIENT,
         }]);
         let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
         let headers = HashMap::new();

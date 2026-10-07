@@ -183,6 +183,22 @@ pub fn protections_off_warnings(config: &GioConfig) -> Vec<String> {
                 .to_string(),
         );
     }
+    if !config.rate_limits.is_empty() && config.server.rate_limit_max_buckets == 0 {
+        warnings.push(
+            "[server] rate_limit_max_buckets = 0: rate-limit buckets are never evicted - \
+             clients rotating addresses grow memory without bound"
+                .to_string(),
+        );
+    }
+    for rule in &config.rate_limits {
+        if rule.key_header.is_some() && rule.max_keys_per_client == 0 {
+            warnings.push(format!(
+                "[[rate_limits]] {}: max_keys_per_client = 0 - one client can mint a fresh \
+                 budget for every key_header value it sends",
+                rule.path
+            ));
+        }
+    }
     if config.websocket.enabled && config.websocket.max_connections == 0 {
         warnings.push(
             "[websocket] max_connections = 0: WebSocket connections are unlimited - every \
@@ -706,6 +722,20 @@ mod tests {
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].starts_with("[server] render_timeout_secs = 0: "));
         assert!(protection_warnings("[server]\nrender_timeout_secs = 120\n").is_empty());
+    }
+
+    #[test]
+    fn lifted_rate_limiter_caps_are_warnings() {
+        let warnings = protection_warnings(
+            "[server]\nrate_limit_max_buckets = 0\n\n\
+             [[rate_limits]]\npath = \"/api/*\"\nkey_header = \"x-api-key\"\nmax_keys_per_client = 0\n\n\
+             [[rate_limits]]\npath = \"/login\"\nmax_keys_per_client = 0\n",
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].starts_with("[server] rate_limit_max_buckets = 0: "));
+        assert!(warnings[1].starts_with("[[rate_limits]] /api/*: max_keys_per_client = 0 - "));
+        // Without rules there are no buckets to cap.
+        assert!(protection_warnings("[server]\nrate_limit_max_buckets = 0\n").is_empty());
     }
 
     #[test]
