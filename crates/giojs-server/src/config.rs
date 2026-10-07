@@ -1078,6 +1078,12 @@ pub struct ServerConfig {
     /// Deadline for buffering a whole request body; exceeded -> 408.
     #[serde(default = "default_request_body_timeout_secs")]
     pub request_body_timeout_secs: u64,
+    /// Deadline for the Node worker's answer: a whole buffered response,
+    /// the head of a streamed one, and every gap between its chunks.
+    /// Exceeded -> 504 (a streamed body is cut short). SSE streams are not
+    /// bounded by it.
+    #[serde(default = "default_render_timeout_secs")]
+    pub render_timeout_secs: u64,
     /// Close connections with no request in flight for this long (HTTP/2
     /// mainly; HTTP/1.1 idles are usually reaped by header_read_timeout_secs
     /// first). Streaming and SSE responses count as in flight.
@@ -1240,6 +1246,9 @@ fn default_header_read_timeout_secs() -> u64 {
 fn default_request_body_timeout_secs() -> u64 {
     30
 }
+fn default_render_timeout_secs() -> u64 {
+    crate::ipc::DEFAULT_RENDER_TIMEOUT.as_secs()
+}
 fn default_idle_timeout_secs() -> u64 {
     60
 }
@@ -1271,6 +1280,9 @@ impl ServerConfig {
     pub fn idle_timeout(&self) -> Option<std::time::Duration> {
         secs(self.idle_timeout_secs)
     }
+    pub fn render_timeout(&self) -> Option<std::time::Duration> {
+        secs(self.render_timeout_secs)
+    }
     /// (interval, ack timeout), or None when either is 0: a ping without an
     /// ack deadline reaps nothing.
     pub fn http2_keep_alive(&self) -> Option<(std::time::Duration, std::time::Duration)> {
@@ -1300,6 +1312,7 @@ impl Default for ServerConfig {
             tls_handshake_timeout_secs: default_tls_handshake_timeout_secs(),
             header_read_timeout_secs: default_header_read_timeout_secs(),
             request_body_timeout_secs: default_request_body_timeout_secs(),
+            render_timeout_secs: default_render_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
             http2_max_concurrent_streams: default_http2_max_concurrent_streams(),
             http2_keep_alive_interval_secs: default_http2_keep_alive_interval_secs(),
@@ -1859,6 +1872,7 @@ mod tests {
         );
         assert_eq!(server.header_read_timeout(), Some(Duration::from_secs(10)));
         assert_eq!(server.request_body_timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(server.render_timeout(), Some(Duration::from_secs(30)));
         assert_eq!(server.idle_timeout(), Some(Duration::from_secs(60)));
         assert_eq!(server.http2_max_concurrent_streams, 250);
         assert_eq!(
@@ -1870,6 +1884,7 @@ mod tests {
         assert_eq!(fallback.max_connections, server.max_connections);
         assert_eq!(fallback.header_read_timeout(), server.header_read_timeout());
         assert_eq!(fallback.idle_timeout(), server.idle_timeout());
+        assert_eq!(fallback.render_timeout(), server.render_timeout());
         assert_eq!(fallback.http2_keep_alive(), server.http2_keep_alive());
     }
 
@@ -1886,6 +1901,7 @@ max_connections = 64
 tls_handshake_timeout_secs = 0
 header_read_timeout_secs = 2
 request_body_timeout_secs = 0
+render_timeout_secs = 0
 idle_timeout_secs = 5
 http2_max_concurrent_streams = 16
 http2_keep_alive_interval_secs = 7
@@ -1900,6 +1916,7 @@ http2_keep_alive_timeout_secs = 0
         assert_eq!(server.tls_handshake_timeout(), None);
         assert_eq!(server.header_read_timeout(), Some(Duration::from_secs(2)));
         assert_eq!(server.request_body_timeout(), None);
+        assert_eq!(server.render_timeout(), None);
         assert_eq!(server.idle_timeout(), Some(Duration::from_secs(5)));
         assert_eq!(server.http2_max_concurrent_streams, 16);
         assert_eq!(

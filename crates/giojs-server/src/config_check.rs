@@ -176,6 +176,13 @@ pub fn protections_off_warnings(config: &GioConfig) -> Vec<String> {
             }
         }
     }
+    if config.server.render_timeout_secs == 0 {
+        warnings.push(
+            "[server] render_timeout_secs = 0: a render that never answers holds its \
+             connection and a worker slot indefinitely"
+                .to_string(),
+        );
+    }
     if config.websocket.enabled && config.websocket.max_connections == 0 {
         warnings.push(
             "[websocket] max_connections = 0: WebSocket connections are unlimited - every \
@@ -642,7 +649,10 @@ mod tests {
     fn the_defaults_loosen_no_protection() {
         assert_eq!(protection_warnings(""), Vec::<String>::new());
         let root = test_root();
-        assert_eq!(report(&loaded(&[]), parse(""), &env_in(&root))["warnings"], json!([]));
+        assert_eq!(
+            report(&loaded(&[]), parse(""), &env_in(&root))["warnings"],
+            json!([])
+        );
     }
 
     #[test]
@@ -651,8 +661,9 @@ mod tests {
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].starts_with("[websocket] max_connections = 0: "));
         // Not while WebSockets are off.
-        assert!(protection_warnings("[websocket]\nenabled = false\nmax_connections = 0\n")
-            .is_empty());
+        assert!(
+            protection_warnings("[websocket]\nenabled = false\nmax_connections = 0\n").is_empty()
+        );
 
         // --check-config reports the same line, and still passes.
         let root = test_root();
@@ -687,6 +698,14 @@ mod tests {
         // optimizer off.
         assert!(protection_warnings("[images]\nmax_source_dimension = 30000\n").is_empty());
         assert!(protection_warnings(&format!("{all}enabled = false\n")).is_empty());
+    }
+
+    #[test]
+    fn no_render_timeout_is_a_warning() {
+        let warnings = protection_warnings("[server]\nrender_timeout_secs = 0\n");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("[server] render_timeout_secs = 0: "));
+        assert!(protection_warnings("[server]\nrender_timeout_secs = 120\n").is_empty());
     }
 
     #[test]

@@ -603,6 +603,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
+    ipc::set_render_timeout(cfg.server.render_timeout());
     // Protections gio.toml turns off or loosens: allowed, never silent.
     for warning in config_check::protections_off_warnings(&cfg) {
         warn!("{warning}");
@@ -3221,8 +3222,9 @@ fn respond_stream(
         req_id: response.id.clone(),
         ipc: state.ipc.clone(),
         injector,
-        idle: has_render_idle_gap(&response)
-            .then(|| Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT))),
+        idle: ipc::render_timeout()
+            .filter(|_| has_render_idle_gap(&response))
+            .map(IdleDeadline::new),
         done: false,
         shell_capture,
         span: tracing::Span::current(),
@@ -3422,6 +3424,33 @@ impl PprShellCapture {
     }
 }
 
+/// The idle-gap deadline of a streamed body: `period` (`[server]
+/// render_timeout_secs`) after the last frame.
+struct IdleDeadline {
+    period: Duration,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl IdleDeadline {
+    fn new(period: Duration) -> Self {
+        Self {
+            period,
+            sleep: Box::pin(tokio::time::sleep(period)),
+        }
+    }
+
+    /// A frame arrived: the gap starts over.
+    fn reset(&mut self) {
+        self.sleep
+            .as_mut()
+            .reset(tokio::time::Instant::now() + self.period);
+    }
+
+    fn poll_elapsed(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        self.sleep.as_mut().poll(cx)
+    }
+}
+
 /// Chunked HTML body fed by the IPC reader loop. The head frame already
 /// consumed the request timeout budget; from here on an idle gap between
 /// chunks longer than the same budget ends the body (headers are sent, so
@@ -3431,8 +3460,9 @@ struct RenderBodyStream {
     req_id: String,
     ipc: Arc<IpcClient>,
     injector: stream_inject::StreamInjector,
-    /// Idle-gap deadline, reset per frame; None for route.ts bodies.
-    idle: Option<Pin<Box<tokio::time::Sleep>>>,
+    /// Idle-gap deadline, reset per frame; None for route.ts bodies and
+    /// with `[server] render_timeout_secs = 0`.
+    idle: Option<IdleDeadline>,
     done: bool,
     /// Set on PPR miss renders; a stream ending without shell_end drops the
     /// capture unstored, so an aborted render can never cache a torn shell.
@@ -3465,8 +3495,7 @@ impl Stream for RenderBodyStream {
             match this.inner.poll_recv(cx) {
                 Poll::Ready(Some(RenderFrame::Chunk(bytes))) => {
                     if let Some(idle) = this.idle.as_mut() {
-                        idle.as_mut()
-                            .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                        idle.reset();
                     }
                     if let Some(capture) = this.shell_capture.as_mut() {
                         capture.absorb(&bytes);
@@ -3478,8 +3507,7 @@ impl Stream for RenderBodyStream {
                 }
                 Poll::Ready(Some(RenderFrame::ShellEnd)) => {
                     if let Some(idle) = this.idle.as_mut() {
-                        idle.as_mut()
-                            .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                        idle.reset();
                     }
                     if let Some(capture) = this.shell_capture.take() {
                         capture.store();
@@ -3496,7 +3524,7 @@ impl Stream for RenderBodyStream {
                     if this
                         .idle
                         .as_mut()
-                        .is_some_and(|idle| idle.as_mut().poll(cx).is_ready())
+                        .is_some_and(|idle| idle.poll_elapsed(cx).is_ready())
                     {
                         warn!(id = %this.req_id, "streaming render idle-gap timeout - truncating body");
                         this.done = true;
@@ -3610,7 +3638,7 @@ async fn feed_ppr_holes(
             response,
             mut body_rx,
         }) => loop {
-            match tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT, body_rx.recv()).await {
+            match ipc::within(ipc::render_timeout(), body_rx.recv()).await {
                 Ok(Some(RenderFrame::Chunk(bytes))) => {
                     if tx.send(bytes).is_err() {
                         // Client went away mid-holes: stop the render.
@@ -5218,7 +5246,7 @@ async fn collect_ppr_shell(
 ) -> Option<Bytes> {
     let mut raw = BytesMut::new();
     loop {
-        match tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT, body_rx.recv()).await {
+        match ipc::within(ipc::render_timeout(), body_rx.recv()).await {
             Ok(Some(RenderFrame::Chunk(bytes))) => {
                 if raw.len() + bytes.len() > MAX_PPR_SHELL_BYTES {
                     return None;
@@ -7671,7 +7699,7 @@ mod tests {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
         let mut stream =
             render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
-        tokio::time::advance(ipc::IPC_RESPONSE_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::advance(ipc::DEFAULT_RENDER_TIMEOUT + Duration::from_secs(1)).await;
         let log = captured_log("warn", || {
             stream.span = request_span("rid-body");
             let mut cx = Context::from_waker(std::task::Waker::noop());
@@ -7850,7 +7878,7 @@ mod tests {
             req_id: "req-stream".into(),
             ipc: Arc::new(client),
             injector,
-            idle: Some(Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT))),
+            idle: Some(IdleDeadline::new(ipc::DEFAULT_RENDER_TIMEOUT)),
             done: false,
             shell_capture: None,
             span: tracing::Span::none(),
@@ -7915,7 +7943,7 @@ mod tests {
             .unwrap();
         assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"data: 1\n\n");
         // An event stream may wait far longer than a render may stall.
-        let quiet = tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT * 4, stream.next()).await;
+        let quiet = tokio::time::timeout(ipc::DEFAULT_RENDER_TIMEOUT * 4, stream.next()).await;
         assert!(quiet.is_err(), "the body must still be open");
         assert!(write_rx.try_recv().is_err(), "no cancel sent");
         tx.send(RenderFrame::Chunk(Bytes::from("data: 2\n\n")))

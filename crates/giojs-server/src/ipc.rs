@@ -72,9 +72,37 @@ impl std::error::Error for RequestTooLarge {}
 /// within v3 - both sides default them off.
 const IPC_PROTOCOL_VERSION: u64 = 3;
 
-/// Budget for a full buffered response, for a streaming head frame, and for
-/// the idle gap between chunks of a streaming body.
-pub const IPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default `[server] render_timeout_secs`: the budget for a full buffered
+/// response, for a streaming head frame, and for the idle gap between
+/// chunks of a streaming body. SSE streams are not bounded by it.
+pub const DEFAULT_RENDER_TIMEOUT: Duration = Duration::from_secs(30);
+
+static RENDER_TIMEOUT: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+
+/// Install `[server] render_timeout_secs` (None: renders never time out).
+/// Once, at startup, before the first request.
+pub fn set_render_timeout(timeout: Option<Duration>) {
+    let _ = RENDER_TIMEOUT.set(timeout);
+}
+
+/// The render budget in force: what startup installed, else the default.
+pub fn render_timeout() -> Option<Duration> {
+    RENDER_TIMEOUT
+        .get()
+        .copied()
+        .unwrap_or(Some(DEFAULT_RENDER_TIMEOUT))
+}
+
+/// `future`, bounded by `limit` when there is one.
+pub async fn within<F: std::future::Future>(
+    limit: Option<Duration>,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    match limit {
+        Some(limit) => timeout(limit, future).await,
+        None => Ok(future.await),
+    }
+}
 
 /// Startup budget: Node + tsx can take several seconds to boot.
 const STARTUP_CONNECT_ATTEMPTS: usize = 60;
@@ -1264,7 +1292,7 @@ impl WorkerInner {
             anyhow::bail!("IPC writer closed");
         }
 
-        match timeout(IPC_RESPONSE_TIMEOUT, rx).await {
+        match within(render_timeout(), rx).await {
             Ok(Ok(result)) => {
                 cancel_guard.armed = false;
                 // Logged here, not by the reader task: this runs in the
@@ -2146,7 +2174,7 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<WorkerInner>) {
 /// A response frame that fails to deserialize (a mistyped field from a plugin
 /// or a version-skewed worker) still names its request - the id was read
 /// leniently from the raw JSON. Answer that request with a 500 now instead
-/// of letting it wait out IPC_RESPONSE_TIMEOUT, and tell Node to stop any
+/// of letting it wait out the render timeout, and tell Node to stop any
 /// stream the frame may have opened.
 fn fail_malformed_response(inner: &WorkerInner, id: &str, parse_error: &str) {
     send_cancel_like_frame(inner, "cancel", id);
@@ -2649,6 +2677,18 @@ impl IpcClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn renders_are_bounded_by_the_render_timeout_unless_it_is_off() {
+        let slow = || async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            "rendered"
+        };
+        assert!(within(Some(Duration::from_secs(1)), slow()).await.is_err());
+        // render_timeout_secs = 0: an hour-long render still completes.
+        assert_eq!(within(None, slow()).await.unwrap(), "rendered");
+        assert_eq!(render_timeout(), Some(DEFAULT_RENDER_TIMEOUT), "until startup sets it");
+    }
 
     #[test]
     fn error_frames_become_flagged_error_pages() {
@@ -3253,7 +3293,7 @@ mod tests {
             .unwrap();
         let resolved = timeout(Duration::from_secs(2), rx)
             .await
-            .expect("resolved immediately, not after IPC_RESPONSE_TIMEOUT")
+            .expect("resolved immediately, not after the render timeout")
             .unwrap();
         let IpcSendResult::Response(resp) = resolved else {
             panic!("a malformed frame resolves to a plain response");

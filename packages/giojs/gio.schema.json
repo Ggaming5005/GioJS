@@ -976,6 +976,13 @@
           ],
           "default": "x-forwarded"
         },
+        "render_timeout_secs": {
+          "description": "Deadline for the Node worker's answer: a whole buffered response,\nthe head of a streamed one, and every gap between its chunks.\nExceeded -> 504 (a streamed body is cut short). SSE streams are not\nbounded by it.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
         "request_body_timeout_secs": {
           "description": "Deadline for buffering a whole request body; exceeded -> 408.",
           "type": "integer",
