@@ -192,7 +192,12 @@ export function createIPCServer(
       // path as requested, until renderRoute reports the path it routes by
       // (a plugin onRequest hook may have rewritten it).
       const label: RouteLabel = {
-        route: resolveRoutePattern(req.path, routes, renderExtras.handlers),
+        route: resolveRoutePattern(
+          req.path,
+          routes,
+          renderExtras.handlers,
+          renderExtras.metadataRoutes,
+        ),
       };
       await withRequestLogContext(logContext, async () => {
         try {
@@ -227,7 +232,12 @@ export function createIPCServer(
         routeResult = await renderRoute(req, routes, layouts, registry, abort.signal, clientScripts, {
           ...renderExtras,
           onRouted: routed => {
-            label.route = resolveRoutePattern(routed.path, routes, renderExtras.handlers);
+            label.route = resolveRoutePattern(
+              routed.path,
+              routes,
+              renderExtras.handlers,
+              renderExtras.metadataRoutes,
+            );
           },
         });
 

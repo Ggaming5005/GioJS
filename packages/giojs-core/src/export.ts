@@ -16,6 +16,11 @@
  * GIO_PUBLIC_* values are frozen at export time. A route whose bundle fails
  * (or is rejected for importing server-only code) exports as HTML only, as
  * the server would serve it, and is reported.
+ *
+ * app/sitemap.*, app/robots.* and app/manifest.* are written as
+ * sitemap.xml, robots.txt and manifest.webmanifest; a public/ file of the
+ * same name wins, as it does on the server. Without app/ modules, robots.txt
+ * (and sitemap.xml when GIO_SITE_URL is set) are generated.
  */
 import { mkdir, writeFile, cp, access, lstat, readdir } from 'node:fs/promises';
 import { join, dirname, relative, resolve, isAbsolute, sep } from 'node:path';
@@ -24,7 +29,9 @@ import {
   discoverLayouts,
   discoverSpecialPages,
   discoverSegmentFiles,
+  discoverMetadataRoutes,
 } from './router.ts';
+import { generateMetadataRoute, METADATA_ROUTE_PATHS } from './metadata-routes.ts';
 import { renderRoute, type RenderExtras } from './ssr.ts';
 import { buildClientBundles, clientBuildErrorFor } from './client-build.ts';
 import { imageConfigFromEnv, installImageConfig } from './image-config.ts';
@@ -314,17 +321,46 @@ export async function exportSite(appDir: string, outDir: string): Promise<Export
     });
   }
 
-  // robots.txt + sitemap.xml for discoverability, unless public/ ships its
-  // own (now at the root). The sitemap needs absolute URLs, so it's emitted
-  // only when GIO_SITE_URL is set.
+  // app/sitemap.*, app/robots.*, app/manifest.*: their output, unless
+  // public/ ships the same file (copied above) - public/ wins on the
+  // server too, which serves it before the worker sees the request.
   const siteUrl = process.env.GIO_SITE_URL?.replace(/\/+$/, '');
-  if (!(await isRegularFile(join(publicDir, 'robots.txt')))) {
+  const metadataRoutes = await discoverMetadataRoutes(appDir);
+  for (const entry of Object.values(metadataRoutes)) {
+    const url = METADATA_ROUTE_PATHS[entry.kind];
+    const fileName = url.slice(1);
+    if (await isRegularFile(join(publicDir, fileName))) {
+      skipped.push({
+        route: url,
+        reason: `public/${fileName} shadows app/${entry.kind} - the public file is exported, as the server serves it`,
+      });
+      continue;
+    }
+    try {
+      const { body } = await generateMetadataRoute(entry, siteUrl);
+      await writeFile(join(outDir, fileName), body, 'utf8');
+    } catch (err) {
+      skipped.push({
+        route: url,
+        reason: `app/${entry.kind} failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  // Otherwise robots.txt + sitemap.xml for discoverability, unless public/
+  // ships its own (now at the root). The sitemap needs absolute URLs, so
+  // it's emitted only when GIO_SITE_URL is set.
+  if (metadataRoutes.robots === undefined && !(await isRegularFile(join(publicDir, 'robots.txt')))) {
     const robots = ['User-agent: *', 'Allow: /'];
     if (siteUrl) robots.push(`Sitemap: ${siteUrl}/sitemap.xml`);
     await writeFile(join(outDir, 'robots.txt'), robots.join('\n') + '\n', 'utf8');
   }
 
-  if (siteUrl && !(await isRegularFile(join(publicDir, 'sitemap.xml')))) {
+  if (
+    siteUrl &&
+    metadataRoutes.sitemap === undefined &&
+    !(await isRegularFile(join(publicDir, 'sitemap.xml')))
+  ) {
     const urls = written
       .slice()
       .sort()

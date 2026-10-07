@@ -197,7 +197,13 @@ describe('generated entries', () => {
       locale: '',
       pattern: '/ppr',
     });
-    const element = provider?.props.children;
+    // Then the metadata wrapper (metadata-tags.ts withMetadata): the page's
+    // head tags in front of the tree, in the same shape with none.
+    const wrapper = provider?.props.children as unknown as
+      | React.ReactElement<{ children: React.ReactElement<{ fallback: unknown }>[] }>
+      | undefined;
+    expect(wrapper?.type).toBe(React.Fragment);
+    const element = wrapper?.props.children[1];
     expect(element?.type).toBe(SegmentErrorScope);
     expect(element?.props.fallback).toBe(ErrorView);
   });

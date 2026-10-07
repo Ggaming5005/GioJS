@@ -74,7 +74,11 @@ export default function PostPage() {
         <li>
           <code>useParams()</code> returns the dynamic segment values. Pass a route pattern
           (<code>{"useParams<'/posts/:id'>()"}</code>) for typed params from the generated
-          typed routes, or a shape (<code>{'useParams<{ id: string }>()'}</code>).
+          typed routes, or a shape (<code>{'useParams<{ id: string }>()'}</code>). In a{' '}
+          <code>not-found.tsx</code> or <code>error.tsx</code> page and its layouts it
+          returns the params of the route that was not found or failed - the ones their{' '}
+          <code>generateMetadata</code> gets - and <code>{'{}'}</code> for a URL no route
+          matches.
         </li>
         <li>
           <code>useSearchParams()</code> returns the query as a read-only{' '}

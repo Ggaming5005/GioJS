@@ -4,7 +4,8 @@
  * The navigation context on the server: provided around the whole document
  * (the server-only root layout included) with the request's pathname,
  * params, query and locale, and carried in the hydration envelope so the
- * client runtime provides the same values. Not-found pages get it too.
+ * client runtime provides the same values. Not-found pages get it too,
+ * with the params of the route that was not found.
  */
 import { describe, expect, it } from 'vitest';
 import React from 'react';
@@ -139,6 +140,32 @@ describe('navigation context on the server', () => {
     const body = 'body' in result ? result.body : '';
     expect(body).toContain('<span data-probe="root">/nope|{}|||</span>');
     expect(body).toContain('<span data-probe="nf">/nope|{}|||</span>');
+  });
+
+  it("gives a matched route's not-found page that route's params, as its generateMetadata gets", async () => {
+    const missing = new Map<string, RouteModule>([
+      [
+        '/posts/:id',
+        {
+          filePath: '/app/posts/[id]/page.tsx',
+          urlPattern: '/posts/:id',
+          dir: 'posts/[id]',
+          load: async () => ({
+            default: () => React.createElement(Probe, { where: 'page' }),
+            getServerSideProps: async () => ({ notFound: true as const }),
+          }),
+        },
+      ],
+    ]);
+    const result = await renderRoute(makeRequest('/posts/9', {}, ''), missing, layouts, undefined, undefined, undefined, {
+      specialPages: {
+        notFound: async () => ({ default: () => React.createElement(Probe, { where: 'nf' }) }),
+      },
+    });
+    expect('status' in result && result.status).toBe(404);
+    const body = 'body' in result ? result.body : '';
+    // No pattern: a special page is not a route.
+    expect(body).toContain('<span data-probe="nf">/posts/9|{&quot;id&quot;:&quot;9&quot;}|||</span>');
   });
 });
 

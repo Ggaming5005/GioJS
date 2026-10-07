@@ -11,6 +11,33 @@ export type { GioRequest, GioSocket } from './context.ts';
 export type { GioNodePlugin } from './plugin.ts';
 export { notFound } from './not-found.ts';
 export type { GioErrorProps, GioErrorInfo } from './segment-tree.ts';
+export type {
+  Metadata,
+  MetadataContext,
+  MetadataExtras,
+  GenerateMetadata,
+  TitleTemplate,
+  MetadataAuthor,
+  OpenGraphMetadata,
+  OpenGraphImage,
+  TwitterMetadata,
+  TwitterImage,
+  AlternatesMetadata,
+  RobotsMetadata,
+  RobotsDirectives,
+  IconsMetadata,
+  IconDescriptor,
+  ThemeColorDescriptor,
+} from './metadata.ts';
+export type {
+  MetadataRoute,
+  Sitemap,
+  SitemapEntry,
+  ChangeFrequency,
+  Robots,
+  RobotsRule,
+  Manifest,
+} from './metadata-routes.ts';
 export { defineMiddleware } from './middleware.ts';
 export { cspNonce } from './csp.ts';
 export { UnsupportedMediaTypeError, isUnsupportedMediaTypeError } from './request-body.ts';

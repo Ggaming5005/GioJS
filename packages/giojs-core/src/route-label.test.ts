@@ -12,6 +12,7 @@ import { once } from 'node:events';
 import { Buffer } from 'node:buffer';
 import { describe, it, expect, vi } from 'vitest';
 import { resolveRoutePattern } from './ssr.ts';
+import type { MetadataRoutes } from './metadata-routes.ts';
 import { withRoute } from './ipc.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import type { HandlerEntry, LayoutEntry, RouteModule } from './router.ts';
@@ -67,6 +68,16 @@ describe('resolveRoutePattern', () => {
     // ...and a same-folder pair shares its one pattern.
     expect(resolveRoutePattern('/feed', pages('/feed'), handlers('/feed'))).toBe('/feed');
     expect(resolveRoutePattern('/api/ping', pages(), handlers('/api/ping'))).toBe('/api/ping');
+  });
+
+  it('labels an app metadata route by its fixed path, ahead of any catch-all', () => {
+    const sitemap: MetadataRoutes = {
+      sitemap: { kind: 'sitemap', filePath: '/fake/sitemap.ts', load: async () => ({ default: [] }) },
+    };
+    expect(resolveRoutePattern('/sitemap.xml', pages('/*rest'), undefined, sitemap)).toBe('/sitemap.xml');
+    // Without the module the URL is an ordinary path.
+    expect(resolveRoutePattern('/robots.txt', pages('/*rest'), undefined, sitemap)).toBe('/*rest');
+    expect(resolveRoutePattern('/robots.txt', pages(), undefined, sitemap)).toBeNull();
   });
 });
 

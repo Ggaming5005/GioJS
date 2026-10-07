@@ -58,6 +58,24 @@ import {
 import { parseCookies } from './cookies.ts';
 import { installedImageConfig, type ImageRenderConfig } from './image-config.ts';
 import { searchFromQuery, withNavigation, type GioNavigationState } from './navigation-context.ts';
+import {
+  dedupeHeadTitles,
+  dedupeHeadTitlesStream,
+  metadataTagsHtml,
+  metadataToTags,
+  resolveMetadata,
+  segmentMetadata,
+  titleHtml,
+  type Metadata,
+  type MetadataExtras,
+  type MetadataModule,
+} from './metadata.ts';
+import { withMetadata, type MetadataTag } from './metadata-tags.ts';
+import {
+  metadataRouteKindForPath,
+  renderMetadataRoute,
+  type MetadataRoutes,
+} from './metadata-routes.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -126,6 +144,8 @@ export interface RenderExtras {
    * metrics `route` label from it.
    */
   onRouted?: (req: IPCRequest) => void;
+  /** app/sitemap.*, app/robots.*, app/manifest.* (metadata-routes.ts). */
+  metadataRoutes?: MetadataRoutes;
 }
 
 /** What production responses say instead of the real error message. */
@@ -207,14 +227,18 @@ function matchRoute(
 /**
  * The route pattern that owns `path` (e.g. "/posts/:id"), or null when none
  * matches - the IPC `route` field Rust labels its metrics with. Same
- * precedence as renderRoute: the more specific of the page and route.ts
- * matches, equal patterns being one folder's pair.
+ * precedence as renderRoute: an app metadata route (app/sitemap.* etc.,
+ * labelled by its fixed path) first, then the more specific of the page and
+ * route.ts matches, equal patterns being one folder's pair.
  */
 export function resolveRoutePattern(
   path: string,
   routes: Map<string, RouteModule>,
   handlers?: Map<string, HandlerEntry>,
+  metadataRoutes?: MetadataRoutes,
 ): string | null {
+  const metadataKind = metadataRouteKindForPath(path);
+  if (metadataKind !== null && metadataRoutes?.[metadataKind] !== undefined) return path;
   const page = matchIn(path, routes);
   const handler = handlers !== undefined ? matchIn(path, handlers) : null;
   if (handler !== null && (page === null || compareSpecificity(handler.pattern, page.pattern) <= 0)) {
@@ -448,13 +472,19 @@ export const BUILTIN_404_HTML = `<!DOCTYPE html><html lang="en"><head><meta char
 // only supplies the document skeleton a missing root layout would provide.
 const DOCUMENT_PREFIX = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>';
 
+/** DOCUMENT_PREFIX with the page's metadata tags (static HTML) in its <head>. */
+function documentPrefix(metadataTags: readonly MetadataTag[]): string {
+  const headTags = metadataTagsHtml(metadataTags);
+  return headTags === '' ? DOCUMENT_PREFIX : DOCUMENT_PREFIX.replace('</head>', `${headTags}</head>`);
+}
+
 /** Closing document shell; its inline script carries the CSP nonce. */
 function documentSuffix(): string {
   return `<script${nonceAttr()}>${OBSERVER_SCRIPT_BODY}</script></body></html>`;
 }
 
-function wrapWithDocument(inner: string): string {
-  return `${DOCUMENT_PREFIX}${inner}${documentSuffix()}`;
+function wrapWithDocument(inner: string, metadataTags: readonly MetadataTag[] = []): string {
+  return `${documentPrefix(metadataTags)}${inner}${documentSuffix()}`;
 }
 
 /**
@@ -503,6 +533,8 @@ export function serializeEnvelope(envelope: {
   params?: Record<string, string>;
   search?: string;
   locale?: string;
+  /** The page's head tags, rendered at the same tree position on the client. */
+  metadata?: MetadataTag[];
 }): string | null {
   try {
     return JSON.stringify(envelope)
@@ -622,6 +654,19 @@ export async function renderRoute(
   }
 
   extras?.onRouted?.(req);
+
+  // ── app/sitemap.*, app/robots.*, app/manifest.* ───────────────────────────
+  // Exact paths no page or route.ts can also claim (discovery rejects that).
+  const metadataKind = metadataRouteKindForPath(req.path);
+  const metadataRoute =
+    metadataKind !== null ? extras?.metadataRoutes?.[metadataKind] : undefined;
+  if (metadataRoute !== undefined) {
+    const result = await renderMetadataRoute(req, metadataRoute);
+    return registry !== undefined && !registry.isEmpty
+      ? registry.interceptResponse(req, result)
+      : result;
+  }
+
   const match = matchRoute(req.path, routes);
 
   // ── route.ts method handlers (API routes + SSE) ───────────────────────────
@@ -658,7 +703,7 @@ export async function renderRoute(
 
   if (!match) {
     // Unmatched URLs belong to no folder: only app/not-found.* applies.
-    return renderNotFound(req, '', layouts, extras, signal);
+    return renderNotFound(req, {}, '', layouts, extras, signal);
   }
 
   // Pages only answer GET/HEAD; mutations belong to route.ts handlers.
@@ -705,7 +750,7 @@ export async function renderRoute(
         };
       }
       if (isNotFoundResult(result)) {
-        return renderNotFound(req, match.module.dir, layouts, extras, signal);
+        return renderNotFound(req, match.params, match.module.dir, layouts, extras, signal);
       }
       if (!isRecord(result)) {
         throw new Error(
@@ -736,6 +781,25 @@ export async function renderRoute(
     } else {
       props = { params: match.params, searchParams: req.query };
     }
+
+    // Head metadata (root layout → nested layouts → page), resolved before
+    // the render so the tags are in the shell's <head>. generateMetadata gets
+    // a context of its own, tracked like gSSP's but judged on its own: its
+    // output lands in the head, which is part of a PPR shell too. Whether it
+    // took the page's props is tracked as well: they carry whatever gSSP
+    // read, credentials included.
+    let metadataContext: ReturnType<typeof makeGsspContext> | undefined;
+    let metadataUsedProps = false;
+    const metadataTags = await resolveMetadataTags(
+      layoutsForDir(match.module.dir, layouts),
+      pageModule,
+      () => (metadataContext ??= makeGsspContext(req, match.params, credentialHeaders)).ctx,
+      () => {
+        metadataUsedProps = true;
+        return props;
+      },
+      match.module.urlPattern,
+    );
 
     // Build the hydration boundary: page wrapped by the non-root layouts and
     // the error/loading boundaries of its folders (segment-tree.ts) inside
@@ -774,6 +838,7 @@ export async function renderRoute(
             params: navigation.params,
             search: navigation.search,
             locale: navigation.locale,
+            ...(metadataTags.length > 0 ? { metadata: metadataTags } : {}),
           })
         : null;
     if (entryScript !== undefined && envelopeJson === null) {
@@ -824,6 +889,25 @@ export async function renderRoute(
       req.method === 'GET' &&
       process.env.GIO_EXPORT !== '1' &&
       (registry === undefined || !registry.hasResponseInterceptors);
+    // Metadata that read credentials is personal even under PPR: it sits in
+    // the <head>, i.e. inside the shell Rust would cache for everyone. So is
+    // metadata built from the props of a gSSP that read them - PPR lets gSSP
+    // read credentials because its props stream after the shell, but a
+    // title made from them lands in it. (Without PPR, such a gSSP makes the
+    // render personal below anyway.)
+    const pprCandidate = pageModule.shell === 'cache' && streamingAvailable;
+    const personalMetadata =
+      metadataContext?.credentialsRead() === true
+        ? 'generateMetadata'
+        : pprCandidate && metadataUsedProps && credentialsRead()
+          ? 'generateMetadata props'
+          : null;
+    if (shareable && personalMetadata !== null) {
+      warnPersonalRender(pattern, req.path, personalMetadata);
+      cacheable = false;
+      cacheMaxAge = 0;
+      shareable = false;
+    }
     const skipShell = req.skipShell === true;
     if (skipShell && pageCookies.setCookies !== undefined) {
       logger.warn(
@@ -857,10 +941,16 @@ export async function renderRoute(
     // ipc.ts) - inside the shell it would be cached with this request's props.
     const deferEnvelope = shouldStream && (pprShell || skipShell);
 
+    // Without a root layout no <head> exists in the tree to hoist into: the
+    // tags go into the document prefix, and stay in the tree unrendered.
     let element: React.ReactNode = React.createElement(
       React.Fragment,
       null,
-      React.createElement('div', { id: '__gio' }, inner),
+      React.createElement(
+        'div',
+        { id: '__gio' },
+        withMetadata(inner, metadataTags, { render: rootLayoutEntry !== undefined }),
+      ),
       envelopeJson !== null && !deferEnvelope
         ? React.createElement('script', {
             id: '__gio_props',
@@ -928,6 +1018,10 @@ export async function renderRoute(
     // what the same render streamed would have.
     const abortedBoundary = abortedLoadingBoundary(reported, probes);
 
+    // A root layout that hand-writes a <title> next to a metadata title
+    // would put two in the head; the metadata one supersedes it.
+    const keepTitle = rootLayoutEntry !== undefined ? metadataTitleHtml(metadataTags) : null;
+
     if (shouldStream) {
       // A holes-only render cannot change the answer: Rust already sent the
       // cached shell.
@@ -957,8 +1051,11 @@ export async function renderRoute(
           ...(storeShell ? { pprShell: true } : {}),
           ...pageCookies,
         },
-        stream,
-        prefix: rootLayoutEntry !== undefined ? '' : DOCUMENT_PREFIX,
+        stream:
+          keepTitle !== null
+            ? dedupeHeadTitlesStream(stream, keepTitle, () => warnDuplicateTitle(pattern))
+            : stream,
+        prefix: rootLayoutEntry !== undefined ? '' : documentPrefix(metadataTags),
         suffix: rootLayoutEntry !== undefined ? '' : documentSuffix(),
         ...(skipShell
           ? { shellBoundary: 'discard' as const }
@@ -975,7 +1072,7 @@ export async function renderRoute(
     }
 
     await stream.allReady;
-    const html = await streamToString(stream);
+    const html = withoutDuplicateTitles(await streamToString(stream), keepTitle, pattern);
     // notFound() anywhere still answers 404: nothing has been sent yet.
     const failure = notFoundFailure(reported) ?? abortedBoundary;
     if (failure !== null) throw failure;
@@ -993,7 +1090,7 @@ export async function renderRoute(
     }
 
     // Root layout provides <html>/<body>, so skip the document wrapper.
-    const body = rootLayoutEntry !== undefined ? html : wrapWithDocument(html);
+    const body = rootLayoutEntry !== undefined ? html : wrapWithDocument(html, metadataTags);
 
     const ssrResponse: IPCOutbound = {
       id: req.id,
@@ -1014,7 +1111,7 @@ export async function renderRoute(
     const reportedFailure = thrown instanceof ReportedFailure ? thrown : null;
     const err: unknown = reportedFailure !== null ? reportedFailure.error : thrown;
     if (isNotFoundError(err)) {
-      return renderNotFound(req, match.module.dir, layouts, extras, signal);
+      return renderNotFound(req, match.params, match.module.dir, layouts, extras, signal);
     }
     // Production responses carry only a generic message and the digest; the
     // details live in this log line under the same digest.
@@ -1028,6 +1125,7 @@ export async function renderRoute(
     const errorProps: GioErrorProps = { error: { message, digest } };
     const errorPage = await renderNearestSegmentPage(
       req,
+      match.params,
       layouts,
       segmentPageCandidates(match.module.dir, 'error', extras),
       errorProps,
@@ -1065,21 +1163,154 @@ function envelopeScript(envelopeJson: string): string {
   return `<script id="__gio_props" type="application/json">${envelopeJson}</script>`;
 }
 
+/** What read credentials: gSSP, generateMetadata, or generateMetadata via gSSP's props. */
+type PersonalReadSource = 'getServerSideProps' | 'generateMetadata' | 'generateMetadata props';
+
 /**
  * Explain once per route why a page exporting `revalidate` is not cached.
  * Each later render of the route stays uncacheable, just silently.
  */
-function warnPersonalRender(pattern: string, path: string): void {
-  if (warnedDynamicRoutes.has(pattern)) return;
-  warnedDynamicRoutes.add(pattern);
+function warnPersonalRender(
+  pattern: string,
+  path: string,
+  source: PersonalReadSource = 'getServerSideProps',
+): void {
+  const key = `${source} ${pattern}`;
+  if (warnedDynamicRoutes.has(key)) return;
+  warnedDynamicRoutes.add(key);
+  const credentials =
+    'request credentials (ctx.cookies, ctx.ip, ctx.host, ctx.scheme, the cookie/authorization, ' +
+    'a client-address or a host header, or a header an onRequest plugin set)';
   logger.warn(
-    'getServerSideProps read request credentials (ctx.cookies, ctx.ip, ctx.host, ctx.scheme, ' +
-      'the cookie/authorization, a client-address or a host header, or a header an onRequest ' +
-      'plugin set) - this render is personalized, so it is not cached even though the page ' +
-      "exports revalidate. Remove `revalidate`, or keep `revalidate` + `shell = 'cache'` " +
-      'and render the personalized parts inside <Suspense> holes',
+    source === 'generateMetadata props'
+      ? `generateMetadata used the props of a getServerSideProps that read ${credentials} - ` +
+          'the metadata is personalized and part of the <head>, i.e. of the PPR shell, so the ' +
+          "shell is not cached even though the page exports revalidate + shell = 'cache'. " +
+          'Derive metadata from ctx.params/ctx.query (not from the personalized props), or ' +
+          'remove `revalidate`'
+      : `${source} read ${credentials} - this render is personalized, so it is not cached even ` +
+          'though the page exports revalidate. ' +
+          (source === 'generateMetadata'
+            ? 'Metadata is part of the <head> (and of a PPR shell): derive it from params/query ' +
+              'only, or remove `revalidate`'
+            : "Remove `revalidate`, or keep `revalidate` + `shell = 'cache'` and render the " +
+              'personalized parts inside <Suspense> holes'),
     { route: pattern, path },
   );
+}
+
+// ── head metadata ─────────────────────────────────────────────────────────────
+
+/** Routes already warned about a duplicate <title> (dev, once per route). */
+const warnedDuplicateTitles = new Set<string>();
+
+/**
+ * Routes already warned about a metadata URL staying relative. Keyed by
+ * route, not URL: generateMetadata can build URLs from request input
+ * (`'/search?q=' + ctx.query.q`), and a per-URL set would grow - and log -
+ * once per distinct request.
+ */
+const warnedRelativeMetadataRoutes = new Set<string>();
+
+/**
+ * Resolve the head tags for a page (or special page) rendered inside
+ * `layoutEntries` (outermost first). `ctx` is created on first use - only a
+ * generateMetadata export touches it - and `props` (the page's
+ * generateMetadata `{ props }`) is read only when that function reads it.
+ * `staticOnly` uses the `metadata` exports alone, never calling
+ * generateMetadata. `route` names the route in warnings.
+ */
+async function resolveMetadataTags(
+  layoutEntries: readonly LayoutEntry[],
+  pageModule: MetadataModule,
+  ctx: () => GsspContext,
+  props: () => Record<string, unknown>,
+  route: string,
+  staticOnly = false,
+): Promise<MetadataTag[]> {
+  const layoutModules = await Promise.all(layoutEntries.map(entry => entry.load()));
+  const modules: MetadataModule[] = [...layoutModules, pageModule].map(mod =>
+    staticOnly ? { metadata: mod.metadata } : mod,
+  );
+  const pageExtras: MetadataExtras = {
+    get props() {
+      return props();
+    },
+  };
+  const segments: Array<Metadata | undefined> = await Promise.all(
+    modules.map((mod, index) =>
+      segmentMetadata(mod, ctx, index === modules.length - 1 ? pageExtras : {}),
+    ),
+  );
+  return metadataToTags(resolveMetadata(segments, process.env.GIO_SITE_URL), url => {
+    if (warnedRelativeMetadataRoutes.has(route)) return;
+    warnedRelativeMetadataRoutes.add(route);
+    logger.warn(
+      'metadata URL is relative and no metadataBase or GIO_SITE_URL is set - Open Graph, ' +
+        'Twitter and canonical URLs must be absolute for crawlers',
+      { route, url },
+    );
+  });
+}
+
+/**
+ * A special page's head tags. Metadata never decides whether a 404/500 page
+ * can render: when resolution fails - a generateMetadata that throws, often
+ * the very failure the error page is answering (the CMS is down) - the
+ * static `metadata` exports are used alone, and failing that no tags at all.
+ */
+async function resolveSpecialPageMetadataTags(
+  req: IPCRequest,
+  params: Record<string, string>,
+  layoutEntries: readonly LayoutEntry[],
+  pageModule: MetadataModule,
+  props: Record<string, unknown>,
+  route: string,
+  status: number,
+): Promise<MetadataTag[]> {
+  // Never cached, so the context's credential tracking has nothing to decide.
+  const ctx = (): GsspContext => makeGsspContext(req, params, new Set()).ctx;
+  try {
+    return await resolveMetadataTags(layoutEntries, pageModule, ctx, () => props, route);
+  } catch (metadataError) {
+    const fields = { path: req.path, status, route, ...describeError(metadataError) };
+    const message = 'special page metadata failed - rendering it with the static metadata only';
+    // notFound() from a layout's generateMetadata is what brought us to
+    // its segment's not-found page in the first place.
+    if (isNotFoundError(metadataError)) logger.debug(message, fields);
+    else logger.error(message, fields);
+  }
+  try {
+    return await resolveMetadataTags(layoutEntries, pageModule, ctx, () => props, route, true);
+  } catch {
+    return [];
+  }
+}
+
+/** The <title> HTML React renders for the metadata title, or null without one. */
+function metadataTitleHtml(tags: readonly MetadataTag[]): string | null {
+  const title = tags.find(tag => tag.tag === 'title');
+  return title !== undefined && title.tag === 'title' ? titleHtml(title.text) : null;
+}
+
+function warnDuplicateTitle(pattern: string): void {
+  if (!isDevMode() || warnedDuplicateTitles.has(pattern)) return;
+  warnedDuplicateTitles.add(pattern);
+  logger.warn(
+    'a layout or page renders its own <title> next to a metadata title - the server HTML ' +
+      '(what crawlers and link previews read) keeps only the metadata title, while React mounts ' +
+      'a <title> a page or nested layout renders again once the page hydrates. Set the title ' +
+      'through `export const metadata = { title }` or generateMetadata instead',
+    { route: pattern },
+  );
+}
+
+/** Buffered counterpart of dedupeHeadTitlesStream. */
+function withoutDuplicateTitles(html: string, keepTitle: string | null, pattern: string): string {
+  if (keepTitle === null) return html;
+  const result = dedupeHeadTitles(html, keepTitle);
+  if (result.dropped > 0) warnDuplicateTitle(pattern);
+  return result.html;
 }
 
 // ── route.ts handler dispatch ─────────────────────────────────────────────────
@@ -1320,9 +1551,11 @@ function segmentPageCandidates(
  * the layouts of that file's folder, else the built-in page. Never cached:
  * a 404 can depend on anything getServerSideProps read (credentials
  * included), and a cached 404 would also outlive the content appearing.
+ * `params` are the matched route's (none for an unmatched URL).
  */
 async function renderNotFound(
   req: IPCRequest,
+  params: Record<string, string>,
   dir: string,
   layouts: Map<string, LayoutEntry>,
   extras: RenderExtras | undefined,
@@ -1330,6 +1563,7 @@ async function renderNotFound(
 ): Promise<IPCResponse> {
   const page = await renderNearestSegmentPage(
     req,
+    params,
     layouts,
     segmentPageCandidates(dir, 'notFound', extras),
     {},
@@ -1353,6 +1587,7 @@ async function renderNotFound(
  */
 async function renderNearestSegmentPage(
   req: IPCRequest,
+  params: Record<string, string>,
   layouts: Map<string, LayoutEntry>,
   candidates: readonly SegmentPageCandidate[],
   props: object,
@@ -1360,7 +1595,7 @@ async function renderNearestSegmentPage(
   signal?: AbortSignal,
 ): Promise<IPCResponse | null> {
   for (const candidate of candidates) {
-    const page = await renderSpecialPage(req, layouts, candidate, props, status, signal);
+    const page = await renderSpecialPage(req, params, layouts, candidate, props, status, signal);
     if (page !== null) return page;
   }
   return null;
@@ -1370,9 +1605,12 @@ async function renderNearestSegmentPage(
  * Render a special page (404/500) through the normal layout pipeline,
  * server-only (no hydration envelope). Returns null when its render fails -
  * callers try the next candidate, then the built-in plain response.
+ * `params` are those of the route that failed or was not found: its
+ * layouts' generateMetadata reads them as on the page itself.
  */
 async function renderSpecialPage(
   req: IPCRequest,
+  params: Record<string, string>,
   layouts: Map<string, LayoutEntry>,
   candidate: SegmentPageCandidate,
   props: object,
@@ -1387,6 +1625,21 @@ async function renderSpecialPage(
     const rootLayoutEntry = applicableLayouts.find(l => l.dir === '');
     const innerLayouts = applicableLayouts.filter(l => l.dir !== '');
 
+    // The same head metadata a page gets (see resolveSpecialPageMetadataTags
+    // for what happens when it fails). Warnings name the file, never the
+    // request path: every unmatched URL renders the same not-found page.
+    const fileName = status === 404 ? 'not-found' : 'error';
+    const route = candidate.dir === '' ? `/${fileName}` : `/${candidate.dir}/${fileName}`;
+    const metadataTags = await resolveSpecialPageMetadataTags(
+      req,
+      params,
+      applicableLayouts,
+      pageModule as MetadataModule,
+      props as Record<string, unknown>,
+      route,
+      status,
+    );
+
     let inner: React.ReactNode = React.createElement(
       pageModule.default,
       props as Record<string, unknown>,
@@ -1395,7 +1648,11 @@ async function renderSpecialPage(
       const layoutMod = await layoutEntry.load();
       inner = React.createElement(layoutMod.default, { children: inner, path: req.path });
     }
-    let element: React.ReactNode = React.createElement('div', { id: '__gio' }, inner);
+    let element: React.ReactNode = React.createElement(
+      'div',
+      { id: '__gio' },
+      withMetadata(inner, metadataTags, { render: rootLayoutEntry !== undefined }),
+    );
     if (rootLayoutEntry !== undefined) {
       const rootLayoutMod = await rootLayoutEntry.load();
       element = React.createElement(rootLayoutMod.default, {
@@ -1403,8 +1660,10 @@ async function renderSpecialPage(
         path: req.path,
       });
     }
-    // Not a route match: no pattern, no params.
-    element = withNavigation(navigationStateFor(req, '', {}), element);
+    // Not a route match, so no pattern. The params are those of the route
+    // that failed or was not found ({} for an unmatched URL) - the same ones
+    // its layouts' generateMetadata read above.
+    element = withNavigation(navigationStateFor(req, '', params), element);
 
     const stream = await renderToReadableStream(element, {
       bootstrapModules: [],
@@ -1419,12 +1678,13 @@ async function renderSpecialPage(
       },
     });
     await stream.allReady;
-    const html = await streamToString(stream);
+    const keepTitle = rootLayoutEntry !== undefined ? metadataTitleHtml(metadataTags) : null;
+    const html = withoutDuplicateTitles(await streamToString(stream), keepTitle, route);
     return {
       id: req.id,
       status,
       headers: { 'content-type': 'text/html; charset=utf-8' },
-      body: rootLayoutEntry !== undefined ? html : wrapWithDocument(html),
+      body: rootLayoutEntry !== undefined ? html : wrapWithDocument(html, metadataTags),
       cacheable: false,
       cacheMaxAge: 0,
     };

@@ -35,6 +35,20 @@ renders React. Full docs: https://giojs.com/llms.txt
   per-user and uncached; personalize inside `<Suspense>` holes with
   `export const shell = 'cache'` instead. Build absolute URLs on cached pages
   from a configured origin (env var), not `ctx.host`.
+- Head tags: `export const metadata = { title, description, openGraph, ... }`
+  or `export async function generateMetadata(ctx, { props })` (same `ctx` as
+  getServerSideProps - credential reads make the page uncached; `props` are
+  the page's gSSP props) in `page.jsx` and `layout.jsx`. Merged root layout →
+  page, leaf wins per field; a layout sets `title: { default, template:
+  '%s | Site' }`. Relative URLs resolve against `metadataBase` or
+  `GIO_SITE_URL`. Don't render `<title>` or a description `<meta>` yourself in
+  layouts or pages once you use metadata (the metadata title replaces any
+  `<title>`; other tags are not deduplicated). Under `shell = 'cache'`,
+  metadata built from the props of a gSSP that read cookies costs the shell
+  its cache - use `ctx.params` there. `app/sitemap.js`, `app/robots.js` and
+  `app/manifest.js` serve `/sitemap.xml`, `/robots.txt` and
+  `/manifest.webmanifest` (a `public/` file of the same name wins). JSON-LD:
+  `<JsonLd data={...} />` from `@gio.js/react`.
 - Client identity: `req.ip` / `ctx.ip` is the visitor's IP - never parse
   `x-forwarded-for` yourself; behind a reverse proxy set
   `[server] trusted_proxies` in `gio.toml`. `req.host` is client-supplied -

@@ -15,6 +15,7 @@ import { renderToString } from 'react-dom/server';
 import type { GioClientRuntime } from './client-runtime.ts';
 import type { GioErrorProps, SegmentLevel } from './segment-tree.ts';
 import { navigationContext, withNavigation, type GioNavigationState } from './navigation-context.ts';
+import { withMetadata, type MetadataTag } from './metadata-tags.ts';
 
 // @ts-expect-error React's act() environment flag
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -73,6 +74,8 @@ interface PageSpec {
   params?: Record<string, string>;
   search?: string;
   props: Record<string, unknown>;
+  /** The envelope's head tags (metadata-tags.ts). */
+  metadata?: MetadataTag[];
 }
 
 function envelopeJson(spec: PageSpec): string {
@@ -84,6 +87,7 @@ function envelopeJson(spec: PageSpec): string {
     params: spec.params ?? {},
     search: spec.search ?? '',
     locale: 'en',
+    ...(spec.metadata !== undefined ? { metadata: spec.metadata } : {}),
   });
 }
 
@@ -126,8 +130,11 @@ async function loadFirstPage(
     spec.path,
     pageLevels,
   );
-  // The server render: the provider around the document, #__gio inside.
-  const html = renderToString(withNavigation(navState(spec), React.createElement('div', { id: '__gio' }, tree)));
+  // The server render: the provider around the document, #__gio inside,
+  // the metadata tags in front of the tree (ssr.ts).
+  const html = renderToString(
+    withNavigation(navState(spec), React.createElement('div', { id: '__gio' }, withMetadata(tree, spec.metadata))),
+  );
   document.body.innerHTML = html;
   swapEnvelope(spec);
   await act(async () => {
@@ -168,6 +175,46 @@ describe('persistent root', () => {
     expect(text('where')).toBe('/posts/7||{"id":"7"}');
     expect(text('count')).toBe('count=2');
     expect(document.body.textContent).not.toContain('server html of B');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('keeps the shared layout between pages with and without head metadata', async () => {
+    const runtime = await loadFirstPage({ path: '/b', pattern: '/b', props: { label: 'B' } }, Page);
+    act(() => document.getElementById('count')?.click());
+    expect(text('count')).toBe('count=1');
+    runtime.registerRoute('/a', (props, path) =>
+      runtime.buildSegmentTree(React.createElement(Page, props as { label: string }), path, levels),
+    );
+    const pageA: PageSpec = {
+      path: '/a',
+      pattern: '/a',
+      props: { label: 'A' },
+      metadata: [
+        { tag: 'title', text: 'TITLE_A' },
+        { tag: 'meta', attrs: { name: 'description', content: 'DESC_A' } },
+      ],
+    };
+    const titles = (): string[] => [...document.head.querySelectorAll('title')].map(t => t.textContent ?? '');
+
+    // To a page with metadata: navigation.ts retitles the document first
+    // (a server-only <title>), then React renders A's tags - one title.
+    document.title = 'TITLE_A';
+    swapEnvelope(pageA);
+    act(() => runtimeApi().commit(null));
+    expect(document.querySelector('h1')?.textContent).toBe('A');
+    expect(text('count')).toBe('count=1');
+    expect(titles()).toEqual(['TITLE_A']);
+    expect(document.head.querySelector('meta[name="description"]')?.getAttribute('content')).toBe('DESC_A');
+
+    // Back to one without: A's tags go - React's <title> too, so the title
+    // navigation set is put back - and the layout above both pages stays.
+    document.title = 'TITLE_B';
+    swapEnvelope({ path: '/b', pattern: '/b', props: { label: 'B' } });
+    act(() => runtimeApi().commit(null));
+    expect(document.querySelector('h1')?.textContent).toBe('B');
+    expect(text('count')).toBe('count=1');
+    expect(document.head.querySelector('meta[name="description"]')).toBeNull();
+    expect(titles()).toEqual(['TITLE_B']);
     expect(consoleError).not.toHaveBeenCalled();
   });
 

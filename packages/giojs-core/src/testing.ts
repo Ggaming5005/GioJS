@@ -43,8 +43,10 @@ import { formatSseEvent } from './ipc.ts';
 import { loadGioConfig } from './config-loader.ts';
 import { NodePluginRegistry } from './plugin.ts';
 import {
+  assertNoMetadataRouteConflicts,
   assertNoRouteConflicts,
   discoverLayouts,
+  discoverMetadataRoutes,
   discoverRouteFiles,
   discoverRoutes,
   discoverSegmentFiles,
@@ -100,14 +102,17 @@ async function discoverTestApp(appDir: string): Promise<TestApp> {
   }
   // Mirrors main.ts (minus client bundles, typed routes and the IPC
   // servers): a conflicting route fails here as it fails the worker boot.
-  const [routes, layouts, routeFiles, segmentFiles, specialPages] = await Promise.all([
-    discoverRoutes(appDir),
-    discoverLayouts(appDir),
-    discoverRouteFiles(appDir),
-    discoverSegmentFiles(appDir),
-    discoverSpecialPages(appDir),
-  ]);
+  const [routes, layouts, routeFiles, segmentFiles, specialPages, metadataRoutes] =
+    await Promise.all([
+      discoverRoutes(appDir),
+      discoverLayouts(appDir),
+      discoverRouteFiles(appDir),
+      discoverSegmentFiles(appDir),
+      discoverSpecialPages(appDir),
+      discoverMetadataRoutes(appDir),
+    ]);
   assertNoRouteConflicts(appDir, routes, routeFiles);
+  assertNoMetadataRouteConflicts(appDir, routes, routeFiles, metadataRoutes);
   const { handlers } = await discoverRouteModules(routeFiles);
   const config = await loadGioConfig(appDir);
   // Not startPluginRegistry: that one owns the worker's SIGTERM handler.
@@ -121,7 +126,7 @@ async function discoverTestApp(appDir: string): Promise<TestApp> {
     layouts,
     registry,
     clientScripts: new Map([...routes.keys()].map(pattern => [pattern, TEST_ENTRY_SCRIPT])),
-    extras: { handlers, specialPages, segmentFiles },
+    extras: { handlers, specialPages, segmentFiles, metadataRoutes },
   };
 }
 

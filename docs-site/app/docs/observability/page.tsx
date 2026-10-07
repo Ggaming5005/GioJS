@@ -41,7 +41,9 @@ token = "a-long-random-secret"   # secure it for production`} />
         </tbody>
       </table>
       <p>
-        Besides patterns, <code>route</code> takes three reserved values:{' '}
+        Besides patterns - and the fixed paths of <code>app/sitemap.ts</code>,{' '}
+        <code>app/robots.ts</code> and <code>app/manifest.ts</code> (<code>/sitemap.xml</code>,
+        ...) - <code>route</code> takes three reserved values:{' '}
         <code>static</code> (public/ files, hashed chunks, app CSS), <code>internal</code>{' '}
         (the server&apos;s own <code>/_gio/*</code> endpoints) and <code>unmatched</code>{' '}
         (no app route: a 404 for an unknown path, or a render the worker never answered).{' '}

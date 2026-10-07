@@ -40,7 +40,9 @@ export default function TestingPage(): React.JSX.Element {
       <p>
         <code>renderPage</code> and <code>callRoute</code> discover your <code>app/</code>{' '}
         routes, layouts, <code>route.ts</code> handlers, <code>not-found</code> and{' '}
-        <code>error</code> files and <code>gio.config.ts</code> plugins once per app
+        <code>error</code> files, <code>app/sitemap.ts</code>, <code>app/robots.ts</code>{' '}
+        and <code>app/manifest.ts</code> (<code>{"callRoute('/sitemap.xml')"}</code>) and{' '}
+        <code>gio.config.ts</code> plugins once per app
         directory, then answer exactly like the worker answers the server -{' '}
         <code>notFound()</code>, redirects and error pages included. What the Rust layer adds
         in front of the worker (rules, guards, CSRF, headers, caching, locale detection) is

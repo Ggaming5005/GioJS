@@ -261,6 +261,41 @@ export default function Late() { return React.createElement('p', null, 'LATE_PAG
   });
 });
 
+describe('callRoute and app metadata routes', () => {
+  let root: string;
+
+  beforeAll(async () => {
+    root = await writeProject('gio-testing-metadata-', {
+      'app/page.tsx': `import React from 'react';
+export const metadata = { title: 'KIT_HOME_TITLE' };
+export default function Home() { return React.createElement('p', null, 'KIT_HOME'); }
+`,
+      'app/robots.ts': `export default { rules: { userAgent: '*', disallow: '/private' } };
+`,
+      'app/sitemap.ts': `export default () => [{ url: 'https://kit.example/' }];
+`,
+    });
+  });
+
+  afterAll(async () => {
+    await resetTestApp(join(root, 'app'));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('serves app/robots.ts and app/sitemap.ts like the server, and page metadata', async () => {
+    const appDir = join(root, 'app');
+    const robots = await callRoute('/robots.txt', { appDir });
+    expect(robots.status).toBe(200);
+    expect(robots.headers['content-type']).toMatch(/^text\/plain/);
+    expect(await robots.text()).toContain('Disallow: /private');
+    const sitemap = await callRoute('/sitemap.xml', { appDir });
+    expect(sitemap.status).toBe(200);
+    expect(sitemap.headers['content-type']).toMatch(/^application\/xml/);
+    expect(await sitemap.text()).toContain('<loc>https://kit.example/</loc>');
+    expect((await renderPage('/', { appDir })).html).toContain('<title>KIT_HOME_TITLE</title>');
+  });
+});
+
 describe('renderPage and .env files', () => {
   const names = ['TK_ENV_FILE', 'TK_ENV_PRESET', 'TK_ENV_LOCAL', 'TK_ENV_DEV', 'TK_ENV_BROKEN'];
   const page = `import React from 'react';

@@ -1143,6 +1143,88 @@ async function main() {
       assert.equal(asset.headers.get('x-gio-cache'), 'static');
     });
 
+    await test('page metadata lands in the document head (layout template, metadataBase, JSON-LD)', async () => {
+      const res = await fetch(`${BASE}/seo`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      const head = html.slice(0, html.indexOf('</head>'));
+      assert.match(head, /<title>Metadata Page \| Gio Fixture<\/title>/);
+      assert.equal(html.match(/<title>/g)?.length, 1, 'exactly one <title>');
+      assert.match(head, /<meta name="description" content="SEO_FIXTURE_SECTION_DESCRIPTION"\/>/);
+      assert.match(head, /<link rel="canonical" href="https:\/\/fixture\.example\/seo"\/>/);
+      assert.match(head, /<meta property="og:title" content="SEO_FIXTURE_OG_TITLE"\/>/);
+      assert.match(head, /<meta property="og:image" content="https:\/\/fixture\.example\/og\.png"\/>/);
+      assert.match(head, /<meta property="og:image:width" content="1200"\/>/);
+      assert.match(head, /<meta name="twitter:card" content="summary_large_image"\/>/);
+      // The client renders the same tags from the envelope.
+      const envelope = JSON.parse(html.match(/<script id="__gio_props" type="application\/json">([^<]*)</)[1]);
+      assert.deepEqual(envelope.metadata[0], { tag: 'title', text: 'Metadata Page | Gio Fixture' });
+      // JSON-LD: a data block whose JSON cannot close the element.
+      const ld = html.match(/<script type="application\/ld\+json">([^<]*)<\/script>/);
+      assert.ok(ld, 'JSON-LD script present');
+      assert.equal(JSON.parse(ld[1]).name, '</script><b>SEO_LD</b>');
+      assert.doesNotMatch(html, /<b>SEO_LD<\/b>/);
+    });
+
+    await test('generateMetadata reuses the gSSP props; reading ctx.host keeps the page out of the cache', async () => {
+      const first = await fetch(`${BASE}/seo/posts/hello`);
+      const html = await first.text();
+      assert.match(html, /<title>Post hello \| Gio Fixture<\/title>/);
+      assert.match(html, /<link rel="canonical" href="https:\/\/fixture\.example\/seo\/posts\/hello"\/>/);
+      assert.equal(first.headers.get('x-gio-cache'), 'miss; stored');
+      const second = await fetch(`${BASE}/seo/posts/hello`);
+      assert.match(second.headers.get('x-gio-cache') ?? '', /^hit/);
+      assert.match(await second.text(), /<title>Post hello \| Gio Fixture<\/title>/);
+
+      for (let i = 0; i < 2; i++) {
+        const personal = await fetch(`${BASE}/seo/posts/hello?who=host`);
+        assert.equal(personal.headers.get('x-gio-cache'), 'bypass', `request ${i + 1} must not be cached`);
+        assert.match(await personal.text(), /<title>Served for 127\.0\.0\.1:39517 \| Gio Fixture<\/title>/);
+      }
+      assert.match(log, /generateMetadata read request credentials/);
+    });
+
+    await test('a streamed page carries its metadata in the shell head', async () => {
+      const res = await fetch(`${BASE}/seo/streamed`, { headers: { 'accept-encoding': 'identity' } });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let html = '';
+      while (!html.includes('</head>')) {
+        const { done, value } = await reader.read();
+        assert.ok(!done, 'stream ended before </head>');
+        html += decoder.decode(value, { stream: true });
+      }
+      const head = html.slice(0, html.indexOf('</head>'));
+      assert.match(head, /<title>Streamed \| Gio Fixture<\/title>/);
+      assert.match(head, /<meta name="robots" content="noindex"\/>/);
+      for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
+        html += decoder.decode(chunk.value, { stream: true });
+      }
+      assert.match(html, /SEO_STREAMED_LATE/);
+    });
+
+    await test('/sitemap.xml is generated from app/sitemap.ts and cached', async () => {
+      const first = await fetch(`${BASE}/sitemap.xml`);
+      assert.equal(first.status, 200);
+      assert.equal(first.headers.get('content-type'), 'application/xml; charset=utf-8');
+      assert.equal(first.headers.get('x-gio-cache'), 'miss; stored');
+      const xml = await first.text();
+      assert.match(xml, /^<\?xml version="1\.0" encoding="UTF-8"\?>\n<urlset xmlns="http:\/\/www\.sitemaps\.org\/schemas\/sitemap\/0\.9">/);
+      assert.match(xml, /<loc>https:\/\/fixture\.example\/<\/loc>\n<changefreq>daily<\/changefreq>\n<priority>1<\/priority>/);
+      assert.match(xml, /<loc>https:\/\/fixture\.example\/seo\?a=1&amp;b=2<\/loc>/);
+      const second = await fetch(`${BASE}/sitemap.xml`);
+      assert.match(second.headers.get('x-gio-cache') ?? '', /^hit/);
+      assert.equal(second.headers.get('content-type'), 'application/xml; charset=utf-8');
+      assert.equal(await second.text(), xml);
+    });
+
+    await test('public/robots.txt shadows app/robots.ts, with a startup warning', async () => {
+      assert.match(log, /public\/ file shadows the app's metadata route/);
+      assert.match(log, /robots\.ts/);
+      const res = await fetch(`${BASE}/robots.txt`);
+      assert.match(await res.text(), /FIXTURE_ROBOTS/);
+    });
+
     await test('public/ files are served at the site root with revalidating caching', async () => {
       const expected = await readFile(join(fixtureDir, 'public', 'robots.txt'), 'utf8');
       const res = await fetch(`${BASE}/robots.txt`);
@@ -1533,6 +1615,8 @@ async function main() {
       assert.equal((await fetch(`${BASE}/posts/7`)).status, 200);
       assert.equal((await fetch(`${BASE}/cached`)).status, 200);
       assert.equal((await fetch(`${BASE}/robots.txt`)).status, 200);
+      // app/sitemap.ts: a metadata route, labelled by its fixed path.
+      assert.equal((await fetch(`${BASE}/sitemap.xml`)).status, 200);
       assert.equal((await fetch(`${BASE}/no-such-page-for-metrics`)).status, 404);
       const metrics = (await rawGet('/_gio/metrics', { 'x-forwarded-for': '198.51.100.7' })).body;
       const has = (pattern) => assert.match(metrics, pattern);
@@ -1541,6 +1625,7 @@ async function main() {
       has(/gio_requests_total\{method="GET",status="200",cache="static",route="static"\} \d+/);
       has(/gio_requests_total\{method="GET",status="200",cache="bypass",route="internal"\} \d+/);
       has(/gio_requests_total\{method="GET",status="404",cache="[a-z]+",route="unmatched"\} \d+/);
+      has(/gio_requests_total\{method="GET",status="200",cache="[a-z]+",route="\/sitemap\.xml"\} \d+/);
       has(/gio_request_duration_seconds_count\{route="\/cached"\} \d+/);
       has(/gio_request_duration_seconds_bucket\{route="\/posts\/:id",le="\+Inf"\} \d+/);
       has(/gio_node_ipc_latency_seconds_count\{route="\/posts\/:id"\} \d+/);
@@ -2742,7 +2827,19 @@ async function standalonePhase() {
         '  return (\n    <main>\n' +
         '      <h1>STANDALONE_FIXTURE_HOME {process.env.GIO_PUBLIC_STANDALONE_GREETING}</h1>\n' +
         '      <p>{routerText}</p>\n' +
-        '      {probe}\n      <GioLink href="/posts/7">post 7</GioLink>\n    </main>\n  );\n}\n',
+        '      {probe}\n      <GioLink href="/posts/7">post 7</GioLink>\n    </main>\n  );\n}\n' +
+        // Head metadata: soft navigation must swap it for the post's.
+        "\nexport const metadata = { title: 'STANDALONE_HOME_TITLE', description: 'STANDALONE_HOME_DESC',\n" +
+        "  openGraph: { title: 'STANDALONE_HOME_OG' } };\n",
+    );
+    // App-root metadata conventions travel in the registry (and gio export).
+    await writeFile(
+      join(workDir, 'app', 'robots.ts'),
+      "export default { rules: { userAgent: '*', disallow: '/private' }, sitemap: 'https://standalone.example/sitemap.xml' };\n",
+    );
+    await writeFile(
+      join(workDir, 'app', 'sitemap.ts'),
+      "export const revalidate = 0;\nexport default () => [{ url: 'https://standalone.example/', priority: 0.5 }];\n",
     );
     await writeFile(
       join(workDir, 'app', 'api', 'hello', 'route.ts'),
@@ -2763,7 +2860,8 @@ async function standalonePhase() {
     await mkdir(join(workDir, 'app', '(blog)', 'posts', '[id]'), { recursive: true });
     await writeFile(
       join(workDir, 'app', '(blog)', 'layout.tsx'),
-      "import React from 'react';\n\nexport default function BlogLayout({ children }) {\n  return <section data-layout=\"STANDALONE_BLOG_LAYOUT\">{children}</section>;\n}\n",
+      "import React from 'react';\n\nexport const metadata = { title: { default: 'Blog', template: '%s | Blog' } };\n\n" +
+        "export default function BlogLayout({ children }) {\n  return <section data-layout=\"STANDALONE_BLOG_LAYOUT\">{children}</section>;\n}\n",
     );
     await writeFile(
       join(workDir, 'app', '(blog)', 'posts', '[id]', 'page.tsx'),
@@ -2775,6 +2873,7 @@ async function standalonePhase() {
         '  return <><p>{`STANDALONE_POST id=[${params.id}]`}</p><p>{routerText}</p>{probe}</>;\n}\n' +
         "\nexport async function getServerSideProps(ctx) {\n" +
         "  return ctx.params.id === 'missing' ? { notFound: true } : { props: { params: ctx.params } };\n}\n" +
+        "\nexport async function generateMetadata(ctx) {\n  return { title: `STANDALONE_ARTICLE_TITLE ${ctx.params.id}` };\n}\n" +
         // For `gio export`; the server must ignore it (any id renders).
         "\nexport function getStaticPaths() {\n  return { paths: [{ params: { id: '7' } }] };\n}\n",
     );
@@ -2886,6 +2985,26 @@ async function standalonePhase() {
       assert.match(report.nav.content, /ROUTER pathname=\[\/posts\/7\] id=\[7\]/);
       assert.equal(report.nav.mounted, 'POST mounted=true clicks=0');
       assert.equal(report.nav.afterClick, 'POST mounted=true clicks=1');
+      // Head metadata: hydration adopted the home page's tags, and the
+      // navigation replaced them with exactly the post's (no leftovers).
+      assert.deepEqual(report.start.head, [
+        'title=STANDALONE_HOME_TITLE',
+        'description=STANDALONE_HOME_DESC',
+        'og:title=STANDALONE_HOME_OG',
+      ]);
+      assert.deepEqual(report.nav.head, ['title=STANDALONE_ARTICLE_TITLE 7 | Blog']);
+    });
+
+    await test('static export: sitemap.xml and robots.txt come from app/sitemap.ts and app/robots.ts', async () => {
+      const exportOut = join(workDir, 'out');
+      assert.equal(
+        await readFile(join(exportOut, 'robots.txt'), 'utf8'),
+        'User-Agent: *\nDisallow: /private\n\nSitemap: https://standalone.example/sitemap.xml\n',
+      );
+      assert.match(
+        await readFile(join(exportOut, 'sitemap.xml'), 'utf8'),
+        /<loc>https:\/\/standalone\.example\/<\/loc>\n<priority>0\.5<\/priority>/,
+      );
     });
 
     // Runtime env lives in the deploy dir: run.mjs starts the server there.
@@ -2958,6 +3077,20 @@ async function standalonePhase() {
       assert.ok(html.indexOf('STANDALONE_BLOG_LAYOUT') !== -1, 'the (blog) layout must apply');
       assert.ok(html.indexOf('STANDALONE_BLOG_LAYOUT') < html.indexOf('STANDALONE_POST'));
       assert.doesNotMatch(await (await fetch(`${STANDALONE_BASE}/`)).text(), /STANDALONE_BLOG_LAYOUT/);
+    });
+
+    await test('standalone: metadata and the robots/sitemap modules come from the prebuilt registry', async () => {
+      const post = await (await fetch(`${STANDALONE_BASE}/posts/7`)).text();
+      assert.match(post, /<title>STANDALONE_ARTICLE_TITLE 7 \| Blog<\/title>/);
+      const robots = await fetch(`${STANDALONE_BASE}/robots.txt`);
+      assert.equal(robots.status, 200);
+      assert.equal(robots.headers.get('content-type'), 'text/plain; charset=utf-8');
+      assert.match(await robots.text(), /^User-Agent: \*\nDisallow: \/private\n/);
+      const sitemap = await fetch(`${STANDALONE_BASE}/sitemap.xml`);
+      assert.equal(sitemap.headers.get('content-type'), 'application/xml; charset=utf-8');
+      // revalidate = 0: generated per request, never cached.
+      assert.equal(sitemap.headers.get('x-gio-cache'), 'bypass');
+      assert.match(await sitemap.text(), /<loc>https:\/\/standalone\.example\/<\/loc>/);
     });
 
     await test('standalone: per-folder not-found and error files come from the prebuilt registry', async () => {

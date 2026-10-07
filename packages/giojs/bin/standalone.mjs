@@ -210,13 +210,15 @@ async function main() {
     console.log(`  env:    skipped ${envFiles.skipped.join(', ')} (not a regular file)`);
   }
 
-  const [routes, layouts, routeFiles, segmentFiles] = await Promise.all([
+  const [routes, layouts, routeFiles, segmentFiles, metadataRoutes] = await Promise.all([
     router.discoverRoutes(appDir),
     router.discoverLayouts(appDir),
     router.discoverRouteFiles(appDir),
     router.discoverSegmentFiles(appDir),
+    router.discoverMetadataRoutes(appDir),
   ]);
   router.assertNoRouteConflicts(appDir, routes, routeFiles);
+  router.assertNoMetadataRouteConflicts(appDir, routes, routeFiles, metadataRoutes);
   if (routes.size === 0 && routeFiles.length === 0) {
     fail(`no pages or route files discovered under ${appDir}`);
   }
@@ -246,6 +248,7 @@ async function main() {
     segmentFiles: [segmentFiles.notFound, segmentFiles.error, segmentFiles.loading].flatMap(
       (files) => [...files.values()].map((f) => ({ kind: f.kind, dir: f.dir, filePath: f.filePath })),
     ),
+    metadataRoutes: Object.values(metadataRoutes).map((m) => ({ kind: m.kind, filePath: m.filePath })),
     clientScripts: Object.fromEntries(clientManifest),
   };
   const notFoundPath = pickExisting(appDir, 'not-found', ['tsx', 'jsx', 'js']);

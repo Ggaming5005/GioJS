@@ -809,6 +809,13 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             "public/ files indexed for root serving"
         );
     }
+    for (url, module) in public_files.shadowed_metadata_routes(std::path::Path::new(&app_dir)) {
+        warn!(
+            url,
+            module = %module.display(),
+            "public/ file shadows the app's metadata route - the public file is served and the module never runs; delete one"
+        );
+    }
 
     let state = AppState {
         ipc: Arc::new(ipc),

@@ -18,11 +18,16 @@
  *
  * The envelope also carries the `<GioImage>` config the server rendered
  * with; it is installed before every render so srcsets hydrate unchanged.
+ * Its `metadata` head tags are rendered in front of the route's tree, as on
+ * the server (metadata-tags.ts): React adopts the server's head elements on
+ * hydration, and each soft navigation's render swaps them for the next
+ * page's.
  */
 import React from 'react';
 import { flushSync } from 'react-dom';
 import { hydrateRoot, createRoot, type Root } from 'react-dom/client';
 import { withNavigation, type GioNavigationState } from './navigation-context.ts';
+import { sanitizeMetadataTags, withMetadata, type MetadataTag } from './metadata-tags.ts';
 
 // Generated entries build their tree with the same function the server used.
 export { buildSegmentTree } from './segment-tree.ts';
@@ -39,6 +44,8 @@ export interface GioEnvelope {
   locale: string;
   /** image-config.ts ImageRenderConfig, opaque here. */
   images?: Record<string, unknown>;
+  /** The page's head tags (metadata-tags.ts). */
+  metadata?: MetadataTag[];
 }
 
 /**
@@ -66,6 +73,8 @@ type BuildFn = (props: Record<string, unknown>, path: string) => React.ReactNode
 const routeBuilders = new Map<string, BuildFn>();
 let activeRoot: Root | null = null;
 let activeContainer: Element | null = null;
+/** Whether activeRoot's tree renders a metadata <title> (React owns it). */
+let rootRendersTitle = false;
 let runtimeInstalled = false;
 let waitingForEnvelope = false;
 
@@ -97,6 +106,7 @@ function readEnvelope(): GioEnvelope | null {
       ...(typeof env['images'] === 'object' && env['images'] !== null
         ? { images: env['images'] as Record<string, unknown> }
         : {}),
+      ...(Array.isArray(env['metadata']) ? { metadata: sanitizeMetadataTags(env['metadata']) } : {}),
     };
   } catch {
     return null;
@@ -113,12 +123,43 @@ function navigationState(envelope: GioEnvelope): GioNavigationState {
   };
 }
 
-/** The route's tree inside the navigation provider, image config installed. */
+/**
+ * The route's tree with its metadata head tags in front, inside the
+ * navigation provider, image config installed.
+ */
 function routeElement(envelope: GioEnvelope, build: BuildFn): React.ReactNode {
   if (envelope.images !== undefined) {
     (globalThis as Record<string, unknown>)['__GIO_IMAGES__'] = envelope.images;
   }
-  return withNavigation(navigationState(envelope), build(envelope.props, envelope.path));
+  return withNavigation(
+    navigationState(envelope),
+    withMetadata(build(envelope.props, envelope.path), envelope.metadata),
+  );
+}
+
+function rendersTitle(envelope: GioEnvelope | null): boolean {
+  return envelope?.metadata?.some(tag => tag.tag === 'title') === true;
+}
+
+/**
+ * Run `update` - a render into the root, or its unmount - keeping exactly
+ * one right <title>. navigation.ts has already set document.title to the
+ * next page's, which writes into the first <title>: when React owns that
+ * element (the current tree renders a metadata title), a next tree without
+ * one removes it, so the title is put back afterwards. When the next tree
+ * renders a metadata title but the current one does not, the <title> in
+ * the head is server-only HTML (a root layout's): it goes first, as the
+ * server drops one next to a metadata title (ssr.ts), or it would sit in
+ * front of React's and win document.title.
+ */
+function updateRoot(nextRendersTitle: boolean, update: () => void): void {
+  const title = document.title;
+  if (nextRendersTitle && !rootRendersTitle) {
+    for (const element of document.head.querySelectorAll('title')) element.remove();
+  }
+  update();
+  rootRendersTitle = nextRendersTitle;
+  if (!nextRendersTitle && document.title !== title) document.title = title;
 }
 
 /** First load: hydrate the server HTML. Later route registrations never re-mount. */
@@ -131,6 +172,9 @@ function mount(): void {
   if (build === undefined) return;
   // The container holds this exact tree's server HTML.
   activeContainer = container;
+  // The server rendered this tree's metadata title, if any, in place of any
+  // hand-written one: hydration adopts it.
+  rootRendersTitle = rendersTitle(envelope);
   activeRoot = hydrateRoot(container, routeElement(envelope, build));
 }
 
@@ -152,13 +196,14 @@ function commit(content: Element | null): void {
     // the current one. Synchronous, so the caller can scroll and move focus
     // on the committed page.
     const element = routeElement(envelope, build);
-    flushSync(() => root.render(element));
+    updateRoot(rendersTitle(envelope), () => flushSync(() => root.render(element)));
     return;
   }
   // No client tree to reconcile with (a server-only page on either side):
-  // the next page's server HTML replaces the old root's container.
+  // the next page's server HTML replaces the old root's container. The
+  // unmount takes the old tree's metadata head tags with it.
   if (root !== null) {
-    root.unmount();
+    updateRoot(false, () => root.unmount());
     activeRoot = null;
     activeContainer = null;
   }
@@ -173,7 +218,7 @@ function commit(content: Element | null): void {
   activeRoot = fresh;
   activeContainer = container;
   const element = routeElement(envelope, build);
-  flushSync(() => fresh.render(element));
+  updateRoot(rendersTitle(envelope), () => flushSync(() => fresh.render(element)));
 }
 
 /** Called by each generated route entry when its module loads. */

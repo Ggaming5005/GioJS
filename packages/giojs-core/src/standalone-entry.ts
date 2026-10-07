@@ -3,8 +3,8 @@
  *
  * Prebuilt-registry entrypoint for `gio build standalone` bundles. The
  * generated entry statically imports every discovered app module (pages,
- * layouts, not-found/error/loading files, route files, gio.config,
- * middleware) and hands them over here, so
+ * layouts, not-found/error/loading files, route files, sitemap/robots/
+ * manifest modules, gio.config, middleware) and hands them over here, so
  * boot performs no filesystem discovery, no tsx transform, and no esbuild
  * client build - the bundle runs on a bare Node install.
  */
@@ -20,6 +20,7 @@ import type {
   SpecialPages,
 } from './router.ts';
 import { emptySegmentFiles } from './router.ts';
+import type { MetadataRouteKind, MetadataRouteModule, MetadataRoutes } from './metadata-routes.ts';
 import { sanitizeMiddlewareRules } from './middleware.ts';
 import { registerRouteModule, type RouteFileModule, type WsHandlerFn } from './ws-router.ts';
 import { installProcessGuards, startPluginRegistry, startIpcServers } from './worker-boot.ts';
@@ -50,6 +51,12 @@ export interface StandaloneSegmentFileEntry {
   module: SegmentFileModule;
 }
 
+export interface StandaloneMetadataRouteEntry {
+  kind: MetadataRouteKind;
+  filePath: string;
+  module: MetadataRouteModule;
+}
+
 export interface StandaloneRouteFileEntry {
   pattern: string;
   filePath: string;
@@ -63,6 +70,8 @@ export interface StandaloneRegistry {
   specialPages?: { notFound?: PageModule; error?: PageModule };
   /** Per-folder not-found.*, error.* and loading.* files. */
   segmentFiles?: StandaloneSegmentFileEntry[];
+  /** app/sitemap.*, app/robots.*, app/manifest.* */
+  metadataRoutes?: StandaloneMetadataRouteEntry[];
   config?: GioConfig | undefined;
   /** Raw default export of middleware.ts; sanitized here at boot. */
   middleware?: unknown;
@@ -122,6 +131,15 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     });
   }
 
+  const metadataRoutes: MetadataRoutes = {};
+  for (const entry of registry.metadataRoutes ?? []) {
+    metadataRoutes[entry.kind] = {
+      kind: entry.kind,
+      filePath: entry.filePath,
+      load: () => Promise.resolve(entry.module),
+    };
+  }
+
   const { rules: middlewareRules, warnings } = sanitizeMiddlewareRules(registry.middleware);
   for (const warning of warnings) {
     logger.warn(warning, { source: 'standalone registry' });
@@ -134,6 +152,7 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     layouts: [...layouts.keys()],
     handlers: [...handlers.keys()],
     ws: [...wsHandlers.keys()],
+    metadataRoutes: Object.keys(metadataRoutes),
     clientScripts: clientScripts.size,
   });
 
@@ -144,6 +163,7 @@ export async function runStandaloneServer(registry: StandaloneRegistry): Promise
     handlers,
     specialPages,
     segmentFiles,
+    metadataRoutes,
     clientScripts,
     middlewareRules,
     pluginRegistry,
