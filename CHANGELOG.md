@@ -1015,6 +1015,10 @@ first.
 - With `[server.tls]` on, `[server] http2 = false` still offered `h2` in the
   TLS handshake (ALPN), and clients that picked it (browsers, curl) could not
   connect. It now offers only `http/1.1`.
+- Server-sent event streams carried `Cache-Control: no-cache` twice and
+  `Connection: keep-alive, keep-alive`. They now carry `Cache-Control` once
+  and no `Connection` header, which is connection-specific and not allowed on
+  HTTP/2.
 
 ### Known limitations
 

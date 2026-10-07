@@ -762,6 +762,22 @@ async function main() {
       controller.abort();
     });
 
+    await test('SSE heads carry Cache-Control once and no Connection header', async () => {
+      const head = await new Promise((resolve, reject) => {
+        const req = httpRequest({ host: '127.0.0.1', port: 39517, path: '/stream' }, (res) => {
+          resolve(res.rawHeaders);
+          res.destroy();
+        });
+        req.on('error', reject);
+        req.end();
+      });
+      const values = (name) => head.filter((_, i) => i % 2 === 1 && head[i - 1].toLowerCase() === name);
+      assert.deepEqual(values('content-type'), ['text/event-stream']);
+      assert.deepEqual(values('cache-control'), ['no-cache']);
+      // Connection-specific, and illegal on HTTP/2.
+      assert.deepEqual(values('connection'), []);
+    });
+
     await test('SSE streams outlive header_read_timeout_secs', async () => {
       // The fixture's 2s head deadline must never cut an established stream.
       const controller = new AbortController();

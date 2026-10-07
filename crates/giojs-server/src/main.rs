@@ -3152,24 +3152,55 @@ fn respond_sse(
         req_id,
         ipc,
     };
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header("x-gio-cache", "bypass")
-        .header("connection", "keep-alive");
-    for (k, v) in &response.headers {
-        if k != "content-type" {
-            if let Ok(val) = HeaderValue::from_str(v) {
-                builder = builder.header(k.as_str(), val);
-            }
-        }
-    }
-    let mut resp = builder
-        .body(axum::body::Body::from_stream(stream))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    let mut resp = Response::new(axum::body::Body::from_stream(stream));
+    *resp.headers_mut() = sse_response_headers(&response.headers);
     append_set_cookies(resp.headers_mut(), &response.set_cookies);
     resp
+}
+
+/// Connection-specific headers: they describe one hop, not the response,
+/// and HTTP/2 forbids them outright. The connection layer owns keep-alive,
+/// so a worker's copy is never forwarded.
+const HOP_BY_HOP_HEADERS: [&str; 7] = [
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+/// The head of an SSE response: the event-stream type and `no-cache` once
+/// each, then the worker's head - which repeats both - without them and
+/// without hop-by-hop headers.
+fn sse_response_headers(worker_headers: &HashMap<String, String>) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(
+        HeaderName::from_static("x-gio-cache"),
+        HeaderValue::from_static("bypass"),
+    );
+    for (name, value) in worker_headers {
+        let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) else {
+            continue;
+        };
+        if name == header::CONTENT_TYPE
+            || name == header::CACHE_CONTROL
+            || HOP_BY_HOP_HEADERS.contains(&name.as_str())
+        {
+            continue;
+        }
+        headers.append(name, value);
+    }
+    headers
 }
 
 /// Response-extension marker: the body is a live SSR chunk stream. Downstream
@@ -8673,6 +8704,39 @@ Z1uis5x6LpdQ/f48fePWB4bJazo1nu0iiDgI5KKq1gGbWFFjVjMISa/m
         assert_eq!(offered(false), vec![b"http/1.1".to_vec()]);
         assert!(load_tls_acceptor(&tls, false).is_ok());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── response heads ────────────────────────────────────────────────────────
+
+    #[test]
+    fn sse_heads_carry_each_header_once_and_nothing_hop_by_hop() {
+        // What the worker's GioEventStream head sends, plus a header of its own.
+        let worker: HashMap<String, String> = [
+            ("content-type", "text/event-stream"),
+            ("cache-control", "no-cache"),
+            ("connection", "keep-alive"),
+            ("keep-alive", "timeout=5"),
+            ("transfer-encoding", "chunked"),
+            ("x-stream", "ticker"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        let headers = sse_response_headers(&worker);
+        let all = |name: &str| -> Vec<&str> {
+            headers
+                .get_all(name)
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect()
+        };
+        assert_eq!(all("content-type"), ["text/event-stream"]);
+        assert_eq!(all("cache-control"), ["no-cache"]);
+        assert_eq!(all("x-gio-cache"), ["bypass"]);
+        assert_eq!(all("x-stream"), ["ticker"]);
+        for name in ["connection", "keep-alive", "transfer-encoding"] {
+            assert!(all(name).is_empty(), "{name} must not be forwarded");
+        }
     }
 
 }
