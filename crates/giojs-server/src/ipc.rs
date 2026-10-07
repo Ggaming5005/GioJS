@@ -2566,7 +2566,7 @@ async fn stop_worker(index: usize, process: Option<WorkerProcess>) {
 
 /// During recovery downtime, sleep for `backoff` while failing any frames
 /// queued for the dead connection: each request frame's pending waiter gets
-/// an immediate 503 instead of waiting out the 30s IPC timeout. Returns true
+/// an immediate 503 instead of waiting out the render timeout. Returns true
 /// when the write channel closed (IpcClient dropped - shut down).
 async fn fail_queued_writes(
     write_rx: &mut mpsc::Receiver<Bytes>,
