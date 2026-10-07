@@ -2761,6 +2761,55 @@ async function unsetNodeEnvPhase() {
 }
 
 /**
+ * Phase 1a' (project tsconfig): the server starts outside the project (cwd
+ * is the repository, GIO_APP_DIR points elsewhere), as a process manager
+ * may start it. The worker must compile app code with the project's own
+ * tsconfig.json - here `"jsx": "react-jsx"`, so a starter-style layout and
+ * page without a React import render - not with whatever the cwd has.
+ */
+async function projectTsconfigPhase() {
+  const appRoot = await mkdtemp(join(tmpdir(), 'gio-int-tsconfig-'));
+  let run = null;
+  try {
+    await mkdir(join(appRoot, 'app'), { recursive: true });
+    await linkFixtureDeps(appRoot);
+    await writeFile(
+      join(appRoot, 'tsconfig.json'),
+      JSON.stringify({ compilerOptions: { jsx: 'react-jsx', strict: true } }),
+    );
+    await writeFile(
+      join(appRoot, 'app', 'layout.tsx'),
+      'export default function RootLayout({ children }: { children: unknown }) {\n' +
+        '  return <html lang="en"><body>{children as never}</body></html>;\n}\n',
+    );
+    await writeFile(
+      join(appRoot, 'app', 'page.tsx'),
+      'export default function Home() {\n  return <p>TSCONFIG_FIXTURE_AUTOMATIC_JSX</p>;\n}\n',
+    );
+    run = await startSwitchesServer(appRoot, SWITCHES_SERVER_TOML);
+
+    await test('a server started outside the project compiles app code with the project tsconfig', async () => {
+      const res = await fetch(`${BASE}/`);
+      const html = await res.text();
+      assert.equal(res.status, 200, html.slice(0, 500));
+      assert.match(html, /TSCONFIG_FIXTURE_AUTOMATIC_JSX/);
+      assert.doesNotMatch(run.log(), /React is not defined/);
+    });
+  } catch (err) {
+    console.error('\nintegration (project tsconfig): FAILED');
+    console.error(err);
+    if (run) {
+      console.error('\n── server log tail ──');
+      console.error(significantLogTail(run.log()));
+    }
+    process.exitCode = 1;
+  } finally {
+    await run?.stop();
+    await rm(appRoot, { recursive: true, force: true });
+  }
+}
+
+/**
  * Phase 1b (inherited NODE_ENV): Rust decides the runtime mode and sets
  * NODE_ENV on the worker it spawns. A server started with NODE_ENV unset or
  * 'test' is production on the Rust side, so its worker must be production
@@ -6169,6 +6218,9 @@ if (process.exitCode !== 1) {
 }
 if (process.exitCode !== 1) {
   await unsetNodeEnvPhase();
+}
+if (process.exitCode !== 1) {
+  await projectTsconfigPhase();
 }
 if (process.exitCode !== 1) {
   await inheritedModePhase();

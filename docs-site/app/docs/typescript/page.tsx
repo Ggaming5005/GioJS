@@ -87,9 +87,10 @@ export default function Post({ params }: PageProps<'/posts/:id'>) {
           (<code>@gio.js/core/testing</code>, <code>@gio.js/core/server-only</code>).
         </li>
         <li>
-          <code>paths</code> and <code>jsx</code> settings are honored when bundling too: the
-          client and standalone bundles use the project&apos;s <code>tsconfig.json</code>{' '}
-          (or <code>jsconfig.json</code>).
+          <code>paths</code> and <code>jsx</code> settings are honored on the server and
+          when bundling: the worker, the client bundles and standalone bundles all use the
+          project&apos;s <code>tsconfig.json</code> (or <code>jsconfig.json</code>), even
+          when the server starts from another directory.
         </li>
       </ul>
       <p>

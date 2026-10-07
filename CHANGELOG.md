@@ -1025,6 +1025,13 @@ first.
   A result that is not a function is logged as a warning, and a cleanup
   that throws is logged instead of failing the frame. The testing kit's
   `callRoute` streams behave the same.
+- A server started outside the project (`GIO_APP_DIR=/srv/app/app` from
+  another directory) compiled app code with the working directory's
+  tsconfig, or none: a starter layout without a React import answered `500`
+  with `React is not defined`. The worker now gets the project's
+  `tsconfig.json` (else `jsconfig.json`) as `TSX_TSCONFIG_PATH`, the file
+  the client bundles already used; a `TSX_TSCONFIG_PATH` the environment
+  sets wins.
 
 ### Known limitations
 
