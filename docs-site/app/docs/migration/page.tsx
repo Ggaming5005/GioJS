@@ -102,7 +102,7 @@ npm run dev`} />
         <tbody>
           <tr>
             <td><code>next/link</code> (default, named or aliased import)</td>
-            <td><a href="/docs/components/gio-link"><code>GioLink</code></a>; <code>legacyBehavior</code>/<code>passHref</code> removed (a child <code>&lt;a&gt;</code> is unwrapped onto the link), <code>as</code> becomes <a href="/docs/functions/href"><code>href</code></a>, <code>prefetch</code> becomes <code>prefetch="viewport"</code>; object hrefs, <code>shallow</code>, <code>locale</code> and unsupported props get a TODO</td>
+            <td><a href="/docs/components/gio-link"><code>GioLink</code></a>; <code>legacyBehavior</code>/<code>passHref</code> removed (a child <code>&lt;a&gt;</code> is unwrapped onto the link), <code>as</code> becomes <a href="/docs/components/gio-link#href"><code>href</code></a>, <code>prefetch</code> becomes <code>prefetch="viewport"</code>; object hrefs, <code>shallow</code>, <code>locale</code> and unsupported props get a TODO</td>
           </tr>
           <tr>
             <td><code>next/image</code>, <code>next/legacy/image</code></td>

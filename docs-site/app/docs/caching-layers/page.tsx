@@ -44,8 +44,8 @@ disk_max_bytes = 536870912          # L2 cap; 0 = unbounded`} />
         Persisted entries survive a restart only while the deployment ID stays the same. The
         derived ID covers the client build the server produces at startup (every chunk and
         stylesheet name is a content hash) and the app&apos;s server-side sources: every file
-        under <code>app/</code> - the root layout, <code>metadata</code> and{' '}
-        <code>revalidate</code> exports, <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>, route handlers -
+        under <code>app/</code> - the root layout, <a href="/docs/page-exports/metadata"><code>metadata</code></a> and{' '}
+        <a href="/docs/page-exports/revalidate"><code>revalidate</code></a> exports, <a href="/docs/page-exports/get-server-side-props"><code>getServerSideProps</code></a>, route handlers -
         plus <a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a>, <a href="/docs/gio-config"><code>gio.config.ts</code></a>, the project modules they
         import, the tsconfig and the lockfile. So a restart after a code or CSS change starts
         with an empty cache instead of serving pages the previous code rendered (or that link
@@ -94,7 +94,8 @@ GET http://localhost:3000/posts/1
         and streams into the same response behind the shell.
       </p>
       <p>
-        Opt in by exporting <a href="/docs/page-exports/shell"><code>shell = 'cache'</code></a> next to <code>revalidate</code> on a
+        Opt in by exporting <a href="/docs/page-exports/shell"><code>shell = 'cache'</code></a> next to{' '}
+        <a href="/docs/page-exports/revalidate"><code>revalidate</code></a> on a
         page with Suspense boundaries:
       </p>
       <CodeBlock lang="tsx" title="app/shop/page.tsx" code={`import React, { Suspense, use } from 'react';

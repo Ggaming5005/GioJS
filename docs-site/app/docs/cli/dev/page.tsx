@@ -136,6 +136,12 @@ export default function Page(): React.JSX.Element {
       </p>
       <ul>
         <li>
+          A <code>gio.toml</code> edit restarts the worker, but the new settings do not
+          apply: the Rust server reads <code>gio.toml</code> once, at startup. Stop and
+          start <code>gio dev</code> after changing it. The same goes for the{' '}
+          <code>.env</code> files, which are read once too; editing them restarts nothing.
+        </li>
+        <li>
           Any change under <code>app/</code> restarts the worker. Elsewhere only these
           extensions do: <code>.ts .tsx .js .jsx .mjs .cjs .mts .cts .json .css .toml</code>,
           plus directories created, deleted or moved. Databases, logs and uploads the app

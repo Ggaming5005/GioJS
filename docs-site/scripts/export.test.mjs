@@ -66,6 +66,15 @@ test('names lead to the section that defines them in the real index', { skip }, 
     max_keys_per_client: '/docs/configuration/rate-limits#reference',
     swr_multiplier: '/docs/configuration/cache#reference',
     allowed_hosts: '/docs/configuration/dev#reference',
+    // ...and in the spelling typed: `proxyHeaders` is a report field, `defaultLocale` a prop.
+    proxy_headers: '/docs/configuration/server#reference',
+    default_locale: '/docs/configuration/i18n#reference',
+    proxyHeaders: '/docs/cli/giojs-server#report',
+    defaultLocale: '/docs/components/locale-link#reference',
+    // A plain-word key: its page at the key table, not the version history.
+    details: '/docs/configuration/health#reference',
+    minify: '/docs/configuration/css#reference',
+    watch: '/docs/configuration/dev#reference',
     'server.idle_timeout_secs': '/docs/configuration/server#reference',
     '[security.headers]': '/docs/configuration/security#reference',
     '[[fonts]]': '/docs/configuration/fonts',
@@ -84,6 +93,12 @@ test('names lead to the section that defines them in the real index', { skip }, 
     tags: '/docs/page-exports/tags',
     action: '/docs/page-exports/action',
     wsHandler: '/docs/page-exports/ws-handler',
+    POST: '/docs/page-exports/http-methods',
+    // A CLI flag row defines the flag, not the bare word.
+    'json()': '/docs/page-exports/http-methods#parameters',
+    json: '/docs/page-exports/http-methods#parameters',
+    static: '/docs/static-export',
+    '--static': '/docs/create-giojs#reference',
   };
   for (const [query, url] of Object.entries(expected)) {
     assert.equal(search.search(query).pages[0]?.items[0].url, url, query);

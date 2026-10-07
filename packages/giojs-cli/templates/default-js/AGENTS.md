@@ -49,7 +49,8 @@ renders React. Full docs: https://giojs.com/llms.txt
 - Never fetch inside a component render; never use `useEffect` for data that
   belongs in `getServerSideProps`.
 - Caching: `export const revalidate = <seconds>` on a page enables ISR in the
-  Rust cache (`false` = cache forever). Caching happens in Rust, never in Node.
+  Rust cache (`false` = a year: until a purge or a new deploy). Caching
+  happens in Rust, never in Node.
   Reading `ctx.cookies`, `ctx.ip`, `ctx.host` or `ctx.scheme` (or the
   cookie/authorization/host header) in `getServerSideProps` makes that render
   per-user and uncached; personalize inside `<Suspense>` holes with

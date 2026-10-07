@@ -931,10 +931,10 @@ first.
   `npm test` checks facts the docs state against the code.
 - The docs site is rebuilt around finding things. **Search** (Ctrl+K, Cmd+K
   or `/`) covers every page section by section, ranks an exact API name
-  first - a gio.toml key or a prop opens the table row that defines it, a
-  bare command (`typegen`) its CLI page - tolerates typos and unfinished
-  words, and runs in the browser
-  with no third-party service. The sidebar has four sections (Getting
+  first - an identifier-shaped gio.toml key or prop (`skew_protection`,
+  `onSuccess`) opens the reference table that defines it, a bare command
+  (`typegen`) its CLI page - tolerates typos and unfinished words, and runs
+  in the browser with no third-party service. The sidebar has four sections (Getting
   Started, Guides, API Reference, Architecture) with collapsible groups, and
   every page gets breadcrumbs, an "On this page" outline, `#` links on its
   headings, previous/next links, "Edit this page on GitHub", "Copy page" as

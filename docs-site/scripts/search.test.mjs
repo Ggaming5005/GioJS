@@ -305,6 +305,65 @@ test('a name a reference table, an API heading or a command page defines leads t
   assert.equal(first('layouts'), '/docs/layouts-and-pages#layouts');
 });
 
+test('a definition as typed wins a spelling tie; flags define only themselves; plain-word rows lead within their page', () => {
+  /** A PropsTable / ConfigKeyTable of these first-column names. */
+  const refTable = (names) => `<table class="ref-table"><thead><tr><th>Name</th><th>Type</th></tr></thead>
+    <tbody>${names.map((name) => `<tr><td><code>${name}</code></td><td><code>string</code></td></tr>`).join('')}</tbody></table>`;
+  const pages = [
+    ['/docs/configuration/server', 'API Reference', 'gio.toml', `
+      <h1>[server]</h1><p>How the server listens.</p>
+      <h2 id="reference">Reference</h2>${refTable(['proxy_headers', 'workers'])}`],
+    // A camelCase field of the same name, on a page that says it more often.
+    ['/docs/cli/giojs-server', 'API Reference', 'CLI', `
+      <h1>giojs-server</h1><p>The server binary prints a report.</p>
+      <h2 id="report">Report</h2><p>The <code>proxyHeaders</code> field echoes <code>proxy_headers</code>:
+      whether proxy_headers is on.</p>${refTable(['proxyHeaders'])}`],
+    ['/docs/configuration/health', 'API Reference', 'gio.toml', `
+      <h1>[health]</h1><p>The health endpoint.</p>
+      <h2 id="reference">Reference</h2>${refTable(['details'])}
+      <h2 id="version-history">Version history</h2><p>Added <code>details</code>: the <code>details</code> key shows details.</p>`],
+    // A flag table: it defines `--json` and `--static`, not the bare words.
+    ['/docs/cli/doctor', 'API Reference', 'CLI', `
+      <h1>gio doctor</h1><p>Check a project.</p>
+      <h2 id="reference">Reference</h2>${refTable(['--json', '--static', '-H, --host &lt;ip&gt;'])}`],
+    ['/docs/page-exports/http-methods', 'API Reference', 'Page Exports', `
+      <h1>GET, POST, PUT, PATCH, DELETE</h1><p>Route handlers.</p>
+      <h2 id="parameters">Parameters</h2><p>Read the body with <code>json()</code>.</p>${refTable(['json()'])}`],
+    ['/docs/file-conventions/route', 'API Reference', 'File Conventions', `
+      <h1>route.ts</h1><p>A route answers HTTP.</p>
+      <h2 id="exports">Exports</h2>${refTable(['GET', 'POST', 'wsHandler'])}`],
+    ['/docs/static-export', 'Guides', 'Deploying', `
+      <h1>Static Export</h1><p>Export a static site.</p>`],
+    ['/docs/hooks/use-router', 'API Reference', 'Hooks', `
+      <h1>useRouter</h1><p>Navigate from code.</p>
+      <h2 id="reference">Reference</h2>${refTable(['push(href)', 'refresh()'])}
+      <h3 id="refresh"><code>refresh()</code></h3><p>Render the current page again with <code>refresh()</code>.</p>`],
+  ];
+  const search = createSearch(buildSearchIndex(
+    pages.map(([route, , , body]) => ({ route, html: html(body) })),
+    (route) => {
+      const page = pages.find(([r]) => r === route);
+      return page && { section: page[1], group: page[2], label: 'label' };
+    },
+  ));
+  const first = (query) => search.search(query).pages[0]?.items[0].url;
+  // Two rows that differ only in spelling: the one typed wins.
+  assert.equal(first('proxy_headers'), '/docs/configuration/server#reference');
+  assert.equal(first('proxyHeaders'), '/docs/cli/giojs-server#report');
+  // A plain-word key keeps its page and opens it at the key table.
+  assert.equal(first('details'), '/docs/configuration/health#reference');
+  // ...but a heading that names the item still beats the table row.
+  assert.equal(first('refresh()'), '/docs/hooks/use-router#refresh');
+  // A flag answers its own spelling only, case included.
+  assert.equal(first('--json'), '/docs/cli/doctor#reference');
+  assert.equal(first('-H'), '/docs/cli/doctor#reference');
+  assert.equal(first('json()'), '/docs/page-exports/http-methods#parameters');
+  assert.equal(first('json'), '/docs/page-exports/http-methods#parameters');
+  assert.equal(first('static'), '/docs/static-export');
+  // A page titled with a list of names is titled with each.
+  assert.equal(first('POST'), '/docs/page-exports/http-methods');
+});
+
 test('prefixes and typos still find the page', () => {
   assert.equal(urls('revalid')[0], '/docs/caching');
   assert.equal(urls('revalidte')[0], '/docs/caching');

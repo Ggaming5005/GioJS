@@ -340,7 +340,7 @@ check_origin = true      # default; false accepts upgrades from any website`} />
       </p>
       <CodeBlock lang="nginx" code={`location / {
     proxy_pass       http://127.0.0.1:3000;
-    proxy_set_header Host $host;   # required: Origin is compared with it
+    proxy_set_header Host $host;   # Origin is compared with it
 }`} />
       <p>
         or send the public host in a forwarding header, from an address you list in{' '}

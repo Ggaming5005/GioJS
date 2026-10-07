@@ -505,8 +505,9 @@ watch_ignore = ["data/**", "*.db.json", "public/uploads"]`} />
         <li>
           Editing <code>gio.toml</code> restarts the worker like any other source file, but
           the new settings do not apply: the Rust server reads <code>gio.toml</code> once, at
-          startup. Stop and start <code>gio dev</code> after changing it. The same holds for{' '}
-          <code>.env</code> files, which the server also reads once.
+          startup. Stop and start <code>gio dev</code> after changing it.{' '}
+          <code>.env</code> files are read once too, and editing them restarts nothing:
+          restart <code>gio dev</code>.
         </li>
       </ul>
 

@@ -27,10 +27,15 @@
  * its reference table (a gio.toml key like `skew_protection`, a prop), or
  * its heading on an API Reference page that writes the name as code
  * (`GioNodePlugin`, `refresh()`). A CLI page titled `gio typegen` answers
- * `typegen` as if titled with it, and a gio.toml key is also found by its
- * full name (`server.idle_timeout_secs`, `[security.headers]`). Between two
- * titles that differ only in punctuation, the one typed wins: `[security]`
- * is the gio.toml page, `Security` the guide.
+ * `typegen` as if titled with it, a page titled `GET, POST, ...` answers
+ * each of them, and a gio.toml key is also found by its full name
+ * (`server.idle_timeout_secs`, `[security.headers]`). Between two titles or
+ * two definitions that differ only in punctuation, the one typed wins:
+ * `[security]` is the gio.toml page, `Security` the guide; `proxy_headers`
+ * the gio.toml key, `proxyHeaders` a report field. A CLI flag row defines
+ * its flags as typed (`--json`, `-H`), never the bare word (`json`). Within
+ * a page, a table row that defines a plain word (`details`) opens the page
+ * before a mere mention of it, such as the version history.
  *
  * Results are grouped by page, best page first, each with its best
  * sections and a snippet around the first match; matched spans come back
@@ -67,6 +72,19 @@ const B_LITERAL_TITLE = 12;
  * in reference code, below a page titled with the name.
  */
 const B_DEFINED = 80;
+/**
+ * On top: the row or API heading as typed, punctuation included -
+ * `proxy_headers` is the gio.toml key, `proxyHeaders` a field of the
+ * server's report.
+ */
+const B_LITERAL_DEFINED = 12;
+/**
+ * Within one page only (it never moves the page): a section whose table
+ * defines the name in any spelling, a plain word included, comes before the
+ * page's sections that only mention it - `details` opens [health] at its
+ * key table, not at the version history - but after a heading for it.
+ */
+const B_ROW_IN_PAGE = 40;
 /** An inline-code term of a code API reference page: above any heading elsewhere, below a title. */
 const B_EXACT_REFERENCE_CODE = 70;
 const B_EXACT_HEADING = 60;
@@ -78,6 +96,12 @@ const CODE_REFERENCE = /^\/docs\/(?:components|hooks|functions|page-exports)(?:\
 const API_REFERENCE = 'API Reference';
 /** A name written as an identifier: snake_case, a dot, a dash, `$` or a capital. */
 const IDENTIFIER = /[_$.-]|\p{Lu}/u;
+/**
+ * A CLI flag row (`--json`, `-p, --port <port>`): it defines each flag as
+ * written, dashes included, never the bare word (`json`, `static`).
+ */
+const FLAG_ROW = /^-/;
+const FLAG = /^-[\w-]+$/;
 /** The title of a gio.toml section page: `[server]`, `[[rate_limits]]`. */
 const GIO_TOML_TABLE = /^\[\[?([\w.]+)\]\]?$/;
 /** A CLI command's page title (`gio typegen`) also answers the bare command (`typegen`). */
@@ -296,26 +320,55 @@ export function createSearch(index) {
   const vocabulary = [...postings.keys()].sort();
   const pageNames = pages.map((page) => [normalizeName(page.t), normalizeName(page.n ?? '')]);
   const literalTitles = pages.map((page) => [page.t, page.n ?? ''].map((text) => text.trim().toLowerCase()));
+  // A page titled with a list of names (`GET, POST, PUT, PATCH, DELETE`) is
+  // titled with each of them.
+  const titleItems = pages.map((page) => {
+    const items = page.t.split(',').map((item) => item.trim());
+    return items.length > 1 && items.every((item) => IDENTIFIER.test(item) && !/\s/.test(item)) ? items : [];
+  });
+  titleItems.forEach((items, p) => {
+    pageNames[p].push(...items.map(normalizeName));
+    literalTitles[p].push(...items.map((item) => item.toLowerCase()));
+  });
   const commandNames = pages.map((page) =>
     (COMMAND_PREFIX.test(page.t) ? normalizeName(page.t.replace(COMMAND_PREFIX, '')) : ''));
   const codeReference = pages.map((page) => CODE_REFERENCE.test(page.u));
   const apiReference = pages.map((page) => page.s === API_REFERENCE);
   const headingNames = sections.map((section) => normalizeName(section.h));
+  /** An identifier-shaped heading as written (`GioNodePlugin`); not a topic ('Rate limits'). */
+  const literalHeadings = sections.map((section) =>
+    (IDENTIFIER.test(section.h) && !/\s/.test(section.h.trim()) ? section.h.trim().toLowerCase() : null));
   const codeNames = sections.map((section) =>
     (section.k ? new Set(section.k.split('\n').map(normalizeName)) : null));
   // A table row defines a name only when the name reads as one: a plain
   // word (`layouts`, `cookies`) is as likely a topic, which a guide's
   // heading answers better. On a gio.toml section page (titled `[server]`)
   // every key is also defined by its full name: `server.idle_timeout_secs`,
-  // `[security.headers]`.
+  // `[security.headers]`. A flag row defines only its flags as typed.
   const tableNames = pages.map((page) => GIO_TOML_TABLE.exec(page.t)?.[1]);
-  const definedNames = sections.map((section) => {
-    if (!section.d) return null;
-    const rows = section.d.split('\n');
-    const names = rows.filter((name) => IDENTIFIER.test(name)).map(normalizeName);
+  const definedNames = [];
+  const definedLiterals = [];
+  const definedFlags = [];
+  const rowNames = [];
+  sections.forEach((section) => {
+    const rows = section.d ? section.d.split('\n') : [];
+    const flagRows = rows.filter((row) => FLAG_ROW.test(row));
+    const nameRows = rows.filter((row) => !FLAG_ROW.test(row));
+    const identifiers = nameRows.filter((name) => IDENTIFIER.test(name));
+    const names = identifiers.map(normalizeName);
     const table = tableNames[section.p];
-    if (table !== undefined) names.push(...rows.map((name) => normalizeName(`${table}.${name}`)));
-    return names.length > 0 ? new Set(names) : null;
+    if (table !== undefined) names.push(...nameRows.map((name) => normalizeName(`${table}.${name}`)));
+    const literals = identifiers.map((name) => name.toLowerCase());
+    // Flags keep their case: `-H` is --host, `-h` is --help.
+    const flags = [];
+    for (const row of flagRows) {
+      flags.push(row);
+      for (const word of row.split(/[\s,/]+/)) if (FLAG.test(word)) flags.push(word);
+    }
+    definedNames.push(names.length > 0 ? new Set(names) : null);
+    definedLiterals.push(literals.length > 0 ? new Set(literals) : null);
+    definedFlags.push(flags.length > 0 ? new Set(flags) : null);
+    rowNames.push(nameRows.length > 0 ? new Set(nameRows.map(normalizeName)) : null);
   });
   // Per page, every name it writes as code: a heading among them names an
   // API item (`GioNodePlugin`, `refresh()`), not a topic ('Layouts').
@@ -385,7 +438,8 @@ export function createSearch(index) {
     const terms = queryTerms(query);
     if (terms.length === 0) return { pages: [], total: 0 };
     const nameQuery = normalizeName(query);
-    const literalQuery = query.trim().toLowerCase();
+    const typedQuery = query.trim();
+    const literalQuery = typedQuery.toLowerCase();
 
     // Per query word, each section's best score for it.
     const termScores = terms.map((term, t) => {
@@ -418,9 +472,10 @@ export function createSearch(index) {
       if (matched === 0) continue;
       const section = sections[s];
       let bonus = 0;
+      let inPage = 0;
       if (nameQuery.length > 0) {
-        const [title, label] = pageNames[section.p];
-        const named = title === nameQuery || label === nameQuery || commandNames[section.p] === nameQuery;
+        const [title] = pageNames[section.p];
+        const named = pageNames[section.p].includes(nameQuery) || commandNames[section.p] === nameQuery;
         if (section.l === 1 && named) {
           bonus += B_EXACT_TITLE;
           if (literalTitles[section.p].includes(literalQuery)) bonus += B_LITERAL_TITLE;
@@ -429,18 +484,25 @@ export function createSearch(index) {
         const apiHeading = exactHeading && apiReference[section.p] && pageCodeNames[section.p].has(nameQuery);
         // A definition outranks a mention; the two do not add up, so a
         // reference page that also quotes the name stays below its own page.
-        if (definedNames[s]?.has(nameQuery) || apiHeading) bonus += B_DEFINED;
-        else {
+        const literalRow = (definedLiterals[s]?.has(literalQuery) || definedFlags[s]?.has(typedQuery)) ?? false;
+        if (definedNames[s]?.has(nameQuery) || literalRow || apiHeading) {
+          bonus += B_DEFINED;
+          if (literalRow || (apiHeading && literalHeadings[s] === literalQuery)) bonus += B_LITERAL_DEFINED;
+        } else {
           if (exactHeading) bonus += B_EXACT_HEADING;
           if (codeNames[s]?.has(nameQuery)) {
             bonus += codeReference[section.p] ? B_EXACT_REFERENCE_CODE : B_EXACT_CODE;
           }
         }
+        // A plain-word row: above the page's mentions, below its heading for the name.
+        if (bonus < B_EXACT_HEADING && rowNames[s]?.has(nameQuery)) inPage = B_ROW_IN_PAGE;
       }
-      if (matched === terms.length) complete.push({ s, score: score + bonus, base: score, complete: true });
-      else {
+      if (matched === terms.length) {
+        complete.push({ s, score: score + bonus, base: score, rank: score + bonus + inPage, complete: true });
+      } else {
         const share = 0.2 * (matched / terms.length);
-        partial.push({ s, score: (score + bonus) * share, base: score * share, complete: false });
+        const scaled = (score + bonus) * share;
+        partial.push({ s, score: scaled, base: score * share, rank: scaled + inPage * share, complete: false });
       }
     }
     // Sections with every word first; the rest only when those are few.
@@ -460,7 +522,10 @@ export function createSearch(index) {
       // by how well they match, not by the exact-name bonus, so an overview
       // naming an API in several sections stays below that API's own page.
       const rest = entries.slice(1, 4).reduce((sum, entry) => sum + entry.base, 0);
-      return { p, entries, complete: entries[0].complete, score: entries[0].score + 0.15 * rest };
+      const best = entries[0];
+      // Then the page's own order, which only B_ROW_IN_PAGE changes.
+      entries.sort((a, b) => Number(b.complete) - Number(a.complete) || b.rank - a.rank || a.s - b.s);
+      return { p, entries, complete: best.complete, score: best.score + 0.15 * rest };
     });
     ranked.sort((a, b) => Number(b.complete) - Number(a.complete) || b.score - a.score || a.p - b.p);
 
