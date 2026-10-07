@@ -25,6 +25,7 @@ export const gettingStartedGroups: NavGroup[] = [
       { href: '/docs/route-handlers', label: 'Route Handlers' },
       { href: '/docs/middleware', label: 'Middleware' },
       { href: '/docs/guides/deploying', label: 'Deploying' },
+      { href: '/docs/upgrading', label: 'Upgrading' },
     ],
   },
 ];

@@ -17,12 +17,16 @@ export const guidesGroups: NavGroup[] = [
       { href: '/docs/testing', label: 'Testing' },
       { href: '/docs/static-export', label: 'Static Export' },
       { href: '/docs/websockets', label: 'WebSockets' },
+      { href: '/docs/guides/streaming', label: 'Streaming' },
+      { href: '/docs/guides/redirecting', label: 'Redirecting' },
     ],
   },
   {
     title: 'Security',
     items: [
       { href: '/docs/security', label: 'Security' },
+      { href: '/docs/guides/content-security-policy', label: 'Content Security Policy' },
+      { href: '/docs/guides/security-switches', label: 'Turning Protections On and Off' },
     ],
   },
   {

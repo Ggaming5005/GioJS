@@ -154,11 +154,6 @@ export const PENDING = new Set([
   '/docs/endpoints',
   '/docs/headers',
   '/docs/typescript',
-  '/docs/upgrading',
-  '/docs/guides/streaming',
-  '/docs/guides/redirecting',
-  '/docs/guides/content-security-policy',
-  '/docs/guides/security-switches',
 ]);
 
 // Written by build.mjs next to the exported pages, not by a page module.
