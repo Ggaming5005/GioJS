@@ -157,6 +157,27 @@ function assertNoncedResponse(res, html, what) {
   return nonce;
 }
 
+/** Enables POST /_gio/revalidate in the main phase (GIO_REVALIDATE_TOKEN). */
+const REVALIDATE_TOKEN = 'integration-fixture-revalidate-token-0123456789';
+
+/** POST /_gio/revalidate with a JSON body and (by default) the right token. */
+function revalidateRequest(body, headers = {}) {
+  return rawRequest('POST', '/_gio/revalidate', {
+    authorization: `Bearer ${REVALIDATE_TOKEN}`,
+    'content-type': 'application/json',
+    ...headers,
+  }, typeof body === 'string' ? body : JSON.stringify(body));
+}
+
+/** GET a fixture article; resolves with its version and X-Gio-Cache label. */
+async function getArticle(path) {
+  const res = await fetch(`${BASE}${path}`);
+  assert.equal(res.status, 200, path);
+  const html = await res.text();
+  const version = Number(html.match(/FIXTURE_ARTICLE id=\[[^\]]*\] version=\[(\d+)\]/)?.[1]);
+  return { version, cache: res.headers.get('x-gio-cache') ?? '' };
+}
+
 /** The fixture's .env.production session secret. */
 const FIXTURE_SESSION_SECRET = 'integration-fixture-session-secret-0123456789';
 
@@ -322,6 +343,7 @@ async function main() {
       NODE_ENV: 'production',
       // Also set in fixture/.env: the real environment must win.
       GIO_FIXTURE_PROCESS_WINS: 'from-process',
+      GIO_REVALIDATE_TOKEN: REVALIDATE_TOKEN,
     },
   });
   server.stdout.on('data', (d) => { log += d.toString(); });
@@ -924,6 +946,128 @@ async function main() {
         return res.status === 404 ? html : undefined;
       }, 4_000);
       assert.match(gone, /FIXTURE_CUSTOM_404/);
+    });
+
+    await test('revalidateTag from a route handler purges the tagged page: the next request renders fresh', async () => {
+      assert.deepEqual(await getArticle('/articles/1'), { version: 0, cache: 'miss; stored' });
+      assert.match((await getArticle('/articles/1')).cache, /^hit/);
+      await getArticle('/articles/2');
+      assert.match((await getArticle('/articles/2')).cache, /^hit/);
+
+      // getServerSideProps tagged the page article:1; the handler awaits the purge.
+      const publish = await fetch(`${BASE}/api/articles/1`, { method: 'POST' });
+      assert.equal(publish.status, 200);
+      assert.deepEqual(await publish.json(), { ok: true, purged: 1 });
+      assert.deepEqual(
+        await getArticle('/articles/1'),
+        { version: 1, cache: 'miss; stored' },
+        'a purge, not a stale serve: the very next request is a miss with the new version',
+      );
+      assert.match((await getArticle('/articles/2')).cache, /^hit/, 'other tags are untouched');
+    });
+
+    await test('a burst of parallel revalidateTag calls is confirmed in full, none refused', async () => {
+      // revalidateTag takes one tag, so a batch is N parallel calls; Rust
+      // queues 64 purges per worker, and the worker must pace the rest.
+      await getArticle('/articles/burst');
+      for (let round = 0; round < 3; round++) {
+        assert.match((await getArticle('/articles/burst')).cache, /^hit/);
+        const res = await fetch(`${BASE}/api/revalidate-burst?n=300&id=burst`, { method: 'POST' });
+        assert.equal(res.status, 200);
+        assert.deepEqual(await res.json(), { ok: 300, failed: 0, errors: [], purged: 1 }, `round ${round}`);
+        assert.equal((await getArticle('/articles/burst')).cache, 'miss; stored', 'the real purge among them happened');
+      }
+    });
+
+    await test('revalidatePath purges every query string of the page; the static tag purges the route', async () => {
+      await getArticle('/articles/1?ref=feed');
+      assert.match((await getArticle('/articles/1?ref=feed')).cache, /^hit/);
+      assert.match((await getArticle('/articles/1')).cache, /^hit/);
+      const byPath = await fetch(`${BASE}/api/articles/1?by=path`, { method: 'POST' });
+      assert.deepEqual(await byPath.json(), { ok: true, purged: 2 });
+      assert.deepEqual(await getArticle('/articles/1?ref=feed'), { version: 2, cache: 'miss; stored' });
+      assert.equal((await getArticle('/articles/1')).cache, 'miss; stored');
+
+      // export const tags = ['articles'] is on every article page.
+      const all = await fetch(`${BASE}/api/articles/2?by=all`, { method: 'POST' });
+      const result = await all.json();
+      assert.equal(result.ok, true);
+      assert.ok(result.purged >= 3, `every cached article purged (${result.purged})`);
+      assert.deepEqual(await getArticle('/articles/2'), { version: 1, cache: 'miss; stored' });
+    });
+
+    await test('path purges reach pages with non-ASCII or space in their URL, given decoded or encoded', async () => {
+      // A browser requests /articles/café as /articles/caf%C3%A9 - the
+      // path the page is cached under - while a CMS knows the slug decoded.
+      assert.equal((await getArticle('/articles/caf%C3%A9')).cache, 'miss; stored');
+      assert.match((await getArticle('/articles/caf%C3%A9')).cache, /^hit/);
+      const viaHandler = await fetch(`${BASE}/api/articles/caf%C3%A9?by=decoded`, { method: 'POST' });
+      assert.deepEqual(await viaHandler.json(), { ok: true, purged: 1 }, "revalidatePath('/articles/café')");
+      assert.deepEqual(await getArticle('/articles/caf%C3%A9'), { version: 1, cache: 'miss; stored' });
+
+      await getArticle('/articles/a%20b');
+      assert.match((await getArticle('/articles/a%20b')).cache, /^hit/);
+      const viaEndpoint = await revalidateRequest({ paths: ['/articles/a b', '/articles/café'] });
+      assert.equal(viaEndpoint.status, 200, viaEndpoint.body);
+      assert.deepEqual(JSON.parse(viaEndpoint.body), { ok: true, purged: 2 });
+      assert.equal((await getArticle('/articles/a%20b')).cache, 'miss; stored');
+      assert.equal((await getArticle('/articles/caf%C3%A9')).cache, 'miss; stored');
+    });
+
+    await test('POST /_gio/revalidate: bearer token required, wrong ones are 401', async () => {
+      const none = await rawRequest('POST', '/_gio/revalidate', { 'content-type': 'application/json' }, '{"tags":["articles"]}');
+      assert.equal(none.status, 401);
+      assert.equal(none.headers['www-authenticate'], 'Bearer');
+      assert.equal(none.headers['cache-control'], 'no-store');
+      const wrong = await revalidateRequest({ tags: ['articles'] }, { authorization: `Bearer ${REVALIDATE_TOKEN}x` });
+      assert.equal(wrong.status, 401);
+      const scheme = await revalidateRequest({ tags: ['articles'] }, { authorization: REVALIDATE_TOKEN });
+      assert.equal(scheme.status, 401, 'the Bearer scheme is required');
+      const lowercase = await revalidateRequest({ tags: ['nothing-carries-this'] }, { authorization: `bearer ${REVALIDATE_TOKEN}` });
+      assert.equal(lowercase.status, 200, 'the scheme is case-insensitive');
+      const get = await rawRequest('GET', '/_gio/revalidate', { authorization: `Bearer ${REVALIDATE_TOKEN}` });
+      assert.equal(get.status, 405);
+    });
+
+    await test('POST /_gio/revalidate purges by tag and by path prefix, and validates its body', async () => {
+      await getArticle('/articles/3');
+      assert.match((await getArticle('/articles/3')).cache, /^hit/);
+      // Bearer-authenticated, not cookie-authenticated: a cross-site
+      // Origin (a CMS calling from its own site) is not a CSRF rejection.
+      const byTag = await revalidateRequest({ tags: ['article:3'] }, {
+        origin: 'https://cms.example',
+        'sec-fetch-site': 'cross-site',
+      });
+      assert.equal(byTag.status, 200, byTag.body);
+      assert.deepEqual(JSON.parse(byTag.body), { ok: true, purged: 1 });
+      assert.equal((await getArticle('/articles/3')).cache, 'miss; stored');
+
+      await getArticle('/articles/4');
+      const byPrefix = await revalidateRequest({ paths: ['/articles/'], prefix: true });
+      assert.equal(byPrefix.status, 200);
+      assert.ok(JSON.parse(byPrefix.body).purged >= 2, byPrefix.body);
+      assert.equal((await getArticle('/articles/4')).cache, 'miss; stored');
+      assert.match((await getArticle('/cached')).cache, /^hit/, 'pages outside the prefix stay cached');
+
+      for (const body of ['{"tag":"articles"}', '{}', 'not json', '{"paths":["/a/../b"]}', '{"tags":["_gio:path:/"]}']) {
+        const bad = await revalidateRequest(body);
+        assert.equal(bad.status, 400, body);
+        assert.ok(JSON.parse(bad.body).error, body);
+      }
+    });
+
+    await test('POST /_gio/revalidate refuses a client after repeated bad tokens, even with the right one', async () => {
+      // A forwarded client of its own, so 127.0.0.1 is not the one blocked.
+      const attacker = { 'x-forwarded-for': '198.51.100.99' };
+      for (let i = 0; i < 10; i++) {
+        const res = await revalidateRequest({ tags: ['x'] }, { ...attacker, authorization: `Bearer guess-${i}` });
+        assert.equal(res.status, 401, `attempt ${i}`);
+      }
+      const blocked = await revalidateRequest({ tags: ['x'] }, attacker);
+      assert.equal(blocked.status, 429, 'blocked before the token is even compared');
+      assert.ok(Number(blocked.headers['retry-after']) > 0);
+      const other = await revalidateRequest({ tags: ['x'] }, { 'x-forwarded-for': '198.51.100.100' });
+      assert.equal(other.status, 200, 'other clients are unaffected');
     });
 
     await test('a nested error.* answers a failed render with 500 and only a digest', async () => {
@@ -1978,6 +2122,14 @@ async function unsetNodeEnvPhase() {
       assert.doesNotMatch(html, /imports server-only code|fixture-keys\.server/);
       // The diagnostic still reaches the server log.
       assert.match(log, /imports server-only code/);
+    });
+
+    await test('without a revalidation token, /_gio/revalidate does not exist', async () => {
+      const res = await rawRequest('POST', '/_gio/revalidate', {
+        authorization: `Bearer ${REVALIDATE_TOKEN}`,
+        'content-type': 'application/json',
+      }, '{"tags":["articles"]}');
+      assert.equal(res.status, 404);
     });
   } catch (err) {
     console.error('\nintegration (NODE_ENV unset): FAILED');

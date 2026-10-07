@@ -408,6 +408,37 @@ struct IpcClientInner {
     /// Server runtime mode: worker error frames become the full dev error
     /// page in dev, and a generic page with only an error reference otherwise.
     dev_mode: bool,
+    /// `revalidate` frames from the worker, executed by main.rs (which owns
+    /// the cache) and answered with `send_revalidate_ack`.
+    revalidate_tx: mpsc::Sender<WorkerRevalidation>,
+    revalidate_rx: std::sync::Mutex<Option<mpsc::Receiver<WorkerRevalidation>>>,
+}
+
+/// Queued worker purges. A worker flooding purges past this gets "busy"
+/// acks instead of growing an unbounded queue. The worker keeps at most
+/// MAX_REVALIDATIONS_IN_FLIGHT (16, giojs-core/src/revalidate.ts) unacked,
+/// so a burst of parallel revalidateTag calls never gets here.
+const REVALIDATE_QUEUE: usize = 64;
+
+/// A `revalidate` frame from the worker (`revalidateTag` / `revalidatePath`
+/// in @gio.js/core). The worker awaits the matching `revalidate_ack`.
+#[derive(Debug)]
+pub struct WorkerRevalidation {
+    pub id: String,
+    pub request: crate::revalidate::RevalidateRequest,
+}
+
+/// Wire shape of the frame (`type` is ignored here); the fields mirror the
+/// HTTP endpoint's body. Optional on both sides, like every additive field.
+#[derive(Deserialize)]
+struct RevalidateFrame {
+    id: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    prefix: bool,
 }
 
 /// Everything needed to (re)spawn the Node worker with the right environment.
@@ -489,6 +520,7 @@ impl IpcClient {
         let (write_tx, write_rx) = mpsc::channel::<Bytes>(256);
         let (restart_tx, restart_rx) = mpsc::channel::<()>(1);
         let (generation, _) = tokio::sync::watch::channel(1u64);
+        let (revalidate_tx, revalidate_rx) = mpsc::channel(REVALIDATE_QUEUE);
 
         let client = IpcClient {
             inner: Arc::new(IpcClientInner {
@@ -503,6 +535,8 @@ impl IpcClient {
                 generation,
                 connected: std::sync::atomic::AtomicBool::new(true),
                 dev_mode,
+                revalidate_tx,
+                revalidate_rx: std::sync::Mutex::new(Some(revalidate_rx)),
             }),
         };
 
@@ -604,6 +638,88 @@ impl IpcClient {
     pub fn send_render_close(&self, req_id: &str) {
         self.inner.render_streams.remove(req_id);
         send_cancel_like_frame(&self.inner, "cancel", req_id);
+    }
+
+    /// The worker's purge requests. Yields the receiver once; the caller
+    /// owns executing them and acking each with `send_revalidate_ack`.
+    pub fn take_revalidations(&self) -> Option<mpsc::Receiver<WorkerRevalidation>> {
+        self.inner
+            .revalidate_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    /// Answer a worker `revalidate` frame: `Ok(purged entries)` once the
+    /// purge happened, or why it was refused. Lost if the connection drops
+    /// first - the worker's own timeout covers that.
+    pub async fn send_revalidate_ack(&self, id: &str, outcome: Result<usize, String>) {
+        send_revalidate_ack_frame(&self.inner, id, outcome).await;
+    }
+}
+
+fn revalidate_ack_frame(id: &str, outcome: Result<usize, String>) -> serde_json::Value {
+    match outcome {
+        Ok(purged) => serde_json::json!({
+            "type": "revalidate_ack",
+            "id": id,
+            "ok": true,
+            "purged": purged,
+        }),
+        Err(error) => serde_json::json!({
+            "type": "revalidate_ack",
+            "id": id,
+            "ok": false,
+            "purged": 0,
+            "error": error,
+        }),
+    }
+}
+
+async fn send_revalidate_ack_frame(
+    inner: &IpcClientInner,
+    id: &str,
+    outcome: Result<usize, String>,
+) {
+    let Ok(payload) = serde_json::to_vec(&revalidate_ack_frame(id, outcome)) else {
+        return;
+    };
+    let _ = inner.write_tx.send(Bytes::from(payload)).await;
+}
+
+/// Queue a worker `revalidate` frame for main.rs, or ack the refusal right
+/// away so the worker never waits out its timeout for nothing. Never awaits:
+/// the reader loop must keep draining frames.
+fn handle_revalidate_frame(inner: &IpcClientInner, val: serde_json::Value) {
+    let frame = match serde_json::from_value::<RevalidateFrame>(val) {
+        Ok(frame) => frame,
+        Err(e) => {
+            warn!(error = %e, "malformed revalidate frame from the worker - ignored");
+            return;
+        }
+    };
+    let revalidation = WorkerRevalidation {
+        id: frame.id,
+        request: crate::revalidate::RevalidateRequest {
+            tags: frame.tags,
+            paths: frame.paths,
+            prefix: frame.prefix,
+        },
+    };
+    if let Err(refused) = inner.revalidate_tx.try_send(revalidation) {
+        let (revalidation, reason) = match refused {
+            mpsc::error::TrySendError::Full(r) => (r, "too many revalidations queued"),
+            mpsc::error::TrySendError::Closed(r) => (r, "revalidation is unavailable"),
+        };
+        warn!(id = %revalidation.id, reason, "worker revalidation refused");
+        // Best-effort like cancel frames: if even this cannot be queued, the
+        // worker's timeout answers the caller.
+        if let Ok(payload) = serde_json::to_vec(&revalidate_ack_frame(
+            &revalidation.id,
+            Err(reason.to_string()),
+        )) {
+            let _ = inner.write_tx.try_send(Bytes::from(payload));
+        }
     }
 }
 
@@ -1155,6 +1271,11 @@ async fn run_reader_loop(mut reader: BoxReader, inner: Arc<IpcClientInner>) {
                                 }
                                 continue;
                             }
+                            // ── Worker-initiated purge (revalidateTag/Path) ──
+                            Some("revalidate") => {
+                                handle_revalidate_frame(&inner, val);
+                                continue;
+                            }
                             _ => {}
                         }
 
@@ -1592,6 +1713,7 @@ pub fn test_client_with_write_channel() -> (IpcClient, mpsc::Receiver<Bytes>) {
 #[cfg(test)]
 pub fn test_client_with_mode(dev_mode: bool) -> (IpcClient, mpsc::Receiver<Bytes>) {
     let (write_tx, write_rx) = mpsc::channel::<Bytes>(64);
+    let (revalidate_tx, revalidate_rx) = mpsc::channel(REVALIDATE_QUEUE);
     let client = IpcClient {
         inner: Arc::new(IpcClientInner {
             pending: DashMap::new(),
@@ -1605,6 +1727,8 @@ pub fn test_client_with_mode(dev_mode: bool) -> (IpcClient, mpsc::Receiver<Bytes
             generation: tokio::sync::watch::channel(1u64).0,
             connected: std::sync::atomic::AtomicBool::new(true),
             dev_mode,
+            revalidate_tx,
+            revalidate_rx: std::sync::Mutex::new(Some(revalidate_rx)),
         }),
     };
     (client, write_rx)
@@ -2167,6 +2291,65 @@ mod tests {
         )
         .unwrap();
         assert!(handler.route_handler);
+    }
+
+    #[tokio::test]
+    async fn reader_loop_queues_worker_revalidations_and_acks_refusals() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client, mut write_rx) = test_client_with_write_channel();
+        let mut revalidations = client.take_revalidations().expect("receiver");
+        assert!(client.take_revalidations().is_none(), "handed out once");
+        let (read_half, _keep_write_open) = tokio::io::split(server_io);
+        let reader_task = tokio::spawn(run_reader_loop(Box::new(read_half), client.inner.clone()));
+        let (_r, mut node_writer) = tokio::io::split(client_io);
+
+        write_frame(
+            &mut node_writer,
+            br#"{"type":"revalidate","id":"rv-1","tags":["posts"],"paths":["/blog"],"prefix":true}"#,
+        )
+        .await
+        .unwrap();
+        let queued = revalidations.recv().await.unwrap();
+        assert_eq!(queued.id, "rv-1");
+        assert_eq!(queued.request.tags, vec!["posts"]);
+        assert_eq!(queued.request.paths, vec!["/blog"]);
+        assert!(queued.request.prefix);
+
+        // Fields are optional; a frame without an id is dropped (no one to ack).
+        write_frame(&mut node_writer, br#"{"type":"revalidate","tags":["x"]}"#)
+            .await
+            .unwrap();
+        write_frame(&mut node_writer, br#"{"type":"revalidate","id":"rv-2"}"#)
+            .await
+            .unwrap();
+        let queued = revalidations.recv().await.unwrap();
+        assert_eq!(queued.id, "rv-2");
+        assert!(queued.request.tags.is_empty() && !queued.request.prefix);
+
+        // Executor gone: the worker is told at once instead of timing out.
+        drop(revalidations);
+        write_frame(&mut node_writer, br#"{"type":"revalidate","id":"rv-3"}"#)
+            .await
+            .unwrap();
+        let ack: serde_json::Value =
+            serde_json::from_slice(&write_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(ack["type"], "revalidate_ack");
+        assert_eq!(ack["id"], "rv-3");
+        assert_eq!(ack["ok"], false);
+        assert!(ack["error"].as_str().unwrap().contains("unavailable"));
+        reader_task.abort();
+    }
+
+    #[tokio::test]
+    async fn revalidate_acks_carry_the_purge_count() {
+        let (client, mut write_rx) = test_client_with_write_channel();
+        client.send_revalidate_ack("rv-9", Ok(3)).await;
+        let ack: serde_json::Value =
+            serde_json::from_slice(&write_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            ack,
+            serde_json::json!({ "type": "revalidate_ack", "id": "rv-9", "ok": true, "purged": 3 })
+        );
     }
 
     #[tokio::test]

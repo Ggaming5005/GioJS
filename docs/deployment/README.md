@@ -35,6 +35,7 @@ The listen address comes from the `[server]` section of `gio.toml` (default `0.0
 | `GIO_APP_DIR` | Path to the `app/` directory | `app` |
 | `GIO_DEPLOYMENT_ID` | Pin the deployment ID (otherwise content-derived from the build) | unset |
 | `GIO_SOCKET_PATH` | IPC socket path (Unix socket; named pipe on Windows) | per-instance `.gio/ipc-<pid>-<rand>.sock` |
+| `GIO_REVALIDATE_TOKEN` | Bearer token (32+ bytes) that enables `POST /_gio/revalidate` for on-demand cache purges | unset (endpoint disabled) |
 | `RUST_LOG` | Rust log filter (`info`, `debug`, `trace`) | `info` |
 | `GIO_LOG_FORMAT` | `json` for one JSON object per server log line (overrides `[logging] format`), ready for Loki/Datadog/CloudWatch | `text` |
 
@@ -45,6 +46,8 @@ Stop the server with `SIGTERM`: it stops accepting, closes idle keep-alive conne
 ## Multi-instance deployments
 
 Each instance keeps its own page cache (memory + disk) - there is no shared/distributed cache yet; cross-instance cache coherence is on the roadmap. To keep caches and version-skew detection consistent across instances of the same build, set `GIO_DEPLOYMENT_ID` to the same value (e.g. the release SHA) on every instance.
+
+On-demand purges are per instance too: `revalidateTag()` / `revalidatePath()` purge only the instance whose worker calls them, so a CMS webhook should call `POST /_gio/revalidate` on every instance by its own address, not once through the load balancer. That holds even for instances sharing one disk cache directory (`GIO_CACHE_DIR`, default `.gio/cache/pages`): they serve the pages each other stored, but each keeps its own memory cache.
 
 ## Behind a reverse proxy or load balancer
 

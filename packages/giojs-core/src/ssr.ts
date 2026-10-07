@@ -82,6 +82,7 @@ import {
   renderMetadataRoute,
   type MetadataRoutes,
 } from './metadata-routes.ts';
+import { sanitizeCacheTags } from './revalidate.ts';
 
 export interface SseRouteResult {
   type: 'sse';
@@ -742,6 +743,7 @@ export async function renderRoute(
 
     let props: Record<string, unknown> = {};
     let gsspHeaders: IpcHeaders | null = null;
+    let gsspTags: unknown = undefined;
     let credentialsRead = (): boolean => false;
     if (pageModule.getServerSideProps) {
       const gssp = makeGsspContext(req, match.params, credentialHeaders);
@@ -772,11 +774,13 @@ export async function renderRoute(
         );
       }
       // Support both { props: {...} } (Next.js convention) and flat { key: value }.
-      // Response headers ({ props, headers }) are honored only alongside a
-      // props key, so flat objects that happen to contain `headers` still work.
+      // Response headers ({ props, headers }) and cache tags ({ props, tags })
+      // are honored only alongside a props key, so flat objects that happen
+      // to contain `headers` or `tags` still work.
       const nested = result['props'];
       if (isRecord(nested)) {
         props = nested;
+        gsspTags = result['tags'];
         const returnedHeaders = result['headers'];
         if (isHeaderRecord(returnedHeaders)) {
           // Checked after flattening: `{ 'set-cookie': [] }` (cookies set
@@ -881,6 +885,20 @@ export async function renderRoute(
     const responseHeaders = {
       'content-type': 'text/html; charset=utf-8',
       ...(gsspHeaders?.headers ?? {}),
+    };
+    // Rust stores them with the cached page (plus its path) for
+    // revalidateTag() / revalidatePath() and POST /_gio/revalidate. Only
+    // read for a render Rust will store: an uncached page's `tags` export
+    // is its own business, not worth a warning.
+    const cacheTagsField = (): { cacheTags?: string[] } => {
+      const cacheTags = sanitizeCacheTags(
+        [
+          { source: 'export const tags', value: pageModule.tags },
+          { source: 'getServerSideProps tags', value: gsspTags },
+        ],
+        match.module.urlPattern,
+      );
+      return cacheTags.length > 0 ? { cacheTags } : {};
     };
     const pageCookies = setCookiesField(gsspHeaders?.setCookies ?? []);
 
@@ -1066,7 +1084,7 @@ export async function renderRoute(
           cacheable: skipShell ? false : cacheable,
           cacheMaxAge: skipShell ? 0 : cacheMaxAge,
           streaming: true,
-          ...(storeShell ? { pprShell: true } : {}),
+          ...(storeShell ? { pprShell: true, ...cacheTagsField() } : {}),
           ...pageCookies,
         },
         stream:
@@ -1117,6 +1135,7 @@ export async function renderRoute(
       body,
       cacheable,
       cacheMaxAge,
+      ...(cacheable && cacheMaxAge > 0 ? cacheTagsField() : {}),
       ...pageCookies,
     };
 

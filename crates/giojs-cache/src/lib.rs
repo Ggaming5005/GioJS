@@ -5,16 +5,23 @@
 //!
 //! Lookup order: memory LRU → disk → miss.
 //! All writes go to memory immediately and to disk in a background task.
+//!
+//! On-demand revalidation purges entries by tag or path (see tags.rs): the
+//! next request for a purged page is a miss and renders fresh. Fills carry a
+//! `FillTicket` so a render that started before a purge cannot store its
+//! result after it.
 
 mod backend;
 mod disk;
 mod key;
 mod memory;
 mod singleflight;
+mod tags;
 
 pub use backend::{CacheBackend, LocalBackend};
 pub use key::build_cache_key;
 pub use singleflight::SingleFlight;
+pub use tags::{path_tag, FillTicket, PathMatch, PATH_TAG_PREFIX};
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -23,6 +30,8 @@ use std::time::SystemTime;
 
 use bytes::Bytes;
 use thiserror::Error;
+
+use tags::Invalidation;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -39,9 +48,9 @@ pub struct CacheEntry {
     /// can be served byte-for-byte on a hit. False for entries written by
     /// older versions or in dev mode - those are injected per request.
     pub composed: bool,
-    /// Cache tags declared by the render (IPC `cacheTags`). Stored now so a
-    /// tag-based revalidation endpoint can invalidate by tag later without a
-    /// disk-format migration.
+    /// Cache tags: those declared by the render (IPC `cacheTags`) plus the
+    /// implicit `path_tag` of the page. `invalidate_tags` and
+    /// `invalidate_paths` purge by them.
     pub tags: Vec<String>,
     /// True when `html` is only the static shell of a PPR page (everything
     /// React flushed before the first Suspense boundary). A hit must append a
@@ -178,6 +187,63 @@ impl PageCache {
             entry.etag = Some(entry_etag(&entry.html));
         }
         self.backend.put(key, entry).await
+    }
+
+    /// Capture the invalidation sequence before rendering a fill (a miss, a
+    /// background refresh, a PPR shell) and hand it to `put_fresh`.
+    pub fn fill_ticket(&self) -> FillTicket {
+        self.backend.fill_ticket()
+    }
+
+    /// `put`, unless an invalidation since `ticket` matches the entry's tags:
+    /// the render started before that purge, so its content may predate it.
+    /// Returns whether the entry was stored. A dropped write costs one more
+    /// miss; storing it would serve purged content until it expired.
+    pub async fn put_fresh(
+        &self,
+        key: &str,
+        entry: CacheEntry,
+        ticket: FillTicket,
+    ) -> Result<bool, CacheError> {
+        self.backend.put_fresh(key, entry, ticket).await
+    }
+
+    /// Purge every entry carrying any of `tags`, from memory and disk (PPR
+    /// shells included). The next request for each is a miss. Returns the
+    /// number of entries purged.
+    pub async fn invalidate_tags<S: AsRef<str>>(&self, tags: &[S]) -> usize {
+        if tags.is_empty() {
+            return 0;
+        }
+        let set = tags.iter().map(|tag| tag.as_ref().to_string()).collect();
+        self.backend.invalidate(Invalidation::Tags(set)).await
+    }
+
+    /// Purge the pages at `paths` (`PathMatch::Exact`) or at and below them
+    /// (`PathMatch::Prefix`), every query string and locale of each. Paths
+    /// must be in the form the server tags entries with (`path_tag`).
+    /// Returns the number of entries purged.
+    pub async fn invalidate_paths<S: AsRef<str>>(&self, paths: &[S], kind: PathMatch) -> usize {
+        if paths.is_empty() {
+            return 0;
+        }
+        let invalidation = match kind {
+            PathMatch::Exact => {
+                Invalidation::Tags(paths.iter().map(|path| path_tag(path.as_ref())).collect())
+            }
+            PathMatch::Prefix => Invalidation::PathPrefixes(
+                paths.iter().map(|path| path.as_ref().to_string()).collect(),
+            ),
+        };
+        self.backend.invalidate(invalidation).await
+    }
+
+    /// Index the entries a previous run left on disk so invalidations reach
+    /// them before they are ever promoted; deletes entries of other
+    /// deployments. Run once at startup (in the background is fine: until
+    /// it finishes, promotions are checked against every purge since boot).
+    pub async fn index_disk(&self, deployment_id: &str) {
+        self.backend.index_disk(deployment_id).await;
     }
 
     /// Drop one entry from memory and disk - e.g. a page whose refresh says
@@ -403,5 +469,335 @@ mod tests {
         let entry = make_entry(60, 65);
         cache.put("key5", entry).await.unwrap();
         assert!(cache.get("key5", "deploy-1").await.is_none());
+    }
+
+    // ── On-demand revalidation ───────────────────────────────────────────────
+
+    fn tagged(tags: &[&str]) -> CacheEntry {
+        let mut entry = make_entry(3600, 0);
+        entry.tags = tags.iter().map(|tag| tag.to_string()).collect();
+        entry
+    }
+
+    fn page(path: &str, tags: &[&str]) -> CacheEntry {
+        let mut entry = tagged(tags);
+        entry.tags.push(path_tag(path));
+        entry
+    }
+
+    /// A fresh cache directory per test, removed by the returned guard.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("giojs-cache-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            TempDir(dir)
+        }
+
+        fn cache(&self, memory_entries: usize) -> PageCache {
+            PageCache::new(CacheConfig {
+                memory_max_entries: NonZeroUsize::new(memory_entries).unwrap(),
+                disk_dir: self.0.clone(),
+                swr_multiplier: 10,
+                disk_max_bytes: 0,
+            })
+        }
+
+        fn has_file(&self, key: &str) -> bool {
+            self.0.join(format!("{key}.json")).exists()
+        }
+
+        /// Background disk writes are spawned tasks: wait until they land.
+        async fn wait_for_file(&self, key: &str) {
+            for _ in 0..200 {
+                if self.has_file(key) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            panic!("disk write of {key} never landed");
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidate_tags_purges_only_tagged_entries_from_both_layers() {
+        let dir = TempDir::new("inv-tags");
+        let cache = dir.cache(100);
+        cache.put("a", tagged(&["posts"])).await.unwrap();
+        cache.put("b", tagged(&["posts", "post:1"])).await.unwrap();
+        cache.put("c", tagged(&["users"])).await.unwrap();
+        for key in ["a", "b", "c"] {
+            dir.wait_for_file(key).await;
+        }
+
+        assert_eq!(cache.invalidate_tags(&["posts"]).await, 2);
+        assert!(cache.get("a", "deploy-1").await.is_none());
+        assert!(cache.get("b", "deploy-1").await.is_none());
+        assert!(
+            !dir.has_file("a") && !dir.has_file("b"),
+            "disk files are purged too"
+        );
+        assert!(cache.get("c", "deploy-1").await.is_some());
+        assert_eq!(
+            cache.invalidate_tags(&["posts"]).await,
+            0,
+            "nothing left to purge"
+        );
+        assert_eq!(cache.invalidate_tags::<&str>(&[]).await, 0);
+    }
+
+    #[tokio::test]
+    async fn entries_evicted_from_memory_stay_purgeable_on_disk() {
+        let dir = TempDir::new("inv-disk-only");
+        let cache = dir.cache(1);
+        cache.put("old", tagged(&["posts"])).await.unwrap();
+        dir.wait_for_file("old").await;
+        // Capacity 1: this evicts "old" from memory; only its file remains.
+        cache.put("new", tagged(&["other"])).await.unwrap();
+
+        assert_eq!(cache.invalidate_tags(&["posts"]).await, 1);
+        assert!(!dir.has_file("old"));
+        assert!(
+            cache.get("old", "deploy-1").await.is_none(),
+            "a purged disk-only entry must not be promoted back"
+        );
+    }
+
+    #[tokio::test]
+    async fn promoted_disk_entries_are_indexed_again() {
+        let dir = TempDir::new("inv-promote");
+        let cache = dir.cache(1);
+        cache.put("a", tagged(&["posts"])).await.unwrap();
+        dir.wait_for_file("a").await;
+        cache.put("b", tagged(&["other"])).await.unwrap(); // evicts "a"
+        assert!(
+            cache.get("a", "deploy-1").await.is_some(),
+            "promoted from disk"
+        );
+        cache.put("c", tagged(&["other"])).await.unwrap(); // evicts "a" again
+
+        assert_eq!(cache.invalidate_tags(&["posts"]).await, 1);
+        assert!(cache.get("a", "deploy-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_index_finds_entries_left_by_a_previous_run() {
+        let dir = TempDir::new("inv-restart");
+        {
+            let previous = dir.cache(100);
+            previous.put("a", tagged(&["posts"])).await.unwrap();
+            previous.put("b", tagged(&["users"])).await.unwrap();
+            let mut dead = tagged(&["posts"]);
+            dead.deployment_id = "deploy-0".into();
+            previous.put("dead", dead).await.unwrap();
+            for key in ["a", "b", "dead"] {
+                dir.wait_for_file(key).await;
+            }
+        }
+
+        let cache = dir.cache(100);
+        cache.index_disk("deploy-1").await;
+        assert!(
+            !dir.has_file("dead"),
+            "another deployment's file is deleted"
+        );
+        assert_eq!(cache.invalidate_tags(&["posts"]).await, 1);
+        assert!(!dir.has_file("a"));
+        assert!(cache.get("a", "deploy-1").await.is_none());
+        assert!(cache.get("b", "deploy-1").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn purges_before_the_startup_index_still_reach_old_files() {
+        let dir = TempDir::new("inv-before-index");
+        {
+            let previous = dir.cache(100);
+            previous.put("a", tagged(&["posts"])).await.unwrap();
+            previous.put("b", tagged(&["users"])).await.unwrap();
+            dir.wait_for_file("a").await;
+            dir.wait_for_file("b").await;
+        }
+
+        // The purge lands before the scan ever ran: neither file is indexed.
+        let cache = dir.cache(100);
+        assert_eq!(cache.invalidate_tags(&["posts"]).await, 0);
+        assert!(
+            cache.get("a", "deploy-1").await.is_none(),
+            "an unindexed file older than a matching purge is stale"
+        );
+        assert!(!dir.has_file("a"));
+        assert!(cache.get("b", "deploy-1").await.is_some());
+    }
+
+    /// Two instances on one cache directory (the default `.gio/cache/pages`
+    /// for every process started in the project): files one writes after
+    /// the other's startup scan are served by both, not deleted as purged.
+    #[tokio::test]
+    async fn instances_sharing_a_cache_directory_keep_each_others_files() {
+        let dir = TempDir::new("inv-shared");
+        let a = dir.cache(100);
+        let b = dir.cache(100);
+        a.index_disk("deploy-1").await;
+        b.index_disk("deploy-1").await;
+
+        a.put("k", tagged(&["posts"])).await.unwrap();
+        dir.wait_for_file("k").await;
+        assert!(
+            b.get("k", "deploy-1").await.is_some(),
+            "B serves the file A wrote"
+        );
+        assert!(dir.has_file("k"), "and leaves it for A");
+
+        // A purge on B still reaches A's files written before it - even
+        // one B never read, so never indexed.
+        a.put("unseen", tagged(&["posts"])).await.unwrap();
+        dir.wait_for_file("unseen").await;
+        assert_eq!(b.invalidate_tags(&["posts"]).await, 1, "k, which B indexed");
+        assert!(b.get("unseen", "deploy-1").await.is_none());
+        assert!(!dir.has_file("unseen"));
+
+        // Rendered after B's purge (the next second): fresh for B too.
+        a.put("after", make_entry_tagged(3600, -2, &["posts"]))
+            .await
+            .unwrap();
+        dir.wait_for_file("after").await;
+        assert!(b.get("after", "deploy-1").await.is_some());
+    }
+
+    fn make_entry_tagged(max_age_secs: u64, age_offset_secs: i64, tags: &[&str]) -> CacheEntry {
+        let mut entry = make_entry(max_age_secs, age_offset_secs);
+        entry.tags = tags.iter().map(|tag| tag.to_string()).collect();
+        entry
+    }
+
+    #[tokio::test]
+    async fn invalidate_paths_exact_and_prefix() {
+        let dir = TempDir::new("inv-paths");
+        let cache = dir.cache(100);
+        cache.put("blog", page("/blog", &[])).await.unwrap();
+        cache.put("blog-1", page("/blog/1", &[])).await.unwrap();
+        cache.put("blog-1-q", page("/blog/1", &[])).await.unwrap(); // ?page=2
+        cache.put("blogger", page("/blogger", &[])).await.unwrap();
+        cache.put("home", page("/", &[])).await.unwrap();
+
+        assert_eq!(
+            cache.invalidate_paths(&["/blog/1"], PathMatch::Exact).await,
+            2
+        );
+        assert!(cache.get("blog-1", "deploy-1").await.is_none());
+        assert!(cache.get("blog-1-q", "deploy-1").await.is_none());
+        assert!(cache.get("blog", "deploy-1").await.is_some());
+
+        cache.put("blog-1", page("/blog/1", &[])).await.unwrap();
+        assert_eq!(
+            cache.invalidate_paths(&["/blog"], PathMatch::Prefix).await,
+            2
+        );
+        assert!(cache.get("blog", "deploy-1").await.is_none());
+        assert!(cache.get("blog-1", "deploy-1").await.is_none());
+        assert!(
+            cache.get("blogger", "deploy-1").await.is_some(),
+            "prefixes match whole segments"
+        );
+        assert!(cache.get("home", "deploy-1").await.is_some());
+
+        assert_eq!(cache.invalidate_paths(&["/"], PathMatch::Prefix).await, 2);
+        assert!(cache.get("home", "deploy-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ppr_shell_entries_are_purged_like_pages() {
+        let cache = cache_with_swr(10);
+        let mut shell = page("/feed", &["feed"]);
+        shell.ppr_shell = true;
+        cache.put("shell", shell).await.unwrap();
+        assert_eq!(cache.invalidate_tags(&["feed"]).await, 1);
+        assert!(cache.get("shell", "deploy-1").await.is_none());
+    }
+
+    /// The write-back race, step by step: a render takes its ticket, an
+    /// invalidation lands while it renders, and its result arrives after the
+    /// purge. The stale result must not be stored.
+    #[tokio::test]
+    async fn a_fill_that_started_before_a_purge_is_not_stored_after_it() {
+        let dir = TempDir::new("inv-race");
+        let cache = dir.cache(100);
+        cache
+            .put("post", page("/post/1", &["posts"]))
+            .await
+            .unwrap();
+
+        let in_flight = cache.fill_ticket(); // render starts
+        assert_eq!(cache.invalidate_tags(&["posts"]).await, 1); // CMS webhook
+        let stored = cache
+            .put_fresh("post", page("/post/1", &["posts"]), in_flight)
+            .await
+            .unwrap(); // render finishes
+        assert!(!stored, "the stale render must be dropped");
+        assert!(cache.get("post", "deploy-1").await.is_none());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!dir.has_file("post"), "nor written to disk");
+
+        // Path purges race the same way.
+        let in_flight = cache.fill_ticket();
+        cache.invalidate_paths(&["/post"], PathMatch::Prefix).await;
+        let stored = cache
+            .put_fresh("post", page("/post/1", &[]), in_flight)
+            .await
+            .unwrap();
+        assert!(!stored);
+
+        // A render that started after the purge stores normally.
+        let fresh = cache.fill_ticket();
+        assert!(cache
+            .put_fresh("post", page("/post/1", &["posts"]), fresh)
+            .await
+            .unwrap());
+        assert!(cache.get("post", "deploy-1").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_purge_does_not_drop_a_fill() {
+        let cache = cache_with_swr(10);
+        let in_flight = cache.fill_ticket();
+        cache.invalidate_tags(&["users"]).await;
+        cache.invalidate_paths(&["/admin"], PathMatch::Prefix).await;
+        assert!(cache
+            .put_fresh("post", page("/post/1", &["posts"]), in_flight)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_purge_racing_the_disk_write_leaves_no_file_behind() {
+        let dir = TempDir::new("inv-disk-race");
+        let cache = dir.cache(100);
+        // The disk write is still queued (or in flight) when the purge runs;
+        // whichever lands first, no file may survive to be promoted later.
+        cache.put("a", tagged(&["posts"])).await.unwrap();
+        cache.invalidate_tags(&["posts"]).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!dir.has_file("a"));
+
+        let restarted = dir.cache(100);
+        restarted.index_disk("deploy-1").await;
+        assert!(restarted.get("a", "deploy-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn clear_also_drops_fills_in_flight() {
+        let dir = TempDir::new("inv-clear");
+        let cache = dir.cache(100);
+        let in_flight = cache.fill_ticket();
+        cache.clear().await;
+        assert!(!cache.put_fresh("k", tagged(&[]), in_flight).await.unwrap());
     }
 }
