@@ -1,192 +1,464 @@
 /**
  * packages/giojs-cli/src/migrate.ts
  *
- * Core transform engine for the gio-migrate command.
- * Applies regex-based transforms to .tsx/.ts/.jsx/.js files to
- * replace Next.js imports with GioJS equivalents.
+ * Next.js → GioJS project migration: plans every change in memory first
+ * (file moves, code transforms, gio.toml, package.json, tsconfig.json,
+ * MIGRATION_REPORT.md), so --dry-run shows exactly what a real run writes,
+ * then applies the plan. Applying never overwrites a file the plan did not
+ * read: moves and generated files only land on free paths.
  */
-import { readdir, readFile, writeFile, stat } from 'fs/promises';
-import { join, extname, relative } from 'path';
+import { existsSync } from 'fs';
+import { mkdir, readFile, readdir, rm, rmdir, stat, writeFile } from 'fs/promises';
+import { dirname, join, posix } from 'path';
+import { TODO_MARKER, scanTodos } from './migrate-edits.js';
+import { buildRootLayout, mapPagesFile, stylesheetImports } from './migrate-pages.js';
+import { migratePackageJson, migrateTsconfig } from './migrate-package.js';
+import { buildReport, REPORT_FILE, REPORT_HEADER } from './migrate-report.js';
+import { transformSource, type FileNote, type FileRole, type FontHint } from './migrate-transforms.js';
+import {
+  CONFIG_FILES,
+  convertConfigSource,
+  planToml,
+  type ConvertedConfig,
+  type TomlResult,
+} from './next-config-converter.js';
 
-export interface TransformResult {
-  filePath: string;
-  changed: boolean;
-  count: number;
-  transforms: string[];
-  diff?: string;
+export type { FileNote, FontHint } from './migrate-transforms.js';
+
+export type RouterKind = 'pages' | 'app' | 'both' | 'none';
+
+export interface PlannedFile {
+  /** Project-relative source path; undefined for generated files. */
+  from?: string;
+  /** Project-relative destination path. */
+  to: string;
+  /** Text before the change, for files modified in place. */
+  before?: string;
+  content: string | Buffer;
+  kind: 'modified' | 'moved' | 'created';
+  /** Files folded into this generated one (pages/_app.tsx → app/layout.tsx). */
+  mergedFrom?: string[];
+  changes: FileNote[];
+  todos: FileNote[];
 }
 
-const SKIP_DIRS = new Set(['node_modules', '.next', '.gio', 'dist', 'out', '.git']);
+export interface ProjectTodo {
+  file?: string;
+  message: string;
+}
+
+export interface MigrationPlan {
+  root: string;
+  router: RouterKind;
+  files: PlannedFile[];
+  /** Project-relative paths deleted after the writes (move sources). */
+  removals: string[];
+  todos: ProjectTodo[];
+  notes: string[];
+  fonts: FontHint[];
+  config?: { source: string; converted: ConvertedConfig; toml: TomlResult };
+}
+
+const SKIP_DIRS = new Set(['node_modules', 'dist', 'out', 'build', 'coverage', 'target', 'standalone']);
 const SOURCE_EXTENSIONS = new Set(['.tsx', '.ts', '.jsx', '.js']);
+const COMPONENT_CONVENTIONS = new Set(['page', 'layout', 'not-found', 'error', 'loading']);
+const UNSUPPORTED_APP_FILES: Record<string, string> = {
+  template: 'template.* files are not supported - use a layout',
+  default: 'parallel-route default.* files are not supported',
+  'global-error': 'global-error.* is not supported - app/error.tsx catches render errors',
+  'opengraph-image': 'generated OG images are not supported - put a static image in public/ and reference it in a <meta> tag',
+  'twitter-image': 'generated images are not supported - use a static image from public/',
+  icon: 'icon.* files are not supported - put the icon in public/ and <link rel="icon"> it from the root layout',
+  'apple-icon': 'apple-icon.* is not supported - put it in public/ and link it from the root layout',
+  sitemap: 'sitemap.* is not supported - serve it from a route.ts handler (app/sitemap.xml/route.ts) or public/',
+  robots: 'robots.* is not supported - put robots.txt in public/',
+  manifest: 'manifest.* is not supported - put the manifest in public/',
+  middleware: '',
+};
 
-export async function findSourceFiles(dir: string): Promise<string[]> {
-  const entries = await readdir(dir, { withFileTypes: true });
-  const files: string[] = [];
+export function extOf(path: string): string {
+  const match = /\.[^./]+$/.exec(path);
+  return match === null ? '' : match[0];
+}
 
+function stemOf(path: string): string {
+  const base = posix.basename(path);
+  return base.slice(0, base.length - extOf(base).length);
+}
+
+async function listFiles(root: string, dir = ''): Promise<string[]> {
+  const out: string[] = [];
+  const entries = await readdir(join(root, dir), { withFileTypes: true });
   for (const entry of entries) {
-    if (SKIP_DIRS.has(entry.name)) continue;
-    const full = join(dir, entry.name);
+    const rel = dir === '' ? entry.name : `${dir}/${entry.name}`;
     if (entry.isDirectory()) {
-      files.push(...await findSourceFiles(full));
-    } else if (SOURCE_EXTENSIONS.has(extname(entry.name))) {
-      files.push(full);
+      // Hidden directories (.git, .next, .gio, .vercel, ...) are never sources.
+      if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
+      out.push(...await listFiles(root, rel));
+    } else if (entry.isFile()) {
+      out.push(rel);
     }
   }
-
-  return files;
+  return out;
 }
 
-function buildDiff(original: string, transformed: string, filePath: string): string {
-  const origLines = original.split('\n');
-  const newLines = transformed.split('\n');
-  const lines: string[] = [`--- a/${filePath}`, `+++ b/${filePath}`];
+function isSource(path: string): boolean {
+  return SOURCE_EXTENSIONS.has(extOf(path)) && !path.endsWith('.d.ts') && !path.startsWith('public/') &&
+    !CONFIG_FILES.includes(path);
+}
 
-  const max = Math.max(origLines.length, newLines.length);
-  for (let i = 0; i < max; i++) {
-    const orig = origLines[i];
-    const next = newLines[i];
-    if (orig === next) {
-      lines.push(`  ${orig ?? ''}`);
-    } else {
-      if (orig !== undefined) lines.push(`- ${orig}`);
-      if (next !== undefined) lines.push(`+ ${next}`);
+/** Resolve a relative import specifier to a project file, Node/TS style. */
+function resolveImport(files: Set<string>, fromDir: string, spec: string): string | undefined {
+  const base = posix.normalize(posix.join(fromDir, spec));
+  if (files.has(base)) return base;
+  for (const ext of ['.tsx', '.ts', '.jsx', '.js', '.mjs', '.cjs', '.json']) {
+    if (files.has(base + ext)) return base + ext;
+  }
+  for (const ext of ['.tsx', '.ts', '.jsx', '.js']) {
+    if (files.has(`${base}/index${ext}`)) return `${base}/index${ext}`;
+  }
+  // `./x.js` written for a TypeScript file (NodeNext style).
+  const jsTs = /^(.*)\.(m?)js$/.exec(base);
+  if (jsTs !== null) {
+    for (const ext of ['.ts', '.tsx']) if (files.has(jsTs[1] + ext)) return jsTs[1] + ext;
+  }
+  return undefined;
+}
+
+function relativeSpecifier(fromDir: string, target: string): string {
+  const rel = posix.relative(fromDir, target);
+  return rel.startsWith('.') ? rel : `./${rel}`;
+}
+
+/** Site URL of a stylesheet: app/x.css is served at /x.css, public/x.css at /x.css. */
+function stylesheetUrl(path: string): string | undefined {
+  if (path.startsWith('app/')) return '/' + path.slice('app/'.length);
+  if (path.startsWith('public/')) return '/' + path.slice('public/'.length);
+  return undefined;
+}
+
+export async function planMigration(rootDir: string): Promise<MigrationPlan> {
+  const root = rootDir;
+  if (!(await stat(root)).isDirectory()) throw new Error(`${root} is not a directory`);
+  const fileList = await listFiles(root);
+  const files = new Set(fileList);
+  const read = (rel: string): Promise<string> => readFile(join(root, rel), 'utf8');
+
+  const pkgRaw = files.has('package.json') ? await read('package.json') : undefined;
+  const configFile = CONFIG_FILES.find(f => files.has(f));
+  const hasNextDep = pkgRaw !== undefined && /"next"\s*:/.test(pkgRaw);
+  if (configFile === undefined && !hasNextDep) {
+    throw new Error(`no Next.js project found in ${root} (no next.config.* file and no "next" dependency in package.json)`);
+  }
+
+  const plan: MigrationPlan = { root, router: 'none', files: [], removals: [], todos: [], notes: [], fonts: [] };
+  const pagesDir = ['pages', 'src/pages'].find(d => fileList.some(f => f.startsWith(`${d}/`)));
+  const rootApp = fileList.some(f => f.startsWith('app/'));
+  const srcApp = !rootApp && fileList.some(f => f.startsWith('src/app/'));
+  plan.router = pagesDir !== undefined && (rootApp || srcApp) ? 'both' : pagesDir !== undefined ? 'pages' : rootApp || srcApp ? 'app' : 'none';
+
+  // ── moves ────────────────────────────────────────────────────────────────
+  const moves = new Map<string, { to: string; role?: FileRole }>();
+  const taken = new Set(fileList);
+  const claim = (from: string, to: string, role?: FileRole): boolean => {
+    if (taken.has(to) && to !== from) {
+      plan.todos.push({ file: from, message: `not moved: ${to} already exists - merge the two by hand` });
+      return false;
     }
-  }
-
-  return lines.join('\n');
-}
-
-export function transformSource(source: string): { output: string; transforms: string[] } {
-  let text = source;
-  const transforms: string[] = [];
-
-  // 1. 'use client' removal
-  const useClientPattern = /^(['"])use client\1;?\r?\n?/m;
-  if (useClientPattern.test(text)) {
-    text = text.replace(
-      useClientPattern,
-      "// GioJS: 'use client' removed - not needed without RSC\n",
-    );
-    transforms.push("removed 'use client'");
-  }
-
-  // 2. next/image → GioImage
-  let needsGioImage = false;
-  const imageImportPattern = /^import\s+Image\s+from\s+['"]next\/image['"];?\r?\n?/m;
-  if (imageImportPattern.test(text)) {
-    text = text.replace(imageImportPattern, '');
-    needsGioImage = true;
-  }
-
-  // 3. next/link → GioLink
-  let needsGioLink = false;
-  const linkImportPattern = /^import\s+Link\s+from\s+['"]next\/link['"];?\r?\n?/m;
-  if (linkImportPattern.test(text)) {
-    text = text.replace(linkImportPattern, '');
-    needsGioLink = true;
-  }
-
-  // 4. Insert combined giojs/react import after removing next/* imports
-  if (needsGioImage || needsGioLink) {
-    const components = [
-      ...(needsGioImage ? ['GioImage'] : []),
-      ...(needsGioLink ? ['GioLink'] : []),
-    ].join(', ');
-    const gioImport = `import { ${components} } from '@gio.js/react';\n`;
-
-    // Insert after the last import statement
-    const lastImportMatch = [...text.matchAll(/^import\b[^\n]+\n/gm)].pop();
-    if (lastImportMatch?.index !== undefined) {
-      const insertAt = lastImportMatch.index + lastImportMatch[0].length;
-      text = text.slice(0, insertAt) + gioImport + text.slice(insertAt);
-    } else {
-      text = gioImport + text;
-    }
-
-    if (needsGioImage) transforms.push('next/image → GioImage');
-    if (needsGioLink) transforms.push('next/link → GioLink');
-  }
-
-  // 5. JSX element renaming - must happen after import removal
-  if (needsGioImage) {
-    // Match <Image followed by whitespace, >, or /
-    const jsxImageOpen = /<Image(?=[\s\/>])/g;
-    const jsxImageClose = /<\/Image>/g;
-    const imageCount = (text.match(jsxImageOpen) ?? []).length + (text.match(jsxImageClose) ?? []).length;
-    text = text.replace(jsxImageOpen, '<GioImage');
-    text = text.replace(jsxImageClose, '</GioImage>');
-    if (imageCount > 0) transforms.push(`<Image /> → <GioImage /> ×${imageCount}`);
-  }
-
-  if (needsGioLink) {
-    const jsxLinkOpen = /<Link(?=[\s\/>])/g;
-    const jsxLinkClose = /<\/Link>/g;
-    const linkCount = (text.match(jsxLinkOpen) ?? []).length + (text.match(jsxLinkClose) ?? []).length;
-    text = text.replace(jsxLinkOpen, '<GioLink');
-    text = text.replace(jsxLinkClose, '</GioLink>');
-    if (linkCount > 0) transforms.push(`<Link /> → <GioLink /> ×${linkCount}`);
-  }
-
-  // 6. next/navigation - flag it, don't rewrite: the common hooks exist in
-  // @gio.js/react under the same names, but redirect/notFound and the
-  // segment hooks do not, so a person decides per import.
-  const navPattern = /^(import\s+[^\n]+from\s+['"]next\/navigation['"][^\n]*)/m;
-  if (navPattern.test(text)) {
-    text = text.replace(
-      navPattern,
-      '// TODO(gio-migrate): usePathname/useParams/useSearchParams/useRouter come from @gio.js/react - switch this import (other next/navigation exports have no GioJS equivalent)\n$1'
-    );
-    transforms.push('next/navigation → flagged (hooks: switch to @gio.js/react)');
-  }
-
-  // 7. next/font → TODO comment (leave import intact)
-  const fontPattern = /^(import\s+[^\n]+from\s+['"]next\/font\/(?:google|local)['"][^\n]*)/m;
-  if (fontPattern.test(text)) {
-    text = text.replace(
-      fontPattern,
-      '// TODO: move font declaration to gio.toml [[fonts]] - see docs/deployment/README.md\n$1',
-    );
-    transforms.push('next/font → TODO comment (move to gio.toml)');
-  }
-
-  return { output: text, transforms };
-}
-
-export async function transformFile(
-  filePath: string,
-  dryRun: boolean,
-  rootDir: string,
-): Promise<TransformResult> {
-  const source = await readFile(filePath, 'utf8');
-  const { output, transforms } = transformSource(source);
-  const changed = output !== source;
-  const rel = relative(rootDir, filePath).replace(/\\/g, '/');
-
-  if (!changed) {
-    return { filePath: rel, changed: false, count: 0, transforms: [] };
-  }
-
-  const result: TransformResult = {
-    filePath: rel,
-    changed: true,
-    count: transforms.length,
-    transforms,
+    taken.add(to);
+    moves.set(from, role !== undefined ? { to, role } : { to });
+    return true;
   };
 
-  if (dryRun) {
-    result.diff = buildDiff(source, output, rel);
-  } else {
-    await writeFile(filePath, output, 'utf8');
+  if (srcApp) {
+    // GioJS reads app/ from the project root only.
+    for (const f of fileList.filter(p => p.startsWith('src/app/'))) claim(f, f.slice('src/'.length));
+    plan.notes.push('src/app/ moved to app/ (GioJS reads app/ from the project root).');
   }
 
-  return result;
+  const specials = new Map<string, string>();
+  if (pagesDir !== undefined) {
+    const pageFiles = fileList.filter(f => f.startsWith(`${pagesDir}/`));
+    const has500 = pageFiles.some(f => /^500\.[jt]sx?$/.test(f.slice(pagesDir.length + 1)));
+    for (const f of pageFiles) {
+      const mapping = mapPagesFile(f.slice(pagesDir.length + 1));
+      if (mapping.kind === 'move') {
+        claim(f, mapping.to, mapping.role);
+      } else if (mapping.kind === 'special') {
+        if (mapping.name === '_error') {
+          if (has500) plan.todos.push({ file: f, message: 'left in place: app/error.* comes from pages/500 - fold any custom handling from _error into it' });
+          else claim(f, `app/error${extOf(f) === '.ts' ? '.tsx' : extOf(f)}`, 'app-page');
+        } else {
+          specials.set(mapping.name, f);
+        }
+      } else if (SOURCE_EXTENSIONS.has(extOf(f)) || /\.mdx?$/.test(f)) {
+        plan.todos.push({ file: f, message: `left in place: ${mapping.reason}` });
+      }
+    }
+  }
+
+  // app/ component files must be .tsx/.jsx/.js; route handlers .ts/.js.
+  for (const f of fileList) {
+    const target = moves.get(f)?.to ?? f;
+    if (!target.startsWith('app/')) continue;
+    const stem = stemOf(target);
+    const ext = extOf(target);
+    if (COMPONENT_CONVENTIONS.has(stem) && ext === '.ts') claim(f, target.slice(0, -3) + '.tsx', moves.get(f)?.role);
+    if (stem === 'route' && (ext === '.tsx' || ext === '.jsx')) {
+      plan.todos.push({ file: target, message: 'route handlers must be route.ts or route.js in GioJS - rename it (move any JSX out)' });
+    }
+    if (stem in UNSUPPORTED_APP_FILES && UNSUPPORTED_APP_FILES[stem] !== '' && (SOURCE_EXTENSIONS.has(ext) || /\.(png|jpe?g|ico|svg|xml|txt|webmanifest|json)$/.test(ext))) {
+      plan.todos.push({ file: target, message: UNSUPPORTED_APP_FILES[stem] as string });
+    }
+    const segments = target.split('/');
+    if (segments.some(s => s.startsWith('@'))) plan.todos.push({ file: target, message: 'parallel routes (@slot folders) are not supported' });
+    if (segments.some(s => /^\(\.{1,3}\)/.test(s))) plan.todos.push({ file: target, message: 'intercepting routes ((.)folder) are not supported' });
+  }
+
+  // Next.js middleware: GioJS loads the root middleware.ts as declarative rules.
+  const headerTodos = new Map<string, string[]>();
+  for (const f of ['middleware.ts', 'middleware.js', 'src/middleware.ts', 'src/middleware.js']) {
+    if (!files.has(f)) continue;
+    const source = await read(f);
+    if (!/next\/server/.test(source)) continue;
+    const message = 'Next.js middleware: GioJS middleware.ts exports declarative rules (export default defineMiddleware({ redirects, rewrites, headers, guards }) from @gio.js/core), evaluated in Rust before routing - port this logic there or to gio.toml rules';
+    if (!f.startsWith('src/')) {
+      // Renamed so GioJS doesn't try to load a Next middleware as its rule file.
+      claim(f, f.replace(/^middleware/, 'middleware.next'));
+    }
+    headerTodos.set(f, [message]);
+  }
+  for (const f of ['instrumentation.ts', 'instrumentation.js', 'src/instrumentation.ts']) {
+    if (files.has(f)) plan.todos.push({ file: f, message: 'instrumentation hooks are not supported - start tracing/metrics from a GioNodePlugin or the [metrics] /_gio/metrics endpoint' });
+  }
+
+  // ── root layout from _app / _document ────────────────────────────────────
+  if (specials.size > 0) {
+    const appFile = specials.get('_app');
+    const docFile = specials.get('_document');
+    const sample = appFile ?? docFile ?? 'x.tsx';
+    const ext = extOf(sample) === '.ts' ? '.tsx' : extOf(sample);
+    const layoutPath = `app/layout${ext}`;
+    const existingLayout = fileList.some(f => /^app\/layout\.[jt]sx?$/.test(moves.get(f)?.to ?? f));
+    if (existingLayout || taken.has(layoutPath)) {
+      for (const f of specials.values()) plan.todos.push({ file: f, message: 'left in place: an app/layout already exists - merge this into it by hand' });
+    } else {
+      const stylesheets: string[] = [];
+      const unlinked: string[] = [];
+      const appSource = appFile !== undefined ? await read(appFile) : undefined;
+      if (appFile !== undefined && appSource !== undefined) {
+        for (const spec of stylesheetImports(appFile, appSource)) {
+          const resolved = spec.startsWith('.') ? resolveImport(files, posix.dirname(appFile), spec) : undefined;
+          if (resolved === undefined) {
+            unlinked.push(spec);
+            continue;
+          }
+          let target = moves.get(resolved)?.to ?? resolved;
+          if (stylesheetUrl(target) === undefined) {
+            // Global CSS only ever comes from _app in a pages project, so
+            // moving it under app/ (served at its path) breaks no import.
+            const moved = `app/${resolved.replace(/^src\//, '')}`;
+            if (claim(resolved, moved)) target = moved;
+          }
+          const url = stylesheetUrl(target);
+          if (url !== undefined) stylesheets.push(url);
+          else unlinked.push(resolved);
+        }
+      }
+      const content = buildRootLayout({
+        ...(appFile !== undefined && appSource !== undefined ? { app: { path: appFile, source: appSource } } : {}),
+        ...(docFile !== undefined ? { document: { path: docFile, source: await read(docFile) } } : {}),
+        stylesheets,
+        unlinkedStylesheets: unlinked,
+        typescript: ext === '.tsx',
+      });
+      taken.add(layoutPath);
+      const mergedFrom = [...specials.values()];
+      plan.files.push({
+        to: layoutPath,
+        content,
+        kind: 'created',
+        mergedFrom,
+        changes: [{ line: 1, message: `generated from ${mergedFrom.join(' + ')}${stylesheets.length > 0 ? ` (stylesheets linked: ${stylesheets.join(', ')})` : ''}` }],
+        todos: scanTodos(content),
+      });
+      plan.removals.push(...mergedFrom);
+    }
+  }
+
+  // ── code transforms ──────────────────────────────────────────────────────
+  const rewriterFor = (from: string, to: string) => (spec: string): string | undefined => {
+    const oldDir = posix.dirname(from);
+    const newDir = posix.dirname(to);
+    const target = resolveImport(files, oldDir, spec);
+    const targetMove = target !== undefined ? moves.get(target)?.to : undefined;
+    if (targetMove !== undefined && target !== undefined) {
+      const written = posix.normalize(posix.join(oldDir, spec));
+      // Keep the specifier's style: extension-less stays extension-less.
+      const keepsExt = written === target || written.endsWith(extOf(target));
+      const dest = keepsExt ? targetMove : targetMove.slice(0, targetMove.length - extOf(targetMove).length);
+      return relativeSpecifier(newDir, dest.replace(/\/index$/, ''));
+    }
+    if (oldDir === newDir) return undefined;
+    return relativeSpecifier(newDir, posix.normalize(posix.join(oldDir, spec)));
+  };
+
+  for (const f of fileList) {
+    const move = moves.get(f);
+    const to = move?.to ?? f;
+    if (!isSource(f)) {
+      if (move !== undefined) {
+        plan.files.push({ from: f, to, content: await readFile(join(root, f)), kind: 'moved', changes: [], todos: [] });
+        plan.removals.push(f);
+      }
+      continue;
+    }
+    if (specials.has('_app') && f === specials.get('_app')) continue;
+    if (specials.has('_document') && f === specials.get('_document')) continue;
+
+    const role = move?.role ?? roleFor(to);
+    const source = await read(f);
+    const result = transformSource(source, {
+      filePath: to,
+      role,
+      ...(move !== undefined ? { originalPath: f } : {}),
+      rewriteSpecifier: rewriterFor(f, to),
+      classicJsx: !files.has('tsconfig.json'),
+      cssUrl: (spec: string) => {
+        const resolved = resolveImport(files, posix.dirname(f), spec) ?? posix.normalize(posix.join(posix.dirname(f), spec));
+        return stylesheetUrl(moves.get(resolved)?.to ?? resolved);
+      },
+    });
+    if (result.skipped !== undefined) {
+      plan.todos.push({ file: to, message: `not transformed${move !== undefined ? ' (its relative imports were not updated for the move either)' : ''} - ${result.skipped}` });
+    }
+    plan.fonts.push(...result.fonts);
+    let output = result.output;
+    let changes = result.changes;
+    const extra = headerTodos.get(f);
+    if (extra !== undefined) {
+      output = extra.map(m => `// ${TODO_MARKER} ${m}\n`).join('') + output;
+      changes = changes.map(c => ({ line: c.line + extra.length, message: c.message }));
+    }
+    if (move === undefined && output === source) continue;
+    plan.files.push({
+      ...(move !== undefined ? { from: f } : {}),
+      to,
+      before: source,
+      content: output,
+      kind: move !== undefined ? 'moved' : 'modified',
+      changes,
+      todos: scanTodos(output),
+    });
+    if (move !== undefined) plan.removals.push(f);
+  }
+
+  // ── next.config → gio.toml ───────────────────────────────────────────────
+  let staticExport = false;
+  if (configFile !== undefined) {
+    const converted = convertConfigSource(await read(configFile), configFile);
+    staticExport = converted.staticExport;
+    let appName = 'my-app';
+    try {
+      const name = (JSON.parse(pkgRaw ?? '{}') as { name?: unknown }).name;
+      if (typeof name === 'string' && name !== '') appName = name;
+    } catch { /* invalid package.json is reported by its own step */ }
+    const existing = files.has('gio.toml') ? await read('gio.toml') : undefined;
+    const toml = planToml(existing, converted, appName);
+    plan.config = { source: configFile, converted, toml };
+    const current = files.has(toml.target) ? await read(toml.target) : undefined;
+    if (current !== toml.content) {
+      plan.files.push({
+        to: toml.target,
+        ...(current !== undefined ? { before: current } : {}),
+        content: toml.content,
+        kind: current !== undefined ? 'modified' : 'created',
+        changes: [],
+        todos: scanTodos(toml.content),
+      });
+    }
+    plan.todos.push({ file: configFile, message: 'delete it once gio.toml is reviewed - GioJS ignores next.config' });
+  } else {
+    plan.notes.push('No next.config.* found - gio.toml was not generated.');
+  }
+
+  // ── package.json / tsconfig.json ─────────────────────────────────────────
+  const typescript = files.has('tsconfig.json');
+  if (pkgRaw !== undefined) {
+    const update = migratePackageJson(pkgRaw, { staticExport, typescript });
+    if (update !== undefined) {
+      for (const t of update.todos) plan.todos.push({ file: 'package.json', message: t });
+      if (update.content !== pkgRaw) {
+        plan.files.push({ from: 'package.json', to: 'package.json', before: pkgRaw, content: update.content, kind: 'modified', changes: update.changes.map(message => ({ line: 0, message })), todos: [] });
+      }
+    }
+  }
+  if (typescript) {
+    const raw = await read('tsconfig.json');
+    const update = migrateTsconfig(raw);
+    if (update !== undefined) {
+      for (const t of update.todos) plan.todos.push({ file: 'tsconfig.json', message: t });
+      plan.files.push({ from: 'tsconfig.json', to: 'tsconfig.json', before: raw, content: update.content, kind: 'modified', changes: update.changes.map(message => ({ line: 0, message })), todos: [] });
+    }
+  }
+  if (files.has('next-env.d.ts')) plan.todos.push({ file: 'next-env.d.ts', message: 'delete it - it only references Next.js types' });
+  if (!typescript && files.has('jsconfig.json') && /"paths"/.test(await read('jsconfig.json'))) {
+    plan.todos.push({
+      file: 'jsconfig.json',
+      message: 'GioJS reads tsconfig.json, not jsconfig.json: its path aliases (e.g. @/...) won\'t resolve - use relative imports, or rename it to tsconfig.json and add "allowJs": true and "jsx": "react-jsx"',
+    });
+  }
+  for (const f of fileList.filter(p => /^\.eslintrc|^eslint\.config\./.test(p))) {
+    if (/next/.test(await read(f))) plan.todos.push({ file: f, message: 'uses eslint-config-next: switch to a plain React/TypeScript ESLint config' });
+  }
+
+  // ── report ───────────────────────────────────────────────────────────────
+  const reportTarget = files.has(REPORT_FILE) && !(await read(REPORT_FILE)).startsWith(REPORT_HEADER) ? 'MIGRATION_REPORT.gio.md' : REPORT_FILE;
+  const report = buildReport(plan, new Date());
+  plan.files.push({
+    to: reportTarget,
+    ...(files.has(reportTarget) ? { before: await read(reportTarget) } : {}),
+    content: report,
+    kind: files.has(reportTarget) ? 'modified' : 'created',
+    changes: [],
+    todos: [],
+  });
+  return plan;
 }
 
-export async function migrateDirectory(
-  dir: string,
-  dryRun: boolean,
-): Promise<TransformResult[]> {
-  await stat(dir);
-  const files = await findSourceFiles(dir);
-  return Promise.all(files.map(f => transformFile(f, dryRun, dir)));
+function roleFor(path: string): FileRole {
+  if (!path.startsWith('app/')) return 'source';
+  const stem = stemOf(path);
+  if (stem === 'route') return 'app-route';
+  if (/^app\/layout\.[jt]sx?$/.test(path)) return 'app-root-layout';
+  return COMPONENT_CONVENTIONS.has(stem) ? 'app-page' : 'source';
+}
+
+/** Write the plan to disk: new files first, then remove what was moved. */
+export async function applyMigration(plan: MigrationPlan): Promise<void> {
+  for (const file of plan.files) {
+    const abs = join(plan.root, file.to);
+    // The plan only targets free paths for moves and generated files; a
+    // path that appeared since planning is never clobbered.
+    if (file.kind !== 'modified' && existsSync(abs)) {
+      throw new Error(`refusing to overwrite ${file.to}, which appeared after the migration was planned`);
+    }
+    await mkdir(dirname(abs), { recursive: true });
+    await writeFile(abs, file.content);
+  }
+  const written = new Set(plan.files.map(f => f.to));
+  const dirs = new Set<string>();
+  for (const rel of plan.removals) {
+    if (written.has(rel)) continue;
+    await rm(join(plan.root, rel), { force: true });
+    for (let d = posix.dirname(rel); d !== '.' && d !== ''; d = posix.dirname(d)) dirs.add(d);
+  }
+  // Deepest first, so emptied pages/ and src/app/ trees disappear entirely.
+  for (const d of [...dirs].sort((a, b) => b.length - a.length)) {
+    try {
+      await rmdir(join(plan.root, d));
+    } catch {
+      // Not empty (files that stayed behind) - keep it.
+    }
+  }
 }
