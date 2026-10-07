@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Deployment</div>
+      <div className="docs-eyebrow">Deployment &amp; Operations</div>
       <h1>Observability</h1>
       <p className="page-subtitle">Health checks, Prometheus metrics, request IDs and JSON logs, and the dev dashboard.</p>
       <p>Two endpoints are served directly by Rust:</p>

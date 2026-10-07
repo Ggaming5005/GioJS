@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Rendering &amp; Caching</div>
       <h1>Caching & Revalidating</h1>
       <p className="page-subtitle">Incremental Static Regeneration with stale-while-revalidate semantics and on-demand purges.</p>
       <p>Export revalidate from a page to control how long its rendered HTML is cached by the Rust layer.</p>
@@ -22,7 +22,7 @@ export const revalidate = false;
       <p>Cached pages are served from memory in microseconds. When a page is stale, GioJS serves the stale copy immediately and revalidates in the background - visitors never wait.</p>
       <div className="callout">Cache keys are deployment-ID aware, so a redeploy automatically invalidates stale entries.</div>
 
-      <h2>On-demand revalidation</h2>
+      <h2 id="on-demand-revalidation">On-demand revalidation</h2>
       <p>
         <code>revalidate</code> bounds how long a page can be out of date. When you know the
         moment its data changed - a post was published, a price edited in the CMS - purge it

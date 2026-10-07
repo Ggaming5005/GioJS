@@ -22,7 +22,7 @@ Known workspace dependencies and their current locked versions are in `Cargo.loc
 
 ### Minimum Rust version
 
-`rust-version` under `[workspace.package]` in the root `Cargo.toml` (1.89) is the oldest toolchain that builds the committed `Cargo.lock`, and every crate inherits it. A dependency bump can raise it: if a locked crate starts needing a newer rustc, CI's `msrv` job fails. In the same PR, raise `rust-version` and the `FROM rust:` tag in `docs/deployment/docker.md`. `node scripts/check-msrv.mjs` checks that `rust-version`, `Cargo.lock` and that tag agree.
+`rust-version` under `[workspace.package]` in the root `Cargo.toml` (1.89) is the oldest toolchain that builds the committed `Cargo.lock`, and every crate inherits it. A dependency bump can raise it: if a locked crate starts needing a newer rustc, CI's `msrv` job fails. In the same PR, raise `rust-version`; the docs never restate the number - building the server from source (`docs/deployment/docker.md`, the Known Limitations page) points at `cargo build --release --locked` with the `rust-version` from `Cargo.toml`. `node scripts/check-msrv.mjs` checks that `rust-version` and `Cargo.lock` agree, and that any `FROM rust:<tag>` image in the docs is at least the MSRV - there is none today (the Docker recipe builds from prebuilt binaries with `gio build standalone`), so a from-source Dockerfile added later is checked too.
 
 ## npm packages
 

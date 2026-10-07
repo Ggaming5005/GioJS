@@ -11,21 +11,16 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { cp, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { cliDir, runCli } from './helpers.ts';
 
-const cliDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BUILD_STEP = 'pnpm --filter @gio.js/core --filter @gio.js/react run build';
 
-/** Runs `create-giojs app --yes --no-install` in `cwd`; returns its stdout. */
-function scaffold(cliEntry: string, cwd: string): string {
-  const result = spawnSync(process.execPath, [cliEntry, 'app', '--yes', '--no-install'], {
-    cwd,
-    encoding: 'utf8',
-  });
+/** Runs `create-giojs <name> --yes --no-install --no-git` in `cwd`; returns its stdout. */
+function scaffold(cliEntry: string, cwd: string, name = 'app', flags: string[] = []): string {
+  const result = runCli([name, '--yes', '--no-install', '--no-git', ...flags], { cwd, entry: cliEntry });
   assert.equal(result.status, 0, `create-giojs failed:\n${result.stdout}\n${result.stderr}`);
   return result.stdout;
 }
@@ -69,6 +64,15 @@ test('a published create-giojs prints no workspace build step', async () => {
     const deps = await dependencies(join(workDir, 'app'));
     assert.match(deps['@gio.js/core'] ?? '', /^\^/);
     assert.doesNotMatch(stdout, /pnpm --filter/);
+
+    // A published static site exports through the @gio.js/server bin.
+    scaffold(join(installed, 'dist', 'index.js'), workDir, 'site', ['--static']);
+    const site = JSON.parse(await readFile(join(workDir, 'site', 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    assert.equal(site.scripts['build'], 'tsc --noEmit && gio export');
+    assert.equal(site.scripts['dev'], 'cross-env NODE_ENV=development giojs-server');
+    assert.equal(site.scripts['start'], undefined);
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }

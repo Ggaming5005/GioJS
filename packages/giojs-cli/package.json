@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "tsc && node --test test/copy-template.test.ts test/templates.test.ts test/create.test.ts test/template-typecheck.test.ts test/migrate-transforms.test.ts test/migrate-pages.test.ts test/next-config-converter.test.ts test/migrate-project.test.ts test/migrate-render.test.ts"
+    "test": "tsc && node --test test/args.test.ts test/project-name.test.ts test/copy-template.test.ts test/templates.test.ts test/create.test.ts test/scaffold.test.ts test/interactive.test.ts test/template-typecheck.test.ts test/scaffold-boot.test.ts test/migrate-transforms.test.ts test/migrate-pages.test.ts test/next-config-converter.test.ts test/migrate-project.test.ts test/migrate-render.test.ts"
   },
   "files": [
     "dist",

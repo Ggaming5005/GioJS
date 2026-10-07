@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Styling &amp; Assets</div>
       <h1>CSS & Styling</h1>
       <p className="page-subtitle">
         Import stylesheets and CSS Modules from any page, layout or component. GioJS bundles

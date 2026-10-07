@@ -298,7 +298,7 @@ pub struct GioConfig {
     pub app: AppConfig,
     #[serde(default)]
     pub server: ServerConfig,
-    /// Self-hosted fonts, downloaded at startup and served from /_gio/fonts.
+    /// Self-hosted fonts, fetched at startup and served from /_gio/fonts.
     #[serde(default, rename = "fonts")]
     pub fonts: Vec<FontEntry>,
     #[serde(default)]
@@ -901,7 +901,8 @@ impl ImageConfig {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct FontEntry {
     pub family: String,
-    /// woff2 URL (or a /public path) downloaded at startup.
+    /// A file under public/ ("/fonts/inter.woff2"), copied at every start, or
+    /// an https:// woff2 URL, downloaded on the first start.
     pub url: String,
     #[serde(default = "default_font_weight")]
     pub weight: u16,

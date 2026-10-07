@@ -1,0 +1,16 @@
+# dependencies
+node_modules/
+
+# GioJS build output and caches (regenerated at every server start)
+.gio/
+out/
+dist/
+standalone/
+
+# local env files hold secrets - .env.example is the committed template
+.env.local
+.env*.local
+
+# logs and OS files
+*.log
+.DS_Store

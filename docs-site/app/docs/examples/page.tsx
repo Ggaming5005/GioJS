@@ -35,11 +35,11 @@ const EXAMPLES: Example[] = [
   },
   {
     title: 'This documentation site',
-    description: 'The site you are reading right now is a GioJS app. It was built as part of the P3.7 dogfooding phase to validate that GioJS can serve real-world docs sites with layout nesting and static caching.',
+    description: 'The site you are reading right now is a GioJS app (docs-site/ in the repository), exported to static HTML and served from a static host.',
     features: [
       'Nested layouts (root layout + docs layout)',
-      'All pages static with revalidate = false',
-      'Redirect from / to /docs/getting-started',
+      'All pages static with revalidate = false, exported with the GioJS exporter',
+      'A landing page at / and the docs under /docs, plus generated llms.txt and sitemap.xml',
       'Sidebar with server-side active link highlighting',
       'Mobile hamburger navigation (vanilla JS, no hydration)',
       'Copy-to-clipboard on code blocks',
@@ -50,6 +50,7 @@ const EXAMPLES: Example[] = [
 export default function ExamplesPage(): React.JSX.Element {
   return (
     <>
+      <div className="docs-eyebrow">Getting Started</div>
       <h1>Examples</h1>
       <p className="page-subtitle">
         Reference apps showing common GioJS patterns.

@@ -9,12 +9,15 @@
  *   - no crate in Cargo.lock needs a newer rustc (its own `rust-version`, or
  *     1.85 for edition 2024) - otherwise a --locked build on the MSRV
  *     toolchain fails before it compiles anything;
- *   - every `FROM rust:<tag>` in the docs is at least the MSRV, so the
+ *   - every `FROM rust:<tag>` in the docs is at least the MSRV, so a
  *     documented from-source Dockerfile can build the committed lockfile.
- *     It said rust:1.78 long after the lockfile needed 1.89.
+ *     One said rust:1.78 long after the lockfile needed 1.89. The docs have
+ *     no Rust image today (the Docker recipe uses `gio build standalone` with
+ *     a prebuilt binary, and from-source builds point at `rust-version`), so
+ *     this part guards any that is added later.
  *
- * A dependency bump that needs a newer rustc has to raise `rust-version` and
- * the docs' `FROM rust:` tag in the same change. Exits 1 on any drift.
+ * A dependency bump that needs a newer rustc has to raise `rust-version` (and
+ * any `FROM rust:` tag in the docs) in the same change. Exits 1 on any drift.
  *
  *   node scripts/check-msrv.mjs           # check (CI gate)
  *   node scripts/check-msrv.mjs --print   # print the MSRV (CI installs it)

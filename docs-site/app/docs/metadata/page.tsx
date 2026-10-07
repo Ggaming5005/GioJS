@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Rendering &amp; Caching</div>
       <h1>Metadata &amp; SEO</h1>
       <p className="page-subtitle">
         Titles, descriptions, Open Graph and Twitter cards, canonical URLs, sitemaps,

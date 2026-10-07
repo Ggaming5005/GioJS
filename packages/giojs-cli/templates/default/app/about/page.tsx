@@ -1,13 +1,21 @@
 import React from 'react';
 import { GioLink } from '@gio.js/react';
+import type { Metadata } from '@gio.js/core';
 
 const STRUCTURE = [
   { path: 'app/', desc: 'File-based routes. A page.tsx is a route; layout.tsx wraps the pages beneath it.' },
   { path: 'app/posts/[id]/', desc: 'A dynamic route with server-side data via getServerSideProps.' },
+  { path: 'app/globals.css', desc: 'Global styles, imported by app/layout.tsx. Import CSS (or *.module.css) from any component.' },
   { path: 'components/', desc: 'Your shared React components.' },
-  { path: 'public/', desc: 'Static files served as-is - images, styles, fonts.' },
-  { path: 'gio.toml', desc: 'Server configuration: port, HTTP/2, image settings.' },
+  { path: 'public/', desc: 'Static files served as-is - images, the self-hosted fonts in public/fonts/.' },
+  { path: 'gio.toml', desc: 'Server configuration: port, HTTP/2, images, fonts, redirects, security.' },
+  { path: '.env.example', desc: 'The environment variables the app reads. Copy it to .env.local (git-ignored).' },
 ] as const;
+
+export const metadata: Metadata = {
+  title: 'Project structure',
+  description: 'Where everything in this GioJS app lives.',
+};
 
 export default function AboutPage(): React.JSX.Element {
   return (
@@ -30,7 +38,7 @@ export default function AboutPage(): React.JSX.Element {
 
         <p>
           Start by editing <code>app/page.tsx</code>, then read the{' '}
-          <GioLink href="/posts/1" className="gio-link">server-rendered example</GioLink>.
+          <GioLink href="/posts/1" className="gio-link">dynamic route example</GioLink>.
         </p>
 
         <p><GioLink href="/" className="gio-link">← Back home</GioLink></p>

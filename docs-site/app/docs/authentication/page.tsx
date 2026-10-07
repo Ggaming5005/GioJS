@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Security &amp; Auth</div>
       <h1>Authentication</h1>
       <p className="page-subtitle">Encrypted cookie sessions, session guards verified in Rust, and secure cookie helpers.</p>
 
@@ -226,10 +226,11 @@ export function POST() {
         cannot submit a form as your logged-in user. Keep every state change behind{' '}
         <code>POST</code>, <code>PUT</code>, <code>PATCH</code>, or <code>DELETE</code> (never{' '}
         <code>GET</code>, which top-level navigations send cookies with).{' '}
-        <code>SameSite</code> is the first layer. Where a server-side cross-site request check
-        on those methods is enabled (see <a href="/docs/configuration">Configuration</a> for
-        whether your version has one), it adds a second. <code>sameSite: &apos;strict&apos;</code>{' '}
-        is available when even links from other sites should arrive logged out.
+        <code>SameSite</code> is the first layer. The Rust server&apos;s{' '}
+        <a href="/docs/security">CSRF protection</a>, on by default, adds a second: it refuses
+        cross-site requests with those methods before they reach your code.{' '}
+        <code>sameSite: &apos;strict&apos;</code> is available when even links from other
+        sites should arrive logged out.
       </p>
 
       <h2>Cookies</h2>

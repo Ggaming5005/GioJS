@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Building Your App</div>
+      <div className="docs-eyebrow">Routing</div>
       <h1>Linking & Navigating</h1>
       <p className="page-subtitle">Client-side navigation, router hooks, prefetching, scroll and focus.</p>
       <p>Use GioLink for internal navigation. It prefetches on hover intent by default and swaps content without a full reload. Set <code>prefetch=&quot;viewport&quot;</code> to instead prefetch once when the link scrolls into view (via IntersectionObserver), or <code>prefetch={'{false}'}</code> to disable prefetching.</p>

@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Architecture</div>
+      <div className="docs-eyebrow">Rendering &amp; Caching</div>
       <h1>Caching Layers</h1>
       <p className="page-subtitle">In-process LRU over a persistent disk tier, per instance.</p>
       <p>

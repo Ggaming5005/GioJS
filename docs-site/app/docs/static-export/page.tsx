@@ -6,7 +6,7 @@ export const revalidate = false;
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Deployment</div>
+      <div className="docs-eyebrow">Rendering &amp; Caching</div>
       <h1>Static Export</h1>
       <p className="page-subtitle">
         Pre-render your whole app to plain HTML and deploy it free to any static
@@ -17,8 +17,10 @@ export default function Page(): React.JSX.Element {
       <h2>Choose at create time</h2>
       <p>
         When you scaffold a project, pick <strong>Static site</strong> at the prompt.
-        That wires <code>npm run build</code> to the exporter and drops the production
-        server scripts.
+        That wires <code>npm run build</code> to the exporter (after a{' '}
+        <code>tsc --noEmit</code> typecheck in TypeScript projects), drops the production
+        server scripts, and declares the starter&apos;s fonts with <code>@font-face</code> in{' '}
+        <code>app/globals.css</code> instead of <code>[[fonts]]</code> (below).
       </p>
       <CodeBlock lang="bash" code={`npm create giojs@latest
 # ? Which language?      › TypeScript / JavaScript
@@ -169,6 +171,12 @@ export function getStaticPaths() {
           Runtime image optimization via <code>/_gio/image</code>: <code>GioImage</code>{' '}
           renders its plain <code>src</code> in an export (no <code>srcset</code>), so ship
           pre-sized images
+        </li>
+        <li>
+          <code>gio.toml</code> settings the Rust server applies, such as{' '}
+          <code>[[fonts]]</code>: declare fonts with <code>@font-face</code> in an imported
+          stylesheet instead - <code>url()</code>s to files next to it (or{' '}
+          <code>../public/fonts/x.woff2</code>) are bundled with hashed names
         </li>
       </ul>
       <p>If you need any of those, use <strong>Server</strong> mode instead.</p>
