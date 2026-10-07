@@ -16,6 +16,7 @@ import { renderRoute } from './ssr.ts';
 import { buildSegmentTree } from './segment-tree.ts';
 import type { IPCRequest } from './context.ts';
 import type { LayoutEntry, LayoutModule, PageModule, RouteModule } from './router.ts';
+import type { Metadata } from './metadata.ts';
 
 (globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
 
@@ -48,6 +49,9 @@ function PageA(): React.ReactElement {
 function PageB(): React.ReactElement {
   return React.createElement('p', null, 'PAGE_B');
 }
+function PageC(): React.ReactElement {
+  return React.createElement('p', null, 'PAGE_C');
+}
 
 const pageModules: Record<string, PageModule> = {
   '/a': {
@@ -62,6 +66,7 @@ const pageModules: Record<string, PageModule> = {
     default: PageB,
     metadata: { title: 'B', alternates: { canonical: '/b' } },
   },
+  '/c': { default: PageC },
 };
 
 function routes(): Map<string, RouteModule> {
@@ -72,8 +77,13 @@ function routes(): Map<string, RouteModule> {
   return map;
 }
 
+const ROOT_METADATA: Metadata = {
+  title: { default: 'Site', template: '%s | Site' },
+  description: 'root desc',
+};
+
 /** A root layout that still hand-writes a <title> (metadata supersedes it). */
-function rootLayout(withHead: boolean): Map<string, LayoutEntry> {
+function rootLayout(withHead: boolean, metadata: Metadata = ROOT_METADATA): Map<string, LayoutEntry> {
   const mod: LayoutModule = {
     default: ({ children }) =>
       React.createElement(
@@ -87,7 +97,7 @@ function rootLayout(withHead: boolean): Map<string, LayoutEntry> {
         ),
         React.createElement('body', null, children),
       ),
-    metadata: { title: { default: 'Site', template: '%s | Site' }, description: 'root desc' },
+    metadata,
   };
   return withHead
     ? new Map([['', { filePath: '/app/layout.tsx', dir: '', load: async () => mod }]])
@@ -97,16 +107,22 @@ function rootLayout(withHead: boolean): Map<string, LayoutEntry> {
 const clientScripts = new Map([
   ['/a', '/_next/static/chunks/a.js'],
   ['/b', '/_next/static/chunks/b.js'],
+  ['/c', '/_next/static/chunks/c.js'],
 ]);
 
-async function serverHtml(path: string, withRootLayout: boolean): Promise<string> {
+async function serverHtml(
+  path: string,
+  withRootLayout: boolean,
+  scripts = clientScripts,
+  rootMetadata = ROOT_METADATA,
+): Promise<string> {
   const result = await renderRoute(
     makeRequest(path),
     routes(),
-    rootLayout(withRootLayout),
+    rootLayout(withRootLayout, rootMetadata),
     undefined,
     undefined,
-    clientScripts,
+    scripts,
   );
   if (!('body' in result)) throw new Error('expected a buffered render');
   return result.body;
@@ -208,4 +224,77 @@ describe('metadata across hydration and soft navigation', () => {
       expect(consoleError).not.toHaveBeenCalled();
     });
   }
+
+  it("a page that does not hydrate takes the previous page's tags with it, and keeps its title", async () => {
+    const htmlA = await serverHtml('/a', true);
+    // No client bundle for B (or props that cannot be serialized): no envelope.
+    const htmlB = await serverHtml('/b', true, new Map([['/a', '/_next/static/chunks/a.js']]));
+    expect(htmlB).not.toContain('__gio_props');
+    loadDocument(htmlA);
+    window.history.replaceState(null, '', '/a');
+    const expectedA = ['title=A | Site', 'description=about A', 'og:title=OG A', 'og:image=https://example.com/a.png'];
+
+    const runtime = await import('./client-runtime.ts');
+    await act(async () => {
+      runtime.registerRoute('/a', build(PageA));
+    });
+    expect(headSummary()).toEqual(expectedA);
+
+    const navigation = (await import(/* @vite-ignore */ NAVIGATION_MODULE)) as NavigationModule;
+    const serve = (html: string): void => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(html, { status: 200, headers: { 'content-type': 'text/html' } })),
+      );
+    };
+    serve(htmlB);
+    await act(async () => {
+      await navigation.navigateTo('/b', false);
+    });
+    expect(document.getElementById('__gio')?.textContent).toBe('PAGE_B');
+    // A's React-owned tags went with its root; the title navigation set stays.
+    expect(headSummary()).toEqual(['title=B | Site']);
+    expect(document.title).toBe('B | Site');
+
+    // Back to a hydrating page: rendered afresh, with exactly its own tags.
+    serve(htmlA);
+    await act(async () => {
+      await navigation.navigateTo('/a', false);
+    });
+    expect(document.getElementById('__gio')?.textContent).toBe('PAGE_A');
+    expect(headSummary()).toEqual(expectedA);
+    expect(document.title).toBe('A | Site');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('a next page without a metadata title keeps the title navigation gave it', async () => {
+    // No metadata title in the root layout: C's only title is the
+    // hand-written one, which A's metadata title superseded on the server.
+    const rootMetadata: Metadata = {};
+    const htmlA = await serverHtml('/a', true, clientScripts, rootMetadata);
+    const htmlC = await serverHtml('/c', true, clientScripts, rootMetadata);
+    loadDocument(htmlA);
+    window.history.replaceState(null, '', '/a');
+    const runtime = await import('./client-runtime.ts');
+    await act(async () => {
+      runtime.registerRoute('/a', build(PageA));
+    });
+    expect(document.title).toBe('A');
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(htmlC, { status: 200, headers: { 'content-type': 'text/html' } })),
+    );
+    const navigation = (await import(/* @vite-ignore */ NAVIGATION_MODULE)) as NavigationModule;
+    await act(async () => {
+      await navigation.navigateTo('/c', false);
+    });
+    await act(async () => {
+      runtime.registerRoute('/c', build(PageC));
+    });
+    expect(document.getElementById('__gio')?.textContent).toBe('PAGE_C');
+    // A's title element went with its root; the hand-written one is back.
+    expect(headSummary()).toEqual(['title=Hand-written']);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
 });

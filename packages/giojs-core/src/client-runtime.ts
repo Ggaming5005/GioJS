@@ -39,6 +39,8 @@ type BuildFn = (props: Record<string, unknown>, path: string) => React.ReactNode
 
 const routeBuilders = new Map<string, BuildFn>();
 let activeRoot: Root | null = null;
+/** Set by the first mount: later ones render swapped-in HTML afresh. */
+let hydrated = false;
 let listenerInstalled = false;
 let waitingForEnvelope = false;
 
@@ -65,10 +67,35 @@ function readEnvelope(): GioEnvelope | null {
   }
 }
 
+/**
+ * Unmount the previous page's root. Its React-owned head tags go with it -
+ * that is how the next page's replace them - and so does its <title>,
+ * which navigation has already retitled for the next page. Unless the next
+ * tree renders a metadata title of its own, that title is put back; when it
+ * does, a leftover server-only <title> would sit next to it, so it goes -
+ * as the server drops one next to a metadata title (ssr.ts).
+ */
+function unmountActiveRoot(nextRendersTitle: boolean): void {
+  const title = document.title;
+  activeRoot?.unmount();
+  activeRoot = null;
+  if (nextRendersTitle) {
+    for (const element of document.head.querySelectorAll('title')) element.remove();
+  } else if (document.title !== title) {
+    document.title = title;
+  }
+}
+
 function mount(): void {
   const container = document.getElementById('__gio');
   const envelope = readEnvelope();
-  if (container === null || envelope === null) return;
+  if (container === null || envelope === null) {
+    // Soft navigation to a page that never hydrates (no client bundle, or
+    // props that could not be serialized): the previous page's root would
+    // otherwise keep the head tags it hoisted.
+    if (activeRoot !== null) unmountActiveRoot(false);
+    return;
+  }
 
   const build = routeBuilders.get(envelope.pattern);
   if (build === undefined) {
@@ -84,13 +111,15 @@ function mount(): void {
     (globalThis as Record<string, unknown>)['__GIO_IMAGES__'] = envelope.images;
   }
   const element = withMetadata(build(envelope.props, envelope.path), envelope.metadata);
-  if (activeRoot === null) {
+  if (!hydrated) {
     // First load: the container holds this exact tree's server HTML.
+    hydrated = true;
     activeRoot = hydrateRoot(container, element);
   } else {
-    // After a swap the old root's container is detached; a fresh render
-    // replaces the swapped-in server HTML.
-    activeRoot.unmount();
+    // After a swap the old root's container is detached (or there is none:
+    // the previous page did not hydrate); a fresh render replaces the
+    // swapped-in server HTML.
+    unmountActiveRoot(envelope.metadata?.some(tag => tag.tag === 'title') === true);
     activeRoot = createRoot(container);
     activeRoot.render(element);
   }

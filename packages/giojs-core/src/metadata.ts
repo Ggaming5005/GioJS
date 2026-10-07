@@ -149,7 +149,9 @@ export interface MetadataExtras {
   /**
    * Pages only: the props the page component renders with (what
    * getServerSideProps returned, or `{ params, searchParams }`) - reuse them
-   * instead of fetching the same data twice. Undefined for layouts.
+   * instead of fetching the same data twice. Undefined for layouts. On a
+   * `shell = 'cache'` page whose getServerSideProps read credentials,
+   * reading them costs the shell its cache: the head is part of the shell.
    */
   props?: Record<string, unknown>;
 }
@@ -176,8 +178,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** `value` when it is a plain object (not a string, array, URL or null), keeping its type. */
-function objectOf<T extends object>(value: T | string | URL | null | undefined): T | undefined {
-  return isRecord(value) && !(value instanceof URL) ? value : undefined;
+function objectOf<T extends object>(
+  value: T | string | URL | null | undefined,
+): Exclude<T, readonly unknown[] | URL> | undefined {
+  return isRecord(value) && !(value instanceof URL)
+    ? (value as Exclude<T, readonly unknown[] | URL>)
+    : undefined;
 }
 
 /**
@@ -409,15 +415,18 @@ export function metadataToTags(
     }
   }
 
-  const icons = resolved.icons;
+  const icons = resolved.icons ?? undefined;
+  // A plain object without `url` is the grouped form; a string, URL,
+  // descriptor or array is the `icon` shorthand.
+  const iconObject = objectOf(icons);
   const iconGroups: Array<[string, IconList | undefined]> =
-    isRecord(icons) && !('url' in icons)
+    iconObject !== undefined && !('url' in iconObject)
       ? [
-          ['icon', (icons as IconsMetadata).icon],
-          ['shortcut icon', (icons as IconsMetadata).shortcut],
-          ['apple-touch-icon', (icons as IconsMetadata).apple],
+          ['icon', iconObject.icon],
+          ['shortcut icon', iconObject.shortcut],
+          ['apple-touch-icon', iconObject.apple],
         ]
-      : [['icon', (icons ?? undefined) as IconList | undefined]];
+      : [['icon', icons as IconList | undefined]];
   for (const [rel, list] of iconGroups) {
     for (const icon of toList(list)) {
       const descriptor: IconDescriptor =

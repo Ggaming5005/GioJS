@@ -211,6 +211,15 @@ describe('tags', () => {
     ]);
   });
 
+  it('accepts a URL instance as the icons shorthand', () => {
+    expect(summary(tagsFor([{ icons: new URL('https://cdn.example/favicon.ico') }]))).toEqual([
+      'icon=https://cdn.example/favicon.ico',
+    ]);
+    expect(
+      summary(tagsFor([{ icons: [new URL('https://cdn.example/a.png'), { url: new URL('https://cdn.example/b.png') }] }])),
+    ).toEqual(['icon=https://cdn.example/a.png', 'icon=https://cdn.example/b.png']);
+  });
+
   it('escapes every value through React', () => {
     const html = metadataTagsHtml(
       tagsFor([{ title: '</title><script>alert(1)</script>', description: '"><img src=x onerror=alert(1)>' }]),

@@ -13,7 +13,16 @@ import React from 'react';
 import { renderRoute, type StreamRenderResult } from './ssr.ts';
 import { notFound } from './not-found.ts';
 import type { IPCRequest } from './context.ts';
-import type { GsspContext, LayoutEntry, LayoutModule, PageModule, RouteModule } from './router.ts';
+import {
+  emptySegmentFiles,
+  type GsspContext,
+  type LayoutEntry,
+  type LayoutModule,
+  type PageModule,
+  type RouteModule,
+  type SegmentFileKind,
+  type SegmentFiles,
+} from './router.ts';
 import type { Metadata, MetadataExtras } from './metadata.ts';
 
 function makeRequest(path: string, headers: Record<string, string> = {}): IPCRequest {
@@ -59,6 +68,17 @@ function rootLayout(metadata?: Metadata, handTitle?: string): [string, LayoutEnt
         React.createElement('body', null, children),
       ),
     ...(metadata !== undefined ? { metadata } : {}),
+  });
+}
+
+/** A not-found.* or error.* file in `dir` rendering `marker`. */
+function segmentFile(files: SegmentFiles, kind: SegmentFileKind, dir: string, marker: string): void {
+  const map = kind === 'not-found' ? files.notFound : kind === 'error' ? files.error : files.loading;
+  map.set(dir, {
+    kind,
+    dir,
+    filePath: `/app/${dir}/${kind}.tsx`,
+    load: async () => ({ default: () => React.createElement('h1', null, marker) }),
   });
 }
 
@@ -234,9 +254,34 @@ describe('metadata in the rendered document', () => {
       }
       expect(headOf(html)).toContain('<title>Meta</title>');
       expect(html).not.toContain('Hand');
-      const warned = logs.lines().some(l => String(l['msg']).includes('renders its own <title>'));
+      const warned = logs.lines().some(l => String(l['msg']).includes('next to a metadata title'));
       expect(warned).toBe(mode === 'development');
     }
+  });
+
+  it('a <title> the page renders itself is superseded too, and the dev warning names pages', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const routes = route('/titled', {
+      default: () =>
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement('title', null, 'Page Title'),
+          React.createElement('main', null, 'PAGE_BODY'),
+        ),
+    });
+    const layouts = new Map([rootLayout({ title: { default: 'Site', template: '%s | Site' } })]);
+    const logs = captureLogs();
+    let html: string;
+    try {
+      html = bodyOf(await renderRoute(makeRequest('/titled'), routes, layouts));
+    } finally {
+      logs.restore();
+    }
+    expect(headOf(html)).toContain('<title>Site</title>');
+    expect(html).not.toContain('Page Title');
+    const warning = logs.lines().find(l => String(l['msg']).includes('next to a metadata title'));
+    expect(String(warning?.['msg'])).toContain('a layout or page');
   });
 
   it('keeps a hand-written title when no metadata title resolves', async () => {
@@ -409,6 +454,62 @@ describe('generateMetadata personal-read detection', () => {
     );
     expect(gsspOnly).toMatchObject({ cacheable: true, pprShell: true });
   });
+
+  it('under PPR, generateMetadata using the props of a gSSP that read credentials costs the shell its cache', async () => {
+    // gSSP may read cookies under PPR (its props stream after the shell),
+    // but a title built from those props lands in the shell's <head>.
+    const personal = await cacheFields(
+      {
+        shell: 'cache',
+        getServerSideProps: async ctx => ({ props: { user: ctx.cookies['session'] ?? 'anon' } }),
+        generateMetadata: async (_ctx, { props }) => ({ title: `Inbox of ${String(props?.['user'])}` }),
+      },
+      { streaming: true },
+      '/inbox',
+    );
+    expect(personal).toMatchObject({ cacheable: false, cacheMaxAge: 0, pprShell: false });
+    expect(personal.logs.some(l => String(l['msg']).startsWith('generateMetadata used the props'))).toBe(true);
+
+    // Props from a gSSP that read nothing personal keep the shell cacheable.
+    const shared = await cacheFields(
+      {
+        shell: 'cache',
+        getServerSideProps: async ctx => ({ props: { slug: ctx.path } }),
+        generateMetadata: async (_ctx, { props }) => ({ title: String(props?.['slug']) }),
+      },
+      { streaming: true },
+      '/shared',
+    );
+    expect(shared).toMatchObject({ cacheable: true, cacheMaxAge: 60, pprShell: true });
+  });
+
+  it('the shell that would have been stored never carries the personal title', async () => {
+    const logs = captureLogs();
+    try {
+      const result = await renderRoute(
+        makeRequest('/inbox-shell', credentialHeaders),
+        route('/inbox-shell', {
+          revalidate: 60,
+          shell: 'cache',
+          getServerSideProps: async ctx => ({ props: { user: ctx.cookies['session'] } }),
+          generateMetadata: async (_ctx, { props }) => ({ title: `Inbox of ${String(props?.['user'])}` }),
+        }),
+        new Map([rootLayout()]),
+        undefined,
+        undefined,
+        clientScripts,
+        { streaming: true },
+      );
+      const streamed = result as StreamRenderResult;
+      expect(streamed.type).toBe('stream');
+      // Plain streaming: no shell boundary for Rust to cut and store.
+      expect(streamed.shellBoundary).toBeUndefined();
+      expect(streamed.head.pprShell).toBeUndefined();
+      expect(headOf(await readStream(result))).toContain('<title>Inbox of u1</title>');
+    } finally {
+      logs.restore();
+    }
+  });
 });
 
 describe('special pages', () => {
@@ -427,6 +528,209 @@ describe('special pages', () => {
     expect(head).toContain('<title>Not found | Acme</title>');
     expect(head).toContain('<meta name="robots" content="noindex"/>');
     expect(head).not.toContain('Hand');
+  });
+
+  /** app/blog/[slug]/layout.tsx titling itself from its route param. */
+  function slugLayouts(seen: Array<Record<string, string>>): Map<string, LayoutEntry> {
+    return new Map([
+      rootLayout(),
+      layoutEntry('blog/[slug]', {
+        default: ({ children }) => React.createElement('article', null, children),
+        generateMetadata: async ctx => {
+          seen.push(ctx.params);
+          return { title: ctx.params['slug']!.toUpperCase() };
+        },
+      }),
+    ]);
+  }
+
+  it("a segment not-found renders with the matched params in its layouts' generateMetadata", async () => {
+    const seen: Array<Record<string, string>> = [];
+    const files = emptySegmentFiles();
+    segmentFile(files, 'not-found', 'blog/[slug]', 'SLUG_404');
+    const routes = route('/blog/:slug', { getServerSideProps: async () => ({ notFound: true }) }, 'blog/[slug]');
+    const result = await renderRoute(
+      makeRequest('/blog/hello'),
+      routes,
+      slugLayouts(seen),
+      undefined,
+      undefined,
+      undefined,
+      { segmentFiles: files },
+    );
+    expect('status' in result && result.status).toBe(404);
+    const html = bodyOf(result);
+    expect(html).toContain('SLUG_404');
+    expect(headOf(html)).toContain('<title>HELLO</title>');
+    expect(seen).toEqual([{ slug: 'hello' }]);
+  });
+
+  it("a segment error page renders with the matched params in its layouts' generateMetadata", async () => {
+    const seen: Array<Record<string, string>> = [];
+    const files = emptySegmentFiles();
+    segmentFile(files, 'error', 'blog/[slug]', 'SLUG_500');
+    const routes = route(
+      '/blog/:slug',
+      {
+        default: () => {
+          throw new Error('page broke');
+        },
+      },
+      'blog/[slug]',
+    );
+    const logs = captureLogs();
+    let result: Awaited<ReturnType<typeof renderRoute>>;
+    try {
+      result = await renderRoute(
+        makeRequest('/blog/hello'),
+        routes,
+        slugLayouts(seen),
+        undefined,
+        undefined,
+        undefined,
+        { segmentFiles: files },
+      );
+    } finally {
+      logs.restore();
+    }
+    expect('status' in result && result.status).toBe(500);
+    const html = bodyOf(result);
+    expect(html).toContain('SLUG_500');
+    expect(headOf(html)).toContain('<title>HELLO</title>');
+    // The page render, then the error page: the same params both times.
+    expect(seen).toEqual([{ slug: 'hello' }, { slug: 'hello' }]);
+  });
+
+  it('a generateMetadata that throws never takes the custom not-found and error pages down', async () => {
+    const layouts = new Map([
+      layoutEntry('', {
+        default: ({ children }) =>
+          React.createElement(
+            'html',
+            null,
+            React.createElement('head', null),
+            React.createElement('body', null, children),
+          ),
+        metadata: { title: { default: 'Acme', template: '%s | Acme' } },
+        generateMetadata: async () => {
+          throw new Error('cms down');
+        },
+      }),
+    ]);
+    const specialPages = {
+      notFound: async () => ({
+        default: () => React.createElement('h1', null, 'CUSTOM_404'),
+        metadata: { title: 'Not found' },
+      }),
+      error: async () => ({ default: () => React.createElement('h1', null, 'CUSTOM_500') }),
+    };
+    const logs = captureLogs();
+    let missing: Awaited<ReturnType<typeof renderRoute>>;
+    let broken: Awaited<ReturnType<typeof renderRoute>>;
+    try {
+      missing = await renderRoute(makeRequest('/missing'), new Map(), layouts, undefined, undefined, undefined, {
+        specialPages,
+      });
+      // The page fails on the layout's generateMetadata; its error page must not.
+      broken = await renderRoute(makeRequest('/'), route('/', {}), layouts, undefined, undefined, undefined, {
+        specialPages,
+      });
+    } finally {
+      logs.restore();
+    }
+    expect('status' in missing && missing.status).toBe(404);
+    expect(bodyOf(missing)).toContain('CUSTOM_404');
+    // The static metadata exports still apply.
+    expect(headOf(bodyOf(missing))).toContain('<title>Not found | Acme</title>');
+    expect('status' in broken && broken.status).toBe(500);
+    expect(bodyOf(broken)).toContain('CUSTOM_500');
+    expect(headOf(bodyOf(broken))).toContain('<title>Acme</title>');
+    const metadataFailures = logs.lines().filter(l => String(l['msg']).startsWith('special page metadata failed'));
+    expect(metadataFailures.length).toBe(2);
+    expect(metadataFailures[0]?.['error']).toBe('cms down');
+  });
+
+  it("notFound() in a layout's generateMetadata renders that segment's not-found page", async () => {
+    const files = emptySegmentFiles();
+    segmentFile(files, 'not-found', 'blog/[slug]', 'SLUG_404');
+    const layouts = new Map([
+      rootLayout({ title: { default: 'Acme', template: '%s | Acme' } }),
+      layoutEntry('blog/[slug]', {
+        default: ({ children }) => React.createElement('article', null, children),
+        generateMetadata: async () => notFound(),
+      }),
+    ]);
+    const logs = captureLogs();
+    let result: Awaited<ReturnType<typeof renderRoute>>;
+    try {
+      result = await renderRoute(
+        makeRequest('/blog/gone'),
+        route('/blog/:slug', {}, 'blog/[slug]'),
+        layouts,
+        undefined,
+        undefined,
+        undefined,
+        { segmentFiles: files },
+      );
+    } finally {
+      logs.restore();
+    }
+    expect('status' in result && result.status).toBe(404);
+    expect(bodyOf(result)).toContain('SLUG_404');
+    expect(headOf(bodyOf(result))).toContain('<title>Acme</title>');
+    // Expected flow, not an error.
+    expect(logs.lines().filter(l => l['level'] === 'error')).toEqual([]);
+  });
+
+  it('falls back to no tags when even the static metadata cannot be rendered', async () => {
+    const layouts = new Map([
+      layoutEntry('', {
+        default: ({ children }) =>
+          React.createElement('html', null, React.createElement('head', null), React.createElement('body', null, children)),
+        // A null image entry: metadataToTags cannot read it.
+        metadata: { openGraph: { images: [null as unknown as string] } },
+        generateMetadata: async () => {
+          throw new Error('cms down');
+        },
+      }),
+    ]);
+    const logs = captureLogs();
+    let result: Awaited<ReturnType<typeof renderRoute>>;
+    try {
+      result = await renderRoute(makeRequest('/missing'), new Map(), layouts, undefined, undefined, undefined, {
+        specialPages: { notFound: async () => ({ default: () => React.createElement('h1', null, 'CUSTOM_404') }) },
+      });
+    } finally {
+      logs.restore();
+    }
+    expect('status' in result && result.status).toBe(404);
+    expect(bodyOf(result)).toContain('CUSTOM_404');
+    expect(headOf(bodyOf(result))).not.toContain('og:image');
+  });
+});
+
+describe('relative metadata URL warning', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('warns once per route, however many distinct URLs requests produce', async () => {
+    vi.stubEnv('GIO_SITE_URL', '');
+    const routes = route('/search', {
+      generateMetadata: async ctx => ({ alternates: { canonical: `/search?q=${String(ctx.query['q'])}` } }),
+    });
+    const logs = captureLogs();
+    try {
+      for (const q of ['a', 'b', 'c']) {
+        const html = bodyOf(await renderRoute({ ...makeRequest('/search'), query: { q } }, routes, new Map()));
+        expect(headOf(html)).toContain(`<link rel="canonical" href="/search?q=${q}"/>`);
+      }
+    } finally {
+      logs.restore();
+    }
+    const warnings = logs.lines().filter(l => String(l['msg']).startsWith('metadata URL is relative'));
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]?.['route']).toBe('/search');
   });
 });
 

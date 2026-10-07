@@ -105,6 +105,18 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
           shell every visitor shares. Derive metadata from params and query.
         </li>
         <li>
+          The same goes for <code>{`{ props }`}</code> on a PPR page. There{' '}
+          <code>getServerSideProps</code> may read credentials, because its props stream
+          after the shell - but a title built from those props would land in the shared
+          shell. So when <code>getServerSideProps</code> read credentials and{' '}
+          <code>generateMetadata</code> takes <code>props</code>, the shell is not cached
+          (the page streams without it, with a warning). On such pages, build metadata from{' '}
+          <code>ctx.params</code>/<code>ctx.query</code> - fetching by slug again if
+          needed - and leave <code>props</code> alone. Pages whose{' '}
+          <code>getServerSideProps</code> reads nothing personal keep using{' '}
+          <code>props</code> freely.
+        </li>
+        <li>
           <code>notFound()</code> answers 404; a throw answers 500 like a failing render.
         </li>
       </ul>
@@ -126,7 +138,7 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
         <code>GIO_SITE_URL</code> environment variable. The base&apos;s path is kept:{' '}
         <code>metadataBase: &apos;https://example.com/blog&apos;</code> turns{' '}
         <code>/og.png</code> into <code>https://example.com/blog/og.png</code>. Without
-        either, the URL stays relative and the worker logs a warning once. The request&apos;s{' '}
+        either, the URL stays relative and the worker logs a warning (once per route). The request&apos;s{' '}
         <code>Host</code> header is never used: on a cached page, a client-chosen host would
         end up in every visitor&apos;s canonical URL.
       </p>
@@ -169,17 +181,33 @@ export async function generateMetadata(ctx: MetadataContext, { props }: Metadata
           tags the next page does not have.
         </li>
         <li>
-          <strong>Metadata supersedes a hand-written title.</strong> A root layout that still
-          renders its own <code>&lt;title&gt;</code> next to a metadata title would put two in
-          the head (browsers, crawlers and React all use the first). The hand-written one is
-          removed from the response, and development mode logs a warning - move it into{' '}
-          <code>{`export const metadata = { title: { default: '...' } }`}</code>. Other tags
-          you hand-write in the root layout (charset, viewport, stylesheets) stay as they are;
-          do not also declare the same <code>&lt;meta&gt;</code> in metadata.
+          <strong>Metadata supersedes a hand-written title.</strong> A{' '}
+          <code>&lt;title&gt;</code> rendered by a component - the root layout, a nested
+          layout or the page itself - next to a metadata title would put two in the head
+          (browsers, crawlers and React all use the first). Every one but the metadata title
+          is removed from the server HTML, and development mode logs a warning. Do not mix
+          the two: a title a page or nested layout renders is mounted again by React once the
+          page hydrates, so the browser tab would end up showing it while crawlers and link
+          previews read the metadata title. Set titles through metadata only - move the root
+          layout&apos;s into{' '}
+          <code>{`export const metadata = { title: { default: '...' } }`}</code>.
+        </li>
+        <li>
+          Only titles are deduplicated. Other tags you hand-write in the root layout
+          (charset, viewport, stylesheets) stay as they are, so do not also declare them in
+          metadata - a <code>&lt;meta name=&quot;description&quot;&gt;</code> written in the
+          root layout next to a metadata <code>description</code> gives the page two, and the
+          hand-written one stays in the head through every navigation. Move it into the root
+          layout&apos;s <code>metadata</code> as well.
         </li>
         <li>
           Special pages (<code>not-found.tsx</code>, <code>error.tsx</code>) resolve metadata
-          the same way, so a 404 can say <code>{`robots: 'noindex'`}</code>.
+          the same way, so a 404 can say <code>{`robots: 'noindex'`}</code>. Their layouts&apos;{' '}
+          <code>generateMetadata</code> get the params of the route that was not found or
+          failed (none for a URL no route matches). Metadata never stops them rendering: when a{' '}
+          <code>generateMetadata</code> throws (say the CMS is down - often the very error
+          the error page answers), the special page renders with the static{' '}
+          <code>metadata</code> exports only, and the failure is logged.
         </li>
       </ul>
 

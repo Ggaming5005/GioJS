@@ -41,8 +41,11 @@ renders React. Full docs: https://giojs.com/llms.txt
   the page's gSSP props) in `page.tsx` and `layout.tsx`. Merged root layout →
   page, leaf wins per field; a layout sets `title: { default, template:
   '%s | Site' }`. Relative URLs resolve against `metadataBase` or
-  `GIO_SITE_URL`. Don't hand-write `<title>` in layouts once you use metadata
-  (the metadata title replaces it). `app/sitemap.ts`, `app/robots.ts` and
+  `GIO_SITE_URL`. Don't render `<title>` or a description `<meta>` yourself in
+  layouts or pages once you use metadata (the metadata title replaces any
+  `<title>`; other tags are not deduplicated). Under `shell = 'cache'`,
+  metadata built from the props of a gSSP that read cookies costs the shell
+  its cache - use `ctx.params` there. `app/sitemap.ts`, `app/robots.ts` and
   `app/manifest.ts` serve `/sitemap.xml`, `/robots.txt` and
   `/manifest.webmanifest` (a `public/` file of the same name wins). JSON-LD:
   `<JsonLd data={...} />` from `@gio.js/react`.

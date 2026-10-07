@@ -36,6 +36,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: '/docs/css', label: 'CSS & Styling' },
       { href: '/docs/image-optimization', label: 'Image Optimization' },
       { href: '/docs/font-optimization', label: 'Font Optimization' },
+      { href: '/docs/metadata', label: 'Metadata & SEO' },
       { href: '/docs/route-handlers', label: 'Route Handlers' },
       { href: '/docs/middleware', label: 'Middleware' },
       { href: '/docs/websockets', label: 'WebSockets' },

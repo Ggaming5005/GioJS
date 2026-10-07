@@ -66,6 +66,7 @@ import {
   segmentMetadata,
   titleHtml,
   type Metadata,
+  type MetadataExtras,
   type MetadataModule,
 } from './metadata.ts';
 import { withMetadata, type MetadataTag } from './metadata-tags.ts';
@@ -665,7 +666,7 @@ export async function renderRoute(
 
   if (!match) {
     // Unmatched URLs belong to no folder: only app/not-found.* applies.
-    return renderNotFound(req, '', layouts, extras, signal);
+    return renderNotFound(req, {}, '', layouts, extras, signal);
   }
 
   // Pages only answer GET/HEAD; mutations belong to route.ts handlers.
@@ -712,7 +713,7 @@ export async function renderRoute(
         };
       }
       if (isNotFoundResult(result)) {
-        return renderNotFound(req, match.module.dir, layouts, extras, signal);
+        return renderNotFound(req, match.params, match.module.dir, layouts, extras, signal);
       }
       if (!isRecord(result)) {
         throw new Error(
@@ -747,13 +748,19 @@ export async function renderRoute(
     // Head metadata (root layout → nested layouts → page), resolved before
     // the render so the tags are in the shell's <head>. generateMetadata gets
     // a context of its own, tracked like gSSP's but judged on its own: its
-    // output lands in the head, which is part of a PPR shell too.
+    // output lands in the head, which is part of a PPR shell too. Whether it
+    // took the page's props is tracked as well: they carry whatever gSSP
+    // read, credentials included.
     let metadataContext: ReturnType<typeof makeGsspContext> | undefined;
+    let metadataUsedProps = false;
     const metadataTags = await resolveMetadataTags(
       layoutsForDir(match.module.dir, layouts),
       pageModule,
       () => (metadataContext ??= makeGsspContext(req, match.params, credentialHeaders)).ctx,
-      props,
+      () => {
+        metadataUsedProps = true;
+        return props;
+      },
       match.module.urlPattern,
     );
 
@@ -836,19 +843,30 @@ export async function renderRoute(
     // shareability test falls back to plain streaming. skipShell requests
     // (Rust re-rendering only the holes for a shell cache hit) always stream.
     let shareable = cacheable && cacheMaxAge > 0;
-    // Metadata that read credentials is personal even under PPR: it sits in
-    // the <head>, i.e. inside the shell Rust would cache for everyone.
-    if (shareable && metadataContext?.credentialsRead() === true) {
-      warnPersonalRender(pattern, req.path, 'generateMetadata');
-      cacheable = false;
-      cacheMaxAge = 0;
-      shareable = false;
-    }
     const streamingAvailable =
       extras?.streaming === true &&
       req.method === 'GET' &&
       process.env.GIO_EXPORT !== '1' &&
       (registry === undefined || !registry.hasResponseInterceptors);
+    // Metadata that read credentials is personal even under PPR: it sits in
+    // the <head>, i.e. inside the shell Rust would cache for everyone. So is
+    // metadata built from the props of a gSSP that read them - PPR lets gSSP
+    // read credentials because its props stream after the shell, but a
+    // title made from them lands in it. (Without PPR, such a gSSP makes the
+    // render personal below anyway.)
+    const pprCandidate = pageModule.shell === 'cache' && streamingAvailable;
+    const personalMetadata =
+      metadataContext?.credentialsRead() === true
+        ? 'generateMetadata'
+        : pprCandidate && metadataUsedProps && credentialsRead()
+          ? 'generateMetadata props'
+          : null;
+    if (shareable && personalMetadata !== null) {
+      warnPersonalRender(pattern, req.path, personalMetadata);
+      cacheable = false;
+      cacheMaxAge = 0;
+      shareable = false;
+    }
     const skipShell = req.skipShell === true;
     if (skipShell && pageCookies.setCookies !== undefined) {
       logger.warn(
@@ -1049,7 +1067,7 @@ export async function renderRoute(
     const reportedFailure = thrown instanceof ReportedFailure ? thrown : null;
     const err: unknown = reportedFailure !== null ? reportedFailure.error : thrown;
     if (isNotFoundError(err)) {
-      return renderNotFound(req, match.module.dir, layouts, extras, signal);
+      return renderNotFound(req, match.params, match.module.dir, layouts, extras, signal);
     }
     // Production responses carry only a generic message and the digest; the
     // details live in this log line under the same digest.
@@ -1063,6 +1081,7 @@ export async function renderRoute(
     const errorProps: GioErrorProps = { error: { message, digest } };
     const errorPage = await renderNearestSegmentPage(
       req,
+      match.params,
       layouts,
       segmentPageCandidates(match.module.dir, 'error', extras),
       errorProps,
@@ -1087,6 +1106,9 @@ function envelopeScript(envelopeJson: string): string {
   return `<script id="__gio_props" type="application/json">${envelopeJson}</script>`;
 }
 
+/** What read credentials: gSSP, generateMetadata, or generateMetadata via gSSP's props. */
+type PersonalReadSource = 'getServerSideProps' | 'generateMetadata' | 'generateMetadata props';
+
 /**
  * Explain once per route why a page exporting `revalidate` is not cached.
  * Each later render of the route stays uncacheable, just silently.
@@ -1094,20 +1116,28 @@ function envelopeScript(envelopeJson: string): string {
 function warnPersonalRender(
   pattern: string,
   path: string,
-  source: 'getServerSideProps' | 'generateMetadata' = 'getServerSideProps',
+  source: PersonalReadSource = 'getServerSideProps',
 ): void {
   const key = `${source} ${pattern}`;
   if (warnedDynamicRoutes.has(key)) return;
   warnedDynamicRoutes.add(key);
+  const credentials =
+    'request credentials (ctx.cookies, ctx.ip, ctx.host, ctx.scheme, the cookie/authorization, ' +
+    'a client-address or a host header, or a header an onRequest plugin set)';
   logger.warn(
-    `${source} read request credentials (ctx.cookies, ctx.ip, ctx.host, ctx.scheme, ` +
-      'the cookie/authorization, a client-address or a host header, or a header an onRequest ' +
-      'plugin set) - this render is personalized, so it is not cached even though the page ' +
-      (source === 'generateMetadata'
-        ? 'exports revalidate. Metadata is part of the <head> (and of a PPR shell): derive it ' +
-          'from params/query only, or remove `revalidate`'
-        : "exports revalidate. Remove `revalidate`, or keep `revalidate` + `shell = 'cache'` " +
-          'and render the personalized parts inside <Suspense> holes'),
+    source === 'generateMetadata props'
+      ? `generateMetadata used the props of a getServerSideProps that read ${credentials} - ` +
+          'the metadata is personalized and part of the <head>, i.e. of the PPR shell, so the ' +
+          "shell is not cached even though the page exports revalidate + shell = 'cache'. " +
+          'Derive metadata from ctx.params/ctx.query (not from the personalized props), or ' +
+          'remove `revalidate`'
+      : `${source} read ${credentials} - this render is personalized, so it is not cached even ` +
+          'though the page exports revalidate. ' +
+          (source === 'generateMetadata'
+            ? 'Metadata is part of the <head> (and of a PPR shell): derive it from params/query ' +
+              'only, or remove `revalidate`'
+            : "Remove `revalidate`, or keep `revalidate` + `shell = 'cache'` and render the " +
+              'personalized parts inside <Suspense> holes'),
     { route: pattern, path },
   );
 }
@@ -1117,35 +1147,87 @@ function warnPersonalRender(
 /** Routes already warned about a duplicate <title> (dev, once per route). */
 const warnedDuplicateTitles = new Set<string>();
 
-/** Metadata URLs already warned about for staying relative (once per URL). */
-const warnedRelativeMetadataUrls = new Set<string>();
+/**
+ * Routes already warned about a metadata URL staying relative. Keyed by
+ * route, not URL: generateMetadata can build URLs from request input
+ * (`'/search?q=' + ctx.query.q`), and a per-URL set would grow - and log -
+ * once per distinct request.
+ */
+const warnedRelativeMetadataRoutes = new Set<string>();
 
 /**
  * Resolve the head tags for a page (or special page) rendered inside
  * `layoutEntries` (outermost first). `ctx` is created on first use - only a
- * generateMetadata export touches it.
+ * generateMetadata export touches it - and `props` (the page's
+ * generateMetadata `{ props }`) is read only when that function reads it.
+ * `staticOnly` uses the `metadata` exports alone, never calling
+ * generateMetadata. `route` names the route in warnings.
  */
 async function resolveMetadataTags(
   layoutEntries: readonly LayoutEntry[],
   pageModule: MetadataModule,
   ctx: () => GsspContext,
-  props: Record<string, unknown>,
-  pattern: string,
+  props: () => Record<string, unknown>,
+  route: string,
+  staticOnly = false,
 ): Promise<MetadataTag[]> {
   const layoutModules = await Promise.all(layoutEntries.map(entry => entry.load()));
-  const segments: Array<Metadata | undefined> = await Promise.all([
-    ...layoutModules.map(mod => segmentMetadata(mod, ctx, {})),
-    segmentMetadata(pageModule, ctx, { props }),
-  ]);
+  const modules: MetadataModule[] = [...layoutModules, pageModule].map(mod =>
+    staticOnly ? { metadata: mod.metadata } : mod,
+  );
+  const pageExtras: MetadataExtras = {
+    get props() {
+      return props();
+    },
+  };
+  const segments: Array<Metadata | undefined> = await Promise.all(
+    modules.map((mod, index) =>
+      segmentMetadata(mod, ctx, index === modules.length - 1 ? pageExtras : {}),
+    ),
+  );
   return metadataToTags(resolveMetadata(segments, process.env.GIO_SITE_URL), url => {
-    if (warnedRelativeMetadataUrls.has(url)) return;
-    warnedRelativeMetadataUrls.add(url);
+    if (warnedRelativeMetadataRoutes.has(route)) return;
+    warnedRelativeMetadataRoutes.add(route);
     logger.warn(
       'metadata URL is relative and no metadataBase or GIO_SITE_URL is set - Open Graph, ' +
         'Twitter and canonical URLs must be absolute for crawlers',
-      { route: pattern, url },
+      { route, url },
     );
   });
+}
+
+/**
+ * A special page's head tags. Metadata never decides whether a 404/500 page
+ * can render: when resolution fails - a generateMetadata that throws, often
+ * the very failure the error page is answering (the CMS is down) - the
+ * static `metadata` exports are used alone, and failing that no tags at all.
+ */
+async function resolveSpecialPageMetadataTags(
+  req: IPCRequest,
+  params: Record<string, string>,
+  layoutEntries: readonly LayoutEntry[],
+  pageModule: MetadataModule,
+  props: Record<string, unknown>,
+  route: string,
+  status: number,
+): Promise<MetadataTag[]> {
+  // Never cached, so the context's credential tracking has nothing to decide.
+  const ctx = (): GsspContext => makeGsspContext(req, params, new Set()).ctx;
+  try {
+    return await resolveMetadataTags(layoutEntries, pageModule, ctx, () => props, route);
+  } catch (metadataError) {
+    const fields = { path: req.path, status, route, ...describeError(metadataError) };
+    const message = 'special page metadata failed - rendering it with the static metadata only';
+    // notFound() from a layout's generateMetadata is what brought us to
+    // its segment's not-found page in the first place.
+    if (isNotFoundError(metadataError)) logger.debug(message, fields);
+    else logger.error(message, fields);
+  }
+  try {
+    return await resolveMetadataTags(layoutEntries, pageModule, ctx, () => props, route, true);
+  } catch {
+    return [];
+  }
 }
 
 /** The <title> HTML React renders for the metadata title, or null without one. */
@@ -1158,8 +1240,10 @@ function warnDuplicateTitle(pattern: string): void {
   if (!isDevMode() || warnedDuplicateTitles.has(pattern)) return;
   warnedDuplicateTitles.add(pattern);
   logger.warn(
-    'a layout renders its own <title> next to a metadata title - the metadata title supersedes ' +
-      'it; move the hand-written title into `export const metadata = { title }`',
+    'a layout or page renders its own <title> next to a metadata title - the server HTML ' +
+      '(what crawlers and link previews read) keeps only the metadata title, while React mounts ' +
+      'a <title> a page or nested layout renders again once the page hydrates. Set the title ' +
+      'through `export const metadata = { title }` or generateMetadata instead',
     { route: pattern },
   );
 }
@@ -1408,9 +1492,11 @@ function segmentPageCandidates(
  * the layouts of that file's folder, else the built-in page. Never cached:
  * a 404 can depend on anything getServerSideProps read (credentials
  * included), and a cached 404 would also outlive the content appearing.
+ * `params` are the matched route's (none for an unmatched URL).
  */
 async function renderNotFound(
   req: IPCRequest,
+  params: Record<string, string>,
   dir: string,
   layouts: Map<string, LayoutEntry>,
   extras: RenderExtras | undefined,
@@ -1418,6 +1504,7 @@ async function renderNotFound(
 ): Promise<IPCResponse> {
   const page = await renderNearestSegmentPage(
     req,
+    params,
     layouts,
     segmentPageCandidates(dir, 'notFound', extras),
     {},
@@ -1441,6 +1528,7 @@ async function renderNotFound(
  */
 async function renderNearestSegmentPage(
   req: IPCRequest,
+  params: Record<string, string>,
   layouts: Map<string, LayoutEntry>,
   candidates: readonly SegmentPageCandidate[],
   props: object,
@@ -1448,7 +1536,7 @@ async function renderNearestSegmentPage(
   signal?: AbortSignal,
 ): Promise<IPCResponse | null> {
   for (const candidate of candidates) {
-    const page = await renderSpecialPage(req, layouts, candidate, props, status, signal);
+    const page = await renderSpecialPage(req, params, layouts, candidate, props, status, signal);
     if (page !== null) return page;
   }
   return null;
@@ -1458,9 +1546,12 @@ async function renderNearestSegmentPage(
  * Render a special page (404/500) through the normal layout pipeline,
  * server-only (no hydration envelope). Returns null when its render fails -
  * callers try the next candidate, then the built-in plain response.
+ * `params` are those of the route that failed or was not found: its
+ * layouts' generateMetadata reads them as on the page itself.
  */
 async function renderSpecialPage(
   req: IPCRequest,
+  params: Record<string, string>,
   layouts: Map<string, LayoutEntry>,
   candidate: SegmentPageCandidate,
   props: object,
@@ -1475,14 +1566,19 @@ async function renderSpecialPage(
     const rootLayoutEntry = applicableLayouts.find(l => l.dir === '');
     const innerLayouts = applicableLayouts.filter(l => l.dir !== '');
 
-    // The same head metadata a page gets. Never cached, so the context's
-    // credential tracking has nothing to decide here.
-    const metadataTags = await resolveMetadataTags(
+    // The same head metadata a page gets (see resolveSpecialPageMetadataTags
+    // for what happens when it fails). Warnings name the file, never the
+    // request path: every unmatched URL renders the same not-found page.
+    const fileName = status === 404 ? 'not-found' : 'error';
+    const route = candidate.dir === '' ? `/${fileName}` : `/${candidate.dir}/${fileName}`;
+    const metadataTags = await resolveSpecialPageMetadataTags(
+      req,
+      params,
       applicableLayouts,
       pageModule as MetadataModule,
-      () => makeGsspContext(req, {}, new Set()).ctx,
       props as Record<string, unknown>,
-      req.path,
+      route,
+      status,
     );
 
     let inner: React.ReactNode = React.createElement(
@@ -1520,7 +1616,7 @@ async function renderSpecialPage(
     });
     await stream.allReady;
     const keepTitle = rootLayoutEntry !== undefined ? metadataTitleHtml(metadataTags) : null;
-    const html = withoutDuplicateTitles(await streamToString(stream), keepTitle, req.path);
+    const html = withoutDuplicateTitles(await streamToString(stream), keepTitle, route);
     return {
       id: req.id,
       status,
