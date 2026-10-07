@@ -45,14 +45,16 @@ export default function IntroductionPage(): React.JSX.Element {
       </ul>
 
       <h2>Start in seconds</h2>
-      <CodeBlock lang="bash" code={`npm create giojs@latest`} />
+      <CodeBlock lang="bash" code={`npm create giojs@latest my-app
+cd my-app
+npm run dev`} />
       <p>
-        Answer the prompts - name, TypeScript or JavaScript, server app or static site, and
-        any starter features - then <code>npm run dev</code>. Next, head to{' '}
-        <a href="/docs/installation">Installation</a> for every option and{' '}
-        <a href="/docs/project-structure">Project Structure</a> for a tour of the files.
-        When you are ready to ship, <a href="/docs/guides/deploying">Deploying</a> and the{' '}
-        <a href="/docs/guides/production-checklist">production checklist</a> take it from
+        Pick TypeScript or JavaScript and a server app or a static site at the prompts; the
+        scaffolder installs dependencies with the package manager you ran it with and makes the
+        first git commit. Next, head to <a href="/docs/installation">Installation</a> for every
+        option and <a href="/docs/project-structure">Project Structure</a> for a tour of the
+        starter. When you are ready to ship, <a href="/docs/guides/deploying">Deploying</a> and
+        the <a href="/docs/guides/production-checklist">production checklist</a> take it from
         there.
       </p>
 

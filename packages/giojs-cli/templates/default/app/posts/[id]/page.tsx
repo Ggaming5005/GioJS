@@ -1,6 +1,6 @@
 import React from 'react';
 import { GioLink } from '@gio.js/react';
-import type { GetServerSideProps, GetStaticPaths } from '@gio.js/core';
+import type { GenerateMetadata, GetServerSideProps, GetStaticPaths, InferPageProps } from '@gio.js/core';
 
 interface Post {
   id: string;
@@ -9,11 +9,8 @@ interface Post {
   publishedAt: string;
 }
 
-interface PostPageProps {
-  post: Post;
-}
-
-export default function PostPage({ post }: PostPageProps): React.JSX.Element {
+// The page renders with exactly what getServerSideProps returns.
+export default function PostPage({ post }: InferPageProps<typeof getServerSideProps>): React.JSX.Element {
   return (
     <section className="gio-container">
       <article className="gio-article">
@@ -48,7 +45,7 @@ export default function PostPage({ post }: PostPageProps): React.JSX.Element {
 
 // '/posts/:id' types ctx.params as { id: string } - and is checked against
 // the routes the server found (.gio/routes.d.ts), so a typo fails tsc.
-export const getServerSideProps: GetServerSideProps<PostPageProps, '/posts/:id'> = async (ctx) => {
+export const getServerSideProps: GetServerSideProps<{ post: Post }, '/posts/:id'> = async (ctx) => {
   const { id } = ctx.params;
   // Replace with your actual data source
   const post: Post = {
@@ -59,6 +56,11 @@ export const getServerSideProps: GetServerSideProps<PostPageProps, '/posts/:id'>
   };
   return { props: { post } };
 };
+
+// Fills the root layout's title template: 'Post #1 | {{PROJECT_NAME}}'.
+export const generateMetadata: GenerateMetadata<'/posts/:id'> = (ctx) => ({
+  title: `Post #${ctx.params.id}`,
+});
 
 // `gio export` (static sites) pre-renders one page per entry: dynamic routes
 // need the list up front. The server ignores it and renders any id on demand.

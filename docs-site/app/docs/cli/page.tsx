@@ -10,10 +10,15 @@ export default function Page(): React.JSX.Element {
       <h1>CLI</h1>
       <p className="page-subtitle">Scaffold, build, and run GioJS apps from the command line.</p>
       <h2>create-giojs</h2>
-      <p>Scaffold a new project. Runs an interactive prompt, or accepts flags for non-interactive use.</p>
+      <p>Scaffold a new project. Runs an interactive prompt, or accepts flags for non-interactive use (without a terminal, nothing is asked). Every option is on the <a href="/docs/installation">Installation</a> page.</p>
       <CodeBlock lang="bash" code={`npm create giojs@latest my-app -- --ts   # or --js
-#   --no-install   skip dependency install
-#   -y / --yes     accept all defaults`} />
+#   --server / --static      server app (default) or static site
+#   --pm <npm|pnpm|yarn|bun> package manager (default: the one running it)
+#   --no-install             skip dependency install
+#   --no-git                 skip git init + initial commit
+#   -f / --force             scaffold into a non-empty directory
+#   -y / --yes               accept all defaults
+#   -h / --help, -v / --version`} />
       <h2>giojs-server / gio</h2>
       <p>The gio binary runs the server. npm run dev and npm run start call it for you.</p>
       <CodeBlock lang="bash" code={`NODE_ENV=development giojs-server   # dev

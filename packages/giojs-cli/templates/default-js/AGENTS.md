@@ -138,6 +138,13 @@ renders React. Full docs: https://giojs.com/llms.txt
   editors the full list. `PORT` (or `GIO_PORT`) overrides `[server] port`.
   Data files the app writes into the project (a JSON db) go in
   `[dev] watch_ignore` so they do not restart the dev server.
+- Fonts are self-hosted with `[[fonts]]` entries in `gio.toml` (`family`,
+  `url`, optional `weight`/`style`; one entry per .woff2 file). A `url` like
+  `/public/fonts/x.woff2` is a file in `public/` (copied at every start); an
+  https:// URL is downloaded once. The server serves them from `/_gio/fonts/`
+  and preloads them on every page. Never add a Google Fonts (or other CDN)
+  `<link>`. `gio export` does not apply `[[fonts]]`: a static site declares
+  its fonts with `@font-face` in its global CSS instead.
 - `gio.config.ts` (optional) only holds Node plugins:
   `export default defineConfig({ plugins: [...] })` from `@gio.js/core`.
 - Env: `.env.{mode}.local`, `.env.local`, `.env.{mode}`, `.env` load at server
@@ -168,7 +175,10 @@ renders React. Full docs: https://giojs.com/llms.txt
 ## Commands
 
 - `npm run dev` — dev server with watch mode + browser reload
-- `npm start` — production server (no separate build step; routes and client
-  bundles are built at startup)
+- `npm run build` — nothing to build: routes and client bundles are built at
+  server startup.
+- `npm start` — production server
+- `npx gio export` — pre-render to static HTML in `out/`;
+  `npx gio build standalone` — a self-contained deploy folder
 - Health: `GET /_gio/health` · Dev dashboard: `/_gio/devtools` (dev only;
   answers localhost hosts only, add LAN IPs/hostnames to `[dev] allowed_hosts`)

@@ -8,11 +8,11 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Buffer } from 'node:buffer';
-import { copyDir, isTextTemplateFile } from '../src/copy-template.ts';
+import { copyDir, isTextTemplateFile, scaffoldFileName } from '../src/copy-template.ts';
 
 const INVALID_UTF8_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x9c, 0x80, 0xfe]);
 
@@ -45,6 +45,44 @@ test('copyDir substitutes the project name in text files but byte-copies binary 
     // The old UTF-8 read/write path mangled these bytes into U+FFFD.
     const favicon = await readFile(join(dest, 'public', 'favicon.ico'));
     assert.deepEqual([...favicon], [...INVALID_UTF8_BYTES]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('copyDir writes _gitignore as .gitignore, at any depth', async () => {
+  // npm never packs a file named .gitignore, so templates ship _gitignore.
+  assert.equal(scaffoldFileName('_gitignore'), '.gitignore');
+  assert.equal(scaffoldFileName('gitignore'), 'gitignore');
+  const root = await mkdtemp(join(tmpdir(), 'gio-copy-template-'));
+  try {
+    const src = join(root, 'src');
+    await mkdir(join(src, 'nested'), { recursive: true });
+    await writeFile(join(src, '_gitignore'), 'node_modules/\n');
+    await writeFile(join(src, 'nested', '_gitignore'), '*.log\n');
+
+    await copyDir(src, join(root, 'dest'), 'my-app');
+
+    assert.deepEqual((await readdir(join(root, 'dest'))).sort(), ['.gitignore', 'nested']);
+    assert.equal(await readFile(join(root, 'dest', '.gitignore'), 'utf8'), 'node_modules/\n');
+    assert.equal(await readFile(join(root, 'dest', 'nested', '.gitignore'), 'utf8'), '*.log\n');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('copyDir stops before the next file once its signal is aborted', async () => {
+  // Ctrl+C mid-scaffold aborts the copy, then rolls back: no write may land
+  // after the rollback removed the directory.
+  const root = await mkdtemp(join(tmpdir(), 'gio-copy-template-'));
+  try {
+    const src = join(root, 'src');
+    await mkdir(src, { recursive: true });
+    for (const name of ['a.txt', 'b.txt', 'c.txt']) await writeFile(join(src, name), name);
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(copyDir(src, join(root, 'dest'), 'my-app', controller.signal), { name: 'AbortError' });
+    assert.deepEqual(await readdir(join(root, 'dest')), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

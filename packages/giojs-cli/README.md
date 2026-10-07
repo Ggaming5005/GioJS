@@ -6,27 +6,36 @@ Scaffold a new [**GioJS**](https://giojs.com) app - the Rust-powered React frame
 npm create giojs@latest
 ```
 
-You'll be asked a couple of questions (with an arrow-key picker):
+You'll be asked a few questions (with an arrow-key picker):
 
+- **Project name** - the directory; the npm package name is derived from it (sanitized if needed)
 - **Language** - TypeScript or JavaScript
 - **Type** - **Server app** (full SSR, ISR caching, image optimization, route handlers) or **Static site** (`gio export` → plain HTML, deploy free to any static host)
+- **Install dependencies** - with the package manager you ran it with (npm, pnpm, yarn or bun)
 
-Then:
+It then runs `git init` with an initial commit (unless the directory is already inside a git repository), and prints the next steps:
 
 ```bash
 cd my-app
 npm run dev
 ```
 
-## Non-interactive
+## Options
 
 ```bash
 npm create giojs@latest my-app -- --ts --server
-#   --js / --ts          language
-#   --static / --server  build target
+#   [directory]          where the app goes ('.' = current directory)
+#   --ts / --js          language
+#   --server / --static  build target
+#   --pm <name>          npm, pnpm, yarn or bun (default: detected)
 #   --no-install         skip dependency install
+#   --no-git             skip git init + initial commit
+#   -f, --force          scaffold into a non-empty directory
 #   -y, --yes            accept defaults
+#   -h, --help / -v, --version
 ```
+
+Without a terminal (CI, piped input) nothing is asked: unanswered options take their defaults. A non-empty target directory is refused unless `--force`; unknown flags are an error with a did-you-mean hint; Ctrl+C at a prompt exits without writing anything.
 
 ## Migrating from Next.js
 
@@ -40,7 +49,7 @@ Moves `pages/` to `app/`, rewrites `next/*` imports (`next/link`, `next/image`, 
 
 ## What you get
 
-A minimal app using file-based routing (`app/page.tsx`, `layout.tsx`, dynamic `[id]` routes), `getServerSideProps` for server data, and the `@gio.js/react` components (`GioLink`, `GioImage`).
+A small app built on the framework's own features: file-based routing (`app/page.tsx`, `layout.tsx`, a dynamic `posts/[id]` route with `getServerSideProps` and `getStaticPaths`), the metadata API for titles and descriptions, global CSS imported from `app/layout.tsx`, fonts self-hosted from `public/fonts/` via `[[fonts]]` in `gio.toml`, typed props from `@gio.js/core`, the `@gio.js/react` components, plus `.gitignore`, `.env.example` and an `AGENTS.md` for coding agents.
 
 ## Links
 

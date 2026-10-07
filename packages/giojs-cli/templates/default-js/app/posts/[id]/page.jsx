@@ -5,7 +5,8 @@ import { GioLink } from '@gio.js/react';
  * @typedef {{ id: string, title: string, body: string, publishedAt: string }} Post
  */
 
-/** @param {{ post: Post }} props */
+// The page renders with exactly what getServerSideProps returns.
+/** @param {import('@gio.js/core').InferPageProps<typeof getServerSideProps>} props */
 export default function PostPage({ post }) {
   return (
     <section className="gio-container">
@@ -53,6 +54,12 @@ export const getServerSideProps = async (ctx) => {
   };
   return { props: { post } };
 };
+
+// Fills the root layout's title template: 'Post #1 | {{PROJECT_NAME}}'.
+/** @type {import('@gio.js/core').GenerateMetadata<'/posts/:id'>} */
+export const generateMetadata = (ctx) => ({
+  title: `Post #${ctx.params.id}`,
+});
 
 // `gio export` (static sites) pre-renders one page per entry: dynamic routes
 // need the list up front. The server ignores it and renders any id on demand.

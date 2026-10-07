@@ -7,7 +7,7 @@ export default function HomePage() {
       <div className="gio-container gio-starter__inner">
         <span className="gio-status-pill">
           <span className="gio-status-pill__dot" />
-          dev server ready
+          ready to build on
         </span>
 
         <h1 className="gio-headline">
@@ -39,7 +39,7 @@ export default function HomePage() {
             Project structure <span className="gio-btn__arrow">→</span>
           </GioLink>
           <GioLink href="/posts/1" className="gio-btn gio-btn--secondary">
-            Server-rendered example
+            Dynamic route example
           </GioLink>
         </div>
       </div>

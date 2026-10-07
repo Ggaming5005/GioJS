@@ -19,8 +19,9 @@ export default function Page(): React.JSX.Element {
     posts/[id]/page.tsx  # dynamic route -> /posts/:id
     not-found.tsx        # 404 page
     error.tsx            # error page
-  components/            # your shared components
+  components/            # your shared components (layout/Navbar, layout/Footer)
   public/                # static files, served at the site root and under /public/
+    fonts/               # the self-hosted .woff2 files gio.toml's [[fonts]] name
   gio.toml               # server configuration (fonts, images, security, ...)
   .env.example           # the environment variables the app reads - copy to .env.local
   .gitignore             # node_modules/, .gio/, .env*.local, build output
@@ -70,28 +71,46 @@ export default function RootLayout({ children }: LayoutProps) {
       <p>
         Server configuration, read once at startup. Every key is optional and an unknown key
         stops the server with a hint, so typos never go unnoticed. The starter self-hosts its
-        font through <code>[[fonts]]</code> - the server downloads the file once and serves
-        it from <code>/_gio/fonts</code> with preload links, instead of loading it from a
-        third-party CDN on every visit:
+        fonts through <code>[[fonts]]</code>: the <code>.woff2</code> files ship in{' '}
+        <code>public/fonts/</code>, are copied into <code>.gio/fonts/</code> at every start
+        (no network needed) and are served from <code>/_gio/fonts</code> with preload links,
+        instead of loading from a third-party CDN on every visit:
       </p>
       <CodeBlock lang="toml" code={`#:schema ./node_modules/@gio.js/server/gio.schema.json
 [app]
 name = "my-app"
 
 [server]
-port = 3000   # PORT or GIO_PORT override it
-
-[[fonts]]
-family = "Inter"
-url = "https://example.com/fonts/inter-latin-400.woff2"
-weight = 400
+host = "0.0.0.0"
+port = 3000   # the PORT or GIO_PORT env var overrides it
+http2 = true
 
 [images]
-allowed_widths = [640, 828, 1080, 1200, 1920]`} />
+allowed_widths = [640, 828, 1080, 1200, 1920]
+quality = 80
+
+[[fonts]]
+family = "Fraunces"
+url = "/public/fonts/fraunces-400-normal.woff2"
+
+[[fonts]]
+family = "Fraunces"
+url = "/public/fonts/fraunces-400-italic.woff2"
+style = "italic"
+
+[[fonts]]
+family = "JetBrains Mono"
+url = "/public/fonts/jetbrains-mono-400-normal.woff2"
+
+[[fonts]]
+family = "JetBrains Mono"
+url = "/public/fonts/jetbrains-mono-600-normal.woff2"
+weight = 600`} />
       <p>
-        The <code>#:schema</code> line gives editors autocomplete and inline docs. See{' '}
-        <a href="/docs/configuration">gio.toml Configuration</a> and{' '}
-        <a href="/docs/font-optimization">Font Optimization</a>.
+        The <code>#:schema</code> line gives editors autocomplete and inline docs. A font{' '}
+        <code>url</code> can also be an <code>https://</code> address, downloaded on the
+        first start - see <a href="/docs/font-optimization">Font Optimization</a> and{' '}
+        <a href="/docs/configuration">gio.toml Configuration</a>.
       </p>
 
       <h2>.env.example and .gitignore</h2>
