@@ -1990,11 +1990,18 @@ async fn dynamic_handler(
                 .extensions()
                 .get::<client_identity::ClientInfo>()
                 .map_or(addr, client_identity::ClientInfo::addr);
+            let info = ws_ipc::WsConnectInfo {
+                query: parse_query(req.uri().query().unwrap_or_default()),
+                headers: ws_ipc::forwarded_ws_headers(req.headers()),
+                ip: client.ip,
+                request_id: client.request_id,
+                route_id: path,
+            };
             return ws::handle_ws_upgrade(
                 ws,
                 ws_ipc.clone(),
                 state.ws_registry.clone(),
-                path,
+                info,
                 client_addr,
                 state.ws_config.max_connections,
                 state.ws_config.ping_interval_secs,
@@ -2980,13 +2987,23 @@ fn respond_stream(
         req_id: response.id.clone(),
         ipc: state.ipc.clone(),
         injector,
-        idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
+        idle: has_render_idle_gap(&response)
+            .then(|| Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT))),
         done: false,
         shell_capture,
         span: tracing::Span::current(),
     };
 
     let mut builder = Response::builder().status(status_code);
+    if is_event_stream_content_type(&response.headers)
+        && !response
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("cache-control"))
+    {
+        // Like respond_sse: no proxy or browser cache may hold an event stream.
+        builder = builder.header(header::CACHE_CONTROL, "no-cache");
+    }
     for (name, value) in &response.headers {
         // A streamed body has no known length; a stale content-length would
         // corrupt framing.
@@ -3010,8 +3027,11 @@ fn respond_stream(
         },
     );
     // Streamed renders are never stored whole: personal, or a PPR page
-    // whose holes are personal.
-    apply_page_cache_control(&mut resp, PageCachePolicy::Private);
+    // whose holes are personal. A streamed route.ts body owns its caching
+    // like a buffered one does.
+    if !response.route_handler {
+        apply_page_cache_control(&mut resp, PageCachePolicy::Private);
+    }
     resp.extensions_mut().insert(StreamedBody);
     resp
 }
@@ -3174,7 +3194,8 @@ struct RenderBodyStream {
     req_id: String,
     ipc: Arc<IpcClient>,
     injector: stream_inject::StreamInjector,
-    idle: Pin<Box<tokio::time::Sleep>>,
+    /// Idle-gap deadline, reset per frame; None for route.ts bodies.
+    idle: Option<Pin<Box<tokio::time::Sleep>>>,
     done: bool,
     /// Set on PPR miss renders; a stream ending without shell_end drops the
     /// capture unstored, so an aborted render can never cache a torn shell.
@@ -3206,9 +3227,10 @@ impl Stream for RenderBodyStream {
         loop {
             match this.inner.poll_recv(cx) {
                 Poll::Ready(Some(RenderFrame::Chunk(bytes))) => {
-                    this.idle
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    if let Some(idle) = this.idle.as_mut() {
+                        idle.as_mut()
+                            .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    }
                     if let Some(capture) = this.shell_capture.as_mut() {
                         capture.absorb(&bytes);
                     }
@@ -3218,9 +3240,10 @@ impl Stream for RenderBodyStream {
                     }
                 }
                 Poll::Ready(Some(RenderFrame::ShellEnd)) => {
-                    this.idle
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    if let Some(idle) = this.idle.as_mut() {
+                        idle.as_mut()
+                            .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    }
                     if let Some(capture) = this.shell_capture.take() {
                         capture.store();
                     }
@@ -3233,7 +3256,11 @@ impl Stream for RenderBodyStream {
                     };
                 }
                 Poll::Pending => {
-                    if this.idle.as_mut().poll(cx).is_ready() {
+                    if this
+                        .idle
+                        .as_mut()
+                        .is_some_and(|idle| idle.as_mut().poll(cx).is_ready())
+                    {
                         warn!(id = %this.req_id, "streaming render idle-gap timeout - truncating body");
                         this.done = true;
                         this.ipc.send_render_close(&this.req_id);
@@ -3889,6 +3916,21 @@ fn is_html_content_type(headers: &std::collections::HashMap<String, String>) -> 
         .get("content-type")
         .map(|ct| ct.starts_with("text/html"))
         .unwrap_or(false)
+}
+
+/// Whether a streamed body gets the idle-gap cutoff. It guards page renders
+/// (a stalled React stream is a hung render). route.ts bodies - flagged
+/// `routeStream` by the worker, HTML or not - are paced by their handler: an
+/// event stream waiting for events, an LLM thinking before its first token.
+/// They end when the handler or the client says so.
+fn has_render_idle_gap(response: &ipc::IpcResponse) -> bool {
+    !response.route_stream && is_html_content_type(&response.headers)
+}
+
+fn is_event_stream_content_type(headers: &std::collections::HashMap<String, String>) -> bool {
+    headers
+        .get("content-type")
+        .is_some_and(|ct| ct.starts_with("text/event-stream"))
 }
 
 fn is_prefetch(req: &Request) -> bool {
@@ -5752,6 +5794,7 @@ mod tests {
             cache_tags: Vec::new(),
             body_base64: false,
             streaming: false,
+            route_stream: false,
             ppr_shell: false,
             worker_error: false,
             set_cookies: Vec::new(),
@@ -6085,6 +6128,32 @@ mod tests {
     }
 
     #[test]
+    fn only_page_renders_get_the_streaming_idle_gap() {
+        let head = |content_type: &str, route_stream: bool| {
+            let mut resp = ipc_response(false, 0);
+            resp.streaming = true;
+            resp.route_stream = route_stream;
+            resp.headers
+                .insert("content-type".into(), content_type.into());
+            resp
+        };
+        let html = "text/html; charset=utf-8";
+        assert!(has_render_idle_gap(&head(html, false)));
+        // A route.ts body streaming HTML (htmx, an LLM writing markup) is
+        // paced by its handler, like any other route stream.
+        assert!(!has_render_idle_gap(&head(html, true)));
+        assert!(!has_render_idle_gap(&head("text/event-stream", true)));
+        assert!(!has_render_idle_gap(&head("text/plain", false)));
+
+        let parsed: ipc::IpcResponse = serde_json::from_value(serde_json::json!({
+            "id": "r", "status": 200, "headers": {"content-type": "text/html"},
+            "body": "", "cacheable": false, "streaming": true, "routeStream": true,
+        }))
+        .unwrap();
+        assert!(parsed.route_stream);
+    }
+
+    #[test]
     fn vary_disqualifies_sharing_until_keyed_caching_exists() {
         let mut resp = ipc_response(true, 60);
         resp.vary = vec!["cookie".to_string()];
@@ -6411,7 +6480,7 @@ mod tests {
             req_id: "req-stream".into(),
             ipc: Arc::new(client),
             injector,
-            idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
+            idle: Some(Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT))),
             done: false,
             shell_capture: None,
             span: tracing::Span::none(),
@@ -6461,6 +6530,29 @@ mod tests {
         let frame = write_rx.recv().await.expect("cancel frame sent to Node");
         let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
         assert_eq!(value["type"], "cancel");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn route_stream_bodies_have_no_idle_gap_deadline() {
+        use tokio_stream::StreamExt as _;
+        let (client, mut write_rx) = ipc::test_client_with_write_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
+        let mut stream =
+            render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
+        stream.idle = None;
+
+        tx.send(RenderFrame::Chunk(Bytes::from("data: 1\n\n")))
+            .unwrap();
+        assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"data: 1\n\n");
+        // An event stream may wait far longer than a render may stall.
+        let quiet = tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT * 4, stream.next()).await;
+        assert!(quiet.is_err(), "the body must still be open");
+        assert!(write_rx.try_recv().is_err(), "no cancel sent");
+        tx.send(RenderFrame::Chunk(Bytes::from("data: 2\n\n")))
+            .unwrap();
+        tx.send(RenderFrame::End).unwrap();
+        assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"data: 2\n\n");
+        assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]

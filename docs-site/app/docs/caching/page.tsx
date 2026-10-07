@@ -215,7 +215,9 @@ ETag: "4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
         A <code>Cache-Control</code> you set yourself always wins - from{' '}
         <code>getServerSideProps</code> <code>headers</code>, a route handler&apos;s{' '}
         <code>Response</code>, or a <code>[[headers]]</code> rule. Route handler responses
-        get no default at all, whatever their content type. In these cases GioJS never makes
+        get no default at all, whatever their content type and whether or not their body
+        streams - only an event stream gets <code>no-cache</code> (see{' '}
+        <a href="/docs/route-handlers">Route Handlers</a>). In these cases GioJS never makes
         a page <code>public</code> or sends an ETag, because one URL is not the same page
         for everyone who asks:
       </p>

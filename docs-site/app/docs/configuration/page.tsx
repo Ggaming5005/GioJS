@@ -150,8 +150,9 @@ allowed_hosts = []      # extra Host names the /_gio/devtools endpoints answer t
         </tbody>
       </table>
       <p>
-        These deadlines never cut an established response. Streaming SSR, SSE streams and
-        WebSockets stay open as long as they run: the head deadline covers only the reading
+        These deadlines never cut an established response. Streaming SSR, SSE streams,
+        streamed route handler responses and WebSockets stay open as long as they run: the
+        head deadline covers only the reading
         of request heads, and a connection with a response still streaming is never idle.
       </p>
       <div className="callout">

@@ -63,6 +63,12 @@ export interface IPCResponse {
    */
   streaming?: boolean;
   /**
+   * With `streaming`: the body is a route.ts Response body, not a page
+   * render, so it is paced by its handler - Rust applies no idle-gap cutoff
+   * to it, whatever its content type (additive, protocol stays v3).
+   */
+  routeStream?: boolean;
+  /**
    * PPR (shell='cache'): this streamed render marks its shell boundary with a
    * shell_end frame; Rust caches everything before it as the static shell.
    */
@@ -152,19 +158,81 @@ export interface GioRequest {
   requestId?: string;
 }
 
-/** Server-side handle for a WebSocket connection. Binary frames arrive as Buffer. */
+/**
+ * Server-side handle for a WebSocket connection. Binary frames arrive as
+ * Buffer. The connection context (params, query, headers, cookies, ip,
+ * requestId) is the upgrade request's - enough to authenticate the socket
+ * the way a route.ts handler authenticates a request.
+ */
 export interface GioSocket {
   readonly id: string;
+  /** The URL path the socket connected to (e.g. `/chat/lobby`). */
   readonly routeId: string;
+  /** Same as `routeId`. */
+  readonly path: string;
+  /** Dynamic segments of the matched route.ts (`app/chat/[room]` → `{ room }`). */
+  readonly params: Record<string, string>;
+  readonly query: Record<string, string>;
+  /**
+   * A fixed subset of the upgrade request's headers, lowercase: cookie,
+   * authorization, user-agent, accept-language, origin and x-request-id.
+   */
+  readonly headers: Record<string, string>;
+  /** Cookie header parsed into name → value (works with getSession(socket)). */
+  readonly cookies: Record<string, string>;
+  /**
+   * The client's IP, behind gio.toml `[server] trusted_proxies` (see
+   * GioRequest.ip). Absent when the server did not send it.
+   */
+  readonly ip?: string;
+  /** The upgrade request's id (its X-Request-Id), on every log line. */
+  readonly requestId?: string;
+  /** The rooms this socket joined. */
+  readonly rooms: ReadonlySet<string>;
   send(data: string | Buffer): void;
+  /** Close the connection. 4000-4999 are application codes (4401 = rejected). */
   close(code?: number, reason?: string): void;
+  /** Send to every socket connected to the same path, this one included. */
   broadcast(data: string): void;
+  /**
+   * Join a room: any non-empty string up to 256 bytes, up to 100 rooms per
+   * socket (beyond either limit it throws). Membership ends with leave() or
+   * the connection. Publish to a room with `broadcast(room, data)`.
+   */
+  join(room: string): void;
+  leave(room: string): void;
   on(event: 'message', handler: (data: string | Buffer) => void): void;
   on(event: 'close', handler: (code: number, reason: string) => void): void;
 }
 
+/**
+ * A route.ts `wsHandler`: runs once per connection. Returning (or resolving
+ * to) `false` rejects the connection - it closes with 4401 'unauthorized'.
+ * A throw closes the connection with 1011. Messages that arrive while an
+ * async handler is still running wait for its first 'message' listener (it
+ * may await the first message, e.g. a token), or are delivered once it
+ * accepts. The socket receives route and room broadcasts only once accepted.
+ */
+export type WsHandler = (
+  socket: GioSocket,
+) => void | boolean | Promise<void | boolean>;
+
 // WS IPC messages: Rust → Node (over giojs-ws pipe)
-export interface WsConnectMsg  { type: 'ws_connect';    connId: string; routeId: string; addr: string; }
+/**
+ * `path` onwards are additive (absent from older servers): the connection
+ * context the upgrade request carried.
+ */
+export interface WsConnectMsg {
+  type: 'ws_connect';
+  connId: string;
+  routeId: string;
+  addr: string;
+  path?: string;
+  query?: Record<string, string>;
+  headers?: Record<string, string>;
+  ip?: string;
+  requestId?: string;
+}
 export interface WsMessageMsg  { type: 'ws_message';    connId: string; data: string; isBinary: boolean; }
 export interface WsDisconnectMsg { type: 'ws_disconnect'; connId: string; code: number; reason: string; }
 export type WsInbound = WsConnectMsg | WsMessageMsg | WsDisconnectMsg;
@@ -172,8 +240,31 @@ export type WsInbound = WsConnectMsg | WsMessageMsg | WsDisconnectMsg;
 // WS IPC messages: Node → Rust (over giojs-ws pipe)
 export interface WsSendMsg      { type: 'ws_send';      connId: string; data: string; isBinary: boolean; }
 export interface WsCloseMsg     { type: 'ws_close';     connId: string; code: number; reason: string; }
+/**
+ * The wsHandler accepted the connection: from now on Rust includes it in
+ * route (ws_broadcast) and room broadcasts.
+ */
+export interface WsAcceptMsg    { type: 'ws_accept';    connId: string; }
 export interface WsBroadcastMsg { type: 'ws_broadcast'; routeId: string; data: string; }
-export type WsOutbound = WsSendMsg | WsCloseMsg | WsBroadcastMsg;
+/** Room membership lives in Rust's registry so a room broadcast is one frame. */
+export interface WsJoinMsg      { type: 'ws_join';      connId: string; room: string; }
+export interface WsLeaveMsg     { type: 'ws_leave';     connId: string; room: string; }
+export interface WsRoomBroadcastMsg {
+  type: 'ws_room_broadcast';
+  room: string;
+  data: string;
+  isBinary: boolean;
+  /** A connId to skip (the sender). */
+  except?: string;
+}
+export type WsOutbound =
+  | WsSendMsg
+  | WsCloseMsg
+  | WsAcceptMsg
+  | WsBroadcastMsg
+  | WsJoinMsg
+  | WsLeaveMsg
+  | WsRoomBroadcastMsg;
 
 // SSE messages on the HTTP IPC pipe
 export interface SseChunkMsg { type: 'sse_chunk'; id: string; data: string; }
@@ -182,8 +273,18 @@ export interface SseCloseMsg { type: 'sse_close'; id: string; }
 
 /** Rust → Node: abort an in-flight render (client disconnected or timed out). */
 export interface CancelMsg { type: 'cancel'; id: string; }
-/** Streaming SSR body chunk (protocol v3). `data` is always UTF-8 HTML text. */
-export interface ChunkMsg { type: 'chunk'; id: string; data: string; }
+/**
+ * Rust → Node (additive): pause or resume a streamed route.ts body while the
+ * client drains what Rust holds. `seq` increases per stream, so a frame that
+ * arrives after a newer one is stale.
+ */
+export interface FlowMsg { type: 'flow'; id: string; pause: boolean; seq: number; }
+/**
+ * Streamed body chunk (protocol v3). `data` is UTF-8 text - always, for
+ * page renders - or base64 with `bodyBase64` (additive: route.ts bodies
+ * are arbitrary bytes).
+ */
+export interface ChunkMsg { type: 'chunk'; id: string; data: string; bodyBase64?: boolean; }
 /** PPR: everything sent before this frame is the cacheable shell. */
 export interface ShellEndMsg { type: 'shell_end'; id: string; }
 /** Terminates a streamed body. `aborted` marks a render error mid-stream. */

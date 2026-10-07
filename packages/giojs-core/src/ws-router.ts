@@ -6,12 +6,27 @@
  * HTTP method handlers (GET/POST/PUT/PATCH/DELETE) for API routes and SSE.
  */
 import { loadTsModule } from './load-ts.ts';
-import type { GioSocket } from './context.ts';
+import type { WsHandler } from './context.ts';
 import { HANDLER_METHODS } from './router.ts';
 import type { HandlerEntry, RouteFile, RouteHandlerFn } from './router.ts';
+import { matchIn } from './ssr.ts';
 import { logger } from './logger.ts';
 
-export type WsHandlerFn = (socket: GioSocket) => void;
+export type WsHandlerFn = WsHandler;
+
+/**
+ * Find the wsHandler for a connection path with the rules pages and route.ts
+ * handlers use (exact static match first, then the most specific of
+ * :param / *catchAll / *optional? patterns; route groups are already gone
+ * from the patterns), so app/chat/[room]/route.ts answers /chat/lobby.
+ */
+export function matchWsHandler(
+  path: string,
+  wsHandlers: Map<string, WsHandlerFn>,
+): { handler: WsHandlerFn; pattern: string; params: Record<string, string> } | null {
+  const match = matchIn(path, wsHandlers);
+  return match === null ? null : { handler: match.entry, pattern: match.pattern, params: match.params };
+}
 
 export interface RouteFileModule {
   wsHandler?: WsHandlerFn;

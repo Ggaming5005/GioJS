@@ -14,8 +14,11 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::ws_ipc::WsIpcClient;
+use crate::ws_ipc::{WsConnectInfo, WsIpcClient};
 use crate::ws_registry::WsRegistry;
+
+/// How long to finish a client-initiated close handshake.
+const CLOSE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Whether a request asks to become a WebSocket (`Upgrade: websocket`).
 /// The upgrade is a GET, yet it opens a live channel carrying the user's
@@ -34,7 +37,7 @@ pub async fn handle_ws_upgrade(
     ws: WebSocketUpgrade,
     ws_ipc: Arc<WsIpcClient>,
     ws_registry: Arc<WsRegistry>,
-    route_id: String,
+    info: WsConnectInfo,
     addr: SocketAddr,
     max_connections: usize,
     ping_interval_secs: u64,
@@ -44,7 +47,7 @@ pub async fn handle_ws_upgrade(
             socket,
             ws_ipc,
             ws_registry,
-            route_id,
+            info,
             addr,
             max_connections,
             ping_interval_secs,
@@ -56,21 +59,32 @@ async fn run_connection(
     mut socket: WebSocket,
     ws_ipc: Arc<WsIpcClient>,
     ws_registry: Arc<WsRegistry>,
-    route_id: String,
+    info: WsConnectInfo,
     addr: SocketAddr,
     max_connections: usize,
     ping_interval_secs: u64,
 ) {
+    let route_id = info.route_id.clone();
     if ws_registry.active_count() >= max_connections {
         warn!(route = %route_id, addr = %addr, "WebSocket connection limit reached");
+        // 1013 "try again later": clients back off and retry, where a bare
+        // drop would read as a network failure.
+        let _ = socket
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::AGAIN,
+                reason: std::borrow::Cow::Borrowed("too many connections"),
+            })))
+            .await;
         return;
     }
 
     let conn_id = Uuid::new_v4().to_string();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Message>();
 
+    // Pending until the worker's ws_accept: its wsHandler may still reject
+    // it, so only direct sends reach it, never broadcasts.
     ws_registry.register(&conn_id, &route_id, outbound_tx);
-    ws_ipc.send_ws_connect(&conn_id, &route_id, &addr);
+    ws_ipc.send_ws_connect(&conn_id, &info, &addr);
     debug!(conn_id = %conn_id, route = %route_id, addr = %addr, "WebSocket connected");
 
     let mut ping_interval = tokio::time::interval(Duration::from_secs(ping_interval_secs));
@@ -78,6 +92,7 @@ async fn run_connection(
 
     let mut close_code: u16 = 1001;
     let mut close_reason = String::new();
+    let mut peer_closed = false;
 
     loop {
         tokio::select! {
@@ -97,6 +112,7 @@ async fn run_connection(
                             .unwrap_or((1000, String::new()));
                         close_code = code;
                         close_reason = reason;
+                        peer_closed = true;
                         break;
                     }
                     Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
@@ -129,6 +145,13 @@ async fn run_connection(
         }
     }
 
+    if peer_closed {
+        // tungstenite queues the close reply the protocol owes the client and
+        // sends it on the next read; dropping the socket instead makes every
+        // client-initiated close look abnormal (1006) to the browser. Bounded:
+        // the read ends when the client drops the TCP connection.
+        let _ = tokio::time::timeout(CLOSE_HANDSHAKE_TIMEOUT, socket.recv()).await;
+    }
     ws_registry.deregister(&conn_id, &route_id);
     ws_ipc.send_ws_disconnect(&conn_id, close_code, &close_reason);
     debug!(conn_id = %conn_id, code = %close_code, reason = %close_reason, "WebSocket disconnected");

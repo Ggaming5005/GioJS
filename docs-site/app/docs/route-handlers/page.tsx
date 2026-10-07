@@ -74,7 +74,7 @@ export function POST(req: GioRequest) {
       <h2>What you can return</h2>
       <ul>
         <li>Any JSON-serializable value - sent as <code>application/json</code> with status 200.</li>
-        <li>A web-standard <code>Response</code> - its status, headers, and body pass through. Binary bodies (images, files) are supported.</li>
+        <li>A web-standard <code>Response</code> - its status, headers, and body pass through. Binary bodies (images, files) are supported, and a <code>ReadableStream</code> body streams (see below).</li>
         <li><code>null</code> / <code>undefined</code> - 204 No Content.</li>
         <li>A <code>GioEventStream</code> (GET only) - switches the connection to SSE.</li>
       </ul>
@@ -120,6 +120,87 @@ export function GET() {
   });
 }`} />
 
+      <h2>Streaming responses</h2>
+      <p>
+        Return a <code>Response</code> whose body is a <code>ReadableStream</code> and the
+        client receives each chunk as you produce it - an LLM token stream, a large export, an
+        event stream written by hand:
+      </p>
+      <CodeBlock lang="ts" code={`// app/api/chat/route.ts
+import type { GioRequest } from '@gio.js/core';
+
+export async function POST(req: GioRequest) {
+  const { prompt } = req.json<{ prompt: string }>();
+  const tokens = await llm.stream(prompt);           // AsyncIterable<string>
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    async pull(controller) {
+      const { done, value } = await tokens.next();
+      if (done) controller.close();
+      else controller.enqueue(encoder.encode(value));
+    },
+    cancel() {
+      tokens.return?.();                            // the client went away
+    },
+  });
+  return new Response(body, { headers: { 'content-type': 'text/plain; charset=utf-8' } });
+}`} />
+      <CodeBlock lang="ts" code={`// app/api/progress/route.ts - Server-Sent Events from a plain Response
+export function GET() {
+  let timer: ReturnType<typeof setInterval>;
+  const body = new ReadableStream({
+    start(controller) {
+      let n = 0;
+      timer = setInterval(() => controller.enqueue(\`data: \${JSON.stringify({ n: ++n })}\\n\\n\`), 1000);
+    },
+    cancel() {
+      clearInterval(timer);
+    },
+  });
+  return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+}`} />
+      <ul>
+        <li>
+          Status, headers and every <code>Set-Cookie</code> go out before the first chunk, so
+          they must be final when you return the <code>Response</code>.
+        </li>
+        <li>
+          A body that is already complete when you return it - a string, a buffer, JSON, a
+          stream that closes without waiting - and is at most 1 MiB is sent buffered, with a{' '}
+          <code>Content-Length</code>. Anything else streams with chunked encoding. A{' '}
+          <code>text/event-stream</code> body always streams, is never compressed (compression
+          would hold events back), and gets <code>Cache-Control: no-cache</code> unless you set
+          one.
+        </li>
+        <li>
+          Chunks may be <code>Uint8Array</code> or strings (sent as UTF-8); binary bodies arrive
+          byte-for-byte.
+        </li>
+        <li>
+          Backpressure reaches your stream: when the client reads slowly, the server stops
+          pulling once about 1 MiB is waiting for it, so a large download never piles up in
+          memory. Produce chunks in <code>pull()</code> (as above) to benefit.
+        </li>
+        <li>
+          When the client disconnects, the stream is cancelled - your <code>cancel()</code>{' '}
+          runs, so stop timers and upstream requests there.
+        </li>
+        <li>
+          A streamed body has no time limit: it ends when you close the stream or the client
+          leaves. If your stream errors midway, the response ends early (the status is already
+          sent).
+        </li>
+        <li>
+          <code>HEAD</code> requests cancel a streaming body instead of sending it. While a
+          plugin with an <code>onResponse</code> hook is installed, bodies are buffered so the
+          hook can see them - except event streams, which stream and skip the hook.
+        </li>
+      </ul>
+      <p>
+        <code>GioEventStream</code> (above) remains the shortest way to write SSE: it frames
+        events for you and runs your cleanup on disconnect.
+      </p>
+
       <h2>Rules</h2>
       <ul>
         <li>Handler responses are never cached or coalesced - every request runs your code.</li>
@@ -141,7 +222,11 @@ export function GET() {
           callbacks, payment (3-D Secure) returns, webhooks that send an <code>Origin</code> - go
           in <code>[security.csrf] exempt</code> - see <a href="/docs/security">Security</a>.
         </li>
-        <li>Export <code>wsHandler</code> from the same file for WebSockets - see the WebSockets page.</li>
+        <li>
+          Export <code>wsHandler</code> from the same file for WebSockets (with the same
+          dynamic segments), and publish to WebSocket rooms from any handler with{' '}
+          <code>broadcast(room, data)</code> - see <a href="/docs/websockets">WebSockets</a>.
+        </li>
       </ul>
     </>
   );

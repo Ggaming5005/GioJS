@@ -593,20 +593,16 @@ async function main() {
     });
 
     await test('event-stream Response cookies arrive as separate Set-Cookie headers', async () => {
-      // Only the head is asserted: respond_sse forwards sse_chunk frames, so
-      // a buffered event-stream body never ends the response - abort instead.
-      const controller = new AbortController();
-      const res = await fetch(`${BASE}/api/events`, { signal: controller.signal });
-      try {
-        assert.equal(res.status, 200);
-        assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/);
-        assert.deepEqual(res.headers.getSetCookie(), [
-          'sse_a=1; Path=/; Expires=Wed, 21 Oct 2037 07:28:00 GMT',
-          'sse_b=2; Path=/; HttpOnly',
-        ]);
-      } finally {
-        controller.abort();
-      }
+      const res = await fetch(`${BASE}/api/events`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/);
+      assert.deepEqual(res.headers.getSetCookie(), [
+        'sse_a=1; Path=/; Expires=Wed, 21 Oct 2037 07:28:00 GMT',
+        'sse_b=2; Path=/; HttpOnly',
+      ]);
+      // The body used to hang forever (it took the sse_chunk path); it now
+      // streams and the response ends.
+      assert.equal(await res.text(), 'data: hello\n\n');
     });
 
     await test('unexported methods get 405 with an Allow header', async () => {
@@ -738,6 +734,232 @@ async function main() {
       assert.match(late, /"tick":2/, 'events still arrive past the head deadline');
     });
 
+    await test('route.ts event-stream Responses stream incrementally and terminate', async () => {
+      // Accept-Encoding asks for compression: an event stream must never be
+      // compressed (an encoder buffers) or the first event would wait.
+      const res = await fetch(`${BASE}/api/stream-events`, {
+        headers: { 'accept-encoding': 'gzip, br' },
+      });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/);
+      assert.equal(res.headers.get('content-encoding'), null);
+      assert.equal(res.headers.get('cache-control'), 'no-cache');
+      assert.deepEqual(res.headers.getSetCookie(), [
+        'stream_a=1; Path=/',
+        'stream_b=2; Path=/; HttpOnly',
+      ]);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      const first = decoder.decode((await reader.read()).value);
+      assert.match(first, /data: first/);
+      assert.doesNotMatch(first, /second/, 'the first event arrives while the stream is still open');
+      let rest = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        rest += decoder.decode(value, { stream: true });
+      }
+      assert.match(rest, /data: second/, 'the stream ends after its last event');
+    });
+
+    await test('a client disconnect cancels a streamed route.ts body in the worker', async () => {
+      const cancelled = async () =>
+        (await (await fetch(`${BASE}/api/stream-endless?state=1`)).json()).cancelled;
+      const before = await cancelled();
+      const controller = new AbortController();
+      const res = await fetch(`${BASE}/api/stream-endless`, { signal: controller.signal });
+      const reader = res.body.getReader();
+      assert.match(new TextDecoder().decode((await reader.read()).value), /data: 0/);
+      controller.abort();
+      await waitFor('the worker to cancel the body', async () => (await cancelled()) > before, 5000);
+    });
+
+    await test('a large streamed binary body arrives intact', async () => {
+      // Default fetch negotiates compression: streaming and compression compose.
+      const res = await fetch(`${BASE}/api/download`);
+      assert.equal(res.status, 200);
+      const total = Number(res.headers.get('x-download-bytes'));
+      const body = Buffer.from(await res.arrayBuffer());
+      const expected = Buffer.alloc(total);
+      for (let i = 0; i < total; i++) expected[i] = (i * 31 + (i >> 8)) & 0xff;
+      assert.equal(body.length, total);
+      assert.ok(body.equals(expected), 'every byte must survive the chunked, base64 crossing');
+    });
+
+    await test('a client that stops reading stops a streamed body\'s producer', async () => {
+      const produced = async () =>
+        (await (await fetch(`${BASE}/api/download?state=1`)).json()).produced;
+      // identity: compression would shrink the pattern enough that socket
+      // buffers take far longer to fill.
+      const res = await new Promise((resolve, reject) => {
+        const req = httpRequest(
+          { host: '127.0.0.1', port: 39517, path: '/api/download?endless=1', headers: { 'accept-encoding': 'identity' } },
+          resolve,
+        );
+        req.on('error', reject);
+        req.end();
+      });
+      try {
+        await new Promise((resolve) => res.once('data', resolve));
+        res.pause();
+        // Without backpressure the worker produces until memory runs out;
+        // with it, the producer stalls once Rust and the socket buffers hold
+        // a bounded amount.
+        let last = -1;
+        const stalledAt = await waitFor('the producer to stall', async () => {
+          const now = await produced();
+          const stalled = now === last;
+          last = now;
+          return stalled ? now : undefined;
+        }, 10000);
+        assert.ok(stalledAt < 64 * 1024 * 1024, `stalled after ${stalledAt} bytes`);
+        res.resume();
+        await waitFor('the producer to resume', async () => (await produced()) > stalledAt, 5000);
+      } finally {
+        res.destroy();
+      }
+    });
+
+    /**
+     * A WebSocket client on the fixture: `next()` resolves the next message,
+     * `closed` the close code and reason.
+     */
+    function wsClient(path, headers = {}) {
+      const ws = new WebSocket(`ws://127.0.0.1:39517${path}`, { headers });
+      const inbox = [];
+      const listeners = new Set();
+      ws.addEventListener('message', (event) => {
+        inbox.push(String(event.data));
+        for (const listener of listeners) listener();
+      });
+      const opened = new Promise((resolve, reject) => {
+        ws.addEventListener('open', () => resolve(), { once: true });
+        ws.addEventListener('error', () => reject(new Error(`WebSocket ${path} failed to open`)), { once: true });
+      });
+      const closed = new Promise((resolve) =>
+        ws.addEventListener('close', (event) => resolve({ code: event.code, reason: event.reason }), { once: true }),
+      );
+      let cursor = 0;
+      const next = (timeoutMs = 3000) => new Promise((resolve, reject) => {
+        const check = () => {
+          if (cursor >= inbox.length) return;
+          listeners.delete(check);
+          clearTimeout(timer);
+          resolve(inbox[cursor++]);
+        };
+        const timer = setTimeout(() => {
+          listeners.delete(check);
+          reject(new Error(`no WebSocket message on ${path} within ${timeoutMs}ms (got ${JSON.stringify(inbox)})`));
+        }, timeoutMs);
+        listeners.add(check);
+        check();
+      });
+      return { ws, inbox, opened, closed, next };
+    }
+
+    await test('WebSocket routes match [param] patterns and see the connection context', async () => {
+      const client = wsClient('/ws/rooms/lobby?token=t1', {
+        cookie: 'theme=dark; sid=abc',
+        'user-agent': 'gio-int-ws',
+        'x-forwarded-for': '198.51.100.23',
+        'x-request-id': 'ws-req-1',
+      });
+      await client.opened;
+      const hello = JSON.parse(await client.next());
+      assert.equal(hello.type, 'hello');
+      assert.equal(hello.path, '/ws/rooms/lobby');
+      assert.deepEqual(hello.params, { room: 'lobby' });
+      assert.deepEqual(hello.query, { token: 't1' });
+      assert.deepEqual(hello.cookies, { theme: 'dark', sid: 'abc' });
+      assert.equal(hello.userAgent, 'gio-int-ws');
+      assert.equal(hello.forwardedFor, null, 'only the allowlisted headers reach the worker');
+      assert.equal(hello.ip, '198.51.100.23', 'the trusted proxy names the client');
+      assert.equal(hello.requestId, 'ws-req-1');
+      assert.deepEqual(hello.rooms, ['lobby']);
+      client.ws.close();
+      assert.equal((await client.closed).code, 1005);
+    });
+
+    await test('room broadcasts stay in their room, and route handlers can publish to a room', async () => {
+      const a1 = wsClient('/ws/rooms/a');
+      const a2 = wsClient('/ws/rooms/a');
+      const b = wsClient('/ws/rooms/b');
+      await Promise.all([a1.opened, a2.opened, b.opened]);
+      await Promise.all([a1.next(), a2.next(), b.next()]); // greetings
+      a1.ws.send('ping');
+      assert.equal(await a1.next(), 'a:ping', 'the sender is a member too');
+      assert.equal(await a2.next(), 'a:ping');
+
+      const published = await fetch(`${BASE}/api/rooms/b`, { method: 'POST', body: 'news' });
+      assert.deepEqual(await published.json(), { delivered: true });
+      // Frames are dispatched in order: had b been in room a, a:ping would
+      // have reached it first.
+      assert.equal(await b.next(), 'server:news');
+      await fetch(`${BASE}/api/rooms/a`, { method: 'POST', body: 'marker' });
+      assert.equal(await a1.next(), 'server:marker', 'room a never sees room b traffic');
+      assert.equal(await a2.next(), 'server:marker');
+      for (const client of [a1, a2, b]) client.ws.close();
+      await Promise.all([a1.closed, a2.closed, b.closed]);
+    });
+
+    await test('a wsHandler authenticates with the session cookie and rejects with 4401', async () => {
+      const anonymous = wsClient('/ws/private');
+      await anonymous.opened;
+      anonymous.ws.send('before the verdict');
+      assert.deepEqual(await anonymous.closed, { code: 4401, reason: 'unauthorized' });
+      assert.deepEqual(anonymous.inbox, [], 'a rejected socket never sees a message');
+
+      const cookie = sessionCookieOf(await loginAs('ws-user'));
+      const member = wsClient('/ws/private', { cookie });
+      await member.opened;
+      member.ws.send('early'); // lands while the async handler is still deciding
+      assert.equal(await member.next(), 'welcome ws-user');
+      assert.equal(await member.next(), 'echo:early', 'messages before acceptance are held, not lost');
+      member.ws.close();
+      await member.closed;
+    });
+
+    await test('a socket its handler has not accepted yet sees no route or room broadcast', async () => {
+      const pub = wsClient('/ws/members?role=pub');
+      await pub.opened;
+      assert.equal(await pub.next(), 'ready');
+      const anon = wsClient('/ws/members');
+      await anon.opened;
+      await new Promise((resolve) => setTimeout(resolve, 100)); // its handler is deciding (500ms)
+      pub.ws.send('members-only secret');
+      assert.equal(await pub.next(), 'members-only secret', 'the route broadcast went out');
+      const published = await fetch(`${BASE}/api/rooms/members-feed`, { method: 'POST', body: 'room secret' });
+      assert.deepEqual(await published.json(), { delivered: true });
+      assert.equal(await pub.next(), 'server:room secret', 'the room broadcast went out');
+      assert.deepEqual(await anon.closed, { code: 4401, reason: 'unauthorized' });
+      assert.deepEqual(anon.inbox, [], 'the rejected socket never saw a broadcast');
+      pub.ws.close();
+      await pub.closed;
+    });
+
+    await test('an async wsHandler can authenticate with the first message', async () => {
+      const member = wsClient('/ws/token');
+      await member.opened;
+      member.ws.send('let-me-in');
+      assert.equal(await member.next(), 'welcome');
+      member.ws.close();
+      await member.closed;
+
+      const forger = wsClient('/ws/token');
+      await forger.opened;
+      forger.ws.send('forged');
+      assert.deepEqual(await forger.closed, { code: 4401, reason: 'unauthorized' });
+    });
+
+    await test('rejected and unrouted WebSocket connections close with 4401 / 4404', async () => {
+      const denied = wsClient('/ws/rooms/x?deny=1');
+      await denied.opened;
+      assert.deepEqual(await denied.closed, { code: 4401, reason: 'unauthorized' });
+      const nowhere = wsClient('/ws/nowhere');
+      await nowhere.opened;
+      assert.deepEqual(await nowhere.closed, { code: 4404, reason: 'no websocket handler' });
+    });
+
     await test('stalled request heads and idle keep-alive sockets are closed after header_read_timeout_secs', async () => {
       // Both run concurrently so the suite pays the 2s deadline once.
       const [stalled, idle] = await Promise.all([
@@ -861,6 +1083,11 @@ async function main() {
       assert.match(await htmlHandler.text(), /INTEGRATION_FIXTURE_HTML_ROUTE/);
       assert.match(htmlHandler.headers.get('content-type') ?? '', /^text\/html/);
       assert.equal(htmlHandler.headers.get('cache-control'), null);
+      // Also when the handler's body streams (respond_stream, not the
+      // buffered path).
+      const streamedHandler = await fetch(`${BASE}/api/html-report?stream=1`);
+      assert.match(await streamedHandler.text(), /INTEGRATION_FIXTURE_HTML_ROUTE_STREAMED/);
+      assert.equal(streamedHandler.headers.get('cache-control'), null);
     });
 
     await test('a malformed worker response frame fails its request at once, with its request id logged', async () => {
@@ -1814,6 +2041,8 @@ async function main() {
       // app/sitemap.ts: a metadata route, labelled by its fixed path.
       assert.equal((await fetch(`${BASE}/sitemap.xml`)).status, 200);
       assert.equal((await fetch(`${BASE}/no-such-page-for-metrics`)).status, 404);
+      // A streamed route.ts body: its head carries the route label too.
+      assert.match(await (await fetch(`${BASE}/api/stream-events`)).text(), /data: second/);
       const metrics = (await rawGet('/_gio/metrics', { 'x-forwarded-for': '198.51.100.7' })).body;
       const has = (pattern) => assert.match(metrics, pattern);
       has(/gio_requests_total\{method="GET",status="200",cache="hit",route="\/cached"\} \d+/);
@@ -1822,6 +2051,7 @@ async function main() {
       has(/gio_requests_total\{method="GET",status="200",cache="bypass",route="internal"\} \d+/);
       has(/gio_requests_total\{method="GET",status="404",cache="[a-z]+",route="unmatched"\} \d+/);
       has(/gio_requests_total\{method="GET",status="200",cache="[a-z]+",route="\/sitemap\.xml"\} \d+/);
+      has(/gio_requests_total\{method="GET",status="200",cache="stream",route="\/api\/stream-events"\} \d+/);
       has(/gio_request_duration_seconds_count\{route="\/cached"\} \d+/);
       has(/gio_request_duration_seconds_bucket\{route="\/posts\/:id",le="\+Inf"\} \d+/);
       has(/gio_node_ipc_latency_seconds_count\{route="\/posts\/:id"\} \d+/);
