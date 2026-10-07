@@ -159,7 +159,7 @@ npx -p create-giojs gio-migrate [dir]    # the standalone bin`} />
         <tbody>
           <tr><td><code>0</code></td><td>The app was created (a failed install or git commit is reported but does not fail the run), or <code>--help</code> / <code>--version</code>.</td></tr>
           <tr><td><code>1</code></td><td>An unexpected error while writing; for <code>add</code>, a refused run; for <code>migrate</code>, a failed or refused migration.</td></tr>
-          <tr><td><code>2</code></td><td>A usage error, for every subcommand: an unknown option or feature (with a suggestion), a flag given a value it does not take, a second directory, a non-empty directory without <code>--force</code>, a server feature for a static site.</td></tr>
+          <tr><td><code>2</code></td><td>A usage error. For every subcommand: an unknown option or feature (with a suggestion), a flag given a value it does not take, a second directory. When creating an app, also: a non-empty directory without <code>--force</code>, a server feature for a static site (<code>add</code> refuses that one with <code>1</code>).</td></tr>
           <tr><td><code>130</code></td><td>Cancelled with Ctrl+C.</td></tr>
         </tbody>
       </table>

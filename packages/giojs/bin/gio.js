@@ -112,6 +112,7 @@ function cmdServer(mode, command, args) {
 function cmdBuild(args) {
   if (args[0] === 'standalone') runNodeScript('standalone.mjs', args.slice(1));
   if (args[0] === '--help' || args[0] === '-h') {
+    if (args.length > 1) usageError(`unexpected argument "${args[1]}"`, 'build');
     console.log(commandHelp('build'));
     process.exit(0);
   }
@@ -179,6 +180,7 @@ async function cmdDoctor(command, args) {
 function cmdCache(args) {
   if (args.length === 0) usageError('missing subcommand: gio cache explain <url-or-path>', 'cache');
   if (args[0] === '--help' || args[0] === '-h') {
+    if (args.length > 1) usageError(`unexpected argument "${args[1]}"`, 'cache');
     console.log(commandHelp('cache'));
     process.exit(0);
   }
@@ -202,11 +204,8 @@ function cmdCache(args) {
 
 // `gio bench` runs the zero-dependency load generator (ESM, so a child
 // node process). Paths and --suite default to the local server's address.
+// bench.mjs prints the help itself, once the rest of the arguments parse.
 function cmdBench(args) {
-  if (args.includes('--help') || args.includes('-h')) {
-    console.log(commandHelp('bench'));
-    process.exit(0);
-  }
   const given = (flag) => args.some((arg) => arg === flag || arg.startsWith(`${flag}=`));
   const needsBase = !given('--base') && (given('--suite') || args.some((arg) => arg.startsWith('/')));
   const extra = needsBase ? ['--base', require('./lib/cache-explain').localBaseUrl()] : [];
@@ -217,18 +216,25 @@ function cmdDelegate(subcommand, args) {
   require('./lib/delegate').delegate(subcommand, args);
 }
 
-function cmdHelp(args) {
+function cmdHelp(args, command = 'help') {
   if (args.length === 0) {
     console.log(mainHelp());
     process.exit(0);
   }
+  // `gio help` takes one command name; `gio --help` takes nothing after it.
+  if (command !== 'help') {
+    const tail = args.length === 1 && commandHelp(args[0]) ? ` - did you mean \`gio help ${args[0]}\`?` : '';
+    usageError(`unexpected argument "${args[0]}" after ${command}${tail}`);
+  }
+  if (args.length > 1) usageError(`unexpected argument "${args[1]}"`, 'help');
   const help = commandHelp(args[0]);
   if (!help) unknownCommand(args[0]);
   console.log(help);
   process.exit(0);
 }
 
-function cmdVersion() {
+function cmdVersion(args, command) {
+  if (args.length > 0) usageError(`unexpected argument "${args[0]}" after ${command}`);
   const { locateBinary } = require('./find-binary');
   const { findCoreDir, ownPackage, readJson } = require('./lib/project');
   const binary = locateBinary();
@@ -249,7 +255,7 @@ function cmdVersion() {
 }
 
 function unknownCommand(name) {
-  const hint = HINTS[name];
+  const hint = Object.prototype.hasOwnProperty.call(HINTS, name) ? HINTS[name] : null;
   const suggestion = hint ? null : didYouMean(name, Object.keys(COMMANDS));
   const tail = hint ? ` - try \`${hint}\`` : suggestion ? ` - did you mean \`gio ${suggestion}\`?` : '';
   usageError(`unknown command "${name}"${tail}`);
@@ -268,10 +274,10 @@ async function main(argv) {
   switch (command) {
     case '-h':
     case '--help':
-      return cmdHelp([]);
+      return cmdHelp(args, command);
     case '-v':
     case '--version':
-      return cmdVersion();
+      return cmdVersion(args, command);
     case 'help': return cmdHelp(args);
     case 'dev': return cmdServer('development', 'dev', args);
     case 'start': return cmdServer('production', 'start', args);

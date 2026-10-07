@@ -78,6 +78,12 @@ Docs: https://giojs.com/docs/cli`} />
           <code>build standalone</code>, the command&apos;s own <code>--help</code> has the full
           option list (the first two come from <code>create-giojs</code>).
         </li>
+        <li>
+          Anything more is a usage error, exit <code>2</code>: <code>gio help dev extra</code>,{' '}
+          <code>gio --help dev</code> (it suggests <code>gio help dev</code>),{' '}
+          <code>gio --version --bogus</code>, or an unknown name in{' '}
+          <code>gio help &lt;command&gt;</code>.
+        </li>
       </ul>
 
       <h3 id="version"><code>gio --version</code></h3>

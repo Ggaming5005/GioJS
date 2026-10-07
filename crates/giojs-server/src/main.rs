@@ -512,11 +512,26 @@ struct AppState {
 }
 
 fn main() -> anyhow::Result<()> {
+    // An argument the binary does not take is a usage error (exit 2, as for
+    // `gio`), never ignored: `giojs-server --version` must not start a server.
+    let check_config = match config_check::requested(std::env::args_os().skip(1)) {
+        Ok(check_config) => check_config,
+        Err(arg) => {
+            eprintln!(
+                "giojs-server: unexpected argument \"{}\": the server takes no arguments except {} \
+                 (gio.toml and environment variables configure it; `gio --version` prints versions)\n\
+                 See https://giojs.com/docs/cli/giojs-server",
+                arg.to_string_lossy(),
+                config_check::FLAG,
+            );
+            std::process::exit(2);
+        }
+    };
     // .env files load before the tokio runtime exists: mutating the process
     // environment is only sound while no other thread can be reading it. A
     // file that exists but cannot be parsed is a config error, like gio.toml.
     let loaded = env_files::load_for_startup();
-    if config_check::requested() {
+    if check_config {
         std::process::exit(config_check::run(loaded.as_ref()));
     }
     let env_files = match loaded {

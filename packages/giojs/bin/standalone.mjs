@@ -65,6 +65,9 @@ function usageError(message) {
 
 function parseArgs(argv) {
   const options = { out: resolve('standalone'), target: null };
+  // --help wins only over arguments that parse: `--help --bogus` is still
+  // a usage error, as with every other gio command.
+  let help = false;
   for (let i = 0; i < argv.length; i++) {
     let arg = argv[i];
     // `--out=dir` as well as `--out dir`, like every other gio command.
@@ -76,8 +79,7 @@ function parseArgs(argv) {
     }
     const value = () => (inline !== undefined ? inline : argv[++i]);
     if (arg === '--help' || arg === '-h') {
-      console.log(USAGE);
-      process.exit(0);
+      help = true;
     } else if (arg === '--out') {
       const dir = value();
       if (!dir) usageError('--out requires a directory argument');
@@ -92,6 +94,10 @@ function parseArgs(argv) {
     } else {
       usageError(`unknown argument "${arg}"`);
     }
+  }
+  if (help) {
+    console.log(USAGE);
+    process.exit(0);
   }
   return options;
 }

@@ -43,6 +43,12 @@ first.
   `giojs-server --check-config` lists every problem at once.
 - **`gio.config.ts` is validated at boot:** unknown keys and plugins without a
   `name` are errors.
+- **The server binary refuses arguments it does not take.** `giojs-server`
+  (and a standalone build's `run.mjs`) takes `--check-config` alone; any other
+  argument, such as `--version` or `--port 4000`, exits with 2 and starts
+  nothing. It used to be ignored, and the server started. Configure the
+  server with `gio.toml` and environment variables (`GIO_PORT`), and use
+  `gio --version` for versions.
 - **Broken guards stop startup.** A `[[guards]]` entry with a misspelled key,
   no requirement or an invalid path now fails startup instead of being skipped
   with a warning. A malformed `middleware.ts` guard denies every request to
@@ -784,7 +790,9 @@ first.
   mistyped command or option is a did-you-mean error. Exit codes: 0 success,
   1 failure, 2 usage error - in every command, including those that parse
   their own options (`gio bench`, `gio build standalone`, `gio migrate`,
-  `gio add`).
+  `gio add`). An argument a command does not take is a usage error too,
+  after `--help` or `--version` as well (`gio --version --bogus`,
+  `gio help dev extra`).
 - **`gio dev` and `gio start`** run the server in development or production
   mode, whatever `NODE_ENV` says. `-p/--port` and `-H/--host` (IPv4 or IPv6)
   set `GIO_PORT` / `GIO_HOST`, `--open` opens a browser, and the local and
@@ -807,7 +815,9 @@ first.
   `GIO_SESSION_SECRET` for `require_session` guards, a free port,
   `trusted_proxies` behind a proxy and a writable cache directory, with a fix
   for every problem. When the server cannot read the configuration, the checks
-  that depend on it are reported as skipped, with the reason.
+  that depend on it are reported as skipped, with the reason - and so when no
+  binary of this version is installed and the CLI's lenient reader cannot read
+  `gio.toml` (the `config` check names the lines).
   **`gio info [--json]`** prints versions and environment details for bug
   reports.
 - **`gio migrate` and `gio add <feature>`** run the matching `create-giojs`

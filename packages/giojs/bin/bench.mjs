@@ -13,6 +13,7 @@
  */
 import http from 'node:http';
 import https from 'node:https';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 const DEFAULT_CONNECTIONS = 32;
@@ -72,6 +73,7 @@ export function parseBenchArgs(argv) {
     base: DEFAULT_BASE_URL,
     suite: null,
     url: null,
+    help: false,
   };
   const numericFlags = { '--connections': 'connections', '--duration': 'duration', '--warmup': 'warmup' };
   const valueFlags = new Set([...Object.keys(numericFlags), '--suite', '--base']);
@@ -90,7 +92,11 @@ export function parseBenchArgs(argv) {
       index += 1;
       return argv[index];
     };
-    if (argument in numericFlags) {
+    // --help wins only over arguments that parse: `--help --bogus` is
+    // still a usage error, as with every other gio command.
+    if (argument === '--help' || argument === '-h') {
+      options.help = true;
+    } else if (argument in numericFlags) {
       const raw = takeValue();
       const parsed = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
       if (argument === '--connections') {
@@ -124,6 +130,7 @@ export function parseBenchArgs(argv) {
     }
   }
 
+  if (options.help) return { ok: true, value: options };
   if (options.suite === null && options.url === null) {
     return { ok: false, error: 'usage: gio bench <url> [--connections 32] [--duration 10] [--warmup 2]\n       gio bench --suite /,/other [--base http://localhost:3000]' };
   }
@@ -248,6 +255,11 @@ async function main() {
     process.exit(USAGE_ERROR);
   }
   const options = parsed.value;
+  if (options.help) {
+    const { commandHelp } = createRequire(import.meta.url)('./lib/commands.js');
+    console.log(commandHelp('bench'));
+    return;
+  }
 
   if (options.suite === null) {
     const result = await runLoad(options.url, options);

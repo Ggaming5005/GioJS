@@ -235,6 +235,20 @@ describe('doctor checks', () => {
     // Port 0 has its own reason; a configuration that parsed is still checked.
     assert.match(checkOf(facts({ port: null, config: { listen: { host: '0.0.0.0', port: 0, portSource: 'gio.toml', tls: false } } }), 'port').title,
       /Port not checked: port 0 picks a free port at startup/);
+    // The fallback reader's report for a gio.toml it cannot read is the
+    // same: the config check names the lines, the rest is skipped.
+    const unread = facts({ port: null, cacheDir: null });
+    unread.config = {
+      ok: true, fallback: true, errors: [], warnings: [], mode: 'production', configFile: 'gio.toml',
+      configProblems: ['gio.toml:1: not a table header'],
+    };
+    const unreadById = Object.fromEntries(runChecks(unread).map((c) => [c.id, c]));
+    assert.equal(unreadById.config.status, 'warn');
+    assert.match(unreadById.config.detail, /^gio\.toml:1: not a table header\nThe checks that read gio\.toml are skipped\.$/);
+    for (const id of ['session', 'port', 'proxy', 'cache']) {
+      assert.equal(unreadById[id].status, 'skip', id);
+      assert.match(unreadById[id].title, /not checked: gio\.toml could not be read \(see above\)$/, id);
+    }
     const invalidButRead = facts({ config: { ok: false, errors: ['[server.tls] cert_path: not found'], sessionGuards: 1 } });
     assert.equal(checkOf(invalidButRead, 'session').status, 'error');
     assert.equal(checkOf(invalidButRead, 'port').status, 'ok');

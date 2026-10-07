@@ -138,7 +138,8 @@ export default function Page(): React.JSX.Element {
         A <code>gio.toml</code> edit restarts the worker like any other, but the new settings
         do not take effect: the Rust server reads <code>gio.toml</code> once, at startup, and
         keeps running with what it read. Stop <code>gio dev</code> (Ctrl+C) and run it again.
-        The same goes for the <code>.env</code> files and the environment.
+        Edits to the <code>.env</code> files are not watched at all (no restart, no reload):
+        restart <code>gio dev</code> to apply them, as for a change to the environment.
       </div>
       <ul>
         <li>

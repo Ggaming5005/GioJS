@@ -72,7 +72,10 @@ gio --version          # CLI, server binary and @gio.js/core package versions (-
         Every command keeps this contract, including the ones that parse their own options
         (<code>gio build standalone</code>, <code>gio bench</code>, <code>gio migrate</code>{' '}
         and <code>gio add</code>): a usage error exits with <code>2</code> before the command
-        does anything.
+        does anything. An argument a command does not take is one too, after{' '}
+        <code>--help</code> or <code>--version</code> as well: <code>gio --version --bogus</code>{' '}
+        and <code>gio help dev extra</code> exit with <code>2</code>. <code>--help</code> wins
+        only over arguments that parse (<code>gio bench / --help</code> prints the help).
       </p>
       <p>
         <code>gio --version</code> prints package versions, read from the installed{' '}
@@ -262,7 +265,8 @@ gio bench --suite /,/posts/1 [--base <url>]`} />
       <h2 id="giojs-server">giojs-server</h2>
       <p>
         The <code>giojs-server</code> bin starts the server with no command parsing: it keeps
-        the caller&apos;s <code>NODE_ENV</code> and passes its arguments to the binary, as the
+        the caller&apos;s <code>NODE_ENV</code> and passes its arguments to the binary (which
+        takes only <code>--check-config</code>: any other argument exits with <code>2</code>), as the
         scripts of scaffolded projects use it (
         <code>cross-env NODE_ENV=development giojs-server</code>). See{' '}
         <a href="/docs/cli/giojs-server"><code>giojs-server</code></a>.

@@ -174,6 +174,36 @@ describe('unknown commands and options', () => {
     }
   });
 
+  // --help and --version do not swallow what follows them: an argument a
+  // command does not take is a usage error wherever it appears.
+  test('extra arguments after --help, --version and help <command> are usage errors', () => {
+    for (const [args, help] of [
+      [['--version', '--bogus'], 'gio --help'],
+      [['-v', 'extra'], 'gio --help'],
+      [['--help', 'extra'], 'gio --help'],
+      [['help', 'dev', 'extra'], 'gio help --help'],
+      [['build', '--help', 'extra'], 'gio build --help'],
+      [['cache', '--help', 'extra'], 'gio cache --help'],
+      [['typegen', '--help', 'extra'], 'gio typegen --help'],
+      [['bench', '--help', '--bogus'], 'gio bench --help'],
+      [['bench', '--help', '/', '/other'], 'gio bench --help'],
+      [['build', 'standalone', '--help', '--bogus'], 'gio build standalone --help'],
+      [['help', 'constructor'], 'gio --help'],
+    ]) {
+      const result = run(args, { env: { GIO_SERVER_BIN: '/nonexistent/giojs-server' } });
+      assert.equal(result.status, 2, `gio ${args.join(' ')}: ${result.stdout}${result.stderr}`);
+      assert.equal(result.stdout, '', args.join(' '));
+      assert.match(result.stderr, new RegExp(`Run \`${help}\` for usage\\.`), args.join(' '));
+    }
+    assert.match(run(['--help', 'dev']).stderr, /unexpected argument "dev" after --help - did you mean `gio help dev`\?/);
+    // --help still wins over arguments that parse.
+    for (const args of [['bench', '/', '--help'], ['build', 'standalone', '--out', 'x', '-h']]) {
+      const result = run(args);
+      assert.equal(result.status, 0, `gio ${args.join(' ')}: ${result.stderr}`);
+      assert.match(result.stdout, /^[Uu]sage: gio /, args.join(' '));
+    }
+  });
+
   test('plain gio build still explains deploys', () => {
     const { status, stdout } = run(['build']);
     assert.equal(status, 0);

@@ -5220,6 +5220,22 @@ async function strictConfigPhase() {
       assert.equal(existsSync(join(projectDir, 'public', '_cache')), false, '--check-config creates nothing');
     });
 
+    // The binary takes no argument but --check-config: anything else is a
+    // usage error before the config is read, never a server that starts.
+    await test('an argument the binary does not take is a usage error (exit 2), not a started server', async () => {
+      for (const [args, rejected] of [[['--version'], '--version'], [['--port', '4000'], '--port'], [['--check-config', 'extra'], 'extra']]) {
+        const run = spawnSync(binary, args, {
+          cwd: projectDir,
+          env: { ...process.env, GIO_APP_DIR: join(projectDir, 'app'), NODE_ENV: 'production' },
+          encoding: 'utf8',
+          timeout: 30_000,
+        });
+        assert.equal(run.status, 2, `${args.join(' ')}: exit status ${run.status} (signal ${run.signal}), stderr:\n${run.stderr}`);
+        assert.match(run.stderr, new RegExp(`^giojs-server: unexpected argument "${rejected}"`), run.stderr);
+        assert.equal(run.stdout, '');
+      }
+    });
+
     // Refusals that come after gio.toml parses: --check-config shares
     // startup's validation, so it must refuse exactly what startup refuses,
     // with the same message - and never echo a token.

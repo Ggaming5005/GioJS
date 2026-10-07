@@ -95,7 +95,8 @@ node standalone/run.mjs`} />
         <code>run.mjs</code> starts <code>server</code> with the output directory as its
         working directory, <code>NODE_ENV=production</code> unless the environment sets{' '}
         <code>NODE_ENV</code>, and the paths to <code>worker.js</code> and{' '}
-        <code>static/</code>. It passes its own arguments to the server, forwards{' '}
+        <code>static/</code>. It passes its own arguments to the server (which takes only{' '}
+        <code>--check-config</code>), forwards{' '}
         <code>SIGINT</code> / <code>SIGTERM</code> (except on Windows), and exits with the
         server&apos;s code. Like <code>gio</code>, it holds the server&apos;s stdin pipe, so
         killing the launcher also stops the server.

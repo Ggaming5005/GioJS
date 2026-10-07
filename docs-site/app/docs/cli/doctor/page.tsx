@@ -81,7 +81,11 @@ export default function Page(): React.JSX.Element {
         CLI&apos;s own version is available (a different version may not know the flag); the
         other checks then read <code>gio.toml</code> leniently. That reader still fails the{' '}
         <code>config</code> check on an invalid <code>GIO_ENV_FILES</code>, with the
-        server&apos;s own error.
+        server&apos;s own error. When it cannot read <code>gio.toml</code> either (a line that
+        is not TOML, such as an unclosed <code>[server</code> header), the <code>config</code>{' '}
+        check warns with the line numbers, and the <code>session</code>, <code>port</code>,{' '}
+        <code>proxy</code> and <code>cache</code> checks are skipped with{' '}
+        <code>gio.toml could not be read (see above)</code> instead of running on defaults.
       </p>
       <p>
         When the server cannot read the configuration at all (<code>gio.toml</code> does not

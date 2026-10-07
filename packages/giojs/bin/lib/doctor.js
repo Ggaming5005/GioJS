@@ -351,6 +351,12 @@ function configCheck(facts) {
       fix: 'Fix the setting named above (the server prints the same message at startup).',
     });
   }
+  if (config.fallback && config.configProblems) {
+    return check('config', 'warn', 'gio.toml not validated (needs a server binary of this version), and it could not be read', {
+      detail: `${config.configProblems.join('\n')}\nThe checks that read gio.toml are skipped.`,
+      fix: 'Fix the lines named above; install the server binary of this version to validate the rest.',
+    });
+  }
   if (config.fallback) {
     return check('config', 'skip', 'gio.toml not validated (needs a server binary of this version)', {
       detail: config.configFile ? 'Read leniently for the checks below; unknown keys are only caught by the server.' : undefined,
@@ -400,12 +406,14 @@ function tsconfigCheck(facts) {
 /**
  * Why a check that reads `field` of the configuration report cannot run, or
  * null when it can. A report for a configuration the server could not read
- * (a gio.toml or .env error) carries only the error - a check must not pass
- * on the missing value.
+ * (a gio.toml or .env error) carries only the error, and so does the
+ * fallback's for a gio.toml it cannot read - a check must not pass on the
+ * missing value.
  */
 function unreadable(facts, field) {
   if (facts.config[field] !== undefined && facts.config[field] !== null) return null;
-  return facts.config.ok ? null : 'the server could not read the configuration (error above)';
+  if (!facts.config.ok) return 'the server could not read the configuration (error above)';
+  return facts.config.configProblems ? 'gio.toml could not be read (see above)' : null;
 }
 
 function sessionSecretCheck(facts) {
