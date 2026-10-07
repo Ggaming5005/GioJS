@@ -77,7 +77,9 @@ export default function Page(): React.JSX.Element {
         key. <a href="/docs/gio-config"><code>gio.config.ts</code></a> is validated too (unknown keys, plugins without a{' '}
         <code>name</code>), and a <a href="/docs/configuration/guards"><code>[[guards]]</code></a> entry with a misspelled key, no
         requirement or an invalid path fails startup instead of being skipped. Run the check
-        before you deploy - it lists every problem at once, and never binds a port:
+        before you deploy. It never binds a port, and lists every validation problem at
+        once; an unknown key or a TOML syntax error is reported on its own, so run it again
+        after fixing one:
       </p>
       <CodeBlock lang="bash" code={`npx giojs-server --check-config     # JSON report; exit code 1 when startup would fail
 npx gio doctor                       # the same check, plus Node, versions, tsconfig and the port`} />
@@ -169,7 +171,9 @@ files = false        # or GIO_ENV_FILES=0 in the environment`} />
           <code>[...slug]</code> matches one or more segments and <code>[[...slug]]</code> zero
           or more; the param is one <code>/</code>-joined string (<code>&apos;a/b&apos;</code>,
           or <code>&apos;&apos;</code> for an optional catch-all that matched nothing):
-          <CodeBlock lang="ts" title="app/docs/[...slug]/page.tsx" code={`export async function getServerSideProps(ctx: GsspContext<'/docs/*slug'>) {
+          <CodeBlock lang="ts" title="app/docs/[...slug]/page.tsx" code={`import type { GsspContext } from '@gio.js/core';
+
+export async function getServerSideProps(ctx: GsspContext<'/docs/*slug'>) {
   const parts = ctx.params.slug.split('/'); // /docs/guides/install -> ['guides', 'install']
   return { props: { parts } };
 }`} />
@@ -319,7 +323,9 @@ x-frame-options = ""          # "" removes the default for these paths`} />
           broadcasts only once it resolves (to anything but <code>false</code>), and a rejected
           promise closes it with <code>1011</code>. A handler that awaits for the socket&apos;s
           whole lifetime must return once its listeners are set up:
-          <CodeBlock lang="diff" title="app/chat/route.ts" code={`  export async function wsHandler(socket: GioSocket) {
+          <CodeBlock lang="diff" title="app/chat/route.ts" code={`  import { broadcast, type GioSocket } from '@gio.js/core';
+
+  export async function wsHandler(socket: GioSocket) {
     socket.join('lobby');
     socket.on('message', (data) => broadcast('lobby', String(data)));
 -   await new Promise((resolve) => socket.on('close', resolve));   // pending while the socket is open
@@ -372,6 +378,11 @@ x-frame-options = ""          # "" removes the default for these paths`} />
       </p>
       <CodeBlock lang="toml" title="gio.toml" code={`[dev]
 allowed_hosts = ["myvm.local", "192.168.1.20", "*.tunnel.example"]`} />
+      <p>
+        An entry of <code>&quot;*&quot;</code>, which beta.7 dropped as invalid, now opens the
+        dev endpoints and error details to every host and every machine, with a startup
+        warning. Open-in-editor still takes same-origin requests only.
+      </p>
 
       <h2 id="15-deploys">15. Deploys</h2>
       <ul>

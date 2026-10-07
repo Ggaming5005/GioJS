@@ -43,12 +43,15 @@ export default function Page(): React.JSX.Element {
           <strong><code>0</code> lifts a limit.</strong> Every numeric limit uses{' '}
           <code>0</code> for unlimited and every timeout uses <code>0</code> for none, in
           every section. To turn a feature off, use its <code>enabled</code> key, not a limit
-          of <code>0</code>.
+          of <code>0</code>. The one exception is <code>[cache] memory_max_entries</code>,
+          which must be at least <code>1</code>: <code>[cache] enabled = false</code> is the
+          page cache&apos;s off switch.
         </li>
         <li>
-          <strong>Never silent.</strong> Turning a protection off or loosening a limit to{' '}
-          <code>0</code> logs one <code>warn</code> line at startup that names the key and
-          what it costs. <a href="/docs/cli/giojs-server"><code>giojs-server --check-config</code></a> and{' '}
+          <strong>Never silent.</strong> Turning a protection off, or lifting a limit that
+          guards memory or connections to <code>0</code>, logs one <code>warn</code> line at
+          startup that names the key and what it costs - the <em>Warns</em> column below says
+          which keys do. Timeouts and the prefetch budget lift without a warning. <a href="/docs/cli/giojs-server"><code>giojs-server --check-config</code></a> and{' '}
           <a href="/docs/cli/doctor"><code>gio doctor</code></a> report the same text under{' '}
           <code>warnings</code>, so CI can catch it before a deploy.
         </li>
@@ -293,7 +296,7 @@ x-frame-options = ""                               # let partners frame one sect
           <tr>
             <td>Dev dashboard, codeframes, open-in-editor, live reload</td>
             <td><code>[dev] devtools = true</code></td>
-            <td><code>false</code>: <code>/_gio/devtools*</code> is not routed and the error overlay shows no codeframes or editor links</td>
+            <td><code>false</code>: <code>/_gio/devtools*</code> is not routed, and the error overlay shows no codeframes or editor links and does not live-reload</td>
             <td>The overlay tooling.</td>
             <td>no (logged as info)</td>
           </tr>
@@ -310,7 +313,8 @@ x-frame-options = ""                               # let partners frame one sect
       <h2 id="features">Features</h2>
       <p>
         Turning one of these off saves work or hands it to something else (a CDN, an image
-        service). None of them warns, except where a limit goes to <code>0</code>.
+        service). None of them warns, except <code>skew_protection = false</code> and the
+        image limits at <code>0</code>.
       </p>
       <table>
         <thead>
@@ -506,7 +510,7 @@ details = false                           # no deployment id or topology on a pu
         (output trimmed):
       </p>
       <CodeBlock lang="bash" code={`$ npx giojs-server --check-config
-{"errors":[],"ok":true,"trustedProxies":1,...,"warnings":["[security] default_headers = false: responses no longer carry x-content-type-options, x-frame-options or referrer-policy (MIME sniffing, clickjacking and full-URL referrers are back) unless [security.headers] sets them"]}`} />
+{...,"errors":[],...,"ok":true,...,"trustedProxies":1,"warnings":["[security] default_headers = false: responses no longer carry x-content-type-options, x-frame-options or referrer-policy (MIME sniffing, clickjacking and full-URL referrers are back) unless [security.headers] sets them"]}`} />
 
       <h2 id="related">Related</h2>
       <ul>
@@ -523,13 +527,18 @@ details = false                           # no deployment id or topology on a pu
           version: 'v0.1.0-beta.8',
           changes: (
             <>
-              Introduced the switches <code>[security] default_headers</code>,{' '}
+              The request protections, connection limits, trusted proxies and the dev
+              host check are new, on by default. Introduced the switches{' '}
+              <code>[security] default_headers</code>,{' '}
               <code>[server] skew_protection</code>, <code>render_timeout_secs</code>,{' '}
               <code>rate_limit_max_buckets</code>, <code>[dev] devtools</code>,{' '}
               <code>watch</code>, <code>[health]</code>, <code>[env]</code>,{' '}
               <code>[images] enabled</code>, <code>[cache] enabled</code>,{' '}
               <code>disk_enabled</code>, <code>etag</code>, <code>swr_multiplier</code>,{' '}
-              <code>[prefetch] enabled</code> and <code>[[fonts]] preload</code>.{' '}
+              <code>[prefetch] enabled</code> and <code>[[fonts]] preload</code>, and the
+              limits <code>[[rate_limits]] max_keys_per_client</code>,{' '}
+              <code>[images] remote_timeout_secs</code>, <code>max_source_dimension</code>{' '}
+              and <code>max_decode_bytes</code>.{' '}
               <code>0</code> now lifts every limit. One startup warning per loosened
               protection.
             </>

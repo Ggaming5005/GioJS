@@ -56,9 +56,9 @@ export default function Page(): React.JSX.Element {
         </li>
         <li>
           <strong>Pages with <code>revalidate</code></strong> render completely before anything
-          is sent, so the whole page can be stored in the page cache and served with a{' '}
-          <code>Content-Length</code>. Suspense still works there; it just resolves on the
-          server first. To stream a cached page, use{' '}
+          is sent, so the whole page can be stored in the page cache and served from it.
+          Suspense still works there; it just resolves on the server first. To stream a
+          cached page, use{' '}
           <a href="#partial-prerendering">partial prerendering</a>.
         </li>
         <li>
@@ -68,7 +68,7 @@ export default function Page(): React.JSX.Element {
         </li>
       </ul>
 
-      <h3 id="page-level-streaming-with-loading-tsx">Page-level streaming with loading.tsx</h3>
+      <h3 id="whole-page-loading-ui-with-loading-tsx">Whole-page loading UI with loading.tsx</h3>
       <p>
         A <a href="/docs/file-conventions/loading"><code>loading.tsx</code></a> wraps everything
         below its folder in a Suspense boundary. While the page suspends, the layouts above
@@ -93,8 +93,8 @@ export default function Dashboard(): React.JSX.Element {
       <CodeBlock lang="ts" title="lib/stats.ts" code={`export interface Stats { orders: number }
 
 export async function loadStats(): Promise<Stats> {
-  const res = await fetch('https://api.example.com/stats');
-  return res.json();
+  const response = await fetch('https://stats.example.com/today');
+  return (await response.json()) as Stats;
 }
 
 // One promise per key for a few seconds. When a component suspends in the
@@ -125,7 +125,7 @@ export function cached<T>(key: string, load: () => Promise<T>, ttlMs = 5000): Pr
         slow, non-essential reads into the component tree to stream them.
       </p>
 
-      <h3 id="granular-streaming-with-suspense">Granular streaming with Suspense</h3>
+      <h3 id="streaming-one-part-of-a-page">Streaming one part of a page</h3>
       <p>
         Wrap only the slow part in your own <code>&lt;Suspense&gt;</code> and the rest of the
         page goes out with the first chunk. Start the work in the page and read it in a child
@@ -293,8 +293,8 @@ id,total
           so they must be final when you return the <code>Response</code>.
         </li>
         <li>
-          A body that is already complete and at most 1 MiB is sent buffered, with a{' '}
-          <code>Content-Length</code>; anything else streams with chunked encoding.
+          A body that is already complete and at most 1 MiB crosses from the worker in one
+          piece; anything longer, or still being produced, is forwarded chunk by chunk.
         </li>
         <li>
           When the client stops reading, the server stops pulling once about 1 MiB is waiting
@@ -377,7 +377,7 @@ export function Ticker(): React.JSX.Element {
         For two-way messages, use <a href="/docs/websockets">WebSockets</a>.
       </p>
 
-      <h2 id="shutdown">What happens at shutdown</h2>
+      <h2 id="what-happens-at-shutdown">What happens at shutdown</h2>
       <p>
         On <code>SIGTERM</code> or Ctrl+C the server stops accepting connections, closes idle
         keep-alive connections, and gives what is in flight up to 8 seconds to finish:
@@ -404,7 +404,7 @@ export function Ticker(): React.JSX.Element {
         recipes do.
       </p>
 
-      <h2 id="what-can-break-streaming">What can break streaming</h2>
+      <h2 id="when-chunks-are-held-back">When chunks are held back</h2>
       <ul>
         <li>
           <strong>Reverse proxies</strong> that buffer responses hold every chunk until the
@@ -422,8 +422,10 @@ export function Ticker(): React.JSX.Element {
         </li>
         <li>
           <strong>Checking it:</strong> <code>curl -N</code> prints chunks as they arrive. A
-          page that streams answers with <code>transfer-encoding: chunked</code> (over
-          HTTP/1.1) and its fallback appears in the HTML before its content.
+          streamed page answers with <code>X-Gio-Cache: bypass</code> (or{' '}
+          <code>ppr; ...</code>), and its Suspense fallback appears in the HTML before the
+          content. <code>transfer-encoding: chunked</code> alone proves nothing: dynamic
+          responses carry it over HTTP/1.1 whether they streamed or not.
         </li>
       </ul>
 

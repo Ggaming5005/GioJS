@@ -55,6 +55,7 @@ export default function Page(): React.JSX.Element {
       </p>
       <CodeBlock lang="tsx" title="app/contact/page.tsx" code={`import React from 'react';
 import { redirect, type ActionArgs } from '@gio.js/core';
+import { saveMessage } from '../../lib/messages';
 
 export async function action(req: ActionArgs) {
   const form = await req.formData();
@@ -81,7 +82,7 @@ export default function Contact({ actionData }: { actionData?: { error?: string 
         with the redirect - a session cookie after a login, an expired one after a logout:
       </p>
       <CodeBlock lang="ts" code={`return redirect('/dashboard', {
-  headers: { 'set-cookie': await sessions.commitSession(session) },
+  headers: { 'set-cookie': sessions.commitSession(session) },
 });`} />
       <p>
         With <a href="/docs/components/gio-form"><code>&lt;GioForm&gt;</code></a> the same
@@ -97,12 +98,14 @@ export default function Contact({ actionData }: { actionData?: { error?: string 
         <code>redirect()</code>, or throw it from any helper it calls - one guard function then
         serves pages and actions alike:
       </p>
-      <CodeBlock lang="ts" title="lib/auth.server.ts" code={`import { redirect } from '@gio.js/core';
+      <CodeBlock lang="ts" title="lib/auth.server.ts" code={`import { createSessionStorage, redirect } from '@gio.js/core';
+
+export const sessions = createSessionStorage<{ userId: string }>();
 
 export function requireUser(cookies: Record<string, string>): string {
-  const user = readSession(cookies);
-  if (user === null) throw redirect('/login', 307);
-  return user;
+  const userId = sessions.getSession({ cookies }).get('userId');
+  if (userId === undefined) throw redirect('/login', 307);
+  return userId;
 }`} />
       <CodeBlock lang="tsx" title="app/account/page.tsx" code={`import { redirect, type GsspContext } from '@gio.js/core';
 
@@ -250,7 +253,8 @@ location: /login?tab=2`} />
         Both fetch the next page through the client router; when the server answers that
         request with a redirect, the router follows it and records the final URL.
       </p>
-      <CodeBlock lang="tsx" code={`import { useRouter } from '@gio.js/react';
+      <CodeBlock lang="tsx" code={`import React from 'react';
+import { useRouter } from '@gio.js/react';
 
 function SignOut(): React.JSX.Element {
   const router = useRouter();

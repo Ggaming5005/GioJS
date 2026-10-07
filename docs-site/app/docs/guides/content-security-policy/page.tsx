@@ -60,7 +60,7 @@ export default function Page(): React.JSX.Element {
       </ul>
       <p>
         If your pages are served from a CDN cache, weigh that against the protection, or use a
-        policy without nonces (<a href="#without-nonces">below</a>). Turning CSP on or off, or
+        policy without nonces (<a href="#policies-without-a-nonce">below</a>). Turning CSP on or off, or
         rotating the placeholder, drops the cached pages so none are served with the wrong
         markup.
       </p>
@@ -84,7 +84,8 @@ csp_report_only = """
   report-uri /api/csp-report
 """`} />
       <p>
-        Line breaks are sent as spaces. A value that is not a valid header stops the server at
+        Runs of whitespace, line breaks included, are sent as single spaces. A value that
+        is not a valid header stops the server at
         startup (<code>[security] csp_report_only: invalid header value</code>). Collect the
         reports with a route handler. <code>report-uri</code> posts{' '}
         <code>application/csp-report</code>, which <code>req.json()</code> does not accept, so
@@ -190,7 +191,7 @@ content-security-policy: default-src 'self'; script-src 'self' 'nonce-SqGohrjsp6
         threat a nonce stops; inline styles are a much smaller one.
       </p>
 
-      <h2 id="without-nonces">Without nonces</h2>
+      <h2 id="policies-without-a-nonce">Policies without a nonce</h2>
       <p>
         A policy without <code>{'{nonce}'}</code> is sent exactly as written, and pages stay
         cacheable by CDNs. GioJS still renders a few inline scripts (the deployment script,

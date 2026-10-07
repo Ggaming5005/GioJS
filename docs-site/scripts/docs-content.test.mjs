@@ -235,3 +235,19 @@ test('the redirecting guide states the redirect statuses each API accepts', () =
   assert.equal(rustDefault('crates/giojs-server/src/rules.rs', 'default_redirect_status'), 302);
   assert.match(docsPage('guides/redirecting'), /accept all of those but\{' '\}\s*<code>303<\/code>/);
 });
+
+test('the streaming guide states the route-body buffer and the backpressure threshold', () => {
+  const page = docsPage('guides/streaming');
+  assert.match(read('packages/giojs-core/src/ssr.ts'), /ROUTE_BUFFER_LIMIT_BYTES = 1024 \* 1024;/, 'update the guide and this test');
+  assert.match(read('crates/giojs-server/src/ipc.rs'), /const STREAM_PAUSE_BYTES: usize = 1024 \* 1024;/, 'update the guide and this test');
+  assert.ok(page.includes('at most 1 MiB crosses from the worker in one'));
+  assert.ok(page.includes('once about 1 MiB is waiting'));
+});
+
+test('the protections page states the request-id and revalidation-token rules', () => {
+  const page = docsPage('guides/security-switches');
+  assert.match(read('crates/giojs-server/src/client_identity.rs'), /const MAX_REQUEST_ID_LEN: usize = 128;/);
+  assert.ok(page.includes('must be 1 to 128 characters'));
+  assert.match(read('crates/giojs-server/src/revalidate.rs'), /pub const MIN_TOKEN_BYTES: usize = 32;/);
+  assert.ok(page.includes('must be at least 32 bytes'));
+});
