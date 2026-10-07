@@ -2,6 +2,811 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.1.0-beta.8 (unreleased)
+
+This release is about running GioJS in production. The server decides the
+runtime mode, error details and personalized pages no longer reach other
+visitors, connections are bounded, and security headers, CSRF and WebSocket
+origin checks are on by default, with encrypted sessions that guards verify in
+Rust. It also adds the everyday app features beta.7 lacked - catch-all routes,
+per-folder error, loading and not-found files, page actions and forms,
+on-demand revalidation, metadata, CSS imports and CSS Modules, router hooks, a
+worker pool and a testing kit - plus a real `gio` CLI and a scaffolder whose
+starter uses all of it. Several defaults changed: read the upgrade notes
+first.
+
+### Upgrade notes (breaking changes)
+
+- **The server decides the runtime mode.** The Node worker now runs in the
+  server's mode: `development` only when the server starts with
+  `NODE_ENV=development`, `production` otherwise. An unset `NODE_ENV` used to
+  run a development worker (dev bundles, sourcemaps, error stacks) behind a
+  production server. `npm start` needs no change; to develop, set
+  `NODE_ENV=development` (`npm run dev`, or the new `gio dev`). New starters'
+  `start` script is `cross-env NODE_ENV=production giojs-server`, with
+  `cross-env` a regular dependency. `gio export` follows the same rule.
+- **`.env` files are loaded.** At startup the server reads
+  `.env.{mode}.local`, `.env.local`, `.env.{mode}` and `.env` from the project
+  root (Next.js precedence; variables already in the environment win), and
+  passes them to the worker. Check what committed `.env` files would now
+  apply. `NODE_ENV` in a `.env` file is ignored, and a file that cannot be
+  parsed stops startup.
+- **`gio.toml` is strict.** An unknown section or key anywhere stops startup
+  with the file, line and closest valid key
+  (`gio.toml:5: unknown key [image] - did you mean [images]?`). Keys that
+  never did anything are rejected with what to do instead: `[cache] memory_mb`
+  (use `memory_max_entries`), `[cache.redis]` (no Redis backend yet),
+  `[css] engine` and `[prefetch] strategy` (set per `<GioLink prefetch>`).
+  Tables for other tools must be named `[x-...]`.
+  `giojs-server --check-config` lists every problem at once.
+- **`gio.config.ts` is validated at boot:** unknown keys and plugins without a
+  `name` are errors.
+- **Broken guards stop startup.** A `[[guards]]` entry with a misspelled key,
+  no requirement or an invalid path now fails startup instead of being skipped
+  with a warning. A malformed `middleware.ts` guard denies every request to
+  its path.
+- **The page cache directory** (`[cache] disk_path` or `GIO_CACHE_DIR`) may no
+  longer be, contain or sit inside `app/` or `public/`.
+- **CSRF protection is on.** Cross-site `POST`/`PUT`/`PATCH`/`DELETE` requests
+  (judged by `Sec-Fetch-Site`, or `Origin` against the request's host) get
+  `403` in Rust before Node runs. Requests without browser headers (curl,
+  server-to-server webhooks) pass. Add endpoints other sites post to on
+  purpose - OAuth/OIDC `response_mode=form_post` callbacks (Sign in with
+  Apple, Entra ID), SAML ACS endpoints, 3-D Secure returns - to
+  `[security.csrf] exempt`, and your other origins to `trusted_origins`.
+  Behind nginx keep `proxy_set_header Host $host`, or set `trusted_proxies` so
+  `X-Forwarded-Host` counts.
+- **Cross-origin WebSocket upgrades get `403`.** Allow an origin with
+  `[security.csrf] trusted_origins`, or turn the check off with
+  `[security.websocket] check_origin = false`.
+- **Security headers by default.** Every response carries
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN` and
+  `Referrer-Policy: strict-origin-when-cross-origin` (plus HSTS when
+  `[server.tls]` is on), and `X-Powered-By` is removed. A site embedded in
+  frames on other origins must override `x-frame-options` in
+  `[security.headers]` (`""` removes it) or with a `[[headers]]` rule.
+- **`req.json()` requires a JSON content type.** In route handlers it throws
+  `UnsupportedMediaTypeError` - a `415` unless caught - for a body not sent as
+  `application/json` or `application/*+json`. Make `fetch()` callers send
+  `Content-Type`.
+- **Personalized renders are no longer cached.** A page that exports
+  `revalidate` but whose `getServerSideProps` reads `ctx.cookies`, the
+  `cookie` or `authorization` header, `ctx.ip`, `ctx.host` or `ctx.scheme` (or
+  the raw client-address and host headers), or headers an `onRequest` plugin
+  changed, renders per request and is never stored, and neither is any
+  response that sets a cookie. Pages that read cookies used to be cached and
+  served to everyone. A warning names each route: drop `revalidate`, or cache
+  the shell with `shell = 'cache'` and personalize inside Suspense.
+- **Production errors show only a digest.** A failed render answers a generic
+  page with a short error reference, and the message and stack are logged
+  under the same digest. `error.tsx` now receives
+  `{ error: { message, digest } }`, where `message` is `Internal Server Error`
+  in production. Route-handler `500`s carry the digest.
+- **`error.tsx` runs in the browser too.** It is now a client error boundary
+  bundled into every page below its folder, so it must be browser-safe: one
+  that imports server-only code leaves those pages without hydration, and the
+  build error names the file.
+- **App Router folder rules.** `(group)` folders no longer appear in URLs, and
+  `_private` folders are never routed - move routes out of `_`-prefixed
+  folders. `[...slug]` matches one or more segments and `[[...slug]]` zero or
+  more; the param is one `/`-joined string (`'a/b'`, or `''` for an optional
+  catch-all that matched nothing). Layouts come from the folder tree, so
+  layouts inside dynamic folders and route groups now apply. Two files that
+  answer the same URLs fail startup, naming both.
+- **`public/` is served at the site root** (`/favicon.ico`, `/robots.txt`,
+  `/.well-known/...`), ahead of Node: a public file wins over a page with the
+  same path. `public/` now defaults to the directory next to `app/`
+  (`GIO_PUBLIC_DIR` overrides it), and CSS Module files under `app/` are no
+  longer served by path.
+- **`/_gio/` is reserved.** Paths under it that are not built-in endpoints
+  answer `404` from Rust and never reach the app; the dev-only
+  `/_gio/devtools*` endpoints `404` in production.
+- **Request paths are canonical.** Rules and rate limits match the path with
+  repeated and trailing slashes collapsed and escapes of unreserved characters
+  decoded, and the app sees those escapes decoded too. Paths with `.`/`..`
+  segments or a `%` that does not start a valid escape get `400`.
+- **`*rest` matches zero segments.** In guards, redirects, rewrites and header
+  rules (`gio.toml` and `middleware.ts`), `/admin/*rest` now also matches
+  `/admin`, and `/old/*rest -> /new/*rest` sends `/old` to `/new`. A
+  `[[rate_limits]]` path like `/api/*` also covers `/api`. Header rules now
+  also apply to redirect and guard responses, and match the requested path
+  rather than a rewritten one.
+- **Cookies in plugins and header rules.** Cookies a page or route handler
+  sets reach an `onResponse` plugin in `res.setCookies`, not
+  `res.headers['set-cookie']` - set `setCookies: []` to strip them. A
+  `set-cookie` header rule adds its cookie next to the response's own instead
+  of replacing them.
+- **Idle HTTP/1.1 keep-alive connections close after 10 seconds**
+  (`header_read_timeout_secs`); before, they were never closed. Proxies that
+  pool upstream connections longer (nginx `keepalive`, ingress-nginx and AWS
+  ALB default to 60 s) can answer with intermittent `502`s: keep the proxy's
+  upstream idle timeout below 10 s, or raise `header_read_timeout_secs` and
+  `idle_timeout_secs` above it.
+- **Dev endpoints answer only local hosts.** `/_gio/devtools*` (dashboard,
+  error-overlay codeframes, open-in-editor) refuse other `Host` values and
+  cross-site requests. If you open the dev server from a VM, a container host,
+  another device or a tunnel, add that host to `[dev] allowed_hosts`.
+- **Pages send `Cache-Control`.** Cached pages now carry
+  `public, max-age=0, s-maxage=<revalidate>, stale-while-revalidate=...`, so a
+  CDN in front of GioJS caches them for `s-maxage`, and an on-demand purge
+  does not reach it. Override it with a `[[headers]]` rule or from the app
+  where that is not wanted.
+- **Bare `gio` no longer starts a server.** It prints the help and exits with
+  code 2, and an unknown command or option is an error with a did-you-mean.
+  Use `gio start` (production) or `gio dev`. The `giojs-server` bin is
+  unchanged.
+- **WebSocket changes.** `useWebSocket` reconnects by default, with backoff
+  (pass `reconnect: false` for the old behavior). On the server, a path with
+  no `wsHandler` closes with `4404`, and an async `wsHandler` now decides the
+  connection: the socket gets broadcasts only once the handler resolves (to
+  anything but `false`), and a rejected promise closes it with `1011`. A
+  handler that awaits for the socket's whole lifetime should return once its
+  listeners are set up.
+- **`gio export` ships hydration.** Exported pages include client bundles
+  (`out/_next/static/chunks/`) and their `getServerSideProps` props as JSON,
+  as served pages always did - never return secrets from it. `public/` is also
+  copied to the root of `out/`, and the generated `robots.txt` and
+  `sitemap.xml` yield to files in `public/`.
+- **Typed routes use a global registry.** `.gio/routes.d.ts` now fills
+  `GioJS.RegisteredRoutes`, which `href()`, `useParams()` and the
+  `@gio.js/core` types read. Routes added by hand to `@gio.js/react`'s
+  `GioRegisteredRoutes` still type `href()`; move them to
+  `declare global { namespace GioJS { interface RegisteredRoutes { ... } } }`
+  so the core types see them.
+- **`create-giojs` is stricter.** Unknown flags are an error, a non-empty
+  target directory needs `--force`, and the new app gets `git init` and a
+  first commit (`--no-git` skips it).
+- **Building the server from source needs Rust 1.89** or newer (`rust-version`
+  in `Cargo.toml`, checked in CI).
+
+### Security
+
+- **No cross-visitor cache leaks.** Renders that read cookies, credentials,
+  the client's IP, host or scheme, or headers a plugin changed, and responses
+  that set cookies, are never cached or shared between concurrent requests,
+  whatever `revalidate` says. A spoofed `Host` can no longer poison the cache.
+  With PPR, the hydration props now stream after the shell boundary, so a
+  cached shell never carries another visitor's `getServerSideProps` props.
+- **The `/_gio` namespace is closed.** `/_gio/settings` could render
+  `app/[org]/settings` with `org = "_gio"` without running its guard; unknown
+  `/_gio/` paths now `404` in Rust.
+- **Rules cannot be sidestepped by spelling.** Rate limits, guards, redirects,
+  rewrites and header rules match the canonical path, so `/api/login/`,
+  `//api/login`, `/api//login` and `/api/%6Cogin` no longer slip past a rule
+  for `/api/login`.
+- **No error details in production responses**, including `gio export` output
+  and streamed Suspense errors (which render `data-dgst` instead of a
+  message). The real error is logged under the digest.
+- **Bounded rate limiter.** At most 100k buckets (refilled buckets are dropped
+  first, then the least recently seen), IPv6 clients are limited per /64, and
+  long windows (5 per hour) are no longer reset after 5 idle minutes.
+- **Connection limits.** New `[server]` settings bound what one client can
+  hold open: `max_connections` (10000), `tls_handshake_timeout_secs` (10),
+  `header_read_timeout_secs` (10, the slowloris guard),
+  `request_body_timeout_secs` (30; slow uploads get `408`),
+  `idle_timeout_secs` (60), `http2_max_concurrent_streams` (250) and HTTP/2
+  keep-alive pings (`http2_keep_alive_interval_secs` /
+  `http2_keep_alive_timeout_secs`, 20/20). `0` disables one. Streaming SSR,
+  SSE and WebSockets are never cut, and HTTP/1.1 responses carry
+  `Keep-Alive: timeout=N`.
+- **Dev server lockdown.** `/_gio/devtools*` endpoints answer only localhost
+  names, loopback IPs, a specific `[server] host` and `[dev] allowed_hosts`,
+  which blocks DNS-rebinding source reads. Cross-site requests are refused,
+  and open-in-editor takes same-origin `POST` only, so a website can no longer
+  launch your editor. Codeframes and open-in-editor resolve symlinks before
+  checking the project root, so a source-named symlink cannot expose `.env`.
+  Dev error pages served to other hosts leave out the message and stack. A LAN
+  client can still forge these headers: bind the dev server to `127.0.0.1` on
+  untrusted networks.
+- **Default security headers** on every response: pages, cache hits, route
+  handlers, static and public files, redirects, errors and `/_gio` endpoints.
+  Behind a TLS-terminating proxy, `[security] hsts = true` (or a table or raw
+  string) turns HSTS on. `[security.headers]` overrides a default, removes it
+  with `""`, or adds opt-in headers such as Permissions-Policy, COOP and CORP.
+  Headers the app or a `[[headers]]` rule sets always win.
+- **Content-Security-Policy with per-response nonces.** `[security] csp` and
+  `csp_report_only` accept `{nonce}`. Every response gets a fresh 192-bit
+  nonce, which every framework inline script carries: the hydration bootstrap,
+  React's Suspense scripts, the deployment script, critical CSS and the dev
+  overlay. Cache hits and PPR shells are covered too: the worker renders a
+  secret placeholder that Rust replaces at serve time, so stored markup never
+  holds a valid nonce. `cspNonce()` from `@gio.js/core` gives your own inline
+  scripts the nonce. Keep `style-src 'self' 'unsafe-inline'`, since `style`
+  props carry no nonce.
+- **CSRF protection** for `POST`/`PUT`/`PATCH`/`DELETE`, on by default and
+  enforced in Rust before the body is read (see the upgrade notes); configure
+  it with `[security.csrf] trusted_origins` and `exempt`.
+- **WebSocket origin check** against cross-site WebSocket hijacking, with its
+  own switch, `[security.websocket] check_origin`, so it stays on when CSRF
+  protection is disabled.
+- **Trusted proxies.** `[server] trusted_proxies` (IPs and CIDRs; default:
+  trust nobody) decides whose `X-Forwarded-For`, `X-Forwarded-Proto` and
+  `X-Forwarded-Host` count (`proxy_headers = "forwarded"` reads RFC 7239
+  `Forwarded` instead). The client address is walked right to left past
+  trusted hops, so nothing a client writes is ever read. Rate limits, prefetch
+  budgets, the `[metrics] ip_allowlist` (which now accepts CIDRs) and logs use
+  the resolved client. An incoming `X-Request-Id` is kept only from a trusted
+  proxy (`accept_request_id = false` always generates one).
+- **Encrypted cookie sessions.** `createSessionStorage()` from `@gio.js/core`
+  keeps session data in the cookie, encrypted with AES-256-GCM and signed,
+  with `getSession(ctx | req)`, `commitSession(session)` and
+  `destroySession()`. Secrets come from `GIO_SESSION_SECRET`: each at least 32
+  bytes, comma-separated to rotate (the first signs, all verify). Production
+  refuses to create a session storage without one; development generates an
+  ephemeral secret. Expired or tampered cookies read as an empty session.
+- **Guards that verify sessions.** `[[guards]] require_session = true`
+  (`requireSession: true` in `middleware.ts`) checks the session's signature
+  and expiry in Rust before any Node code runs; without a valid secret it
+  denies every request. `require_cookie` guards still only check that the
+  cookie exists.
+- **Cookie helpers.** `serializeCookie` has secure defaults (HttpOnly,
+  SameSite=Lax, Secure in production) and throws on values that could inject
+  headers or attributes. Also new: `parseCookies`, and `signValue` /
+  `unsignValue` (HMAC-SHA256, constant-time comparison, key rotation).
+- The reference auth plugin (`packages/giojs-auth-example`) trusted any cookie
+  containing `session=valid`. It is now `createAuthPlugin({ sessions })` on
+  real sessions, and `examples/auth-demo` is a complete login, guard and
+  logout flow.
+- **Server code stays out of the browser.** `getServerSideProps` and
+  `getStaticPaths`, and every module or package only they import, are
+  tree-shaken from client bundles in every export form, including
+  `export ... from` and `export *`. Importing `@gio.js/core/server-only` (or
+  `server-only`), or naming a file `*.server.ts`, marks a module server-only:
+  a route whose client bundle pulls one in is rejected with the import chain.
+  Only `GIO_PUBLIC_*` variables reach client code.
+- **Supply chain.** Release binaries are built from a committed `Cargo.lock`
+  with `--locked`. GitHub Actions are pinned to commit SHAs and the `cross`
+  install to an exact revision. `cargo-deny` checks advisories, licenses and
+  sources on every PR, and a vulnerable or unsound crate blocks a release;
+  production npm dependencies go through `pnpm audit`, and both audits also
+  run weekly. Dependabot opens weekly update PRs. `SECURITY.md` explains how
+  to report a vulnerability privately.
+
+### Routing
+
+- **Catch-alls, groups and private folders.** `[...slug]`, `[[...slug]]`,
+  `(group)` folders and `_private` folders follow the App Router conventions
+  (see the upgrade notes).
+- **Layouts follow the folder tree.** A page gets the `layout.tsx` of every
+  folder from `app/` down to its own, including inside dynamic folders and
+  route groups, and the client bundle wraps the same layouts the server
+  rendered.
+- **Deterministic matching.** Precedence is static > `[id]` > `[...slug]` >
+  `[[...slug]]`, compared segment by segment from the left, for `page.tsx` and
+  `route.ts` alike: a catch-all `route.ts` never shadows the pages below it.
+  Conflicting files fail startup naming both, and param names containing `?`,
+  `:` or `*` are rejected.
+- **Per-folder `not-found.tsx`, `error.tsx` and `loading.tsx`.** All three
+  work in any folder of `app/`. The nearest one at or above a page applies and
+  renders inside its own folder's layouts, nested layout > error boundary >
+  Suspense as in the App Router; an `error.tsx` never catches its own folder's
+  layout.
+- **`notFound()`** from `@gio.js/core`, or `{ notFound: true }` from
+  `getServerSideProps`, answers `404` with the nearest `not-found.tsx`. It
+  works in `getServerSideProps`, during render, and in `route.ts` handlers (as
+  a JSON 404). 404s are never cached.
+- **`error.tsx` is a client error boundary.** After hydration a render error
+  replaces only that segment, and the component gets `{ error, reset }`.
+  Server-side failures still answer `500` with the nearest `error.tsx`.
+- **`loading.tsx`** wraps its folder in `<Suspense>`, so a streamed page sends
+  the loading UI first. A page that throws or calls `notFound()` before it
+  suspends still gets its `500`/`404`; after it has suspended, errors fall
+  back to React's client-side recovery, so the answer is a `200`. With
+  `shell = 'cache'` the boundary is the edge of the PPR shell.
+- Typed routes: an optional catch-all is `*slug?`, and `href('/shop/*path?')`
+  returns `/shop`.
+- `getStaticPaths` works for catch-all and optional catch-all routes, with
+  strings or segment arrays. Invalid entries are skipped with a reason,
+  nothing is written outside `out/`, and a root catch-all no longer replaces
+  `404.html`.
+
+### Data, forms and mutations
+
+- **Page actions.** `export async function action(req)` in a page handles a
+  `POST` to its URL. `req` is the route-handler request plus
+  `await req.formData()` (urlencoded and multipart, files as `File` objects).
+  Return `redirect(url)` from `@gio.js/core` (`303` by default, for
+  Post/Redirect/Get), `{ status: 422, data }` or plain data to re-render the
+  page with an `actionData` prop (also `ctx.actionData`), or a web `Response`.
+  Action answers and re-renders are never cached.
+- **`<GioForm>`** from `@gio.js/react`: a real `<form method="post">` that
+  works without JavaScript. Once hydrated it submits with `fetch` and shows
+  the redirect target or the re-rendered page through the client router, so
+  layouts and typed input survive. It provides `useGioFormState()`
+  (`{ pending, lastResult }`), `onSuccess`, `onError`, `resetOnSuccess`,
+  `reloadDocument`, a double-submit guard and `aria-busy`, never sends a
+  submission twice once the action may have run, and follows redirects to
+  other sites.
+- `redirect()` also works in `getServerSideProps`, returned or thrown. Headers
+  an action returns with its data are sent even when `getServerSideProps` then
+  redirects or calls `notFound()`. Typed contract: `ActionArgs<Params>`,
+  `ActionResult`, `ActionData<typeof action>` and
+  `WithActionData<typeof action, Props>`.
+- Route handlers get `req.formData()` too. A body sent as something other than
+  a form is a `415`, and a malformed one a `400` (`MalformedBodyError`)
+  instead of a `500`.
+- **Several cookies per response.** Each `Set-Cookie` of a route-handler
+  `Response` (`headers.append('Set-Cookie', ...)`) is sent as its own header,
+  byte for byte; before, only the last one arrived. `getServerSideProps`
+  accepts `headers: { 'set-cookie': [...] }`, redirects may carry `headers`
+  (clearing cookies on logout), and Node plugins can add cookies through
+  `setCookies`.
+- **Request context.** `req.ip`, `req.scheme`, `req.host` and `req.requestId`
+  in route handlers, and the same fields on the `getServerSideProps` context.
+- **`.env` files** with Next.js precedence for the server, `gio export` and
+  `gio build standalone`. Only file names are logged; a parse error names the
+  file and line.
+- **`GIO_PUBLIC_*` variables** set at build time are inlined into client
+  bundles, and `process.env` in the browser holds only those. Any other
+  `process.env.X` is `undefined` there instead of throwing
+  `process is not defined`. Standalone builds and exports freeze the values.
+
+### Rendering, caching and revalidation
+
+- **On-demand revalidation.** Tag pages with `export const tags = ['posts']`,
+  or per render with `return { props, tags: ['post:42'] }`, then call
+  `await revalidateTag('post:42')` or
+  `await revalidatePath('/blog', { type: 'prefix' })` from `@gio.js/core`.
+  Purges cover memory and disk, PPR shells included, and resolve
+  `{ ok, purged }` once the server has confirmed them (a timeout gives
+  `ok: false` and a warning, not an exception). A render already running when
+  a purge lands is served but not stored, so it cannot undo the purge.
+- **`POST /_gio/revalidate`** for CMS webhooks and scripts:
+  `{ "tags"?: [...], "paths"?: [...], "prefix"?: bool }` with
+  `Authorization: Bearer <token>`. It exists only when `GIO_REVALIDATE_TOKEN`
+  or `[revalidate] token` (at least 32 bytes) is set; the token is compared in
+  constant time, and 10 failed attempts in a minute get `429`.
+- **HTTP caching for pages.** Cached pages send
+  `Cache-Control: public, max-age=0, s-maxage=..., stale-while-revalidate=...`
+  and a strong `ETag`, and a matching `If-None-Match` gets a `304` that keeps
+  the page's `Vary`. Personal, streamed, PPR, error and guarded pages,
+  requests with an `Authorization` header and header-negotiated locales get
+  `private, no-cache`. A `Cache-Control` set by the app or a header rule
+  always wins.
+- Renders that recovered from an error inside a Suspense boundary are not
+  cached, nor is their PPR shell. A cached page whose background revalidation
+  answers `404` is evicted instead of served stale.
+- PPR pages hydrate as soon as their props arrive, without waiting for the
+  remaining Suspense holes.
+- Instances that share a disk cache directory serve each other's pages instead
+  of deleting them, and the page cache only ever deletes its own entry files.
+- **Static exports hydrate.** `gio export` builds the client bundles, so
+  exported pages are interactive and `GioLink` navigates client-side on any
+  static host; images render their plain `src`. Routes whose bundle fails or
+  imports server-only code are exported as HTML only and listed, pages that
+  call `notFound()` are skipped, and failed pages are listed with their error
+  reference.
+- Changing `[images]` and restarting now drops persisted pages (the derived
+  deployment ID covers it). A pinned `GIO_DEPLOYMENT_ID` should change with
+  every deploy.
+
+### Metadata and SEO
+
+- **`metadata` and `generateMetadata`.** Pages and layouts export `metadata`
+  (title, description, keywords, authors, openGraph, twitter, alternates,
+  robots, icons, manifest, themeColor, other) or
+  `async generateMetadata(ctx, { props })`. Segments merge from the root
+  layout to the page, the deepest winning per field. Titles support
+  `{ default, template: '%s | Site', absolute }`, and relative URLs resolve
+  against `metadataBase` or `GIO_SITE_URL`.
+- The tags render into `<head>` on the server, streamed pages included, and
+  are replaced on client-side navigation. Reading cookies, the IP or the host
+  in `generateMetadata` makes the page uncached. A metadata title replaces a
+  component-rendered `<title>` (dev warns), and not-found and error pages get
+  the route's params.
+- **`app/sitemap.ts`, `app/robots.ts` and `app/manifest.ts`** serve
+  `/sitemap.xml`, `/robots.txt` and `/manifest.webmanifest`, cached for
+  `revalidate` seconds (default 3600), in standalone builds and `gio export`
+  too. A `public/` file of the same name wins, with a startup warning.
+- **`<JsonLd>`** from `@gio.js/react` renders schema.org data as a
+  non-executable `application/ld+json` block, escaped so its content can never
+  close the element; it needs no CSP nonce.
+
+### Styling and assets
+
+- **CSS imports.** `import './globals.css'` works from the root layout or any
+  page, layout or component. Each route's CSS is bundled into content-hashed,
+  minified stylesheets under `/_next/static/css/` with immutable caching,
+  linked in `<head>` (one shared root-layout stylesheet, then one per route).
+  On client navigation the next route's stylesheets load before it is shown.
+  `@import` is bundled, including a bare package name
+  (`@import "modern-normalize";`).
+- **CSS Modules.** `import styles from './card.module.css'` returns the class
+  map, with the same names in SSR and the client bundle, stable across builds
+  and machines; `composes` and `:global` follow esbuild's rules.
+  `.gio/css-modules.d.ts` types CSS imports with no setup.
+- `gio export` and `gio build standalone` ship the stylesheets and class maps,
+  lifting beta.7's standalone limitation. Client and standalone bundles use
+  the project's `tsconfig.json`/`jsconfig.json`, so `jsxImportSource` and
+  decorators apply as in SSR. The docs have a Tailwind v4 recipe.
+- **`public/` at the site root.** Dotfiles (except under `.well-known/`),
+  symlinks and a top-level `public/_gio/` are never served there. Guards,
+  header rules and `[[rate_limits]]` for a file's `/public/...` URL also apply
+  to its root URL, and root-served files revalidate
+  (`max-age=0, must-revalidate` with `Last-Modified`).
+- **CSS revalidates.** App CSS served from the CSS cache (`/globals.css`) and
+  `/_gio/fonts/fonts.css` are no longer cached as immutable for a year; they
+  revalidate on every use (a strong `ETag` and `304`s), so CSS changes show
+  right after a deploy.
+- **GioImage requests only widths the optimizer accepts.** srcset candidates
+  come from `[images] allowed_widths` and the default quality from
+  `[images] quality`; a hardcoded list used to produce widths the optimizer
+  rejected with `400`, which broke images in the starter. Fixed-size images
+  get 1x/2x candidates, `sizes`/`fill` every allowed width.
+- GioImage `priority` preloads the image (`<link rel="preload" as="image">`
+  plus `fetchpriority=high`). The new `unoptimized` prop renders the plain
+  `src`, as SVG, `data:` and `blob:` sources now always do. `/_gio/image`
+  accepts `src=/public/x` as well as `/x`.
+- **Local fonts.** A `[[fonts]]` `url` may be a file in `public/`
+  (`/public/fonts/inter.woff2`), read at every start with no network needed
+  and served under a content-hashed name. Remote font downloads now fail on an
+  HTTP error status instead of saving the error page as the font.
+
+### Client router
+
+- **Router hooks.** `usePathname()`, `useParams()` (typed:
+  `useParams<'/posts/:id'>()`), `useSearchParams()` and `useRouter()` (`push`,
+  `replace`, `back`, `forward`, `refresh`, `prefetch`) from `@gio.js/react`,
+  plus `navigate(href, { replace, scroll })`. They work during server
+  rendering, in the root layout too, hydrate without mismatches and update on
+  every soft navigation. `useLocale()` returns the request locale on the
+  server, so `<LocaleLink>` renders its prefixed href in the server HTML.
+- **Layouts keep their state.** Soft navigation renders the next page into the
+  same React root. Shared layouts stay mounted, the page remounts when the
+  path changes, a layout inside a dynamic segment mounts fresh when that
+  segment's value changes, and an error an `error.tsx` caught is cleared by
+  navigating away.
+- **Scroll and focus.** Navigations scroll to the top or the `#hash` target
+  (`scroll={false}` keeps the position), back/forward restore each page's
+  scroll position, and same-page hash links only scroll. Focus moves to the
+  new page's `<main>` and its title is announced to screen readers, except
+  that a text field still on the page keeps focus, so search-as-you-type with
+  `router.replace('?q=' + value)` works.
+- `router.refresh()` re-fetches the current page and re-renders it in place,
+  keeping state and scroll. `<GioLink>` gains `replace` and `scroll` props.
+- Only GioJS pages render in place, your `not-found`/`error` pages included;
+  JSON, a server error page or any non-2xx response (such as a static host's
+  `404.html`) is a full page load. After a redirect, history records the URL
+  the redirect landed on.
+- Prefetched pages expire after 30 seconds (`PREFETCH_TTL_MS`) and are cleared
+  by `router.refresh()` and by any same-origin non-GET `fetch()`. A failed
+  prefetch (including the `429` of a spent prefetch budget) no longer turns
+  the next click into a full page load.
+
+### Realtime and streaming
+
+- **WebSocket routes use page routing.** `app/chat/[room]/route.ts` answers
+  `/chat/lobby`, with the segments in `socket.params`.
+- **`GioSocket` knows the upgrade request:** `path`, `query`, selected
+  `headers`, parsed `cookies`, `ip` and `requestId`.
+  `sessions.getSession(socket)` works.
+- **Connection auth.** A `wsHandler` can return `false` (or resolve to it) to
+  close with `4401`, or call `socket.close(code, reason)`. Async handlers are
+  supported, including one that awaits the client's first message for token
+  auth: messages that arrive before the handler listens are held (up to 256
+  messages or 1 MiB) and delivered in order. A socket gets no broadcasts until
+  it is accepted, and a throwing handler closes with `1011`.
+- **Rooms.** `socket.join(room)` / `socket.leave(room)`, plus
+  `broadcast(room, data, { except })` from `@gio.js/core`, callable from any
+  route handler. Rooms live in the Rust server, so a broadcast reaches sockets
+  on every worker.
+- **`useWebSocket` reconnects** with exponential backoff and jitter
+  (`reconnect` is a boolean or
+  `{ maxAttempts, initialDelayMs, maxDelayMs, minUptimeMs }`), but not after
+  `1000` or `4000`-`4499` closes, `close()` or unmount. New: an optional send
+  queue while disconnected, `reconnectAttempts`, `isReconnecting`,
+  `reconnect()` and `onMessage` / `onOpen` / `onClose` callbacks.
+- **Streamed route-handler bodies.** A `ReadableStream` body (LLM tokens,
+  large downloads, a hand-written `text/event-stream`, streamed HTML) reaches
+  the client chunk by chunk, with backpressure and no idle cutoff. When the
+  client disconnects, the stream's `cancel()` runs. Small complete bodies stay
+  buffered.
+- Server shutdown and worker restarts close sockets with `1001`, and
+  connections over `[websocket] max_connections` close with `1013` instead of
+  being dropped.
+
+### Operations and observability
+
+- **Worker pool.** `[server] workers = N | "auto"` renders on several Node
+  processes, so a slow render no longer holds up the others. The default stays
+  1; `"auto"` is one per CPU core, at most 8. Requests go to the ready worker
+  with the fewest requests in flight (open SSE streams and streaming responses
+  count until they end), and streams, SSE and PPR holes stay on the worker
+  that started them. A crashed worker fails only its own in-flight requests
+  (`503`) and restarts while the others serve. Development always runs one
+  worker.
+- Client bundles are built once per pool: the first worker runs esbuild and
+  the others load its manifest. Each worker gets `GIO_WORKER_INDEX` and
+  `GIO_WORKER_COUNT`; a plugin's `onStartup` / `onShutdown` runs in every
+  worker, so guard one-time jobs. Each WebSocket stays on one worker, and a
+  restart closes only that worker's sockets.
+- **No orphaned workers.** A server killed outright (SIGKILL, the OOM killer,
+  a crash) no longer leaves its Node worker running: the worker exits when the
+  stdin pipe the server holds closes. `gio` and a standalone `run.mjs` launch
+  the server the same way, so killing a launcher also stops the server and
+  frees the port.
+- **Graceful shutdown** closes idle keep-alive connections at once instead of
+  waiting out the 8-second drain, and gives every worker a few seconds to run
+  plugin shutdown hooks.
+- **JSON logs.** `[logging] format = "json"` or `GIO_LOG_FORMAT=json` makes
+  the server write one JSON object per line in the worker's shape (`ts`,
+  `level`, `msg`, plus `target`), with span fields such as `request_id`
+  flattened in.
+- **Request IDs end to end.** Every response carries `X-Request-Id`, including
+  cache hits, static files, redirects and errors. Server log lines run in a
+  `request{request_id=...}` span, and every worker log line for the request
+  carries `"requestId"`, including the production error-digest lines, so a
+  user's error reference leads to every line of that request.
+- **Route-labeled metrics.** `gio_requests_total`,
+  `gio_request_duration_seconds` and `gio_node_ipc_latency_seconds` carry a
+  `route` label: the matched pattern (`/posts/:id`), or `static`, `internal`
+  or `unmatched`. `/_gio/metrics` adds `gio_workers`, `gio_worker_ready`,
+  `gio_worker_in_flight` and `gio_worker_restarts_total`, and `/_gio/health`
+  reports `workers: { configured, ready }`.
+- A worker response that fails to parse gets a `500` at once instead of
+  waiting out the 30-second IPC timeout. A request too large for one IPC frame
+  (a `max_body_bytes` raised above about 48 MiB) is answered `413`; it used to
+  drop the worker's connection and fail every in-flight request.
+
+### Configuration
+
+- **Editor support.** `@gio.js/server` ships `gio.schema.json`, generated from
+  the server's config types; new apps' `gio.toml` starts with
+  `#:schema ./node_modules/@gio.js/server/gio.schema.json` for completion and
+  hover docs (Even Better TOML / Taplo).
+- **Listen address.** `[server] host` and `port` default to `0.0.0.0` and
+  `3000`, so a partial `[server]` table works; `host` takes IPv4 or bracketed
+  IPv6 (`[::]`). The `PORT` variable (Heroku, Render, Railway, Fly.io, Cloud
+  Run) is honored with precedence `GIO_PORT` > `PORT` > `gio.toml` > 3000, and
+  `GIO_HOST` overrides the host. The startup log says where the port came
+  from.
+- **Now honored:** `[compression]` (`enabled`, `min_size_bytes`,
+  `prefer_brotli`), `[prefetch]` (`max_concurrent`, `max_per_second`),
+  `[cache]` (`memory_max_entries`, `disk_path`, `disk_max_bytes`;
+  `GIO_CACHE_DIR` still wins) and `[images] formats` (AVIF/WebP preference,
+  which also limits `f=`).
+- **New keys:** `[security]` (`headers`, `hsts`, `csp`, `csp_report_only`,
+  `[security.csrf]`, `[security.websocket]`), `[logging]`, `[revalidate]`,
+  `[dev] allowed_hosts`, and in `[server]` the connection limits, `workers`,
+  `trusted_proxies`, `proxy_headers` and `accept_request_id`.
+- **`[dev] watch_ignore`** (`["data/**", "*.db.json"]`): files the app writes
+  into the project no longer restart the dev worker. The page cache's own
+  writes never do.
+- `defineConfig` and `type GioConfig` from `@gio.js/core` type
+  `gio.config.ts`.
+- **`giojs-server --check-config`** loads the `.env` files and `gio.toml`
+  exactly as startup does, runs startup's validation (gio.toml, cache
+  placement, `[security]`, the revalidation token, TLS) and prints a JSON
+  report: the listen address, errors, rules startup would skip, and guard and
+  proxy settings. It exits 1 when the server would refuse to start, never
+  binds a port and never prints secrets, so it works as a CI step.
+- Startup reports every configuration refusal at once and checks the TLS
+  certificate and key before starting the worker. A `gio.toml` syntax error is
+  reported as `file:line:column` with the reason, without quoting the line (it
+  may hold a token).
+
+### TypeScript
+
+- **Types for every file convention** from `@gio.js/core`:
+  `GetServerSideProps<Props, '/posts/:id'>` (types `ctx.params` and the result
+  variants), `InferPageProps`, `PageProps<'/posts/:id'>`, `LayoutProps`,
+  `ErrorPageProps`, `NotFoundPageProps`, `GetStaticPaths`, `RouteHandler`,
+  `Metadata`, `MetadataRoute`, and route-typed `GioRequest`, `GsspContext`,
+  `ActionArgs` and `GenerateMetadata`. Every exported function's parameter and
+  result types are exported too, including `IPCRequest` / `IPCResponse` for
+  plugins.
+- **Typed params from your routes.** `.gio/routes.d.ts` fills one global
+  registry that `href()`, `useParams()` and the core types read, and a route
+  pattern that is not one of your routes fails `tsc`. Before the first server
+  start (or `gio typegen`), params are read from the pattern itself.
+- `import type ... from '@gio.js/core'` no longer fails `tsc --noEmit` with
+  TS5097: the package ships declaration files.
+- Starters depend on `@gio.js/core` directly and use these types (the
+  JavaScript starter through JSDoc); both starters are typechecked in CI.
+
+### CLI
+
+- **`gio` has real commands.** `gio --help`, `gio help <command>` and
+  `gio <command> --help` show the command table and each command's options,
+  and `gio --version` prints the CLI, server binary and `@gio.js/core`
+  versions. A mistyped command or option is a did-you-mean error. Exit codes:
+  0 success, 1 failure, 2 usage error.
+- **`gio dev` and `gio start`** run the server in development or production
+  mode, whatever `NODE_ENV` says. `-p/--port` and `-H/--host` (IPv4 or IPv6)
+  set `GIO_PORT` / `GIO_HOST`, `--open` opens a browser, and the local and
+  network URLs are printed once the worker is ready.
+- **Dev mode watches the whole project.** Changes in `app/`, source files in
+  `components/`, `lib/`, `src/` and `hooks/`, and root config files restart
+  the worker; edits under `public/` only reload the browser. `node_modules`,
+  `.git`, `.gio`, build output and editor temp files are ignored.
+- **`gio routes [--json]`** lists every route without starting the server:
+  pages with their layouts and loading/error/not-found files, route-handler
+  methods, WebSocket handlers and metadata routes. **`gio typegen`** writes
+  `.gio/routes.d.ts` without a server, for CI before `tsc`.
+- **`gio doctor [--dev | --prod] [--json]`** checks Node.js, the platform
+  binary, `@gio.js/*` versions in lockstep, `gio.toml` (validated by the
+  server itself), `tsconfig.json` including `.gio/routes.d.ts`,
+  `GIO_SESSION_SECRET` for `require_session` guards, a free port,
+  `trusted_proxies` behind a proxy and a writable cache directory, with a fix
+  for every problem. **`gio info [--json]`** prints versions and environment
+  details for bug reports.
+- **`gio migrate` and `gio add <feature>`** run the matching `create-giojs`
+  commands, using the installed `create-giojs` or the same version through
+  npx, pnpm dlx or bunx.
+- `gio cache explain` and `gio bench` use the address the server listens on
+  (`GIO_PORT` / `PORT`, `.env` files, `gio.toml`) instead of port 3000;
+  `gio cache explain` also takes `--base <url>`.
+- A missing platform binary prints which package to install for your platform
+  and package manager, never a stack trace. `GIO_SERVER_BIN` points the CLI at
+  a binary you built yourself.
+- `gio export` lists failed routes with their error reference, and routes it
+  exported without hydration.
+
+### create-giojs and starters
+
+- **Flags.** `npm create giojs` takes `--help`, `--version`,
+  `--pm <npm|pnpm|yarn|bun>`, `--no-git`, `--force` and a positional directory
+  (`.` for the current one). Unknown flags are a did-you-mean error, and the
+  `--` separator pnpm, yarn and bun pass on is accepted
+  (`pnpm create giojs my-app -- --js`).
+- It checks the package name and offers a sanitized one (`My App` becomes
+  `my-app`), refuses a non-empty directory without `--force` (listing what is
+  there), installs with the package manager you ran it with, and runs
+  `git init` plus an initial commit holding only the scaffolded files.
+- Without a terminal nothing is asked, so scripts and CI never hang; Ctrl+C at
+  a prompt exits with nothing written.
+- **A starter that uses the framework.** It imports `app/globals.css` from the
+  root layout, self-hosts its fonts from `public/fonts/` through `[[fonts]]`
+  (no Google Fonts CDN), declares its title template and description as
+  `export const metadata`, and ships `.gitignore` and `.env.example`. A
+  static-site scaffold's `npm run build` typechecks and then runs
+  `gio export`, with fonts declared by `@font-face`.
+- **Starter features.** `npm create giojs@latest` asks which features to add,
+  or takes `--tailwind`, `--api`, `--auth`, `--db`, `--docker` and `--ci` (or
+  `--features a,b,c`): Tailwind CSS v4 (CLI build, watcher in `npm run dev`),
+  a JSON `route.ts` plus a `<GioForm>` page action, cookie-session login with
+  a guarded `/dashboard` and a rate-limited `/login`, SQLite with Drizzle ORM
+  on Node's built-in `node:sqlite` (Node 22.16+, bundles into standalone
+  deploys), a non-root multi-stage Dockerfile built with
+  `gio build standalone` (with compose), and a GitHub Actions workflow.
+  TypeScript and JavaScript are both supported.
+- **`create-giojs add <feature>`** (or `gio add`) adds the same features to an
+  existing app without overwriting files you changed. A feature already set up
+  keeps your edits, so running it again is safe. A file of yours in a new
+  feature's way stops the run before anything is written and shows a diff
+  (`--force` overwrites, `--dry-run` previews), and `gio.toml` additions merge
+  into existing tables.
+
+### Testing
+
+- **`@gio.js/core/testing`** for vitest and node:test.
+  `renderPage(path, { cookies, query, headers })` renders a page in-process
+  through the worker's own pipeline and returns the status, HTML, hydration
+  props, every `Set-Cookie`, the redirect, whether the server would cache the
+  page and its cache tags. It loads the project's `.env` files and links the
+  same stylesheets the server does.
+- `callRoute(path, { method, body })` calls route handlers and returns a
+  fetch-like response (JSON, form and binary bodies; SSE as a raw event
+  stream).
+- `createTestServer()` starts the real server on a free port with a private
+  cache and waits for the worker; `close()` stops both, and a forgotten
+  `close()` never keeps the run alive or leaves processes behind.
+- **`gioVitest()`** from `@gio.js/core/vitest` makes CSS Module imports under
+  vitest produce the server's class names.
+- `GIO_HOST` / `GIO_PORT` override the listen address without editing
+  `gio.toml`. A page that imports `@gio.js/core/testing` has its client bundle
+  rejected.
+
+### Migration from Next.js
+
+- **`npm create giojs@latest -- migrate [dir]`** (also
+  `npx create-giojs migrate`, `gio migrate`, or the `gio-migrate` bin of
+  `create-giojs`) replaces the regex codemod and the docs' `npx gio-migrate`,
+  which fetched an unrelated npm package. `--dry-run` prints the plan and a
+  unified diff; a real run asks first, or needs `--yes` without a terminal.
+- Code is parsed with the TypeScript compiler and edited in place. It converts
+  `next/link`, `next/image`, `next/router` and `next/navigation` (to the
+  `@gio.js/react` hooks), `next/head`, `next/script`, `next/dynamic`,
+  `next/font` (to `[[fonts]]` hints), `getStaticProps` (to
+  `getServerSideProps` plus `revalidate`) and `NextResponse`. Anything else
+  gets a `// TODO(gio-migrate):` comment.
+- `metadata` and `generateMetadata` are kept (the latter rewritten to
+  `(ctx, { props })`), as are `app/sitemap.ts`, `app/robots.ts` and
+  `app/manifest.ts`; static metadata files in `app/` move to `public/`. Server
+  Action forms become `<GioForm>` posting to the page's `action`, `redirect()`
+  / `permanentRedirect()` and `next/cache`'s `revalidatePath` /
+  `revalidateTag` map to `@gio.js/core`, and `dynamic = 'force-static'`
+  becomes `revalidate = false`.
+- `pages/` projects move to `app/` (pages, 404/500, API routes, `_app` and
+  `_document` into the root layout) with relative imports rewritten; `src/app`
+  moves to `app/`; `.js` files with JSX become `.jsx`. A file is never moved
+  onto an existing one.
+- `next.config` becomes `gio.toml`: redirects, rewrites and headers (`:path*`
+  to `*path`), images and i18n. Rules GioJS would match differently are
+  skipped with a TODO, and an existing `gio.toml` is merged into only when
+  safe (otherwise `gio.migrated.toml`).
+- `package.json` swaps `next` for `@gio.js/*` and gets `"type": "module"`
+  (CommonJS `.js` configs become `.cjs`), `tsconfig.json` gets
+  `"jsx": "react-jsx"`, and `MIGRATION_REPORT.md` lists every move, change and
+  TODO with file and line.
+
+### Docs
+
+- New guides: **Environment Variables**, **Deploying** (Docker with
+  `gio build standalone`, Fly.io, Railway, Render, systemd behind nginx or
+  Caddy, with `trusted_proxies`, HSTS behind a proxy, `PORT` and stop timeouts
+  long enough to drain) and a **Production Checklist**; new pages for
+  Security, Authentication & Sessions, Forms & Mutations, Metadata & SEO and
+  Testing; and a Starter Features page with guides for Tailwind,
+  authentication, the database and Docker.
+- The sidebar is regrouped by topic. In `docs-site/`, `npm run check-links`
+  fails on dead links, missing anchors and pages left out of the sidebar, and
+  `npm test` checks facts the docs state against the code.
+- "Known Issues" is now **Known Limitations**: what GioJS does not do yet and
+  what to use instead.
+- The README's comparison with self-hosted Next.js is corrected and expanded,
+  the getting-started pages describe the new starter and `create-giojs` flags,
+  and the CLI reference is rewritten.
+
+### Fixed
+
+- Enabling `[server.tls]` panicked at startup: rustls could not choose between
+  the two compiled-in crypto providers.
+- The accept loop kept a record of every finished connection until shutdown,
+  and spun a core when it ran out of file descriptors.
+- A route handler returning
+  `new Response(stream, { headers: { 'content-type': 'text/event-stream' } })`
+  hung forever.
+- Client-initiated WebSocket closes were reported to browsers as `1006`.
+- `gio export` crashed with ENOENT writing `404.html` when no page was
+  exported, and the "Static site" starter's `/posts/1` link returned 404 after
+  export.
+- Slow rate limits such as 1 per hour now refill correctly.
+- Under vitest, app modules in `[id]` folders or paths with spaces failed to
+  load.
+
+### Known limitations
+
+- **No React Server Components** and no Server Actions: every page and nested
+  layout is server-rendered and hydrated, data loads in `getServerSideProps`,
+  and mutations are page actions or route handlers. The root layout never
+  hydrates, so URL-dependent UI there does not update on soft navigation.
+- **No generated Open Graph images** (`opengraph-image.tsx`), file-based icons
+  (`app/icon.png`), `viewport` export or `generateSitemaps`.
+- **No shared cache backend across instances.** There is no Redis (or other)
+  backend yet, so the page cache, revalidation purges, rate limits and
+  WebSocket rooms are per instance: call `POST /_gio/revalidate` on every
+  instance, and expect N instances to allow N times a configured rate.
+- **No linux-arm64 binary is published yet.** Build the server from source and
+  hand it to `gio build standalone` with `GIO_STANDALONE_SERVER_BIN`, or
+  deploy `linux/amd64` images. Windows on ARM and FreeBSD have no binary
+  either.
+- **Slow-read clients** that never read their response are bounded only by
+  `[server] max_connections`, and long-lived SSE and streaming connections
+  count toward it; there is no response write timeout or per-IP cap yet.
+- During client-side navigation the current page stays until the next page's
+  HTML arrives: the target's `loading.tsx` shows only if the new page suspends
+  in the browser. A `notFound()` that runs in the browser (after a streamed
+  page suspended) shows the nearest `error.tsx`, with status `200`.
+- `ctx.query` and `req.query` hold one value per key, so a server-rendered
+  `useSearchParams().getAll()` returns at most one.
+- Optimized images (`/_gio/image`) and remote `[[fonts]]` are cached as
+  immutable under names that ignore the source's content: replacing
+  `public/hero.png` or a remote font keeps serving the old one. Give a changed
+  file a new name (local fonts in `public/` are content-hashed).
+- Everything in `public/`, dotfiles included, stays reachable under
+  `/public/...`: never keep secrets there.
+- Request bodies are buffered in memory (2 MiB by default, about 48 MiB at
+  most). Sessions live in one cookie (4 KB, no server-side revocation).
+- `ctx.headers` is a Proxy that `structuredClone` cannot copy; pass
+  `{ ...ctx.headers }`. A `getServerSideProps` built by a module-scope call
+  (`export const getServerSideProps = withAuth(...)`) is not stripped from the
+  client bundle; mark the helper module server-only to turn a leak into a
+  build error.
+- No hot module replacement (an edit restarts the worker and reloads the
+  page), no edge runtime, and no `template` files, parallel routes or
+  intercepting routes.
+
 ## 0.1.0-beta.7 (2026-09-06)
 
 ### Partial prerendering (PPR)

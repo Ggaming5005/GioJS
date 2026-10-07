@@ -32,12 +32,12 @@ const RELEASES: Release[] = [
     date: 'Unreleased',
     tag: 'next',
     summary:
-      'The production release: security on by default, sessions and forms, a worker pool, on-demand revalidation, a metadata API, CSS Modules, a testing kit, a Next.js migration tool - and documentation for all of it.',
+      'The production release: security on by default, sessions and forms, a worker pool, on-demand revalidation, a metadata API, CSS Modules, a testing kit, a Next.js migration tool, a real gio CLI and a starter with optional features - and documentation for all of it.',
     groups: [
       {
         title: 'Security',
         items: [
-          'Every response carries default security headers; a Content-Security-Policy with fresh per-response nonces is one line of gio.toml - cache hits, PPR shells and streamed responses included. Cross-site POST/PUT/PATCH/DELETE requests and WebSocket upgrades are refused in Rust before Node sees them.',
+          'Every response carries default security headers; a Content-Security-Policy with fresh per-response nonces is one line of gio.toml - cache hits, PPR shells and streamed responses included. Cross-site POST/PUT/PATCH/DELETE requests and cross-origin WebSocket upgrades are refused in Rust before Node sees them.',
           'Encrypted, signed cookie sessions (createSessionStorage), cookie and signing helpers, and require_session guards that verify the session in the Rust layer before any Node code runs.',
           'Trusted proxies: real client IPs for rate limits, metrics and req.ip, plus request ids on every response and log line in both processes.',
           'Production mode is anything but NODE_ENV=development: error responses carry only a digest that matches the log line. Connection caps and slowloris/TLS/body timeouts, Host- and Origin-gated dev endpoints, a closed /_gio namespace, and supply-chain hardening (committed Cargo.lock, cargo-deny, pinned CI actions, SECURITY.md).',
@@ -71,13 +71,25 @@ const RELEASES: Release[] = [
         ],
       },
       {
+        title: 'CLI and starters',
+        items: [
+          'A real gio CLI: gio dev and gio start (with --port, --host and --open), gio routes, gio typegen, gio doctor and gio info, plus gio migrate and gio add. giojs-server --check-config validates a deploy\'s configuration without starting it.',
+          'npm create giojs takes a target directory, --pm, --no-git and --force, and its starter imports its CSS, self-hosts its fonts and declares page metadata. Optional starter features - Tailwind CSS, an API route with a form, authentication, a SQLite database, Docker and CI - come from flags at creation or create-giojs add / gio add later.',
+        ],
+      },
+      {
         title: 'Upgrading from beta.7',
         items: [
           'Unknown or never-implemented gio.toml keys ([cache] memory_mb, [cache.redis], ...) now stop the server with a hint - fix or remove them.',
           'Cross-site form posts are refused by default: list OAuth form_post, SAML and payment-provider callbacks in [security.csrf] exempt, and other origins of yours in trusted_origins.',
           'Behind a reverse proxy, set [server] trusted_proxies so rate limits and req.ip see visitors, and [security] hsts = true when the proxy terminates TLS.',
           'The Node worker follows the server\'s mode: an unset NODE_ENV is production on both sides (production React build, no error details in responses). Run the dev server with NODE_ENV=development, as npm run dev does.',
-          'A page with revalidate that reads ctx.cookies or the cookie/authorization header is no longer cached - it used to be stored and served to everyone. Drop revalidate, or cache the shell with shell = \'cache\' and personalize inside Suspense holes.',
+          'A page with revalidate that reads ctx.cookies, the cookie/authorization header or the client\'s IP or host is no longer cached - it used to be stored and served to everyone. Drop revalidate, or cache the shell with shell = \'cache\' and personalize inside Suspense holes.',
+          'Every response now sends X-Frame-Options: SAMEORIGIN, X-Content-Type-Options: nosniff and a Referrer-Policy - override or remove them in [security.headers] - and req.json() in a route handler answers 415 unless the body was sent as JSON.',
+          'Routing follows the App Router: _private folders are never routed, (group) folders leave the URL, catch-all params are one /-joined string, and conflicting routes stop startup. public/ files are served at the site root and win over a page with the same path.',
+          'In production, error.tsx receives a generic message and a digest, and it now also runs in the browser as an error boundary, so it must not import server-only code.',
+          'Idle HTTP/1.1 keep-alive connections are closed after 10 seconds: keep a pooling proxy\'s upstream idle timeout below that, or raise header_read_timeout_secs and idle_timeout_secs.',
+          'Bare gio no longer starts a server - it prints the help and exits with code 2. Use gio start or gio dev; giojs-server is unchanged.',
         ],
       },
     ],
