@@ -49,7 +49,17 @@ function monorepoRoot(): string | null {
   return existsSync(join(root, 'gio.toml')) ? root : null;
 }
 
-async function patchPackageJson(destDir: string, mode: Mode): Promise<void> {
+/**
+ * Builds the workspace packages a monorepo scaffold file-refs. They resolve
+ * through their builds: @gio.js/react's dist/ (code and types) and
+ * @gio.js/core's declarations in dist/types - without those, tsc falls back
+ * to core's .ts sources, which an app tsconfig cannot compile (TS5097). A
+ * stale build shadows later source edits the same way.
+ */
+const MONOREPO_BUILD_COMMAND = 'pnpm --filter @gio.js/core --filter @gio.js/react run build';
+
+/** Patches the copied package.json; returns whether the app links the monorepo's packages. */
+async function patchPackageJson(destDir: string, mode: Mode): Promise<boolean> {
   const pkgPath = join(destDir, 'package.json');
   const raw = await readFile(pkgPath, 'utf8');
   const pkg = JSON.parse(raw) as Record<string, unknown>;
@@ -76,6 +86,7 @@ async function patchPackageJson(destDir: string, mode: Mode): Promise<void> {
   }
 
   await writeFile(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
+  return root !== null;
 }
 
 export async function create(argv: string[]): Promise<void> {
@@ -86,7 +97,7 @@ export async function create(argv: string[]): Promise<void> {
   const modeLabel = config.mode === 'static' ? 'static site' : 'server app';
   console.log(`\nCreating ${config.projectName} - ${langLabel}, ${modeLabel}...`);
   await copyTemplate(config.template, destDir, config.projectName);
-  await patchPackageJson(destDir, config.mode);
+  const linksMonorepo = await patchPackageJson(destDir, config.mode);
   console.log('Template copied.');
 
   if (config.installDeps) {
@@ -94,11 +105,16 @@ export async function create(argv: string[]): Promise<void> {
     execSync('npm install', { cwd: destDir, stdio: 'inherit' });
   }
 
+  const prebuild = linksMonorepo ? `  ${MONOREPO_BUILD_COMMAND}\n` : '';
   const base = config.installDeps
-    ? `  cd ${config.projectName}\n  npm run dev`
-    : `  cd ${config.projectName}\n  npm install\n  npm run dev`;
+    ? `${prebuild}  cd ${config.projectName}\n  npm run dev`
+    : `${prebuild}  cd ${config.projectName}\n  npm install\n  npm run dev`;
   const steps = config.mode === 'static'
     ? `${base}\n\nWhen you're ready to deploy:\n  npm run build      # → out/ (deploy to any static host)`
     : base;
-  console.log(`\nDone! To get started:\n\n${steps}\n`);
+  const rebuild = linksMonorepo
+    ? `\nThe first step builds the workspace's @gio.js/core and @gio.js/react, which\n` +
+      `this app links: run it again after changing them.\n`
+    : '';
+  console.log(`\nDone! To get started:\n\n${steps}\n${rebuild}`);
 }
