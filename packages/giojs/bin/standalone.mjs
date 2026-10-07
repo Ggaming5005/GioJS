@@ -259,7 +259,9 @@ async function main() {
   console.log(`  app:    ${appDir}`);
   console.log(`  server: ${serverBin}`);
   console.log(`  out:    ${options.out}`);
-  if (envFiles.files.length > 0) {
+  if (envFiles.disabledBy) {
+    console.log(`  env:    .env files not loaded (${envFiles.disabledBy} turns them off)`);
+  } else if (envFiles.files.length > 0) {
     console.log(`  env:    ${envFiles.files.join(', ')} (GIO_PUBLIC_* inlined at build time)`);
   }
   if (envFiles.skipped.length > 0) {

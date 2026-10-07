@@ -993,6 +993,34 @@ export default function Home() { return React.createElement('p', null, 'SERVER_E
     }, 90_000);
   });
 
+  describe.skipIf(binary === undefined)('and [health] enabled = false', () => {
+    let root: string;
+
+    beforeAll(async () => {
+      root = await writeProject('gio-testing-server-health-', {
+        'gio.toml': '[health]\nenabled = false\n',
+        'app/page.tsx': `import React from 'react';
+export default function Home() { return React.createElement('p', null, 'NO_HEALTH_HOME'); }
+`,
+      });
+    });
+
+    afterAll(async () => {
+      await resetTestApp(join(root, 'app'));
+      await rm(root, { recursive: true, force: true });
+    });
+
+    it('still starts: an answering server has a ready worker', async () => {
+      const server = await createTestServer({ appDir: join(root, 'app'), binary: binary! });
+      try {
+        expect((await fetch(`${server.url}/_gio/health`)).status).toBe(404);
+        expect(await (await fetch(`${server.url}/`)).text()).toContain('NO_HEALTH_HOME');
+      } finally {
+        await server.close();
+      }
+    }, 90_000);
+  });
+
   describe.skipIf(binary === undefined)('without close()', () => {
     // test-fixtures/testing-orphans.ts, in a node process of its own, starts
     // a server for a throwaway project and never closes it.

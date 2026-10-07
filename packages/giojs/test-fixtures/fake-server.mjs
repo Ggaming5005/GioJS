@@ -6,7 +6,8 @@
  * tests. Behavior by FAKE_SERVER_MODE:
  *   echo    - write { argv, env } to FAKE_SERVER_OUT and exit 0
  *   serve   - answer GET /_gio/health ({ nodeReady: true }) on GIO_PORT
- *             until stdin closes, like the real server's orphan guard
+ *             until stdin closes, like the real server's orphan guard;
+ *             a 404 instead with FAKE_SERVER_HEALTH=off ([health] off)
  * `--check-config` prints a report built from GIO_HOST / GIO_PORT unless
  * FAKE_SERVER_NO_CHECK is set (a binary from before the flag).
  */
@@ -46,6 +47,11 @@ if (process.argv[2] === '--check-config') {
 
 if (env.FAKE_SERVER_MODE === 'serve') {
   const server = createServer((req, res) => {
+    if (env.FAKE_SERVER_HEALTH === 'off') {
+      res.statusCode = 404;
+      res.end('404 Not Found');
+      return;
+    }
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ status: 'ok', nodeReady: req.url === '/_gio/health' }));
   });

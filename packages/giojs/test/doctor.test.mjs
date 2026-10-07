@@ -112,6 +112,17 @@ describe('doctor checks', () => {
     assert.match(invalid.detail, /did you mean `server\.port`/);
     const skipped = checkOf(facts({ config: { warnings: ['[[redirects]] /a: bad status'] } }), 'config');
     assert.equal(skipped.status, 'warn');
+    assert.match(skipped.title, /1 warning the server logs at startup/);
+    // A protection turned off is reported the same way, in the server's words.
+    const loosened = checkOf(facts({
+      config: { warnings: ['[security.csrf] enabled = false: any website can ...', '[server] max_body_bytes = 0: ...'] },
+    }), 'config');
+    assert.equal(loosened.status, 'warn');
+    assert.match(loosened.title, /2 warnings/);
+    assert.match(loosened.detail, /^\[security\.csrf\] enabled = false/);
+    const envOff = checkOf(facts({ config: { envFilesDisabledBy: 'GIO_ENV_FILES', envFiles: [] } }), 'config');
+    assert.equal(envOff.status, 'ok');
+    assert.match(envOff.title, /\.env files off \(GIO_ENV_FILES\)/);
     const fallback = checkOf(facts({ config: { fallback: true } }), 'config');
     assert.equal(fallback.status, 'skip');
   });

@@ -257,7 +257,12 @@ describe('dev / start / giojs-server environment', { skip: !posix && 'fake binar
     assert.equal(recorded([], {}, compatBin).server.env.NODE_ENV, undefined);
   });
 
-  for (const [label, extraEnv] of [['--check-config', {}], ['a binary without --check-config', { FAKE_SERVER_NO_CHECK: '1' }]]) {
+  for (const [label, extraEnv] of [
+    ['--check-config', {}],
+    ['a binary without --check-config', { FAKE_SERVER_NO_CHECK: '1' }],
+    // The server binds only once a worker is ready, so any answer will do.
+    ['[health] enabled = false', { FAKE_SERVER_HEALTH: 'off' }],
+  ]) {
     test(`the local URL is printed once /_gio/health reports nodeReady (${label})`, async () => {
       const port = await freePort();
       const child = spawn(process.execPath, [gioBin, 'start', '--port', String(port), '--host', '127.0.0.1'], {

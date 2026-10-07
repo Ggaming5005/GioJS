@@ -9,7 +9,15 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { EnvFileError, envFileNames, envMode, loadEnvFiles, parseEnvFile } from './env-files.ts';
+import {
+  EnvFileError,
+  envFileNames,
+  envFilesDisabledBy,
+  envMode,
+  gioTomlEnvFiles,
+  loadEnvFiles,
+  parseEnvFile,
+} from './env-files.ts';
 
 const roots: string[] = [];
 
@@ -118,6 +126,45 @@ describe('loadEnvFiles', () => {
     expect(message).toContain('.env.local');
     expect(message).toContain('line 3');
     expect(message).not.toContain('hunter2');
+  });
+});
+
+describe('turning .env loading off', () => {
+  it('[env] files = false in gio.toml loads nothing', async () => {
+    const root = await projectWith({ '.env': 'FROM_FILE=1\n', 'gio.toml': '[server]\nport = 1\n\n[env]\nfiles = false # no stray files\n' });
+    const env: NodeJS.ProcessEnv = {};
+    const loaded = loadEnvFiles(root, { mode: 'production', env });
+    expect(loaded.disabledBy).toBe('[env] files');
+    expect(loaded.files).toEqual([]);
+    expect(env).toEqual({});
+  });
+
+  it('GIO_ENV_FILES wins over gio.toml in both directions', async () => {
+    const off = await projectWith({ '.env': 'FROM_FILE=1\n', 'gio.toml': '[env]\nfiles = false\n' });
+    const on = await projectWith({ '.env': 'FROM_FILE=1\n' });
+    const forcedOn: NodeJS.ProcessEnv = { GIO_ENV_FILES: '1' };
+    expect(loadEnvFiles(off, { mode: 'production', env: forcedOn }).disabledBy).toBeNull();
+    expect(forcedOn['FROM_FILE']).toBe('1');
+    const forcedOff: NodeJS.ProcessEnv = { GIO_ENV_FILES: '0' };
+    expect(loadEnvFiles(on, { mode: 'production', env: forcedOff }).disabledBy).toBe('GIO_ENV_FILES');
+    expect(forcedOff['FROM_FILE']).toBeUndefined();
+    expect(envFilesDisabledBy(on, { GIO_ENV_FILES: 'false' })).toBe('GIO_ENV_FILES');
+    expect(envFilesDisabledBy(off, { GIO_ENV_FILES: '' })).toBe('[env] files');
+    expect(envFilesDisabledBy(on, {})).toBeNull();
+    expect(() => envFilesDisabledBy(on, { GIO_ENV_FILES: 'no' })).toThrow(/GIO_ENV_FILES="no" must be 0/);
+  });
+
+  it('reads every spelling of the key and nothing else', () => {
+    expect(gioTomlEnvFiles('[env]\nfiles = false\n')).toBe(false);
+    expect(gioTomlEnvFiles('[ env ]\r\nfiles=true\r\n')).toBe(true);
+    expect(gioTomlEnvFiles('env.files = false\n[server]\nport = 1\n')).toBe(false);
+    expect(gioTomlEnvFiles('env = { files = false }\n')).toBe(false);
+    expect(gioTomlEnvFiles('')).toBeUndefined();
+    expect(gioTomlEnvFiles('# [env]\n# files = false\n')).toBeUndefined();
+    expect(gioTomlEnvFiles('[server]\nfiles = false\n')).toBeUndefined();
+    expect(gioTomlEnvFiles('[env.sub]\nfiles = false\n')).toBeUndefined();
+    expect(gioTomlEnvFiles('[env]\nfiles = "no"\n')).toBeUndefined();
+    expect(gioTomlEnvFiles('[[env]]\nfiles = false\n')).toBeUndefined();
   });
 });
 

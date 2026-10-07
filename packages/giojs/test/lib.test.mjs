@@ -190,6 +190,19 @@ describe('fallbackReport', () => {
     assert.equal(fallbackReport({ GIO_SESSION_SECRET: 'short' }, project).sessionSecret, 'invalid');
     assert.equal(fallbackReport({ GIO_SESSION_SECRET: 'x'.repeat(32) }, project).sessionSecret, 'valid');
   });
+
+  test('skips the .env files when [env] files or GIO_ENV_FILES turns them off, as the server does', () => {
+    const files = { '.env': 'GIO_PORT=5000\n' };
+    const on = tempProject({ ...files, 'gio.toml': '[server]\nport = 4000\n' });
+    const off = tempProject({ ...files, 'gio.toml': '[server]\nport = 4000\n\n[env]\nfiles = false\n' });
+    assert.equal(fallbackReport({}, on).listen.port, 5000);
+    assert.equal(fallbackReport({}, on).envFilesDisabledBy, null);
+    assert.equal(fallbackReport({}, off).listen.port, 4000);
+    assert.equal(fallbackReport({}, off).envFilesDisabledBy, '[env] files');
+    assert.equal(fallbackReport({ GIO_ENV_FILES: '0' }, on).listen.port, 4000);
+    assert.equal(fallbackReport({ GIO_ENV_FILES: '0' }, on).envFilesDisabledBy, 'GIO_ENV_FILES');
+    assert.equal(fallbackReport({ GIO_ENV_FILES: '1' }, off).listen.port, 5000, 'the variable wins');
+  });
 });
 
 describe('URLs', () => {

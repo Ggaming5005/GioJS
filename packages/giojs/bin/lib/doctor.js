@@ -352,13 +352,18 @@ function configCheck(facts) {
       fix: 'Fix the setting named above (the server prints the same message at startup).',
     });
   }
+  // Rules the server would skip, and protections the file turns off or
+  // loosens - each line names its setting.
   if (config.warnings && config.warnings.length > 0) {
-    return check('config', 'warn', `gio.toml: ${config.warnings.length} rule(s) will be skipped at startup`, {
+    const count = config.warnings.length;
+    return check('config', 'warn', `gio.toml: ${count} warning${count === 1 ? '' : 's'} the server logs at startup`, {
       detail: config.warnings.join('\n'),
-      fix: 'Fix or remove the rules listed above.',
+      fix: 'Change each setting named above, or keep it if you meant to turn that protection off.',
     });
   }
-  const files = config.envFiles && config.envFiles.length > 0 ? `, env: ${config.envFiles.join(', ')}` : '';
+  const files = config.envFilesDisabledBy
+    ? `, .env files off (${config.envFilesDisabledBy})`
+    : config.envFiles && config.envFiles.length > 0 ? `, env: ${config.envFiles.join(', ')}` : '';
   return check('config', 'ok', `${config.configFile ? 'gio.toml is valid' : 'No gio.toml (defaults apply)'}${files}`);
 }
 

@@ -174,11 +174,25 @@ function envFileCandidates(mode) {
   return [`.env.${mode}.local`, '.env.local', `.env.${mode}`, '.env'];
 }
 
-/** The values `names` take after the server's .env loading, never overriding `env`. */
-function envWithFiles(env, projectRoot, mode, names) {
+/**
+ * What turns the server's .env loading off: GIO_ENV_FILES (`0` / `false`
+ * off, `1` / `true` on) over gio.toml's `[env] files`. Null when it loads.
+ */
+function envFilesDisabledBy(env, toml) {
+  const value = String(env.GIO_ENV_FILES || '').trim();
+  if (value === '0' || value === 'false') return 'GIO_ENV_FILES';
+  if (value === '1' || value === 'true') return null;
+  return toml.env && toml.env.files === false ? '[env] files' : null;
+}
+
+/**
+ * The values `names` take after the server's .env loading, never overriding
+ * `env` - just `env`'s own when `loadFiles` is false.
+ */
+function envWithFiles(env, projectRoot, mode, names, loadFiles = true) {
   const merged = {};
   for (const name of names) if (env[name] !== undefined) merged[name] = env[name];
-  for (const file of envFileCandidates(mode)) {
+  for (const file of loadFiles ? envFileCandidates(mode) : []) {
     let text;
     try {
       text = readFileSync(join(projectRoot, file), 'utf8');
@@ -215,7 +229,8 @@ function fallbackReport(env, projectRoot) {
     }
   }
   const server = toml.server || {};
-  const vars = envWithFiles(env, projectRoot, mode, LISTEN_VARS);
+  const envFilesOff = envFilesDisabledBy(env, toml);
+  const vars = envWithFiles(env, projectRoot, mode, LISTEN_VARS, envFilesOff === null);
   let port = Number.isInteger(server.port) ? server.port : 3000;
   let portSource = Number.isInteger(server.port) ? 'gio.toml' : 'default';
   for (const name of ['GIO_PORT', 'PORT']) {
@@ -238,6 +253,7 @@ function fallbackReport(env, projectRoot) {
     errors: [],
     warnings: [],
     mode,
+    envFilesDisabledBy: envFilesOff,
     configFile: configText === null ? null : configFile,
     listen: { host, port, portSource, tls: Boolean(server.tls && server.tls.enabled) },
     trustedProxies: Array.isArray(server.trusted_proxies) ? server.trusted_proxies.length : 0,
@@ -338,6 +354,7 @@ module.exports = {
   checkConfig,
   parseTomlLite,
   envWithFiles,
+  envFilesDisabledBy,
   fallbackReport,
   resolveConfig,
   bareHost,

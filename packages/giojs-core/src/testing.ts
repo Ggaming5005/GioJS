@@ -753,7 +753,11 @@ function freePort(): Promise<number> {
   });
 }
 
-/** GET /_gio/health without a keep-alive agent (it would hold the server's shutdown). */
+/**
+ * GET /_gio/health without a keep-alive agent (it would hold the server's
+ * shutdown). A 404 is a project with `[health] enabled = false`: the server
+ * binds its port only once its first worker is ready, so that counts as ready.
+ */
 function healthCheck(url: string): Promise<{ nodeReady?: boolean } | null> {
   return new Promise(resolveHealth => {
     const req = httpGet(`${url}/_gio/health`, { agent: false }, res => {
@@ -763,6 +767,10 @@ function healthCheck(url: string): Promise<{ nodeReady?: boolean } | null> {
         body += chunk;
       });
       res.on('end', () => {
+        if (res.statusCode === 404) {
+          resolveHealth({ nodeReady: true });
+          return;
+        }
         try {
           resolveHealth(res.statusCode === 200 ? (JSON.parse(body) as { nodeReady?: boolean }) : null);
         } catch {

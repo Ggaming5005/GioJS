@@ -12,6 +12,8 @@
  * .env` makes a `.env/` directory) is skipped. The parser is a port of
  * dotenvy's (the Rust side's) so a file means the same thing to both; Node's
  * own util.parseEnv is not used because it differs and needs Node >= 20.12.
+ * Also the same switches: `[env] files = false` in gio.toml skips the files,
+ * and GIO_ENV_FILES (`0` off, `1` on) wins over gio.toml either way.
  */
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -242,6 +244,65 @@ export function parseEnvFile(source: string, lookup: Lookup = () => undefined): 
   return pairs;
 }
 
+/** `0` / `false` skips the .env files, `1` / `true` loads them, whatever gio.toml says. */
+export const ENV_FILES_SWITCH = 'GIO_ENV_FILES';
+
+/**
+ * `[env] files` in gio.toml's contents, or undefined when it is not set to
+ * a plain bool (the server's strict parse reports anything else). A line
+ * scan rather than a TOML parser, covering the spellings TOML allows for a
+ * top-level table's key: `[env]` then `files = ...`, `env.files = ...`, and
+ * `env = { files = ... }`.
+ */
+export function gioTomlEnvFiles(source: string): boolean | undefined {
+  let table = '';
+  let found: boolean | undefined;
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.replace(/\s+#.*$|^#.*$/, '').trim();
+    if (line === '') continue;
+    if (line.startsWith('[[')) {
+      table = '[[]]';
+      continue;
+    }
+    const header = /^\[\s*([^\]]*?)\s*\]$/.exec(line);
+    if (header) {
+      table = header[1] as string;
+      continue;
+    }
+    const value =
+      (table === 'env' ? /^files\s*=\s*(true|false)$/.exec(line) : null) ??
+      (table === '' ? /^env\s*\.\s*files\s*=\s*(true|false)$/.exec(line) : null) ??
+      (table === '' ? /^env\s*=\s*\{.*\bfiles\s*=\s*(true|false)\b.*\}$/.exec(line) : null);
+    if (value) found = value[1] === 'true';
+  }
+  return found;
+}
+
+/**
+ * What turns .env loading off for the project at `root`: GIO_ENV_FILES in
+ * `env`, else `[env] files` in `root`/gio.toml - or null when the files
+ * load. Throws for a GIO_ENV_FILES value that is neither on nor off, as the
+ * server does.
+ */
+export function envFilesDisabledBy(root: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const value = (env[ENV_FILES_SWITCH] ?? '').trim();
+  if (value === '0' || value === 'false') return ENV_FILES_SWITCH;
+  if (value === '1' || value === 'true') return null;
+  if (value !== '') {
+    throw new EnvFileError(
+      'the .env files',
+      `${ENV_FILES_SWITCH}=${JSON.stringify(value)} must be 0 (skip them) or 1 (load them)`,
+    );
+  }
+  let source: string;
+  try {
+    source = readFileSync(join(root, 'gio.toml'), 'utf8');
+  } catch {
+    return null;
+  }
+  return gioTomlEnvFiles(source) === false ? '[env] files' : null;
+}
+
 export interface LoadedEnvFiles {
   mode: EnvMode;
   /** File names actually read, in precedence order. */
@@ -250,12 +311,15 @@ export interface LoadedEnvFiles {
   skipped: string[];
   /** A file tried to set NODE_ENV; mode was already decided, so it is ignored. */
   ignoredNodeEnv: boolean;
+  /** What turned loading off (GIO_ENV_FILES or `[env] files`), else null. */
+  disabledBy: string | null;
 }
 
 /**
  * Load the env files for `mode` (default: from env.NODE_ENV) from `root`
  * into `env` (default: process.env), never overriding a variable `env`
- * already has. Throws EnvFileError for a file that exists but cannot be read
+ * already has - or none at all when GIO_ENV_FILES or `[env] files` turns
+ * them off. Throws EnvFileError for a file that exists but cannot be read
  * or parsed.
  */
 export function loadEnvFiles(
@@ -264,7 +328,9 @@ export function loadEnvFiles(
 ): LoadedEnvFiles {
   const env = options.env ?? process.env;
   const mode = options.mode ?? envMode(env['NODE_ENV']);
-  const loaded: LoadedEnvFiles = { mode, files: [], skipped: [], ignoredNodeEnv: false };
+  const loaded: LoadedEnvFiles = { mode, files: [], skipped: [], ignoredNodeEnv: false, disabledBy: null };
+  loaded.disabledBy = envFilesDisabledBy(root, env);
+  if (loaded.disabledBy !== null) return loaded;
   for (const name of envFileNames(mode)) {
     const path = join(root, name);
     let source: string;

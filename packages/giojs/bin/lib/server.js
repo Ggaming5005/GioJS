@@ -89,7 +89,10 @@ function spawnServer(binaryPath, args, env) {
   return server;
 }
 
-/** One GET of /_gio/health: the parsed body, or null. */
+/**
+ * One GET of /_gio/health: the parsed body, `{ off: true }` for a 404 (the
+ * endpoint is turned off with `[health] enabled = false`), or null.
+ */
 function fetchHealth(baseUrl) {
   return new Promise((resolve) => {
     const url = new URL('/_gio/health', baseUrl);
@@ -100,6 +103,10 @@ function fetchHealth(baseUrl) {
       response.setEncoding('utf8');
       response.on('data', (chunk) => { body += chunk; });
       response.on('end', () => {
+        if (response.statusCode === 404) {
+          resolve({ off: true });
+          return;
+        }
         try {
           resolve(JSON.parse(body));
         } catch (_) {
@@ -128,7 +135,9 @@ function waitForReady(baseUrl, server, startedAt = Date.now()) {
       if (done) return;
       const health = await fetchHealth(baseUrl);
       if (done) return;
-      if (health && health.nodeReady === true) {
+      // With /_gio/health turned off, any answer will do: the server binds
+      // its port only once the first worker is ready.
+      if (health && (health.nodeReady === true || health.off === true)) {
         done = true;
         resolve(true);
         return;
