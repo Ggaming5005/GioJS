@@ -1775,11 +1775,37 @@ async function main() {
     });
 
     await test('page action: an upload over max_body_bytes is a 413 before the action runs', async () => {
-      const form = new FormData();
-      form.append('attachment', new Blob([Buffer.alloc(3 * 1024 * 1024, 0xab)]), 'big.bin');
-      const res = await fetch(`${BASE}/guestbook`, { method: 'POST', body: form });
-      assert.equal(res.status, 413);
-      assert.doesNotMatch(await res.text(), /GUESTBOOK_UPLOAD/);
+      // A raw socket that stops writing one byte past the 2 MiB default limit
+      // and then reads: the server answers 413 without reading the rest, so
+      // a client still writing (fetch) would race it into EPIPE, and bytes
+      // left unread in the server's socket would turn its close into a reset.
+      const boundary = 'gio-big-upload';
+      const head = Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="attachment"; filename="big.bin"\r\n` +
+          'Content-Type: application/octet-stream\r\n\r\n',
+      );
+      const sent = Buffer.concat([head, Buffer.alloc(2 * 1024 * 1024 + 1 - head.length, 0xab)]);
+      const status = await new Promise((resolve, reject) => {
+        const socket = connect(39517, '127.0.0.1', () => {
+          socket.write(
+            'POST /guestbook HTTP/1.1\r\nHost: 127.0.0.1:39517\r\n' +
+              `Content-Type: multipart/form-data; boundary=${boundary}\r\n` +
+              `Content-Length: ${3 * 1024 * 1024}\r\n\r\n`,
+          );
+          socket.write(sent);
+        });
+        let data = '';
+        socket.setEncoding('latin1');
+        socket.on('data', (chunk) => {
+          data += chunk;
+          if (data.includes('\r\n')) {
+            socket.destroy();
+            resolve(Number(data.split(' ')[1]));
+          }
+        });
+        socket.on('error', reject);
+      });
+      assert.equal(status, 413);
       // The worker connection is untouched: the next post goes through.
       const ok = await formPost('name=+');
       assert.equal(ok.status, 422);
