@@ -12,7 +12,10 @@ function version(): string {
   return (JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string }).version;
 }
 
-async function main(argv: string[]): Promise<void> {
+async function main(rawArgv: string[]): Promise<void> {
+  // pnpm, yarn and bun pass on the npm-style `--` separator:
+  // `pnpm create giojs -- migrate ./app` reaches us as ['--', 'migrate', ...].
+  const argv = rawArgv[0] === '--' ? rawArgv.slice(1) : rawArgv;
   if (argv[0] === 'migrate') {
     // Loaded on demand: the migration pulls in the TypeScript compiler,
     // which scaffolding never needs.

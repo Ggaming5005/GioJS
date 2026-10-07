@@ -59,12 +59,18 @@ export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = { force: false, yes: false, help: false, version: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? '';
+    // The npm-style separator (`npm create giojs@latest my-app -- --js`):
+    // npm consumes it, but pnpm, yarn and bun pass it on, so a user typing
+    // the documented form under them must not get an error.
+    if (arg === '--') continue;
     const [flag, inlineValue] = arg.startsWith('--') && arg.includes('=')
       ? [arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)]
       : [arg, undefined];
 
-    const setter = BOOLEAN_FLAGS[flag];
-    if (setter !== undefined && inlineValue === undefined) {
+    // hasOwn: a directory named `constructor` or `toString` is not a flag.
+    const setter = Object.hasOwn(BOOLEAN_FLAGS, flag) ? BOOLEAN_FLAGS[flag] : undefined;
+    if (setter !== undefined) {
+      if (inlineValue !== undefined) throw new UsageError(`${flag} does not take a value`);
       setter(args);
       continue;
     }

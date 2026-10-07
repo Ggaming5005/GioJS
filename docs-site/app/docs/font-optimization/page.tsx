@@ -50,12 +50,13 @@ body {
       <p>A <code>url</code> takes one of two forms:</p>
       <ul>
         <li>
-          <strong>A file in <code>public/</code></strong> - any <code>url</code> without a
-          scheme, written the way the file is served: <code>/public/fonts/a.woff2</code> and{' '}
-          <code>/fonts/a.woff2</code> both name <code>public/fonts/a.woff2</code> (plain path
-          segments only, so <code>..</code> cannot leave <code>public/</code>). It is copied
-          into <code>.gio/fonts/</code> at every start, so the server needs no network and an
-          edited file takes effect on restart. A missing file stops startup with its path.
+          A <code>url</code> without a scheme names a file in <code>public/</code>, written the
+          way it is served: <code>/public/fonts/a.woff2</code> and <code>/fonts/a.woff2</code>{' '}
+          are both <code>public/fonts/a.woff2</code>. It is read at every start, so the server
+          needs no network, and served under a name with a hash of its content (
+          <code>fraunces-400-normal-1a2b3c4d.woff2</code>): an edited file gets a new URL on
+          restart, so browsers and CDNs that cached the old one pick it up. A missing file stops
+          the server at startup with its path.
         </li>
         <li>
           <strong>A remote URL</strong> such as{' '}
@@ -69,18 +70,10 @@ body {
         </li>
       </ul>
       <p>
-        Each file is stored as <code>&lt;family&gt;-&lt;weight&gt;-&lt;style&gt;.woff2</code>{' '}
-        (<code>fraunces-400-italic.woff2</code>); <code>GIO_FONTS_DIR</code> points the folder
-        somewhere other than <code>.gio/fonts/</code>.
+        <code>GIO_FONTS_DIR</code> points the font folder somewhere other than{' '}
+        <code>.gio/fonts/</code>.
       </p>
-      <div className="callout">
-        The faces use <code>font-display: swap</code>. The <code>.woff2</code> files are served
-        as immutable; the generated <code>/_gio/fonts/fonts.css</code> is rewritten from{' '}
-        <code>gio.toml</code> on every start under the same URL, so it is served with{' '}
-        <code>Cache-Control: public, max-age=0, must-revalidate</code> and revalidated via
-        Last-Modified.
-      </div>
-
+      <div className="callout">Self-hosted fonts are served from /_gio/fonts, eliminating a render-blocking round-trip to an external host. Every page gets a <code>&lt;link rel=&quot;preload&quot;&gt;</code> per font and the generated <code>/_gio/fonts/fonts.css</code> with its <code>@font-face</code> rules (<code>font-display: swap</code>). The .woff2 files are cached as immutable (a URL never gets new content); fonts.css is rewritten from gio.toml on every start under the same URL, so it is served with <code>Cache-Control: public, max-age=0, must-revalidate</code> and revalidated via Last-Modified.</div>
       <h2>Static export</h2>
       <p>
         <code>[[fonts]]</code> is applied by the Rust server, so <code>gio export</code> does not

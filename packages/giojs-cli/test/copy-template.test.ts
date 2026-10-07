@@ -61,8 +61,10 @@ test('copyDir writes _gitignore as .gitignore, at any depth', async () => {
     await writeFile(join(src, '_gitignore'), 'node_modules/\n');
     await writeFile(join(src, 'nested', '_gitignore'), '*.log\n');
 
-    await copyDir(src, join(root, 'dest'), 'my-app');
+    const written = await copyDir(src, join(root, 'dest'), 'my-app');
 
+    // The written list names files as git does (a --force scaffold commits only these).
+    assert.deepEqual(written.sort(), ['.gitignore', 'nested/.gitignore']);
     assert.deepEqual((await readdir(join(root, 'dest'))).sort(), ['.gitignore', 'nested']);
     assert.equal(await readFile(join(root, 'dest', '.gitignore'), 'utf8'), 'node_modules/\n');
     assert.equal(await readFile(join(root, 'dest', 'nested', '.gitignore'), 'utf8'), '*.log\n');

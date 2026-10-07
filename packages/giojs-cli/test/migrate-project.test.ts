@@ -523,11 +523,16 @@ test('parseMigrateArgs reads the directory and flags', () => {
   assert.deepEqual(parseMigrateArgs(['--config', 'next.config.js'], '/work'), { dir: '/work', dryRun: false, yes: false, help: false, config: '/work/next.config.js' });
   assert.deepEqual(parseMigrateArgs(['--force']), { error: 'unknown option --force' });
   assert.deepEqual(parseMigrateArgs(['a', 'b']), { error: 'unexpected argument b' });
+  // pnpm, yarn and bun pass the npm-style `--` separator on.
+  assert.deepEqual(parseMigrateArgs(['site', '--', '--dry-run'], '/work'), { dir: '/work/site', dryRun: true, yes: false, help: false });
 });
 
 test('create-giojs dispatches `migrate` and both bins print usage', () => {
   const dist = join(here, '..', 'dist');
   const viaCreate = execFileSync(process.execPath, [join(dist, 'index.js'), 'migrate', '--help'], { encoding: 'utf8' });
+  // `pnpm create giojs -- migrate --help` reaches the bin with the `--`.
+  const viaPnpm = execFileSync(process.execPath, [join(dist, 'index.js'), '--', 'migrate', '--help'], { encoding: 'utf8' });
+  assert.equal(viaPnpm, viaCreate);
   assert.match(viaCreate, /^Usage: create-giojs migrate \[dir\] \[options\]/);
   assert.match(viaCreate, /npm create giojs@latest -- migrate \[dir\]/);
   // `npx gio-migrate` would fetch whatever npm package is named gio-migrate.

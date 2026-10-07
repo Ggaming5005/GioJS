@@ -34,6 +34,18 @@ test('parseArgs reads every flag and one positional directory', () => {
   assert.equal(parseArgs(['-h']).help, true);
   assert.equal(parseArgs(['-v']).version, true);
   assert.deepEqual(parseArgs([]), { force: false, yes: false, help: false, version: false });
+  // Names that are Object.prototype keys are directories, not flags.
+  assert.equal(parseArgs(['constructor']).projectDir, 'constructor');
+  assert.equal(parseArgs(['toString']).projectDir, 'toString');
+});
+
+test('parseArgs skips the npm-style -- separator that pnpm, yarn and bun pass on', () => {
+  // `pnpm create giojs my-app -- --js` reaches the bin as exactly this argv.
+  const args = parseArgs(['my-app', '--', '--js']);
+  assert.equal(args.projectDir, 'my-app');
+  assert.equal(args.language, 'js');
+  assert.equal(parseArgs(['--', 'my-app', '--static']).mode, 'static');
+  assert.equal(parseArgs(['--', 'my-app']).projectDir, 'my-app');
 });
 
 test('parseArgs rejects unknown flags, bad --pm values and a second directory', () => {
@@ -42,7 +54,11 @@ test('parseArgs rejects unknown flags, bad --pm values and a second directory', 
   assert.throws(() => parseArgs(['--template', 'x']), /Unknown option --template\n/);
   assert.throws(() => parseArgs(['--pm']), /--pm needs a value/);
   assert.throws(() => parseArgs(['--pm', 'deno']), /Unknown package manager "deno"/);
-  assert.throws(() => parseArgs(['--yes=1']), /Unknown option --yes/);
+  // A known boolean flag with a value says so, not "did you mean" itself.
+  for (const flag of ['--yes', '--force', '--help']) {
+    assert.throws(() => parseArgs([`${flag}=1`]), (err: unknown) =>
+      err instanceof UsageError && err.message === `${flag} does not take a value`);
+  }
   assert.throws(() => parseArgs(['a', 'b']), /Unexpected argument "b"/);
 });
 
@@ -89,6 +105,18 @@ test('--version prints the package version', async () => {
     const result = runCli([flag], { cwd: tmpdir() });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), version);
+  }
+});
+
+test('`pnpm create giojs my-app -- --js` scaffolds the JS app', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'gio-create-separator-'));
+  try {
+    const result = runCli(['my-app', '--', '--js', '--no-install', '--no-git'], { cwd });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const app = await readdir(join(cwd, 'my-app', 'app'));
+    assert.ok(app.includes('page.jsx'), app.join(', '));
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
   }
 });
 

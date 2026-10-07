@@ -660,17 +660,20 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         })
         .collect();
 
-    if !font_entries.is_empty() {
-        giojs_font::download_fonts(&font_entries, &fonts_dir, &public_dir).await?;
-        let css = giojs_font::generate_css(&font_entries);
+    // The name each font is served under (local fonts carry a content hash).
+    let font_files = if font_entries.is_empty() {
+        Vec::new()
+    } else {
+        let files = giojs_font::download_fonts(&font_entries, &fonts_dir, &public_dir).await?;
+        let css = giojs_font::generate_css(&font_entries, &files);
         tokio::fs::write(fonts_dir.join("fonts.css"), css).await?;
-    }
+        files
+    };
 
-    let font_snippets: Vec<String> = font_entries
+    let font_snippets: Vec<String> = font_files
         .iter()
-        .map(|e| format!(
-            r#"<link rel="preload" href="/_gio/fonts/{}" as="font" type="font/woff2" crossorigin>"#,
-            giojs_font::font_filename(e)
+        .map(|file| format!(
+            r#"<link rel="preload" href="/_gio/fonts/{file}" as="font" type="font/woff2" crossorigin>"#
         ))
         .chain(if font_entries.is_empty() {
             None

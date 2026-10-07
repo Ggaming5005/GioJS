@@ -1018,6 +1018,7 @@ version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "reqwest",
+ "sha2",
  "tokio",
  "tracing",
 ]

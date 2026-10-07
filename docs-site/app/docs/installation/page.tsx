@@ -89,8 +89,13 @@ npm create giojs@latest -- --help           # every option`} />
           <code>README.md</code> and <code>LICENSE</code>, and editor folders, don&apos;t count.
         </li>
         <li>
-          <strong>Git.</strong> A failed first commit - no <code>user.name</code> configured,
-          say - keeps the repository and prints a note; it never fails the scaffold.
+          <strong>Git.</strong> When git is installed and the directory is not already inside a
+          repository (a monorepo, for example), the scaffold runs <code>git init</code> and
+          commits the files. After <code>--force</code>, the commit holds only what the scaffold
+          created: files that were already in the directory (a <code>.env</code>, say) stay
+          untracked and are listed for you to review. A failed commit - no{' '}
+          <code>user.name</code> configured, say - leaves the repository and prints a note; it
+          never fails the scaffold.
         </li>
         <li>
           <strong>Scripts and CI.</strong> Without a terminal (piped stdin, CI) nothing is asked:

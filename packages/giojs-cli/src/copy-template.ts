@@ -50,30 +50,41 @@ export function templateDir(templateName: string): string {
   return join(TEMPLATES_DIR, templateName);
 }
 
+/** Returns the files written, as {@link copyDir} does. */
 export async function copyTemplate(
   templateName: string,
   destDir: string,
   projectName: string,
   signal?: AbortSignal,
-): Promise<void> {
-  await copyDir(templateDir(templateName), destDir, projectName, signal);
+): Promise<string[]> {
+  return copyDir(templateDir(templateName), destDir, projectName, signal);
 }
 
-/** `signal` stops the copy before the next file, so a rollback never races a write. */
-export async function copyDir(src: string, dest: string, projectName: string, signal?: AbortSignal): Promise<void> {
+/**
+ * `signal` stops the copy before the next file, so a rollback never races a
+ * write. Returns the files written, relative to `dest` and '/'-separated
+ * (the way git names them).
+ */
+export async function copyDir(src: string, dest: string, projectName: string, signal?: AbortSignal): Promise<string[]> {
   await mkdir(dest, { recursive: true });
+  const written: string[] = [];
   const entries = await readdir(src, { withFileTypes: true });
   for (const entry of entries) {
     signal?.throwIfAborted();
+    const name = scaffoldFileName(entry.name);
     const srcPath = join(src, entry.name);
-    const destPath = join(dest, scaffoldFileName(entry.name));
+    const destPath = join(dest, name);
     if (entry.isDirectory()) {
-      await copyDir(srcPath, destPath, projectName, signal);
-    } else if (isTextTemplateFile(entry.name)) {
+      for (const file of await copyDir(srcPath, destPath, projectName, signal)) written.push(`${name}/${file}`);
+      continue;
+    }
+    if (isTextTemplateFile(entry.name)) {
       const content = await readFile(srcPath, 'utf8');
       await writeFile(destPath, content.replaceAll('{{PROJECT_NAME}}', projectName), 'utf8');
     } else {
       await copyFile(srcPath, destPath);
     }
+    written.push(name);
   }
+  return written;
 }
