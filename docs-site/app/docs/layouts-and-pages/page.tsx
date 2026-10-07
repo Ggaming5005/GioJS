@@ -122,6 +122,15 @@ export default function SiteLayout({ children }) {
         empty string. A catch-all must be the last segment of its route, and a param name may
         appear only once per route.
       </p>
+      <p>
+        Param values are not percent-decoded: <code>/blog/caf%C3%A9</code> gives{' '}
+        <code>{"{ slug: 'caf%C3%A9' }"}</code> and <code>/blog/hello%20world</code> gives{' '}
+        <code>&apos;hello%20world&apos;</code> (only escapes of unreserved characters, such
+        as <code>%41</code>, arrive decoded). Call <code>decodeURIComponent()</code> where you
+        need the text. This is on purpose: decoding <code>%2F</code> inside one segment would
+        hand your code a <code>/</code> - or a <code>../</code> - it never saw in the path.
+        See <a href="/docs/file-conventions/dynamic-routes#param-values">Param values</a>.
+      </p>
       <h2 id="route-groups">Route groups</h2>
       <p>
         Wrap a folder name in parentheses to organize routes without changing URLs:{' '}
