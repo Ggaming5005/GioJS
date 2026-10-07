@@ -1073,14 +1073,15 @@ function methodNotAllowed(req: IPCRequest, allowed: string[]): IPCResponse {
  * Invoke a route.ts method handler. The result contract:
  * `GioEventStream` → SSE; web `Response` → converted; null/undefined → 204;
  * anything else → JSON 200; notFound() → JSON 404. Handler responses are
- * never cacheable.
+ * never cacheable, and are flagged `routeHandler` so Rust leaves their
+ * Cache-Control to the app.
  */
 async function runRouteHandler(
   req: IPCRequest,
   handler: (gioReq: GioRequest) => unknown,
   params: Record<string, string>,
 ): Promise<IPCResponse | SseRouteResult> {
-  const base = { id: req.id, cacheable: false, cacheMaxAge: 0 };
+  const base = { id: req.id, cacheable: false, cacheMaxAge: 0, routeHandler: true };
   try {
     const result = await handler(makeGioRequest(req, params));
 

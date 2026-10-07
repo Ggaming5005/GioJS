@@ -81,6 +81,12 @@ export interface IPCResponse {
    * absent when no route matched. Stamped by ipc.ts, never by renderRoute.
    */
   route?: string;
+  /**
+   * True on a route.ts handler's response (additive, protocol stays v3).
+   * Route handlers own their caching: Rust adds no default Cache-Control
+   * to them, whatever their content type.
+   */
+  routeHandler?: boolean;
 }
 
 export interface IPCError {

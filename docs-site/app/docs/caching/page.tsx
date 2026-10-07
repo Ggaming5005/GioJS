@@ -58,7 +58,9 @@ ETag: "4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
       <p>
         The ETag is strong: a hash of the stored page, computed once when it is cached. A
         request whose <code>If-None-Match</code> names it gets a 304 with the same headers
-        (<code>X-Request-Id</code>, security headers and header rules included). Pages
+        (<code>X-Request-Id</code>, security headers and header rules included). The dev
+        server sends no page ETags: it inlines your current CSS into every response, so a
+        stylesheet edit always reaches the browser. Pages
         rendered per visitor - personalized, uncached, streamed, every{' '}
         <a href="/docs/caching-layers">PPR</a> response (its holes are personal) and error
         pages - get <code>Cache-Control: private, no-cache</code>: no shared cache stores
@@ -69,12 +71,15 @@ ETag: "4f1c0a9be27d63e5d1b8a04c9f2e7a13"`} />
         A <code>Cache-Control</code> you set yourself always wins - from{' '}
         <code>getServerSideProps</code> <code>headers</code>, a route handler&apos;s{' '}
         <code>Response</code>, or a <code>[[headers]]</code> rule. Route handler responses
-        get no default at all. Two cases never get <code>public</code> or an ETag, because
-        one URL serves different bytes: with <code>[i18n]</code> detecting the locale from{' '}
-        <code>accept-language</code> or a cookie, an unprefixed URL is{' '}
-        <code>private, no-cache</code> (locale-prefixed URLs like <code>/de/about</code>{' '}
-        stay public); and with CSP nonces (<code>{'{nonce}'}</code> in{' '}
-        <code>[security] csp</code>) every response is unique, so no ETag is sent.
+        get no default at all, whatever their content type. In two cases GioJS never makes
+        a page <code>public</code> or sends an ETag, because one URL serves different bytes:
+        with <code>[i18n]</code> detecting the locale from <code>accept-language</code> or a
+        cookie, an unprefixed URL is <code>private, no-cache</code> (locale-prefixed URLs
+        like <code>/de/about</code> stay public); and with CSP nonces (<code>{'{nonce}'}</code>{' '}
+        in <code>[security] csp</code>) every response is unique, so even cached pages are{' '}
+        <code>private, no-cache</code> - a CDN replaying one would hand every visitor the
+        same nonce. GioJS still caches those pages itself and fills in a fresh nonce per
+        response.
       </p>
     </>
   );

@@ -303,6 +303,11 @@ pub struct IpcResponse {
     /// (and from older workers); additive, protocol stays v3.
     #[serde(default)]
     pub route: Option<String>,
+    /// A route.ts handler answered: its Cache-Control is the app's call, so
+    /// the pipeline adds no default (whatever the content type). Additive,
+    /// protocol stays v3.
+    #[serde(rename = "routeHandler", default)]
+    pub route_handler: bool,
     /// Never on the wire: set on the 500 built for a response frame that
     /// failed to parse; `send_request` logs it inside the request's span.
     #[serde(skip)]
@@ -1310,6 +1315,7 @@ fn error_frame_response(id: &str, val: &serde_json::Value, dev_mode: bool) -> Ip
             .get("route")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        route_handler: false,
         frame_error: None,
     }
 }
@@ -1332,6 +1338,7 @@ fn unavailable_response(id: &str) -> IpcResponse {
         worker_error: false,
         set_cookies: Vec::new(),
         route: None,
+        route_handler: false,
         frame_error: None,
     }
 }
@@ -2146,6 +2153,20 @@ mod tests {
         );
         assert_eq!(error.route.as_deref(), Some("/boom"));
         assert_eq!(unavailable_response("a").route, None);
+    }
+
+    #[test]
+    fn ipc_response_route_handler_flag_defaults_off() {
+        let page: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"x","cacheable":false,"cacheMaxAge":0}"#,
+        )
+        .unwrap();
+        assert!(!page.route_handler);
+        let handler: IpcResponse = serde_json::from_str(
+            r#"{"id":"a","status":200,"headers":{},"body":"x","cacheable":false,"cacheMaxAge":0,"routeHandler":true}"#,
+        )
+        .unwrap();
+        assert!(handler.route_handler);
     }
 
     #[tokio::test]

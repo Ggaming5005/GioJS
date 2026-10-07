@@ -762,9 +762,13 @@ async function main() {
       const own = await fetch(`${BASE}/cache-headers`);
       assert.match(await own.text(), /INTEGRATION_FIXTURE_CACHE_HEADERS/);
       assert.equal(own.headers.get('cache-control'), 'public, max-age=30');
-      // Route handlers are the app's business: no default added.
+      // Route handlers are the app's business: no default added, even to HTML.
       const api = await fetch(`${BASE}/api/whoami`);
       assert.equal(api.headers.get('cache-control'), null);
+      const htmlHandler = await fetch(`${BASE}/api/html-report`);
+      assert.match(await htmlHandler.text(), /INTEGRATION_FIXTURE_HTML_ROUTE/);
+      assert.match(htmlHandler.headers.get('content-type') ?? '', /^text\/html/);
+      assert.equal(htmlHandler.headers.get('cache-control'), null);
     });
 
     await test('a malformed worker response frame fails its request at once, with its request id logged', async () => {
@@ -2266,6 +2270,20 @@ async function devWatchPhase() {
       assert.equal(body.precedence, 'from-env-development');
     });
 
+    await test('dev: cached pages send no ETag, so a CSS edit is never answered with a 304', async () => {
+      // Dev inlines the current critical CSS into every response: a tag of
+      // the stored markup would 304 the browser onto stale styles.
+      for (let i = 0; i < 2; i += 1) {
+        const res = await fetch(`${BASE}/cached`);
+        assert.match(await res.text(), /INTEGRATION_FIXTURE_CACHED/);
+        assert.match(res.headers.get('x-gio-cache') ?? '', /^(miss; stored|hit)/);
+        assert.equal(res.headers.get('etag'), null);
+      }
+      const conditional = await rawGet('/cached', { 'if-none-match': '*' });
+      assert.equal(conditional.status, 200);
+      assert.match(conditional.body, /INTEGRATION_FIXTURE_CACHED/);
+    });
+
     await test('dev: a rejected client bundle is handed to the error overlay', async () => {
       const html = await (await fetch(`${BASE}/server-only-leak`)).text();
       assert.match(html, /SERVER_ONLY_LEAK_FIXTURE/);
@@ -2978,6 +2996,12 @@ export function GET(): Response {
           const missNonce = assertNoncedResponse(miss.res, miss.html, 'miss');
           const hit = await fetchHtml('/cached');
           assert.match(hit.res.headers.get('x-gio-cache') ?? '', /^hit/);
+          // A shared cache would replay one nonce to every visitor: cached
+          // pages stay out of CDNs (and get no ETag) while nonces are on.
+          for (const [what, res] of [['miss', miss.res], ['hit', hit.res]]) {
+            assert.equal(res.headers.get('cache-control'), 'private, no-cache', what);
+            assert.equal(res.headers.get('etag'), null, what);
+          }
           // Substituted before compression: the body went out gzipped.
           assert.equal(hit.res.headers.get('content-encoding'), 'gzip');
           const hitNonce = assertNoncedResponse(hit.res, hit.html, 'hit');
@@ -3066,6 +3090,9 @@ export function GET(): Response {
           const hit = await fetchHtml('/cached');
           assert.match(hit.res.headers.get('x-gio-cache') ?? '', /^hit/);
           assertNoncedResponse(hit.res, hit.html, 'hit after restart');
+          // A disk entry from before the restart: still never public.
+          assert.equal(hit.res.headers.get('cache-control'), 'private, no-cache');
+          assert.equal(hit.res.headers.get('etag'), null);
         });
       },
     },

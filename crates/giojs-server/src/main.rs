@@ -183,6 +183,19 @@ fn page_cache_control(policy: PageCachePolicy) -> String {
 /// Set Cache-Control on an HTML page response unless the app set its own:
 /// route handlers, getServerSideProps headers and header rules always win.
 fn apply_page_cache_control(resp: &mut Response, policy: PageCachePolicy) {
+    set_page_cache_control(resp, policy, security::nonce_placeholder().is_some());
+}
+
+/// `apply_page_cache_control` with the CSP-nonce setting passed in. Nonced
+/// HTML is unique to its response (body and CSP header): a shared cache
+/// replaying one would hand every visitor the same nonce, so with nonces on
+/// no page is ever `public` - and gets no ETag either (`etag_allowed`).
+fn set_page_cache_control(resp: &mut Response, policy: PageCachePolicy, csp_nonces: bool) {
+    let policy = if csp_nonces {
+        PageCachePolicy::Private
+    } else {
+        policy
+    };
     let is_html = resp
         .headers()
         .get(header::CONTENT_TYPE)
@@ -235,6 +248,21 @@ fn if_none_match_hits(if_none_match: &str, etag: &str) -> bool {
         || if_none_match
             .split(',')
             .any(|candidate| opaque(candidate) == opaque(etag))
+}
+
+/// Whether a cached body's ETag - the hash of the stored bytes - stands for
+/// what is served. Uncomposed HTML (dev mode, or a composition that failed)
+/// gets critical CSS from the live CSS cache, font links and scripts
+/// injected on every request, so unchanged stored bytes can still serve a
+/// different page: a 304 would keep the browser on stale inlined CSS after
+/// a stylesheet edit. Dev mode also splices its overlay into composed
+/// entries, so it sends no page ETags at all.
+fn stored_body_is_served(
+    composed: bool,
+    headers: &HashMap<String, String>,
+    dev_mode: bool,
+) -> bool {
+    !dev_mode && (composed || !is_html_content_type(headers))
 }
 
 /// Stamp a cache hit's ETag, and turn the response into a 304 - the same
@@ -1877,7 +1905,9 @@ async fn dynamic_handler(
                 age_secs,
             };
             let route = entry.route.clone();
-            let etag = entry.etag.clone().filter(|_| etag_allowed);
+            let etag = entry.etag.clone().filter(|_| {
+                etag_allowed && stored_body_is_served(entry.composed, &entry.headers, dev_mode)
+            });
             let mut resp = build_response_from_entry(
                 entry,
                 &deployment_id,
@@ -1921,7 +1951,9 @@ async fn dynamic_handler(
                 age_secs,
             };
             let route = entry.route.clone();
-            let etag = entry.etag.clone().filter(|_| etag_allowed);
+            let etag = entry.etag.clone().filter(|_| {
+                etag_allowed && stored_body_is_served(entry.composed, &entry.headers, dev_mode)
+            });
             spawn_revalidation(
                 state.clone(),
                 cache_key.clone(),
@@ -2140,9 +2172,11 @@ async fn dynamic_handler(
                     age_secs: 0,
                 },
             );
+            let etag_servable =
+                etag_allowed && stored_body_is_served(page.composed, &page.headers, dev_mode);
             apply_entry_etag(
                 &mut resp_out,
-                etag_allowed.then_some(page.etag.as_str()),
+                etag_servable.then_some(page.etag.as_str()),
                 if_none_match.as_ref(),
             );
             let status_code = resp_out.status();
@@ -2484,17 +2518,20 @@ async fn respond_from_render(
         &mut resp_out,
         if will_cache { "miss; stored" } else { "bypass" },
     );
-    apply_page_cache_control(
-        &mut resp_out,
-        if will_cache {
-            PageCachePolicy::Shared {
-                max_age_secs: resp.cache_max_age,
-                age_secs: 0,
-            }
-        } else {
-            PageCachePolicy::Private
-        },
-    );
+    // Route handlers own their caching: no default, even for HTML.
+    if !resp.route_handler {
+        apply_page_cache_control(
+            &mut resp_out,
+            if will_cache {
+                PageCachePolicy::Shared {
+                    max_age_secs: resp.cache_max_age,
+                    age_secs: 0,
+                }
+            } else {
+                PageCachePolicy::Private
+            },
+        );
+    }
     state.metrics.record_request(
         method,
         status_code.as_u16(),
@@ -5288,6 +5325,7 @@ mod tests {
             worker_error: false,
             set_cookies: Vec::new(),
             route: None,
+            route_handler: false,
             frame_error: None,
         }
     }
@@ -5356,6 +5394,30 @@ mod tests {
     }
 
     #[test]
+    fn csp_nonces_keep_cached_pages_out_of_shared_caches() {
+        let shared = PageCachePolicy::Shared {
+            max_age_secs: 300,
+            age_secs: 10,
+        };
+        let mut page = html_response(None, "text/html; charset=utf-8");
+        set_page_cache_control(&mut page, shared, true);
+        assert_eq!(page.headers()[header::CACHE_CONTROL], "private, no-cache");
+        assert!(page.extensions().get::<FrameworkCacheControl>().is_some());
+
+        let mut plain = html_response(None, "text/html; charset=utf-8");
+        set_page_cache_control(&mut plain, shared, false);
+        assert_eq!(
+            plain.headers()[header::CACHE_CONTROL],
+            "public, max-age=0, s-maxage=290, stale-while-revalidate=2700"
+        );
+
+        // An app-set value still wins with nonces on.
+        let mut own = html_response(Some("public, max-age=5"), "text/html");
+        set_page_cache_control(&mut own, shared, true);
+        assert_eq!(own.headers()[header::CACHE_CONTROL], "public, max-age=5");
+    }
+
+    #[test]
     fn negotiated_locales_tighten_only_the_pipelines_own_cache_control() {
         let shared = PageCachePolicy::Shared {
             max_age_secs: 60,
@@ -5384,6 +5446,26 @@ mod tests {
         apply_page_cache_control(&mut own, shared);
         make_framework_cache_control_private(&mut own);
         assert_eq!(own.headers()[header::CACHE_CONTROL], "public, max-age=5");
+    }
+
+    #[test]
+    fn etags_only_tag_bodies_served_as_stored() {
+        let html: HashMap<String, String> = [(
+            "content-type".to_string(),
+            "text/html; charset=utf-8".to_string(),
+        )]
+        .into();
+        let json: HashMap<String, String> =
+            [("content-type".to_string(), "application/json".to_string())].into();
+        // Composed at put time: the stored bytes are the page.
+        assert!(stored_body_is_served(true, &html, false));
+        // Uncomposed HTML gets the live critical CSS injected per request.
+        assert!(!stored_body_is_served(false, &html, false));
+        // Non-HTML bodies are never injected into.
+        assert!(stored_body_is_served(false, &json, false));
+        // Dev mode: CSS edits must reach the browser, so no page ETags.
+        assert!(!stored_body_is_served(false, &html, true));
+        assert!(!stored_body_is_served(true, &html, true));
     }
 
     #[test]
