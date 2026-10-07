@@ -3079,8 +3079,25 @@ fn is_path_served_css(path: &std::path::Path) -> bool {
             .is_some_and(|name| name.ends_with(".module.css"))
 }
 
-/// Public URL prefix of the worker-built route stylesheets (css-build.ts).
-const ROUTE_STYLESHEET_PREFIX: &str = "/_next/static/css/";
+/// `href` attribute of a worker-built route stylesheet link (css-build.ts).
+const ROUTE_STYLESHEET_HREF: &str = "href=\"/_next/static/css/";
+
+/// Whether a `<link>` tag in `html` points at a route stylesheet. Only tags
+/// count: page text that merely mentions the path (a post about CSS) is
+/// escaped by React, so it never holds a raw `<link`. Tags anywhere count -
+/// pages without a root layout get their links at the top of `<body>`.
+fn links_route_stylesheet(html: &str) -> bool {
+    let mut rest = html;
+    while let Some(start) = rest.find("<link") {
+        let tag = &rest[start..];
+        let end = tag.find('>').unwrap_or(tag.len());
+        if tag[..end].contains(ROUTE_STYLESHEET_HREF) {
+            return true;
+        }
+        rest = &tag[end..];
+    }
+    false
+}
 
 /// Extract critical CSS for `html` using the pre-transformed `/globals.css` from the cache.
 /// Returns a ready-to-inject HTML snippet, or `None` if extraction produces nothing useful.
@@ -3091,7 +3108,7 @@ const ROUTE_STYLESHEET_PREFIX: &str = "/_next/static/css/";
 /// rules, letting it override them.
 fn extract_critical_snippet(html: &Bytes, css_cache: &css_assets::CssCache) -> Option<String> {
     let html_str = std::str::from_utf8(html).ok()?;
-    if html_str.contains(ROUTE_STYLESHEET_PREFIX) {
+    if links_route_stylesheet(html_str) {
         return None;
     }
     let css_entry = css_cache.get("/globals.css")?;
@@ -4291,6 +4308,46 @@ mod tests {
         let s = std::str::from_utf8(&out).unwrap();
         assert!(!s.contains("<style>"), "{s}");
         assert!(!s.contains("/globals.css"), "{s}");
+    }
+
+    #[test]
+    fn critical_css_skips_pages_without_a_root_layout_that_link_imported_stylesheets() {
+        // No root layout: React puts the links at the top of <body>.
+        let html = Bytes::from(
+            r#"<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><link rel="stylesheet" href="/_next/static/css/route-docs-ABC.css" data-precedence="default"/><div id="__gio"><h1 class="hero">x</h1></div></body></html>"#,
+        );
+        let out = compose_final_html(html, "dep-1", "en", &[], &globals_cache(), true);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(!s.contains("<style>"), "{s}");
+        assert!(!s.contains("/globals.css"), "{s}");
+    }
+
+    #[test]
+    fn critical_css_is_kept_on_pages_that_only_mention_the_stylesheet_path() {
+        // A docs page about CSS: the path is text (and escaped attribute
+        // text in an inline code sample), never a <link>.
+        let html = Bytes::from(
+            r#"<html><head><link rel="icon" href="/favicon.ico"/></head><body><h1 class="hero">CSS</h1><p>Served from <code>/_next/static/css/</code>.</p><pre>&lt;link href=&quot;/_next/static/css/x.css&quot;&gt;</pre></body></html>"#,
+        );
+        let out = compose_final_html(html, "dep-1", "en", &[], &globals_cache(), true);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("<style>.hero{color:red}"), "{s}");
+        assert!(s.contains(r#"href="/globals.css""#), "{s}");
+    }
+
+    #[test]
+    fn links_route_stylesheet_only_matches_link_tags() {
+        assert!(links_route_stylesheet(
+            r#"<head><link rel="stylesheet" href="/_next/static/css/root-A.css" data-precedence="default"/></head>"#
+        ));
+        assert!(!links_route_stylesheet(
+            r#"<head><link rel="stylesheet" href="/globals.css"/></head><body>/_next/static/css/</body>"#
+        ));
+        assert!(!links_route_stylesheet(
+            r#"<a href="/_next/static/css/root-A.css">raw file</a>"#
+        ));
+        // An unterminated tag at the end of the input is still scanned safely.
+        assert!(!links_route_stylesheet("<link rel=\"icon\""));
     }
 
     #[tokio::test]
