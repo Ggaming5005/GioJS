@@ -665,7 +665,7 @@ test('add creates gio.toml when the project has none, so auth\'s guard and rate 
       assert.equal(again.status, 0, again.stderr);
       assert.equal(await read(project.dir, 'gio.toml'), gio);
       // The dashboard checks the session itself too, not only through the guard.
-      const dashboard = await read(project.dir, `app/dashboard/page.${language === 'ts' ? 'tsx' : 'jsx'}`);
+      const dashboard = await read(project.dir, `app/(site)/dashboard/page.${language === 'ts' ? 'tsx' : 'jsx'}`);
       assert.match(dashboard, /if \(email === undefined\) return redirect\('\/login'\);/);
       assert.doesNotMatch(dashboard, /'unknown'/);
     });

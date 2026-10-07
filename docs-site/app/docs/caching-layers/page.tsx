@@ -38,9 +38,16 @@ disk_max_bytes = 536870912          # L2 cap; 0 = unbounded`} />
       <p>
         Persisted entries survive a restart only while the deployment ID stays the same. The
         derived ID covers the client build the server produces at startup (every chunk and
-        stylesheet name is a content hash), so a restart after a code or CSS change starts
-        with an empty cache instead of serving pages that link the previous build&apos;s
-        deleted files, and a restart of the same code keeps the cache. It also covers the
+        stylesheet name is a content hash) and the app&apos;s server-side sources: every file
+        under <code>app/</code> - the root layout, <code>metadata</code> and{' '}
+        <code>revalidate</code> exports, <code>getServerSideProps</code>, route handlers -
+        plus <code>middleware.ts</code>, <code>gio.config.ts</code>, the project modules they
+        import, the tsconfig and the lockfile. So a restart after a code or CSS change starts
+        with an empty cache instead of serving pages the previous code rendered (or that link
+        its deleted files), and a restart of the same code keeps the cache. Data your pages
+        read at runtime (files, a database, <code>.env</code> values) is not part of the ID:
+        after changing it, purge with <code>revalidatePath()</code> or{' '}
+        <code>POST /_gio/revalidate</code>. It also covers the
         gio.toml settings pages are rendered with (<code>[images]</code> decides every{' '}
         <code>GioImage</code> srcset, plus the served <code>[[fonts]]</code> and the i18n
         default locale), so changing those settings drops persisted pages too. A pinned{' '}

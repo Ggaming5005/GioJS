@@ -1425,9 +1425,10 @@ async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> anyhow::Result<B
 /// Pins the deployment ID across pods (used as given, up to 64 characters).
 pub const DEPLOYMENT_ID_ENV: &str = "GIO_DEPLOYMENT_ID";
 
-/// What the deployment ID is derived from, besides the client build the
-/// builder reports in its READY frame (`buildHash`, see
-/// giojs-core/src/build-manifest.ts `clientBuildHash`).
+/// What the deployment ID is derived from, besides the build the builder
+/// reports in its READY frame (`buildHash`: its client build and the app's
+/// server-side sources, see giojs-core/src/build-manifest.ts
+/// `deploymentBuildHash`).
 ///
 /// Content-derived, never time-derived: a restart of the same code and
 /// config must keep the same ID or the entire persisted disk cache becomes
@@ -1767,7 +1768,8 @@ struct WorkerConnection {
 }
 
 /// The optional `buildHash` field of a READY frame: the content hash of the
-/// client build the worker serves (giojs-core `clientBuildHash`). Additive
+/// client build the worker serves and, from the builder, of the app's
+/// server-side sources (giojs-core `deploymentBuildHash`). Additive
 /// within protocol v3; a worker that omits it contributes no build.
 fn ready_build_hash(ready: &serde_json::Value) -> Option<&str> {
     ready

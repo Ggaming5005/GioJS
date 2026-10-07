@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildManifestPath,
   clientBuildHash,
+  deploymentBuildHash,
   loadClientBuild,
   readBuildManifest,
   reuseBuildRequested,
@@ -222,5 +223,23 @@ describe('clientBuildHash', () => {
     const second = await readBuildManifest(projectRoot, 'run-2');
     if (!('build' in first) || !('build' in second)) throw new Error('manifest unreadable');
     expect(clientBuildHash(second.build)).toBe(clientBuildHash(first.build));
+  });
+});
+
+describe('deploymentBuildHash', () => {
+  it('is the client build hash when no server sources were hashed', () => {
+    expect(deploymentBuildHash(sampleBuild())).toBe(clientBuildHash(sampleBuild()));
+    expect(deploymentBuildHash(sampleBuild(), '')).toBe(clientBuildHash(sampleBuild()));
+  });
+
+  it('changes with the server sources even when the client build does not', () => {
+    const a = deploymentBuildHash(sampleBuild(), 'server-a');
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(a).not.toBe(clientBuildHash(sampleBuild()));
+    expect(deploymentBuildHash(sampleBuild(), 'server-a')).toBe(a);
+    expect(deploymentBuildHash(sampleBuild(), 'server-b')).not.toBe(a);
+    const newChunk = sampleBuild();
+    newChunk.clientScripts.set('/', '/_next/static/chunks/route-index-EEE.js');
+    expect(deploymentBuildHash(newChunk, 'server-a')).not.toBe(a);
   });
 });

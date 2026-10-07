@@ -3315,20 +3315,51 @@ async function imageConfigCachePhase() {
  * page links the ones it was rendered with. A restart after a code change
  * must get a new deployment ID - so pages persisted by the old build stop
  * matching and clients on it get the skew reload - while a restart of the
- * same code keeps the ID and the warm disk cache.
+ * same code keeps the ID and the warm disk cache. Server-only code counts
+ * too: the root layout and a page's `metadata` export never reach the
+ * client chunks or stylesheets, yet they shape every cached page.
  */
 async function buildChangeCachePhase() {
   const binary = findServerBinary();
   const appRoot = await copyFixtureForDev('.build-cache-fixture');
   const cssPath = join(appRoot, 'app', 'root.css');
+  const layoutPath = join(appRoot, 'app', 'layout.tsx');
+  const cachedPagePath = join(appRoot, 'app', 'cached', 'page.tsx');
   const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-buildcache-'));
   const stylesheets = (html) => [...html.matchAll(/\/_next\/static\/css\/[^"]+\.css/g)].map((m) => m[0]);
+  const scripts = (html) => [...html.matchAll(/\/_next\/static\/chunks\/[^"]+\.js/g)].map((m) => m[0]);
+  const persistedBy = (deploymentId) => async () => {
+    const files = await readdir(cacheDir, { recursive: true });
+    for (const file of files.filter((f) => f.endsWith('.json'))) {
+      const body = await readFile(join(cacheDir, file), 'utf8').catch(() => '');
+      if (body.includes(`"deployment_id":"${deploymentId}`)) return true;
+    }
+    return false;
+  };
   const runs = [];
+  // The page's metadata export: run 5 edits only that.
+  await writeFile(
+    cachedPagePath,
+    `${await readFile(cachedPagePath, 'utf8')}\nexport const metadata = { title: 'BUILD_CHANGE_TITLE_V1' };\n`,
+  );
 
   try {
-    for (const run of [1, 2, 3]) {
+    for (const run of [1, 2, 3, 4, 5]) {
       if (run === 2) {
         await writeFile(cssPath, `${await readFile(cssPath, 'utf8')}\n.build-change-marker { color: teal; }\n`);
+      }
+      if (run === 4) {
+        const layout = await readFile(layoutPath, 'utf8');
+        const edited = layout.replace(
+          '<meta name="theme-color"',
+          '<meta name="build-change" content="ROOT_LAYOUT_V2" />\n        <meta name="theme-color"',
+        );
+        assert.notEqual(edited, layout, 'the root layout edit applies');
+        await writeFile(layoutPath, edited);
+      }
+      if (run === 5) {
+        const page = await readFile(cachedPagePath, 'utf8');
+        await writeFile(cachedPagePath, page.replace('BUILD_CHANGE_TITLE_V1', 'BUILD_CHANGE_TITLE_V2'));
       }
       let log = '';
       const server = spawn(binary, [], {
@@ -3357,7 +3388,13 @@ async function buildChangeCachePhase() {
         const deploymentId = (await (await fetch(`${BASE}/_gio/health`)).json()).deploymentId;
         const res = await fetch(`${BASE}/cached`);
         const html = await res.text();
-        runs.push({ deploymentId, cache: res.headers.get('x-gio-cache') ?? '', css: stylesheets(html) });
+        runs.push({
+          deploymentId,
+          cache: res.headers.get('x-gio-cache') ?? '',
+          css: stylesheets(html),
+          scripts: scripts(html),
+          html,
+        });
         const current = runs[run - 1];
         assert.equal(res.status, 200);
         assert.ok(current.css.length > 0, `/cached links a stylesheet: ${html.slice(0, 400)}`);
@@ -3396,22 +3433,39 @@ async function buildChangeCachePhase() {
             await skewed.arrayBuffer();
           });
           // The entry file is rewritten in place, stamped with the new ID.
-          await waitFor('page re-persisted by the new build', async () => {
-            const files = await readdir(cacheDir, { recursive: true });
-            for (const file of files.filter((f) => f.endsWith('.json'))) {
-              const body = await readFile(join(cacheDir, file), 'utf8').catch(() => '');
-              if (body.includes(`"deployment_id":"${current.deploymentId}`)) return true;
-            }
-            return false;
-          }, 10_000);
+          await waitFor('page re-persisted by the new build', persistedBy(current.deploymentId), 10_000);
           continue;
         }
 
-        await test('a restart of the same code keeps the deployment ID and the disk cache', () => {
-          assert.equal(current.deploymentId, runs[1].deploymentId);
-          assert.match(current.cache, /^hit\b/, 'the page persisted by this build must be served');
-          assert.deepEqual(current.css, runs[1].css);
+        if (run === 3) {
+          await test('a restart of the same code keeps the deployment ID and the disk cache', () => {
+            assert.equal(current.deploymentId, runs[1].deploymentId);
+            assert.match(current.cache, /^hit\b/, 'the page persisted by this build must be served');
+            assert.deepEqual(current.css, runs[1].css);
+          });
+          continue;
+        }
+
+        const before = runs[run - 2];
+        const [what, fresh, stale] = run === 4
+          ? ['the root layout', /content="ROOT_LAYOUT_V2"/, null]
+          : ["a page's metadata export", /<title>BUILD_CHANGE_TITLE_V2<\/title>/, /BUILD_CHANGE_TITLE_V1/];
+        await test(`a change to ${what} alone gives the restarted server a new deployment ID`, () => {
+          // The client build is untouched: only the server sources moved.
+          assert.deepEqual(current.css, before.css, `${what} edit must not change the stylesheets`);
+          assert.deepEqual(current.scripts, before.scripts, `${what} edit must not change the client chunks`);
+          assert.notEqual(current.deploymentId, before.deploymentId);
         });
+        await test(`pages persisted before a change to ${what} are not served after it`, () => {
+          assert.match(current.cache, /^miss; stored$/, `the page rendered by the old ${what} was served`);
+          assert.match(current.html, fresh);
+          if (stale !== null) assert.doesNotMatch(current.html, stale);
+        });
+        if (run === 4) {
+          assert.match(before.html, /<title>BUILD_CHANGE_TITLE_V1<\/title>/, 'the metadata export renders');
+          assert.doesNotMatch(before.html, /ROOT_LAYOUT_V2/);
+          await waitFor('page re-persisted after the layout change', persistedBy(current.deploymentId), 10_000);
+        }
       } catch (err) {
         console.error(`\nintegration (build change, run ${run}): FAILED`);
         console.error(err);
@@ -4122,6 +4176,38 @@ async function standalonePhase() {
       assert.match(worker, /STANDALONE_FIXTURE_HOME/, 'page component bundled into worker.js');
       assert.match(build.stdout, /env: {4}\.env\.production/);
       assert.ok(!existsSync(join(outDir, '.env.production')), 'build-time .env files are not copied');
+    });
+
+    // .gio/manifest.json is what Rust hashes into a standalone deployment ID:
+    // it must change with server-only code (a metadata export never reaches
+    // the client chunks) and stay put for a rebuild of the same code.
+    await test('standalone: the manifest tracks server-only code, deterministically', async () => {
+      const buildInto = (out) => {
+        const build = spawnSync(
+          process.execPath,
+          [join(repoRoot, 'packages', 'giojs', 'bin', 'standalone.mjs'), '--out', out],
+          { cwd: workDir, env: { ...process.env, GIO_STANDALONE_SERVER_BIN: binary }, encoding: 'utf8', timeout: 180_000 },
+        );
+        assert.equal(build.status, 0, `standalone build failed:\n${build.stdout ?? ''}\n${build.stderr ?? ''}`);
+      };
+      const manifestOf = async (out) => JSON.parse(await readFile(join(out, '.gio', 'manifest.json'), 'utf8'));
+      const first = await manifestOf(outDir);
+      assert.match(first.worker, /^[0-9a-f]{64}$/, 'manifest carries the worker.js hash');
+      const again = join(workDir, 'dist-standalone-again');
+      buildInto(again);
+      assert.equal((await manifestOf(again)).worker, first.worker, 'same code, same worker hash');
+      const page = join(workDir, 'app', 'page.tsx');
+      const original = await readFile(page, 'utf8');
+      await writeFile(page, original.replace('STANDALONE_HOME_TITLE', 'STANDALONE_HOME_TITLE_V2'));
+      const changed = join(workDir, 'dist-standalone-changed');
+      try {
+        buildInto(changed);
+      } finally {
+        await writeFile(page, original);
+      }
+      const next = await manifestOf(changed);
+      assert.deepEqual(next.clientScripts, first.clientScripts, 'a metadata edit leaves the client chunks alone');
+      assert.notEqual(next.worker, first.worker, 'a server-only edit changes the manifest');
     });
 
     await test('static export: pages hydrate from chunks shipped in out/', async () => {

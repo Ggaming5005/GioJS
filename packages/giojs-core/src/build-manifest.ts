@@ -64,7 +64,8 @@ function sortedEntries<V>(map: ReadonlyMap<string, V>): [string, V][] {
  * a hash of its content (an entry's also covers the chunks it imports), so
  * this changes whenever the app's client code, CSS or inlined `GIO_PUBLIC_*`
  * values do, and stays the same across restarts of the same code. Sent in
- * READY as `buildHash`: the Rust server derives the deployment ID from it,
+ * READY as part of `buildHash` (deploymentBuildHash): the Rust server
+ * derives the deployment ID from it,
  * so pages cached by an earlier build - which link chunks and stylesheets
  * the new build no longer has - stop matching, and clients still running
  * the old build get the version-skew reload.
@@ -78,6 +79,21 @@ export function clientBuildHash(build: ClientBuild): string {
     },
   });
   return createHash('sha256').update(canonical).digest('hex');
+}
+
+/**
+ * The `buildHash` a worker reports in READY: its client build plus, from
+ * the builder, the hash of the app's server-side sources
+ * (server-source-hash.ts). The client build alone misses everything that
+ * never reaches the browser - the root layout, `metadata` and `revalidate`
+ * exports, getServerSideProps, route handlers, server libraries - so a
+ * deploy changing only those would keep the deployment ID and serve pages
+ * the old code rendered from the persisted cache.
+ */
+export function deploymentBuildHash(build: ClientBuild, serverSourceHash?: string): string {
+  const client = clientBuildHash(build);
+  if (serverSourceHash === undefined || serverSourceHash === '') return client;
+  return createHash('sha256').update(`client:${client}\nserver:${serverSourceHash}`).digest('hex');
 }
 
 /** True when this worker was told to load the builder's build. */

@@ -311,8 +311,8 @@ workers = "auto"   # one per CPU core, at most 8 - or an exact count`}</code>
         shared cache backend yet. When running multiple instances (Kubernetes, multiple VMs),
         set <code>GIO_DEPLOYMENT_ID</code> to the same value on every instance so they agree
         on the deployment ID. By default the ID is derived from the app&apos;s content (the
-        client build each instance produces at startup and the gio.toml settings pages
-        render with), so identical builds already agree - pinning it explicitly protects you
+        client build each instance produces at startup, the app&apos;s server-side sources
+        and the gio.toml settings pages render with), so identical builds already agree - pinning it explicitly protects you
         when pods roll out at different times:
       </p>
       <pre>

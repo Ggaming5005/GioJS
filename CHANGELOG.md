@@ -403,12 +403,21 @@ first.
   listed, pages that call `notFound()` are skipped, and failed pages are
   listed with their error reference.
 - **The derived deployment ID covers the build.** The first worker reports a
-  content hash of the client build it produced (`buildHash` in READY), so a
-  restart after any change to the app's client code, CSS or `GIO_PUBLIC_*`
-  values gets a new ID: pages persisted by the previous build, which link
-  chunks and stylesheets the new one deleted, are dropped, and tabs still on
-  it reload in full. A restart of the same code keeps the ID and the disk
-  cache. Before, only `gio build standalone` output changed the ID, so after
+  content hash of the client build it produced and of the app's server-side
+  sources (`buildHash` in READY), so a restart after any change to the app's
+  client code, CSS or `GIO_PUBLIC_*` values gets a new ID: pages persisted
+  by the previous build, which link chunks and stylesheets the new one
+  deleted, are dropped, and tabs still on it reload in full. Server-only code
+  counts too - the root layout, `metadata`, `revalidate` and
+  `getServerSideProps` exports, route handlers, `middleware.ts`,
+  `gio.config.ts`, the project-local modules they import (found with an
+  esbuild pass at startup, every project source file if that pass fails),
+  the tsconfig and the lockfile - so persisted pages never outlive the code
+  that rendered them, even with `revalidate = false`. A standalone build's
+  `.gio/manifest.json` records a hash of its `worker.js` for the same
+  reason. Data read at runtime (files, databases, `.env` values) is not
+  covered: purge with `revalidatePath()` or `POST /_gio/revalidate`. A
+  restart of the same code keeps the ID and the disk cache. Before, only `gio build standalone` output changed the ID, so after
   a `gio start` deploy cached pages served for up to ten times their
   `revalidate` with broken stylesheet and chunk links. The ID also covers
   `[images]`, the served `[[fonts]]` files and the i18n default locale, and a

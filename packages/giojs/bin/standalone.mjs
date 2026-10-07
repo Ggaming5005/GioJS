@@ -19,9 +19,10 @@
  * cwd, and the server loads that dir's .env files at startup like any other
  * `gio` run.
  */
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { chmod, copyFile, cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -368,6 +369,7 @@ async function main() {
   } finally {
     await rm(entryDir, { recursive: true, force: true });
   }
+  const workerHash = await standaloneWorkerHash(join(options.out, 'worker.js'), entryDir);
 
   await copyFile(serverBin, join(options.out, serverName));
   if (serverName === 'server') {
@@ -403,6 +405,11 @@ async function main() {
         handlers: routeFiles.map((f) => f.urlPattern).sort(),
         clientScripts: Object.fromEntries([...clientManifest].sort()),
         stylesheets,
+        // Everything server-side - the root layout, metadata exports, route
+        // handlers, server libraries, dependencies - is in worker.js and
+        // nowhere else above: without it a server-only change would keep
+        // the deployment ID and the pages the old bundle cached.
+        worker: workerHash,
       },
       null,
       2,
@@ -431,6 +438,17 @@ async function main() {
   process.exit(0);
 }
 
+/**
+ * Content hash of the bundled worker.js. The generated entry lives in a
+ * fresh temporary directory, whose name esbuild's module path comments
+ * carry; it is normalized so the same app always hashes alike.
+ */
+async function standaloneWorkerHash(workerFile, entryDir) {
+  const source = (await readFile(workerFile, 'utf8')).replaceAll(basename(entryDir), 'gio-standalone-entry');
+  return createHash('sha256').update(source).digest('hex');
+}
+
 main().catch((buildError) => {
   fail(buildError instanceof Error ? (buildError.stack ?? buildError.message) : String(buildError));
 });
+
