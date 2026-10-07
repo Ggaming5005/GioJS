@@ -234,9 +234,9 @@ impl ImageHandler {
         let result = tokio::task::spawn_blocking(move || {
             process_image_with_limits(source_bytes, &params, decode_limits)
         })
-            .await
-            .map_err(|_| ImageError::ProcessFailed("spawn_blocking join error".into()))?
-            .map_err(|e| ImageError::ProcessFailed(e.to_string()))?;
+        .await
+        .map_err(|_| ImageError::ProcessFailed("spawn_blocking join error".into()))?
+        .map_err(|e| ImageError::ProcessFailed(e.to_string()))?;
 
         self.cache
             .put(&key, format.extension(), result.data.clone())

@@ -145,15 +145,17 @@ fn entry_age_secs(entry: &CacheEntry) -> u64 {
         .as_secs()
 }
 
-/// Stale entries keep serving (while one refresh runs) until they are this
-/// many times `max_age` old. Also sizes the CDN stale-while-revalidate window.
-const CACHE_SWR_MULTIPLIER: u64 = 10;
-
 /// How browsers and CDNs may cache a page response the pipeline built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PageCachePolicy {
     /// A shareable cached render, `age_secs` into its `max_age_secs` life.
-    Shared { max_age_secs: u64, age_secs: u64 },
+    /// Stale entries keep serving (while one refresh runs) until they are
+    /// `swr_multiplier` times `max_age_secs` old (`[cache] swr_multiplier`).
+    Shared {
+        max_age_secs: u64,
+        age_secs: u64,
+        swr_multiplier: u64,
+    },
     /// Personal or uncacheable - and every PPR response: its holes are
     /// rendered with the visitor's cookies.
     Private,
@@ -162,16 +164,26 @@ enum PageCachePolicy {
 /// The Cache-Control value for `policy`. A shared page is CDN-fresh for what
 /// is left of its revalidate window, CDN-servable stale (while it refreshes)
 /// for what is left of the SWR window, and always revalidated by browsers
-/// (max-age=0). Personal pages are `private, no-cache` - never `no-store`,
-/// which would disable the back/forward cache.
+/// (max-age=0). Without an SWR window (`swr_multiplier = 0`) there is no
+/// stale-while-revalidate directive. Personal pages are `private, no-cache`
+/// - never `no-store`, which would disable the back/forward cache.
 fn page_cache_control(policy: PageCachePolicy) -> String {
     match policy {
         PageCachePolicy::Shared {
             max_age_secs,
             age_secs,
+            swr_multiplier: 0,
         } => {
             let fresh = max_age_secs.saturating_sub(age_secs);
-            let swr_end = max_age_secs.saturating_mul(CACHE_SWR_MULTIPLIER);
+            format!("public, max-age=0, s-maxage={fresh}")
+        }
+        PageCachePolicy::Shared {
+            max_age_secs,
+            age_secs,
+            swr_multiplier,
+        } => {
+            let fresh = max_age_secs.saturating_sub(age_secs);
+            let swr_end = max_age_secs.saturating_mul(swr_multiplier);
             let swr = swr_end.saturating_sub(age_secs.max(max_age_secs));
             format!("public, max-age=0, s-maxage={fresh}, stale-while-revalidate={swr}")
         }
@@ -259,6 +271,13 @@ fn shared_cache_audience(req: &Request) -> bool {
     req.extensions().get::<HeaderNegotiatedLocale>().is_none()
         && req.extensions().get::<GuardAdmitted>().is_none()
         && !req.headers().contains_key(header::AUTHORIZATION)
+}
+
+/// Whether a page answer may carry its ETag (and so turn into a 304):
+/// `[cache] etag` is on, the URL serves one audience (`shared_cache_audience`)
+/// and no CSP nonces make every body unique.
+fn page_etags_allowed(etag_switch: bool, shared_audience: bool, csp_nonces: bool) -> bool {
+    etag_switch && shared_audience && !csp_nonces
 }
 
 /// If-None-Match evaluation (RFC 9110 weak comparison, as the header
@@ -456,6 +475,9 @@ struct AppState {
     image: Arc<giojs_image::ImageHandler>,
     css_cache: Arc<css_assets::CssCache>,
     css_config: config::CssConfig,
+    /// `[cache]`: page ETags and the stale window (the switches the cache
+    /// itself does not hold).
+    cache_config: config::CacheConfig,
     http2: bool,
     tls_enabled: bool,
     max_body_bytes: usize,
@@ -703,11 +725,18 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         security::cache_epoch(ipc.deployment_id(), nonce_placeholder.as_deref()).into();
 
     let cache = Arc::new(PageCache::new(CacheConfig {
+        enabled: cfg.cache.enabled,
         memory_max_entries: cfg.cache.memory_max_entries,
+        disk_enabled: cfg.cache.disk_enabled,
         disk_dir: cache_dir.clone(),
-        swr_multiplier: CACHE_SWR_MULTIPLIER,
+        swr_multiplier: cfg.cache.swr_multiplier,
         disk_max_bytes: cfg.cache.disk_max_bytes,
     }));
+    if !cfg.cache.enabled {
+        info!("page cache disabled ([cache] enabled = false): every request renders");
+    } else if !cfg.cache.disk_enabled {
+        info!("page cache is memory only ([cache] disk_enabled = false)");
+    }
 
     // Index what a previous run left on disk so tag and path purges reach
     // it. In the background: lookups stay correct while it runs.
@@ -912,6 +941,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         image: image_handler,
         css_cache,
         css_config,
+        cache_config: cfg.cache.clone(),
         http2,
         tls_enabled,
         max_body_bytes: cfg.server.max_body_bytes,
@@ -2128,8 +2158,12 @@ async fn dynamic_handler(
         .unwrap_or_default();
     // A hit's ETag must stand for one body under this URL, for everyone:
     // not for a URL with several audiences, and not with CSP nonces (unique
-    // per body).
-    let etag_allowed = shared_audience && security::nonce_placeholder().is_none();
+    // per body). `[cache] etag = false` sends none at all.
+    let etag_allowed = page_etags_allowed(
+        state.cache_config.etag,
+        shared_audience,
+        security::nonce_placeholder().is_some(),
+    );
     let if_none_match = req.headers().get(header::IF_NONE_MATCH).cloned();
     // Nothing under /_gio belongs to the app. path_hygiene_middleware already
     // 404s unrouted /_gio requests; this also covers paths that only land in
@@ -2318,6 +2352,7 @@ async fn dynamic_handler(
             let policy = PageCachePolicy::Shared {
                 max_age_secs: entry.max_age_secs,
                 age_secs,
+                swr_multiplier: state.cache_config.swr_multiplier,
             };
             let route = entry.route.clone();
             let etag = entry.etag.clone().filter(|_| {
@@ -2364,6 +2399,7 @@ async fn dynamic_handler(
             let policy = PageCachePolicy::Shared {
                 max_age_secs: entry.max_age_secs,
                 age_secs,
+                swr_multiplier: state.cache_config.swr_multiplier,
             };
             let route = entry.route.clone();
             let etag = entry.etag.clone().filter(|_| {
@@ -2582,12 +2618,22 @@ async fn dynamic_handler(
                 &state.css_config,
                 dev_mode,
             );
-            insert_cache_status_header(&mut resp_out, "miss; stored");
+            // `[cache] enabled = false` stored nothing: a shareable page
+            // nobody will hit again here, still public for CDNs.
+            insert_cache_status_header(
+                &mut resp_out,
+                if state.cache.is_enabled() {
+                    "miss; stored"
+                } else {
+                    "bypass"
+                },
+            );
             apply_page_cache_control(
                 &mut resp_out,
                 PageCachePolicy::Shared {
                     max_age_secs: page.max_age_secs,
                     age_secs: 0,
+                    swr_multiplier: state.cache_config.swr_multiplier,
                 },
             );
             let etag_servable =
@@ -2897,7 +2943,10 @@ async fn respond_from_render(
     locale: &str,
     start: std::time::Instant,
 ) -> Response {
-    let will_cache = render_is_shareable(&resp) && matches!(method, "GET" | "HEAD");
+    let shareable = render_is_shareable(&resp) && matches!(method, "GET" | "HEAD");
+    // `[cache] enabled = false`: a shareable page keeps its public
+    // Cache-Control (CDNs may still cache it) but is not stored here.
+    let will_cache = shareable && state.cache.is_enabled();
     let (body, composed) = if will_cache {
         compose_for_cache(
             state,
@@ -2961,10 +3010,11 @@ async fn respond_from_render(
     if !resp.route_handler {
         apply_page_cache_control(
             &mut resp_out,
-            if will_cache {
+            if shareable {
                 PageCachePolicy::Shared {
                     max_age_secs: resp.cache_max_age,
                     age_secs: 0,
+                    swr_multiplier: state.cache_config.swr_multiplier,
                 }
             } else {
                 PageCachePolicy::Private
@@ -3147,8 +3197,11 @@ fn respond_stream(
         stream_inject::StreamInjector::passthrough()
     };
 
-    let capture_shell =
-        response.ppr_shell && is_html && method == "GET" && render_is_shareable(&response);
+    let capture_shell = response.ppr_shell
+        && is_html
+        && method == "GET"
+        && render_is_shareable(&response)
+        && state.cache.is_enabled();
     let shell_capture = capture_shell.then(|| PprShellCapture {
         raw: BytesMut::new(),
         overflowed: false,
@@ -3282,6 +3335,9 @@ async fn store_fill(
     fill_ticket: FillTicket,
     path: &str,
 ) {
+    if !cache.is_enabled() {
+        return;
+    }
     match cache.put_fresh(cache_key, entry, fill_ticket).await {
         Ok(true) => {}
         Ok(false) => {
@@ -5889,6 +5945,7 @@ mod tests {
             disk_dir: dir.clone(),
             swr_multiplier: 1,
             disk_max_bytes: u64::MAX,
+            ..giojs_cache::CacheConfig::default()
         });
         // Simulates a stale render landing after the pre-restart clear.
         cache
@@ -6836,6 +6893,7 @@ mod tests {
         let fresh = PageCachePolicy::Shared {
             max_age_secs: 60,
             age_secs: 0,
+            swr_multiplier: 10,
         };
         assert_eq!(
             page_cache_control(fresh),
@@ -6845,6 +6903,7 @@ mod tests {
         let aged = PageCachePolicy::Shared {
             max_age_secs: 60,
             age_secs: 45,
+            swr_multiplier: 10,
         };
         assert_eq!(
             page_cache_control(aged),
@@ -6853,10 +6912,27 @@ mod tests {
         let stale = PageCachePolicy::Shared {
             max_age_secs: 60,
             age_secs: 100,
+            swr_multiplier: 10,
         };
         assert_eq!(
             page_cache_control(stale),
             "public, max-age=0, s-maxage=0, stale-while-revalidate=500"
+        );
+        // [cache] swr_multiplier = 0: never stale, so no SWR directive.
+        let no_swr = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 45,
+            swr_multiplier: 0,
+        };
+        assert_eq!(page_cache_control(no_swr), "public, max-age=0, s-maxage=15");
+        let doubled = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 0,
+            swr_multiplier: 2,
+        };
+        assert_eq!(
+            page_cache_control(doubled),
+            "public, max-age=0, s-maxage=60, stale-while-revalidate=60"
         );
         // Never no-store: it disables the back/forward cache.
         assert_eq!(
@@ -6899,6 +6975,7 @@ mod tests {
         let shared = PageCachePolicy::Shared {
             max_age_secs: 300,
             age_secs: 10,
+            swr_multiplier: 10,
         };
         let mut page = html_response(None, "text/html; charset=utf-8");
         set_page_cache_control(&mut page, shared, true);
@@ -6923,6 +7000,7 @@ mod tests {
         let shared = PageCachePolicy::Shared {
             max_age_secs: 60,
             age_secs: 0,
+            swr_multiplier: 10,
         };
         let mut page = html_response(None, "text/html");
         apply_page_cache_control(&mut page, shared);
@@ -6947,6 +7025,17 @@ mod tests {
         apply_page_cache_control(&mut own, shared);
         make_framework_cache_control_private(&mut own);
         assert_eq!(own.headers()[header::CACHE_CONTROL], "public, max-age=5");
+    }
+
+    #[test]
+    fn page_etags_need_the_switch_one_audience_and_no_nonces() {
+        assert!(page_etags_allowed(true, true, false));
+        assert!(
+            !page_etags_allowed(false, true, false),
+            "[cache] etag = false"
+        );
+        assert!(!page_etags_allowed(true, false, false));
+        assert!(!page_etags_allowed(true, true, true));
     }
 
     #[test]
@@ -7844,6 +7933,7 @@ mod tests {
             disk_dir: dir.clone(),
             swr_multiplier: 10,
             disk_max_bytes: 0,
+            ..giojs_cache::CacheConfig::default()
         }));
         (cache, dir)
     }

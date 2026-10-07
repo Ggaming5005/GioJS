@@ -14,9 +14,13 @@
         }
       ],
       "default": {
+        "disk_enabled": true,
         "disk_max_bytes": 536870912,
         "disk_path": ".gio/cache/pages",
-        "memory_max_entries": 1000
+        "enabled": true,
+        "etag": true,
+        "memory_max_entries": 1000,
+        "swr_multiplier": 10
       }
     },
     "compression": {
@@ -186,6 +190,11 @@
       "description": "`[cache]`: the page cache (memory LRU in front of a disk directory).",
       "type": "object",
       "properties": {
+        "disk_enabled": {
+          "description": "Keep a disk tier behind the memory LRU (it also outlives restarts).\nfalse: memory only, no files written.",
+          "type": "boolean",
+          "default": true
+        },
         "disk_max_bytes": {
           "description": "Disk cache size bound; the oldest entries are evicted past it. 0\ndisables the bound.",
           "type": "integer",
@@ -198,12 +207,29 @@
           "type": "string",
           "default": ".gio/cache/pages"
         },
+        "enabled": {
+          "description": "Store and serve pages that export `revalidate`. false renders every\nrequest; Cache-Control still follows `revalidate`, so a CDN in front\ncan keep caching.",
+          "type": "boolean",
+          "default": true
+        },
+        "etag": {
+          "description": "Send a weak ETag with cached pages and answer a matching\nIf-None-Match with 304. false: no page ETags and no 304s.",
+          "type": "boolean",
+          "default": true
+        },
         "memory_max_entries": {
-          "description": "Pages kept in the in-memory LRU; the disk cache holds the rest.",
+          "description": "Pages kept in the in-memory LRU; the disk cache holds the rest. At\nleast 1 (`enabled = false` is the off switch).",
           "type": "integer",
           "format": "uint",
           "default": 1000,
           "minimum": 1
+        },
+        "swr_multiplier": {
+          "description": "A page stays servable stale (while one refresh runs) until it is\nthis many times its `revalidate` old; it also sizes the CDN\n`stale-while-revalidate` window. 0 = never serve stale, and no\n`stale-while-revalidate` directive.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 0
         }
       },
       "additionalProperties": false

@@ -609,6 +609,7 @@ mod tests {
             disk_dir: dir.clone(),
             swr_multiplier: 10,
             disk_max_bytes: 0,
+            ..giojs_cache::CacheConfig::default()
         });
         let entry = |path: &str| giojs_cache::CacheEntry {
             html: bytes::Bytes::from_static(b"<p>x</p>"),
@@ -678,6 +679,7 @@ mod tests {
             disk_dir: dir.clone(),
             swr_multiplier: 10,
             disk_max_bytes: 0,
+            ..giojs_cache::CacheConfig::default()
         });
         let entry = |path: &str, tags: &[&str]| giojs_cache::CacheEntry {
             html: bytes::Bytes::from_static(b"<p>x</p>"),

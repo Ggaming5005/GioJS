@@ -7,6 +7,9 @@
 //! The directory is configurable (`[cache] disk_path`, `GIO_CACHE_DIR`) and
 //! may hold files the cache did not write, so clearing, eviction and the
 //! startup scan only ever touch the layer's own files (`is_disk_cache_file`).
+//!
+//! A disabled layer (`[cache] disk_enabled = false`) has no directory: it
+//! stores nothing, finds nothing, and abandons every write at once.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -94,20 +97,28 @@ impl From<DiskEntry> for CacheEntry {
 }
 
 pub(crate) struct DiskLayer {
-    dir: PathBuf,
+    /// None: the layer is disabled.
+    dir: Option<PathBuf>,
 }
 
 impl DiskLayer {
     pub(crate) fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: Some(dir.into()),
+        }
     }
 
-    fn path_for(&self, key: &str) -> PathBuf {
-        self.dir.join(format!("{key}.json"))
+    /// A layer that never touches the disk (memory-only page cache).
+    pub(crate) fn disabled() -> Self {
+        Self { dir: None }
+    }
+
+    fn path_for(&self, key: &str) -> Option<PathBuf> {
+        Some(self.dir.as_ref()?.join(format!("{key}.json")))
     }
 
     pub(crate) async fn get(&self, key: &str) -> Option<CacheEntry> {
-        let path = self.path_for(key);
+        let path = self.path_for(key)?;
         let bytes = tokio::fs::read(&path).await.ok()?;
         let disk_entry: DiskEntry = serde_json::from_slice(&bytes).ok()?;
         Some(CacheEntry::from(disk_entry))
@@ -127,7 +138,10 @@ impl DiskLayer {
         still_live: impl Fn() -> bool + Send + 'static,
         abandoned: impl FnOnce() + Send + 'static,
     ) {
-        let path = self.path_for(&key);
+        let Some(path) = self.path_for(&key) else {
+            abandoned();
+            return;
+        };
         let disk_entry = DiskEntry::from(entry);
         tokio::spawn(async move {
             if !still_live() {
@@ -148,7 +162,9 @@ impl DiskLayer {
 
     /// Remove one entry's file. Best-effort.
     pub(crate) async fn remove(&self, key: &str) {
-        remove_file_logged(&self.path_for(key), key).await;
+        if let Some(path) = self.path_for(key) {
+            remove_file_logged(&path, key).await;
+        }
     }
 
     /// Visit the key, deployment id, tags and write time (`created_at_secs`)
@@ -168,7 +184,10 @@ impl DiskLayer {
             created_at_secs: u64,
         }
 
-        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
+        let Some(dir) = &self.dir else {
+            return;
+        };
+        let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
             return;
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -192,7 +211,10 @@ impl DiskLayer {
     /// between temp-write and rename. Best-effort (dev-mode invalidation).
     /// Files the cache did not write are left alone.
     pub(crate) async fn clear_all(&self) {
-        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
+        let Some(dir) = &self.dir else {
+            return;
+        };
+        let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
             return;
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -214,7 +236,10 @@ impl DiskLayer {
         let mut total: u64 = 0;
         let mut evicted = Vec::new();
 
-        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
+        let Some(dir) = &self.dir else {
+            return evicted;
+        };
+        let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
             return evicted;
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -405,9 +430,12 @@ mod tests {
 
         let mut entry = entry_of_size(32);
         entry.composed = true;
-        write_entry(&layer.path_for("composed"), &DiskEntry::from(&entry))
-            .await
-            .unwrap();
+        write_entry(
+            &layer.path_for("composed").unwrap(),
+            &DiskEntry::from(&entry),
+        )
+        .await
+        .unwrap();
 
         let restored = layer.get("composed").await.expect("entry should exist");
         assert!(restored.composed);
@@ -422,11 +450,14 @@ mod tests {
         let layer = DiskLayer::new(dir.clone());
 
         let live = key("live");
-        write_entry(&layer.path_for(&live), &DiskEntry::from(&entry_of_size(8)))
-            .await
-            .unwrap();
+        write_entry(
+            &layer.path_for(&live).unwrap(),
+            &DiskEntry::from(&entry_of_size(8)),
+        )
+        .await
+        .unwrap();
         // Same shape write_entry uses, as if a crash landed before the rename.
-        let orphan = temp_path(&layer.path_for(&live));
+        let orphan = temp_path(&layer.path_for(&live).unwrap());
         tokio::fs::write(&orphan, b"partial").await.unwrap();
 
         layer.clear_all().await;
@@ -449,21 +480,21 @@ mod tests {
         // Three ~1KB entries; write "old" first so it has the earliest mtime.
         let (old, mid, new) = (key("old"), key("mid"), key("new"));
         write_entry(
-            &layer.path_for(&old),
+            &layer.path_for(&old).unwrap(),
             &DiskEntry::from(&entry_of_size(1024)),
         )
         .await
         .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         write_entry(
-            &layer.path_for(&mid),
+            &layer.path_for(&mid).unwrap(),
             &DiskEntry::from(&entry_of_size(1024)),
         )
         .await
         .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         write_entry(
-            &layer.path_for(&new),
+            &layer.path_for(&new).unwrap(),
             &DiskEntry::from(&entry_of_size(1024)),
         )
         .await
@@ -531,18 +562,24 @@ mod tests {
 
         // Eviction neither counts nor deletes them: the one small entry is
         // within budget even though the directory as a whole is not.
-        write_entry(&layer.path_for(&own), &DiskEntry::from(&entry_of_size(8)))
-            .await
-            .unwrap();
+        write_entry(
+            &layer.path_for(&own).unwrap(),
+            &DiskEntry::from(&entry_of_size(8)),
+        )
+        .await
+        .unwrap();
         assert!(layer.enforce_limit(1024).await.is_empty());
         assert!(layer.get(&own).await.is_some());
         assert_eq!(layer.enforce_limit(1).await, vec![own.clone()]);
 
         // The startup scan never visits them (so never deletes one as
         // belonging to another deployment).
-        write_entry(&layer.path_for(&own), &DiskEntry::from(&entry_of_size(8)))
-            .await
-            .unwrap();
+        write_entry(
+            &layer.path_for(&own).unwrap(),
+            &DiskEntry::from(&entry_of_size(8)),
+        )
+        .await
+        .unwrap();
         let mut visited = Vec::new();
         layer
             .scan_tags(|key, _, _, _| {
@@ -556,9 +593,12 @@ mod tests {
             "the visited entry was deleted"
         );
 
-        write_entry(&layer.path_for(&own), &DiskEntry::from(&entry_of_size(8)))
-            .await
-            .unwrap();
+        write_entry(
+            &layer.path_for(&own).unwrap(),
+            &DiskEntry::from(&entry_of_size(8)),
+        )
+        .await
+        .unwrap();
         layer.clear_all().await;
         assert!(layer.get(&own).await.is_none());
 

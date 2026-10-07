@@ -224,7 +224,10 @@ mod tests {
         for _ in 0..3 {
             assert!(no_concurrency_cap.try_acquire(LOCAL));
         }
-        assert!(!no_concurrency_cap.try_acquire(LOCAL), "max_per_second still holds");
+        assert!(
+            !no_concurrency_cap.try_acquire(LOCAL),
+            "max_per_second still holds"
+        );
         let no_rate_cap = budget(2, 0);
         assert!(no_rate_cap.try_acquire(LOCAL));
         assert!(no_rate_cap.try_acquire(LOCAL));

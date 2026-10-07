@@ -251,7 +251,11 @@ mod tests {
             max_dimension: 0,
             max_alloc_bytes: 0,
         };
-        assert_eq!(unbounded.image_limits().max_alloc, None, "not the crate's 512 MiB");
+        assert_eq!(
+            unbounded.image_limits().max_alloc,
+            None,
+            "not the crate's 512 MiB"
+        );
         assert_eq!(unbounded.image_limits().max_image_width, None);
         assert!(process_image_with_limits(src.clone(), &params, unbounded).is_ok());
         assert!(process_image(src, &params).is_ok(), "the defaults admit it");

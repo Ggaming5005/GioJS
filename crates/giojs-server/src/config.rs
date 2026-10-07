@@ -644,9 +644,19 @@ impl PrefetchConfig {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema, serde::Serialize))]
 pub struct CacheConfig {
-    /// Pages kept in the in-memory LRU; the disk cache holds the rest.
+    /// Store and serve pages that export `revalidate`. false renders every
+    /// request; Cache-Control still follows `revalidate`, so a CDN in front
+    /// can keep caching.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Pages kept in the in-memory LRU; the disk cache holds the rest. At
+    /// least 1 (`enabled = false` is the off switch).
     #[serde(default = "default_memory_max_entries")]
     pub memory_max_entries: std::num::NonZeroUsize,
+    /// Keep a disk tier behind the memory LRU (it also outlives restarts).
+    /// false: memory only, no files written.
+    #[serde(default = "default_true")]
+    pub disk_enabled: bool,
     /// Page cache directory, relative to the project root. GioJS only ever
     /// deletes its own entry files there (`<sha256>.json`), but a dedicated
     /// directory is clearer; it must not be, contain, or sit inside app/ or
@@ -660,6 +670,16 @@ pub struct CacheConfig {
     /// disables the bound.
     #[serde(default = "default_cache_disk_max_bytes")]
     pub disk_max_bytes: u64,
+    /// Send a weak ETag with cached pages and answer a matching
+    /// If-None-Match with 304. false: no page ETags and no 304s.
+    #[serde(default = "default_true")]
+    pub etag: bool,
+    /// A page stays servable stale (while one refresh runs) until it is
+    /// this many times its `revalidate` old; it also sizes the CDN
+    /// `stale-while-revalidate` window. 0 = never serve stale, and no
+    /// `stale-while-revalidate` directive.
+    #[serde(default = "default_cache_swr_multiplier")]
+    pub swr_multiplier: u64,
 }
 
 fn default_memory_max_entries() -> std::num::NonZeroUsize {
@@ -670,6 +690,9 @@ fn default_cache_disk_path() -> String {
 }
 fn default_cache_disk_max_bytes() -> u64 {
     512 * 1024 * 1024
+}
+fn default_cache_swr_multiplier() -> u64 {
+    10
 }
 
 /// `disk_path` must name a directory below the project root. Clearing and
@@ -708,9 +731,13 @@ fn cache_disk_path<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             memory_max_entries: default_memory_max_entries(),
+            disk_enabled: true,
             disk_path: default_cache_disk_path(),
             disk_max_bytes: default_cache_disk_max_bytes(),
+            etag: true,
+            swr_multiplier: default_cache_swr_multiplier(),
         }
     }
 }
@@ -2558,6 +2585,22 @@ check_origin = true
             std::path::PathBuf::from("/tmp/gio-pages")
         );
         assert_eq!(cache.disk_dir(root, Some("")), root.join("var/pages"));
+    }
+
+    #[test]
+    fn cache_switches_default_on_and_turn_off() {
+        let defaults = parse("").unwrap().cache;
+        assert!(defaults.enabled && defaults.disk_enabled && defaults.etag);
+        assert_eq!(defaults.swr_multiplier, 10);
+        let off = parse(
+            "[cache]\nenabled = false\ndisk_enabled = false\netag = false\nswr_multiplier = 0\n",
+        )
+        .unwrap()
+        .cache;
+        assert!(!off.enabled && !off.disk_enabled && !off.etag);
+        assert_eq!(off.swr_multiplier, 0);
+        // enabled is the off switch; an empty LRU is still refused.
+        assert!(parse("[cache]\nmemory_max_entries = 0\n").is_err());
     }
 
     #[test]

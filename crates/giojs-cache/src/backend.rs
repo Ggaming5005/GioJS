@@ -60,9 +60,19 @@ pub struct LocalBackend {
 
 impl LocalBackend {
     pub fn new(memory_max_entries: NonZeroUsize, disk_dir: PathBuf, disk_max_bytes: u64) -> Self {
+        Self::with_disk(memory_max_entries, DiskLayer::new(disk_dir), disk_max_bytes)
+    }
+
+    /// The memory LRU alone: nothing is written to or read from disk, and
+    /// an entry the LRU evicts is gone.
+    pub fn memory_only(memory_max_entries: NonZeroUsize) -> Self {
+        Self::with_disk(memory_max_entries, DiskLayer::disabled(), 0)
+    }
+
+    fn with_disk(memory_max_entries: NonZeroUsize, disk: DiskLayer, disk_max_bytes: u64) -> Self {
         Self {
             memory: MemoryLayer::new(memory_max_entries),
-            disk: DiskLayer::new(disk_dir),
+            disk,
             disk_max_bytes,
             index: Arc::new(Mutex::new(TagIndex::default())),
         }
@@ -389,6 +399,30 @@ mod tests {
         assert!(backend.promote("k", read, seen).await.is_none());
         assert!(backend.memory.get("k").is_none());
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn a_memory_only_backend_writes_no_files_and_forgets_evicted_keys() {
+        let backend = LocalBackend::memory_only(NonZeroUsize::new(1).unwrap());
+        backend.put("a", entry("t", 8)).await.unwrap();
+        assert!(backend.get("a").await.is_some());
+        backend.put("b", entry("u", 8)).await.unwrap(); // evicts "a" from memory
+        assert!(
+            backend.get("a").await.is_none(),
+            "no disk tier to fall back on"
+        );
+        assert!(
+            backend.index().tagged_keys("t").is_empty(),
+            "an evicted key has no file keeping it indexed"
+        );
+        assert!(backend.get("b").await.is_some());
+        // Purges and clears still work on what memory holds.
+        let purge = Invalidation::Tags(["u".to_string()].into_iter().collect());
+        assert_eq!(backend.invalidate(purge).await, 1);
+        assert!(backend.get("b").await.is_none());
+        backend.index_disk("d").await;
+        backend.evict_disk().await;
+        backend.clear().await;
     }
 
     #[tokio::test]
