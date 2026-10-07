@@ -33,9 +33,8 @@ export function Price({ amount }: { amount: number }) {
       <ul>
         <li>
           with <code>[i18n] locales</code> set in <code>gio.toml</code>, one of them: the
-          locale the server detected, or <code>default_locale</code> when nothing matched (a
-          region locale with capitals can come back in lower case, see{' '}
-          <a href="#good-to-know">Good to know</a>);
+          locale the server detected, or <code>default_locale</code> when nothing matched,
+          spelled exactly as in <code>locales</code>;
         </li>
         <li>without <code>[i18n]</code>, <code>&apos;&apos;</code>.</li>
       </ul>
@@ -48,12 +47,13 @@ export function Price({ amount }: { amount: number }) {
       </p>
       <ul>
         <li><code>path</code> - a first path segment that is a locale (<code>/fr/about</code>). The prefix is always removed before routing, so the page is <code>app/about/page.tsx</code> and <code>usePathname()</code> is <code>/about</code>.</li>
-        <li><code>accept-language</code> - the first language in the header that is a locale, by full tag (<code>fr-CA</code>) or language (<code>fr</code>). The languages are tried in the order the header lists them; <code>q</code> weights are not compared.</li>
+        <li><code>accept-language</code> - the preferred language in the header that is a locale, by full tag (<code>fr-CA</code>) or language (<code>fr</code>). The languages are tried from the highest <code>q</code> weight down (the header&apos;s order breaks ties), and one marked <code>q=0</code> is never picked.</li>
         <li><code>cookie</code> - the <code>gio_locale</code> cookie.</li>
       </ul>
       <p>
-        For HTML responses in a locale other than the default, the server also adds{' '}
-        <code>lang=&quot;&lt;locale&gt;&quot;</code> to the <code>&lt;html&gt;</code> element.
+        For HTML responses in a locale other than the default, the server also sets the{' '}
+        <code>&lt;html&gt;</code> element&apos;s <code>lang</code> to the locale, replacing the
+        one the root layout wrote.
       </p>
 
       <h3 id="behavior">Behavior</h3>
@@ -114,9 +114,9 @@ const published = new Intl.DateTimeFormat(locale, { dateStyle: 'long' }).format(
         </li>
         <li>
           Locales are matched exactly as written in <code>locales</code> for the path and the
-          cookie; the <code>Accept-Language</code> match ignores case. A full-tag match is
-          returned in lower case (<code>pt-br</code> for a configured <code>pt-BR</code>), which
-          then no longer matches the path prefix: write region locales in lower case.
+          cookie; the <code>Accept-Language</code> match ignores case. The value is always
+          spelled as in <code>locales</code>: <code>Accept-Language: pt-br</code> with a
+          configured <code>pt-BR</code> gives <code>&apos;pt-BR&apos;</code>.
         </li>
       </ul>
 
@@ -130,7 +130,7 @@ const published = new Intl.DateTimeFormat(locale, { dateStyle: 'long' }).format(
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Returns the request locale during server rendering too, from the navigation state GioJS provides.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Returns the request locale during server rendering too, from the navigation state GioJS provides. A locale from <code>Accept-Language</code> is spelled as in <code>locales</code> (it was lowercased) and picked by <code>q</code> weight.</> },
         { version: 'v0.1.0-beta.6', changes: 'No longer causes hydration mismatches.' },
         { version: 'v0.1.0-beta.1', changes: 'Introduced.' },
       ]} />

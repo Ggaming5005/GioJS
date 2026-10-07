@@ -469,7 +469,8 @@ first.
   restart of the same code keeps the ID and the disk cache. Before, only `gio build standalone` output changed the ID, so after
   a `gio start` deploy cached pages served for up to ten times their
   `revalidate` with broken stylesheet and chunk links. The ID also covers
-  `[images]`, the served `[[fonts]]` files and the i18n default locale, and a
+  `[images]`, the served `[[fonts]]` files and `[i18n]` (`locales` and
+  `default_locale`), and a
   standalone build's `.gio/manifest.json` is now read from the project root
   instead of the working directory. A pinned `GIO_DEPLOYMENT_ID` still wins
   and should change with every deploy.

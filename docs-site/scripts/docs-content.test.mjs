@@ -731,6 +731,17 @@ test('the i18n guide states the default detection order and the cookie name', ()
   assert.match(read('crates/giojs-i18n/src/lib.rs'), /strip_prefix\("gio_locale="\)/, 'the cookie is gio_locale');
 });
 
+test('the i18n pages state how Accept-Language is read', () => {
+  const lib = read('crates/giojs-i18n/src/lib.rs');
+  // Highest q first, stable for ties; q=0 never chosen; the configured spelling.
+  assert.match(lib, /ranges\.sort_by\(\|a, b\| b\.1\.cmp\(&a\.1\)\)/, 'q-value ordering changed - update the docs');
+  assert.match(lib, /\(q > 0\)\.then_some/, 'q=0 handling changed - update the docs');
+  assert.doesNotMatch(lib, /to_ascii_lowercase/, 'a detected locale is the configured string');
+  assert.ok(docsPage('i18n').includes('<code>de;q=0.1, en</code> picks{\' \'}'));
+  assert.ok(docsPage('configuration/i18n').includes('tried by quality value, highest first'));
+  assert.ok(docsPage('hooks/use-locale').includes('tried from the highest <code>q</code> weight down'));
+});
+
 test('the streaming guide states the shutdown drain, render deadline and event buffer', () => {
   const page = docsPage('guides/streaming');
   const drain = rustSeconds('crates/giojs-server/src/main.rs', 'SHUTDOWN_DRAIN_TIMEOUT');
