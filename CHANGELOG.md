@@ -1024,6 +1024,11 @@ first.
   now say `bypass`. `static` is for files only (`public/`, `/_next/static`,
   the CSS compiled at startup), and the self-hosted fonts under
   `/_gio/fonts/` now carry it too.
+- `X-RateLimit-Remaining` could be larger than `X-RateLimit-Limit`: the limit
+  was the rule's `per_ip`, the remaining count included its `burst`.
+  `X-RateLimit-Limit` is now the bucket's size, `per_ip + burst` (a fresh
+  client of `per_ip = 3` with the default `burst = 20` sees `23` and `22`),
+  and Remaining never exceeds it.
 
 ### Known limitations
 

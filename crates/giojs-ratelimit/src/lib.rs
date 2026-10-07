@@ -64,10 +64,20 @@ pub struct RateLimitRule {
     pub max_keys_per_client: u64,
 }
 
+impl RateLimitRule {
+    /// Requests a full bucket admits at once: `per_ip` plus `burst`.
+    pub fn capacity(&self) -> u64 {
+        self.per_ip.saturating_add(self.burst)
+    }
+}
+
 pub enum RateLimitResult {
     Allowed {
+        /// Whole tokens left in the bucket, never more than `limit`.
         remaining: u64,
-        /// per_ip from the matched rule; 0 means no rule matched (skip headers).
+        /// The matched rule's bucket capacity (`per_ip + burst`): the most a
+        /// fresh client can send at once. 0 means no rule matched (skip
+        /// headers).
         limit: u64,
     },
     Rejected {
@@ -169,10 +179,13 @@ impl RateLimiter {
     ) -> RateLimitResult {
         let bucket = self.bucket_for(rule_index, ip, rule, headers);
 
+        // The limit a client sees is what its bucket holds when full, so
+        // Limit - Remaining is the share of it used.
+        let limit = rule.capacity();
         if bucket.try_consume() {
             RateLimitResult::Allowed {
-                remaining: bucket.remaining_approx(),
-                limit: rule.per_ip,
+                remaining: bucket.remaining_approx().min(limit),
+                limit,
             }
         } else {
             let retry_after_secs = rule
@@ -182,7 +195,7 @@ impl RateLimiter {
                 .max(1);
             RateLimitResult::Rejected {
                 retry_after_secs,
-                limit: rule.per_ip,
+                limit,
                 rule_pattern: rule.path_pattern.clone(),
             }
         }
@@ -509,6 +522,34 @@ mod tests {
             panic!("must be allowed");
         };
         assert_eq!(remaining, 98);
+    }
+
+    #[test]
+    fn the_limit_is_the_bucket_capacity_burst_included() {
+        // per_ip = 3 with burst = 20: a fresh client can send 23 at once, so
+        // Remaining (22 after the first) must never exceed the Limit.
+        let rl = make_limiter(vec![RateLimitRule {
+            burst: 20,
+            ..rule("/api/*", 3)
+        }]);
+        let RateLimitResult::Allowed { remaining, limit } =
+            rl.check("/api/hello", LOCAL, &empty_headers())
+        else {
+            panic!("first request must be allowed");
+        };
+        assert_eq!((remaining, limit), (22, 23));
+        for _ in 0..22 {
+            let RateLimitResult::Allowed { remaining, limit } =
+                rl.check("/api/hello", LOCAL, &empty_headers())
+            else {
+                panic!("the burst must be admitted");
+            };
+            assert!(remaining < limit);
+        }
+        assert!(matches!(
+            rl.check("/api/hello", LOCAL, &empty_headers()),
+            RateLimitResult::Rejected { limit: 23, .. }
+        ));
     }
 
     fn keyed_rule(per_ip: u64, window_seconds: u64) -> RateLimitRule {
