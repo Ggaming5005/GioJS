@@ -85,14 +85,17 @@ Create a `gio.config.ts` file in your project root (next to `gio.toml`):
 
 ```typescript
 // gio.config.ts
+import { defineConfig } from '@gio.js/core';
 import { myPlugin } from 'my-giojs-plugin';
 
-export default {
+export default defineConfig({
   plugins: [myPlugin],
-};
+});
 ```
 
-`gio.config.ts` is **optional** - if absent, the server starts with no plugins.
+`gio.config.ts` is **optional** - if absent, the server starts with no plugins. It is
+checked at boot: an unknown key (`plugin:`) or a plugin without a `name` stops the worker
+with an error naming the file.
 
 ---
 

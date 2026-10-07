@@ -84,7 +84,7 @@ docker run \
   my-app:latest
 ```
 
-The listen port comes from the `[server]` section of `gio.toml` (default `3000`); `GIO_PORT` overrides it (there is no plain `PORT` variable).
+The listen port comes from the `[server]` section of `gio.toml` (default `3000`); `GIO_PORT`, then `PORT`, override it.
 
 ## docker-compose.yml
 

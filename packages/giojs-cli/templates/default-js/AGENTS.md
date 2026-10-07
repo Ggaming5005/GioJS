@@ -118,9 +118,15 @@ renders React. Full docs: https://giojs.com/llms.txt
   production). Protect paths with `[[guards]] require_session = true` in
   gio.toml (verified in Rust). Build other cookies with `serializeCookie`,
   never by string concatenation.
-- Config is `gio.toml` (server, TLS, images.remote_patterns, rate_limits,
-  fonts, i18n, websocket, metrics, logging, security). There is no `[cache]`/redirects/rewrites
-  section.
+- Config is `gio.toml` (server, TLS, cache, compression, prefetch, images,
+  rate_limits, fonts, i18n, websocket, metrics, logging, security, dev,
+  redirects/rewrites/headers/guards). Unknown keys stop the server at startup
+  with a did-you-mean hint - never invent keys; the `#:schema` line gives
+  editors the full list. `PORT` (or `GIO_PORT`) overrides `[server] port`.
+  Data files the app writes into the project (a JSON db) go in
+  `[dev] watch_ignore` so they do not restart the dev server.
+- `gio.config.ts` (optional) only holds Node plugins:
+  `export default defineConfig({ plugins: [...] })` from `@gio.js/core`.
 - Env: `.env.{mode}.local`, `.env.local`, `.env.{mode}`, `.env` load at server
   start (first wins; real env vars always win; restart after editing). Only
   `GIO_PUBLIC_*` variables reach client code (not `NEXT_PUBLIC_*`); any other

@@ -25,7 +25,7 @@ See `benchmarks/memory-stability.md` for measured numbers comparing GioJS vs sel
 
 There is no build step for server apps - route discovery and client bundles happen at server startup. Static sites are pre-rendered with `gio export` instead and need no server at all.
 
-The listen address comes from the `[server]` section of `gio.toml` (default `0.0.0.0:3000`). `GIO_HOST` / `GIO_PORT` override it without editing the file - there is no plain `PORT` variable.
+The listen address comes from the `[server]` section of `gio.toml` (default `0.0.0.0:3000`). The environment overrides it without editing the file: `GIO_PORT`, then `PORT` (the variable Heroku, Render, Railway, Fly.io and Cloud Run set), win over `[server] port`, and `GIO_HOST` over `[server] host`.
 
 ## Common environment variables
 
@@ -33,6 +33,8 @@ The listen address comes from the `[server]` section of `gio.toml` (default `0.0
 |----------|-------------|---------|
 | `NODE_ENV` | Set to `production` for production | production behavior unless set to `development` |
 | `GIO_APP_DIR` | Path to the `app/` directory | `app` |
+| `PORT` / `GIO_PORT` | Listen port, overriding `[server] port` (`GIO_PORT` wins) | `[server] port`, else `3000` |
+| `GIO_CACHE_DIR` | Page cache directory, overriding `[cache] disk_path` | `.gio/cache/pages` |
 | `GIO_DEPLOYMENT_ID` | Pin the deployment ID (otherwise content-derived from the build) | unset |
 | `GIO_SOCKET_PATH` | IPC socket path (Unix socket; named pipe on Windows) | per-instance `.gio/ipc-<pid>-<rand>.sock` |
 | `GIO_REVALIDATE_TOKEN` | Bearer token (32+ bytes) that enables `POST /_gio/revalidate` for on-demand cache purges | unset (endpoint disabled) |

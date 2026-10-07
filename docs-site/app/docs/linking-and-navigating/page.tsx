@@ -159,7 +159,12 @@ function SaveButton({ id }: { id: string }) {
         <code>429</code> the server answers once a client&apos;s prefetch budget is spent - never
         decides the click: the navigation fetches the page itself.
       </p>
-      <div className="callout">Prefetching is budgeted by the Rust prefetch manager, so a page full of links will not flood your server.</div>
+      <div className="callout">
+        Prefetching is budgeted by the Rust prefetch manager, so a page full of links will not
+        flood your server: each client may have 5 prefetches in flight and start 20 per second,
+        set by <code>[prefetch] max_concurrent</code> and <code>max_per_second</code> in{' '}
+        <code>gio.toml</code>.
+      </div>
 
       <h2>Focus and announcements</h2>
       <p>
