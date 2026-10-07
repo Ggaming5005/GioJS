@@ -142,9 +142,9 @@ docker run -p 3000:3000 --stop-timeout 20 \\
         </li>
       </ul>
       <p>
-        <code>npm create giojs -- --docker</code> adds a Dockerfile like this one to a new
-        project - see the <a href="/docs/guides/docker">Docker starter</a>. With pnpm or
-        Yarn, swap the lockfile and install command in the first stage.
+        The <a href="/docs/guides/docker">Docker starter recipe</a> walks through an image
+        like this one. With pnpm or Yarn, swap the lockfile and install command in the first
+        stage.
       </p>
       <CodeBlock lang="yaml" code={`# docker-compose.yml
 services:
@@ -169,6 +169,7 @@ volumes:
       <CodeBlock lang="toml" code={`# fly.toml
 app = "my-app"
 primary_region = "fra"
+kill_timeout = 20   # seconds to drain before a forced stop (Fly's default is 5)
 
 [env]
   PORT = "8080"
@@ -191,6 +192,13 @@ fly secrets set GIO_SESSION_SECRET="$(node -e "console.log(require('crypto').ran
 fly deploy`} />
       <ul>
         <li>
+          <strong>Keep <code>kill_timeout</code>.</strong> Fly stops a machine with{' '}
+          <code>SIGINT</code>, which GioJS drains like <code>SIGTERM</code>, but force-stops
+          it after 5 seconds by default - less than the drain needs (see{' '}
+          <a href="#docker">Stopping</a> above), so every deploy or scale-down would cut
+          requests off mid-response.
+        </li>
+        <li>
           Each machine has its own page cache, on a disk that is reset when the machine is
           replaced; a machine stopped by <code>auto_stop_machines</code> starts with a cold
           memory cache. Mount a <a href="https://fly.io/docs/volumes/">volume</a> at{' '}
@@ -205,20 +213,28 @@ fly deploy`} />
       <h2 id="railway">Railway</h2>
       <p>
         Railway builds the Dockerfile in your repository and sets <code>PORT</code>{' '}
-        itself. Add a <code>railway.json</code> for the health check:
+        itself. Add a <code>railway.json</code> for the health check and the shutdown grace
+        period:
       </p>
       <CodeBlock lang="json" code={`{
   "$schema": "https://railway.com/railway.schema.json",
   "build": { "builder": "DOCKERFILE", "dockerfilePath": "Dockerfile" },
   "deploy": {
     "healthcheckPath": "/_gio/health",
-    "restartPolicyType": "ON_FAILURE"
+    "restartPolicyType": "ON_FAILURE",
+    "drainingSeconds": 20
   }
 }`} />
       <p>
         Set <code>GIO_SESSION_SECRET</code> and your other secrets under the service&apos;s{' '}
         <em>Variables</em>, then generate a domain under <em>Settings › Networking</em>.
         Railway terminates TLS in front of the container.
+      </p>
+      <p>
+        Keep <code>drainingSeconds</code> (or set the service variable{' '}
+        <code>RAILWAY_DEPLOYMENT_DRAINING_SECONDS=20</code>): Railway sends the old
+        deployment <code>SIGTERM</code> and, by default, <code>SIGKILL</code> right after it,
+        which gives GioJS no time to finish in-flight requests on every deploy.
       </p>
 
       <h2 id="render">Render</h2>
@@ -240,7 +256,10 @@ services:
       <p>
         Render terminates TLS and routes traffic to the service over its private network.
         The filesystem is ephemeral, so the disk cache starts empty on each deploy unless you
-        attach a persistent disk at <code>/app/.gio/cache</code>.
+        attach a persistent disk at <code>/app/.gio/cache</code>. On a deploy Render sends the
+        old instance <code>SIGTERM</code> and waits up to 30 seconds by default before{' '}
+        <code>SIGKILL</code>, which is enough for GioJS to drain - if you set{' '}
+        <code>maxShutdownDelaySeconds</code>, keep it at 20 or more.
       </p>
 
       <h2 id="platform-proxies">Trusting the platform&apos;s proxy</h2>

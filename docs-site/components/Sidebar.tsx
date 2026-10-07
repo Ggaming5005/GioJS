@@ -43,7 +43,6 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: '/docs/fetching-data', label: 'Fetching Data' },
       { href: '/docs/forms', label: 'Forms & Mutations' },
-      { href: '/docs/guides/database', label: 'Database Example' },
     ],
   },
   {
@@ -59,7 +58,6 @@ export const NAV_GROUPS: NavGroup[] = [
     title: 'Styling & Assets',
     items: [
       { href: '/docs/css', label: 'CSS & Styling' },
-      { href: '/docs/guides/tailwind', label: 'Tailwind CSS' },
       { href: '/docs/image-optimization', label: 'Image Optimization' },
       { href: '/docs/font-optimization', label: 'Font Optimization' },
     ],
@@ -69,7 +67,6 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: '/docs/security', label: 'Security' },
       { href: '/docs/authentication', label: 'Authentication & Sessions' },
-      { href: '/docs/guides/authentication-example', label: 'Authentication Example' },
     ],
   },
   {
@@ -85,7 +82,6 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: '/docs/guides/production-checklist', label: 'Production Checklist' },
       { href: '/docs/deployment', label: 'Proxies, Sizing & Scaling' },
       { href: '/docs/standalone', label: 'Standalone Deploys' },
-      { href: '/docs/guides/docker', label: 'Docker Starter' },
       { href: '/docs/adapters', label: 'Adapters' },
       { href: '/docs/observability', label: 'Observability' },
     ],

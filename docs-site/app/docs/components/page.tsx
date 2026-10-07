@@ -41,8 +41,9 @@ export default function Page(): React.JSX.Element {
       <h2>GioFont</h2>
       <p>
         A typed marker that renders nothing. Fonts are self-hosted from{' '}
-        <code>[[fonts]]</code> in <code>gio.toml</code>: the server downloads them and injects
-        the preload and stylesheet links itself - see{' '}
+        <code>[[fonts]]</code> in <code>gio.toml</code>: the server copies them from{' '}
+        <code>public/</code> (or downloads them once) and injects the preload and stylesheet
+        links itself - see{' '}
         <a href="/docs/font-optimization">Font Optimization</a>.
       </p>
       <h2>Props of your app components</h2>

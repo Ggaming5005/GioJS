@@ -8,7 +8,8 @@
     "export": "node build.mjs",
     "deploy": "node build.mjs && npx wrangler pages deploy out --project-name=giojs --branch=main --commit-dirty=true",
     "typecheck": "tsc --noEmit",
-    "check-links": "node scripts/check-links.mjs"
+    "check-links": "node scripts/check-links.mjs",
+    "test": "node --test scripts/*.test.mjs"
   },
   "dependencies": {
     "react": "^19.0.0",

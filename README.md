@@ -25,12 +25,12 @@ GioJS gives every developer the production stack a managed cloud provides - HTTP
 npm create giojs@latest
 ```
 
-The scaffolder asks for a name, TypeScript or JavaScript, **Server app** or **Static site**, and optional starter features (Tailwind CSS, an API and form example, authentication, a database, Docker, CI), then installs dependencies and initializes git. Start it with `npm run dev`.
+The scaffolder asks for a name, TypeScript or JavaScript, **Server app** or **Static site**, and whether to install dependencies, then makes the first git commit. Start it with `npm run dev`.
 
 Skip the prompts with flags:
 
 ```bash
-npm create giojs@latest my-app -- --ts --server --tailwind --auth
+npm create giojs@latest my-app -- --ts --server
 npm create giojs@latest -- --help        # every option
 ```
 

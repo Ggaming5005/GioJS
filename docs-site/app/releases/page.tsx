@@ -11,9 +11,19 @@ export const revalidate = false;
 interface Release {
   version: string;
   date: string;
-  tag?: string;
+  /** npm dist-tag: 'latest' for the current release, 'next' for one not out yet. */
+  tag?: 'latest' | 'next';
   summary: string;
   groups: { title: string; items: string[] }[];
+}
+
+/**
+ * The highlighted card is the release tagged 'latest', not the first entry:
+ * an unreleased version listed ahead of it must not glow as the current one.
+ * On release day, move the 'latest' tag to the new entry and set its date.
+ */
+function isLatest(rel: Release): boolean {
+  return rel.tag === 'latest';
 }
 
 const RELEASES: Release[] = [
@@ -252,10 +262,10 @@ export default function ReleasesPage(): React.JSX.Element {
         </p>
 
         <ol className="rel-timeline">
-          {RELEASES.map((rel, i) => (
+          {RELEASES.map((rel) => (
             <li className="rel-item" key={rel.version}>
-              <span className={`rel-node${i === 0 ? ' rel-node--latest' : ''}`} aria-hidden="true" />
-              <article className={`rel-card${i === 0 ? ' rel-card--latest' : ''}`}>
+              <span className={`rel-node${isLatest(rel) ? ' rel-node--latest' : ''}`} aria-hidden="true" />
+              <article className={`rel-card${isLatest(rel) ? ' rel-card--latest' : ''}`}>
                 <div className="rel-head">
                   <h2 className="rel-version">{rel.version}</h2>
                   {rel.tag && <span className="rel-badge">{rel.tag}</span>}

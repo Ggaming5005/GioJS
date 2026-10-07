@@ -81,7 +81,8 @@ limits, security headers, CSP nonces, CSRF checks, and image optimization
 
 - Prebuilt binaries: Linux x64 (glibc, musl), macOS x64/arm64, Windows x64.
   **Linux arm64 is not published yet**: build with
-  `cargo build --release -p giojs-server` and pass it to
+  `cargo build --release --locked -p giojs-server` (Rust `rust-version` from
+  `Cargo.toml` or newer) and pass it to
   `gio build standalone` via `GIO_STANDALONE_SERVER_BIN`, or build
   `linux/amd64` images. No Windows on ARM or FreeBSD binary.
 - Standalone builds freeze the framework version and `GIO_PUBLIC_*` values;

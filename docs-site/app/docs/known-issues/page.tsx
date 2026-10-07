@@ -187,7 +187,8 @@ export default function KnownLimitationsPage(): React.JSX.Element {
           <strong>Prebuilt server binaries</strong> exist for Linux x64 (glibc and musl),
           macOS (Intel and Apple Silicon) and Windows x64. <strong>Linux arm64</strong>{' '}
           (Graviton, Ampere, Raspberry Pi) is not published yet: build the server from source
-          (<code>cargo build --release -p giojs-server</code>) and hand it to{' '}
+          (<code>cargo build --release --locked -p giojs-server</code>, with the Rust version{' '}
+          from <code>rust-version</code> in <code>Cargo.toml</code> or newer) and hand it to{' '}
           <code>gio build standalone</code> with <code>GIO_STANDALONE_SERVER_BIN</code>, or
           build <code>linux/amd64</code> container images. Windows on ARM and FreeBSD have no
           binary either.

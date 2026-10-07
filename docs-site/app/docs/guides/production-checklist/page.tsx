@@ -40,10 +40,14 @@ export default function Page(): React.JSX.Element {
           are released in lockstep.
         </li>
         <li>
-          <strong>Fonts download on first start.</strong> <code>[[fonts]]</code> files are
-          fetched into <code>.gio/fonts/</code> before the server listens, and a failed
-          download stops startup - allow outbound HTTPS to the font URLs, or persist that
-          folder. See <a href="/docs/font-optimization">Font Optimization</a>.
+          <strong>Check where fonts come from.</strong> A <code>[[fonts]]</code> file in{' '}
+          <code>public/</code> (the starter&apos;s) is copied at every start and needs no
+          network - make sure it is in the image or standalone folder, since a missing file
+          stops startup. An <code>https://</code> font <code>url</code> is downloaded into{' '}
+          <code>.gio/fonts/</code> on a fresh host&apos;s first start, and a failed download
+          stops startup: allow outbound HTTPS to that URL, persist the folder, or move the
+          file into <code>public/</code>. See{' '}
+          <a href="/docs/font-optimization#local-and-remote">Font Optimization</a>.
         </li>
       </ul>
 
@@ -240,9 +244,12 @@ permissions-policy = "camera=(), microphone=(), geolocation=()"`} />
         </li>
         <li>
           <strong>Graceful stops</strong>: stop with <code>SIGTERM</code> and allow at least
-          15-20 seconds (requests drain for up to 8, then workers get a few more). Docker&apos;s
-          default 10 seconds is too short - use <code>--stop-timeout 20</code>; in systemd
-          use <code>KillMode=mixed</code>.
+          15-20 seconds (requests drain for up to 8, then workers get a few more). Several
+          defaults are shorter: Docker&apos;s 10 seconds (use <code>--stop-timeout 20</code>),
+          Fly.io&apos;s 5 (<code>kill_timeout = 20</code>) and Railway&apos;s 0
+          (<code>&quot;drainingSeconds&quot;: 20</code>) - see{' '}
+          <a href="/docs/guides/deploying">Deploying</a>. In systemd use{' '}
+          <code>KillMode=mixed</code>.
         </li>
       </ul>
 
