@@ -43,7 +43,9 @@ default_locale = "en"`} />
         <li>
           A leading locale segment is always removed before routing, whether or not{' '}
           <code>&quot;path&quot;</code> is in <code>detect_from</code>: <code>/de/about</code> renders{' '}
-          <code>app/about/page.tsx</code> and <code>/de</code> renders the home page.
+          <code>app/about/page.tsx</code> and <code>/de</code> renders the home page. Guards,
+          redirects, rewrites, header rules and rate limits match that path too, so a guard on{' '}
+          <code>/admin/*rest</code> also protects <code>/de/admin</code>.
         </li>
         <li>
           <code>Accept-Language</code> entries are read in the order the browser sends them (quality

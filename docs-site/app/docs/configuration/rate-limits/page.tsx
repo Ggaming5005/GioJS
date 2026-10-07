@@ -59,6 +59,11 @@ burst = 0`} />
           general one.
         </li>
         <li>
+          <strong>Before the rules.</strong> Limits run before the CSRF check, guards, redirects
+          and rewrites, so a flood of refused or redirected requests still spends budget. With <code>[i18n]</code> on, they match the path without
+          its locale prefix: a <code>/api/*rest</code> rule also covers <code>/de/api/x</code>.
+        </li>
+        <li>
           <strong>Canonical paths.</strong> Requests are matched with repeated and trailing slashes
           collapsed and unreserved escapes decoded, so <code>/api/login/</code>,{' '}
           <code>//api//login</code> and <code>/api/%6Cogin</code> share one bucket.
