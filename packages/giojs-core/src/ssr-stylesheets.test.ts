@@ -113,7 +113,7 @@ describe('route stylesheets in the server render', () => {
     expect(root).toBeGreaterThanOrEqual(0);
     expect(docs).toBeGreaterThan(root);
     // Nothing stays behind inside the hydration boundary.
-    expect(/<div id="__gio">([\s\S]*?)<\/div>/.exec(out.body)?.[1]).not.toContain('<link');
+    expect(/<div id="__gio"[^>]*>([\s\S]*?)<\/div>/.exec(out.body)?.[1]).not.toContain('<link');
   });
 
   it('puts them in <head> on streamed renders too', async () => {
@@ -144,7 +144,7 @@ describe('route stylesheets in the server render', () => {
     )) as IPCResponse;
     const docs = out.body.indexOf(`href="${DOCS_CSS}"`);
     expect(docs).toBeGreaterThan(0);
-    expect(docs).toBeLessThan(out.body.indexOf('<div id="__gio">'));
+    expect(docs).toBeLessThan(out.body.indexOf('<div id="__gio" '));
   });
 
   it('streams them at the top of <body> of a complete document when there is no root layout', async () => {
@@ -166,8 +166,8 @@ describe('route stylesheets in the server render', () => {
     const docs = body.indexOf(`<link rel="stylesheet" href="${DOCS_CSS}" data-precedence="default"/>`);
     expect(root).toBeGreaterThan(0);
     expect(docs).toBeGreaterThan(root);
-    expect(docs).toBeLessThan(body.indexOf('<div id="__gio">'));
-    expect(/<div id="__gio">([\s\S]*?)<\/div>/.exec(html)?.[1]).not.toContain('<link');
+    expect(docs).toBeLessThan(body.indexOf('<div id="__gio" '));
+    expect(/<div id="__gio"[^>]*>([\s\S]*?)<\/div>/.exec(html)?.[1]).not.toContain('<link');
   });
 
   it('links nothing for routes the manifest does not know', async () => {

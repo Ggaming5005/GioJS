@@ -997,6 +997,19 @@ first.
   Deploying guide's (`KillMode=mixed`, `TimeoutStopSec=30`). The Tailwind
   docs and the feature's `AGENTS.md` note say to start with `npm run dev`:
   `gio dev` alone never builds the ignored `app/tailwind.out.css`.
+- `useId` values in a page differed between the server HTML and hydration:
+  the server rendered the page deep inside the document (the root layout and
+  the `#__gio` boundary around it), the browser hydrated it as a root of its
+  own, and `useId` derives its value from the position in the tree. Every
+  `htmlFor`, `aria-*` or form id built on it pointed at nothing after
+  hydration - silently in production, with a hydration warning in
+  development. The `#__gio` boundary now records its position
+  (`data-gio-tree`) and the browser hydrates from the same one, so ids match
+  inside streamed Suspense content and static exports too, and the client
+  router keeps that position for every later page. One rare case remains: a
+  root layout that puts `children` past React's 30-bit tree id, with slots
+  in lists of 8 or more children around it or in the page, can still see an
+  id differ by a `0` digit.
 
 ### Known limitations
 

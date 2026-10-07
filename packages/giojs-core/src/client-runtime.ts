@@ -22,12 +22,20 @@
  * the server (metadata-tags.ts): React adopts the server's head elements on
  * hydration, and each soft navigation's render swaps them for the next
  * page's.
+ *
+ * The tree starts at the useId tree position the server rendered #__gio's
+ * content at (id-tree.ts, from the boundary's `data-gio-tree`): useId values
+ * hydrate unchanged however deep the root layout puts the boundary. The
+ * persistent root keeps the position it hydrated with for every later
+ * render, so the tree's shape - and with it every layout's state - never
+ * changes under a soft navigation.
  */
 import React from 'react';
 import { flushSync } from 'react-dom';
 import { hydrateRoot, createRoot, type Root } from 'react-dom/client';
 import { withNavigation, type GioNavigationState } from './navigation-context.ts';
 import { sanitizeMetadataTags, withMetadata, type MetadataTag } from './metadata-tags.ts';
+import { atBoundaryPosition, ID_TREE_ATTRIBUTE } from './id-tree.ts';
 
 // Generated entries build their tree with the same function the server used.
 export { buildSegmentTree } from './segment-tree.ts';
@@ -73,6 +81,8 @@ type BuildFn = (props: Record<string, unknown>, path: string) => React.ReactNode
 const routeBuilders = new Map<string, BuildFn>();
 let activeRoot: Root | null = null;
 let activeContainer: Element | null = null;
+/** The useId tree position activeRoot's trees render at (id-tree.ts). */
+let activeTreeId: string | null = null;
 /** Whether activeRoot's tree renders a metadata <title> (React owns it). */
 let rootRendersTitle = false;
 let runtimeInstalled = false;
@@ -124,17 +134,23 @@ function navigationState(envelope: GioEnvelope): GioNavigationState {
 }
 
 /**
- * The route's tree with its metadata head tags in front, inside the
- * navigation provider, image config installed.
+ * The route's tree with its metadata head tags in front, at the boundary's
+ * useId tree position (`treeId`), inside the navigation provider, image
+ * config installed.
  */
-function routeElement(envelope: GioEnvelope, build: BuildFn): React.ReactNode {
+function routeElement(envelope: GioEnvelope, build: BuildFn, treeId: string | null): React.ReactNode {
   if (envelope.images !== undefined) {
     (globalThis as Record<string, unknown>)['__GIO_IMAGES__'] = envelope.images;
   }
   return withNavigation(
     navigationState(envelope),
-    withMetadata(build(envelope.props, envelope.path), envelope.metadata),
+    atBoundaryPosition(treeId, withMetadata(build(envelope.props, envelope.path), envelope.metadata)),
   );
+}
+
+/** Where the server rendered `container`'s content in its tree (id-tree.ts). */
+function treeIdOfBoundary(container: Element): string | null {
+  return container.getAttribute(ID_TREE_ATTRIBUTE);
 }
 
 function rendersTitle(envelope: GioEnvelope | null): boolean {
@@ -172,10 +188,11 @@ function mount(): void {
   if (build === undefined) return;
   // The container holds this exact tree's server HTML.
   activeContainer = container;
+  activeTreeId = treeIdOfBoundary(container);
   // The server rendered this tree's metadata title, if any, in place of any
   // hand-written one: hydration adopts it.
   rootRendersTitle = rendersTitle(envelope);
-  activeRoot = hydrateRoot(container, routeElement(envelope, build));
+  activeRoot = hydrateRoot(container, routeElement(envelope, build, activeTreeId));
 }
 
 async function prepare(entry: string, pattern: string): Promise<void> {
@@ -194,8 +211,9 @@ function commit(content: Element | null): void {
   if (envelope !== null && build !== undefined && root !== null && activeContainer?.isConnected) {
     // The persistent root: React reconciles the next route's tree against
     // the current one. Synchronous, so the caller can scroll and move focus
-    // on the committed page.
-    const element = routeElement(envelope, build);
+    // on the committed page. At the position the root hydrated with, not the
+    // next page's: a different one would remount the whole tree.
+    const element = routeElement(envelope, build, activeTreeId);
     updateRoot(rendersTitle(envelope), () => flushSync(() => root.render(element)));
     return;
   }
@@ -206,6 +224,7 @@ function commit(content: Element | null): void {
     updateRoot(false, () => root.unmount());
     activeRoot = null;
     activeContainer = null;
+    activeTreeId = null;
   }
   const current = document.getElementById('__gio');
   if (content !== null && current !== null && content !== current) current.replaceWith(content);
@@ -217,7 +236,8 @@ function commit(content: Element | null): void {
   const fresh = createRoot(container);
   activeRoot = fresh;
   activeContainer = container;
-  const element = routeElement(envelope, build);
+  activeTreeId = treeIdOfBoundary(container);
+  const element = routeElement(envelope, build, activeTreeId);
   updateRoot(rendersTitle(envelope), () => flushSync(() => fresh.render(element)));
 }
 

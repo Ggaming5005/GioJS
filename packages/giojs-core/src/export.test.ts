@@ -678,7 +678,7 @@ export default function Loading() { return React.createElement('p', null, 'EXPOR
     expect(result.unhydrated).toEqual([]);
     const html = await readFile(join(outDir, 'index.html'), 'utf8');
     // The page completed inside the loading boundary...
-    expect(html).toMatch(/<div id="__gio"><!--\$--><h1>EXPORT_HOME<\/h1><!--\/\$--><\/div>/);
+    expect(html).toMatch(/<div id="__gio" data-gio-tree="[0-9a-v]+"><!--\$--><h1>EXPORT_HOME<\/h1><!--\/\$--><\/div>/);
     // ...which the hydrating bundle builds too, with the error boundary around it.
     const chunks = await readChunks(outDir);
     expect(chunks.some(js => js.includes('EXPORT_LOADING_UI'))).toBe(true);

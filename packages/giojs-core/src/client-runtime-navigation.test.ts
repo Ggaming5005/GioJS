@@ -8,6 +8,8 @@
  * root so a shared layout keeps its state (unless the dynamic segment it
  * lives under changed), a caught error clears on navigation - a query-only
  * one too - and server-only pages swap their HTML in and out of the root.
+ * useId values hydrate unchanged however deep a root layout puts #__gio,
+ * and the persistent root keeps that tree position across navigations.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React, { act } from 'react';
@@ -16,6 +18,7 @@ import type { GioClientRuntime } from './client-runtime.ts';
 import { withStylesheets, type GioErrorProps, type SegmentLevel } from './segment-tree.ts';
 import { navigationContext, withNavigation, type GioNavigationState } from './navigation-context.ts';
 import { withMetadata, type MetadataTag } from './metadata-tags.ts';
+import { hydrationBoundary } from './id-tree.ts';
 
 // @ts-expect-error React's act() environment flag
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -119,10 +122,14 @@ function serverContent(html: string): HTMLElement {
   return div;
 }
 
+/** A root layout (server-only HTML): the boundary sits deep in its tree. */
+type RootLayout = (children: React.ReactNode) => React.ReactNode;
+
 async function loadFirstPage(
   spec: PageSpec,
   page: React.ComponentType<{ label: string }>,
   pageLevels: SegmentLevel[] = levels,
+  rootLayout: RootLayout = children => children,
 ): Promise<Runtime> {
   const runtime = await import('./client-runtime.ts');
   const tree = runtime.buildSegmentTree(
@@ -130,10 +137,22 @@ async function loadFirstPage(
     spec.path,
     pageLevels,
   );
-  // The server render: the provider around the document, #__gio inside,
-  // the metadata tags in front of the tree (ssr.ts).
+  // The server render: the provider around the document, the root layout,
+  // #__gio inside next to the envelope, the metadata tags in front of the
+  // tree (ssr.ts).
   const html = renderToString(
-    withNavigation(navState(spec), React.createElement('div', { id: '__gio' }, withMetadata(tree, spec.metadata))),
+    withNavigation(
+      navState(spec),
+      rootLayout(
+        React.createElement(
+          React.Fragment,
+          null,
+          hydrationBoundary(withMetadata(tree, spec.metadata)),
+          null,
+          null,
+        ),
+      ),
+    ),
   );
   document.body.innerHTML = html;
   swapEnvelope(spec);
@@ -377,9 +396,7 @@ describe('persistent root', () => {
     const html = renderToString(
       withNavigation(
         navState(first),
-        React.createElement(
-          'div',
-          { id: '__gio' },
+        hydrationBoundary(
           runtime.buildSegmentTree(React.createElement(Page, { label: 'one' }), first.path, withLoading),
         ),
       ),
@@ -444,5 +461,78 @@ describe('persistent root', () => {
   it('prepare rejects when the chunk cannot be loaded', async () => {
     await loadFirstPage({ path: '/a', pattern: '/a', props: { label: 'A' } }, Page);
     await expect(runtimeApi().prepare('/definitely-missing-chunk.js', '/missing')).rejects.toThrow();
+  });
+});
+
+describe('useId under a root layout', () => {
+  /** A root layout putting the boundary behind siblings and a useId call. */
+  function UsesId({ children }: { children?: React.ReactNode }): React.ReactNode {
+    React.useId();
+    return children;
+  }
+  const shell: RootLayout = children =>
+    React.createElement(
+      'div',
+      { className: 'shell' },
+      React.createElement('nav', null, 'menu'),
+      React.createElement(UsesId, null, React.createElement('section', null, children)),
+      React.createElement('footer', null, 'footer'),
+    );
+
+  /** A labelled field; shows the id the client computed once mounted. */
+  function FieldPage({ label }: { label: string }): React.ReactElement {
+    const id = React.useId();
+    const [clientId, setClientId] = React.useState('');
+    React.useEffect(() => setClientId(id), [id]);
+    return React.createElement(
+      'main',
+      null,
+      React.createElement('h1', null, label),
+      React.createElement('label', { htmlFor: id }, 'name'),
+      React.createElement('input', { id, name: 'name' }),
+      React.createElement('output', { id: 'client-id' }, clientId),
+    );
+  }
+
+  const input = (): HTMLInputElement | null => document.querySelector('input[name="name"]');
+
+  it('hydrates with the ids the server rendered, without a mismatch', async () => {
+    await loadFirstPage({ path: '/form', pattern: '/form', props: { label: 'form' } }, FieldPage, levels, shell);
+    const serverId = input()?.id;
+    expect(serverId).toMatch(/^_R_[0-9a-v]+_$/);
+    expect(text('client-id')).toBe(serverId);
+    expect(document.querySelector('label')?.htmlFor).toBe(serverId);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('keeps the tree position across soft navigations: layout state survives, ids stay paired', async () => {
+    const runtime = await loadFirstPage({ path: '/form', pattern: '/form', props: { label: 'form' } }, FieldPage, levels, shell);
+    act(() => document.getElementById('count')?.click());
+    runtime.registerRoute('/other', (props, path) =>
+      runtime.buildSegmentTree(React.createElement(FieldPage, props as { label: string }), path, levels),
+    );
+    swapEnvelope({ path: '/other', pattern: '/other', props: { label: 'other' } });
+    act(() => runtimeApi().commit(serverContent('<p>server html</p>')));
+    expect(document.querySelector('h1')?.textContent).toBe('other');
+    expect(text('count')).toBe('count=1');
+    expect(document.querySelector('label')?.htmlFor).toBe(input()?.id);
+    expect(text('client-id')).toBe(input()?.id);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('renders a fresh root at the position of the HTML it replaced', async () => {
+    const runtime = await loadFirstPage({ path: '/form', pattern: '/form', props: { label: 'form' } }, FieldPage, levels, shell);
+    swapEnvelope(null);
+    act(() => runtimeApi().commit(serverContent('<h1>Not here</h1>')));
+    runtime.registerRoute('/again', (props, path) =>
+      runtime.buildSegmentTree(React.createElement(FieldPage, props as { label: string }), path, levels),
+    );
+    swapEnvelope({ path: '/again', pattern: '/again', props: { label: 'again' } });
+    const content = serverContent('<p>server html</p>');
+    content.setAttribute('data-gio-tree', '1d');
+    act(() => runtimeApi().commit(content));
+    expect(document.querySelector('h1')?.textContent).toBe('again');
+    expect(document.querySelector('label')?.htmlFor).toBe(input()?.id);
+    expect(consoleError).not.toHaveBeenCalled();
   });
 });
