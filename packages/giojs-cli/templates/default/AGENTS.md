@@ -103,6 +103,9 @@ renders React. Full docs: https://giojs.com/llms.txt
   return `false` to reject with close code 4401). Rooms: `socket.join(room)`,
   and `broadcast(room, data)` from `@gio.js/core` in any handler. Client:
   `useWebSocket(url)` from `@gio.js/react` reconnects with backoff.
+- `[server] workers = N | "auto"` renders on several Node processes (default
+  1; dev always 1). Module-level variables then exist once per worker - keep
+  shared state in a database, a cache server or the session, never in memory.
 - Security runs in Rust: default headers (nosniff, `X-Frame-Options:
   SAMEORIGIN`, referrer policy) on every response, and cross-site
   POST/PUT/PATCH/DELETE or WebSocket upgrades get 403 (CSRF) - endpoints other

@@ -109,8 +109,10 @@ export default function DeploymentPage(): React.JSX.Element {
       <h2>Health check</h2>
       <p>
         <code>/_gio/health</code> returns JSON and always answers 200 - cached and static
-        content keeps serving even while the Node worker is respawning, during which{' '}
-        <code>nodeReady</code> is <code>false</code>. Readiness probes should read that field.
+        content keeps serving even while the Node worker is respawning. <code>nodeReady</code>{' '}
+        is <code>false</code> while no worker is ready (with a worker pool, only when every
+        worker is down at once), and <code>workers</code> counts the ready ones. Readiness
+        probes should read <code>nodeReady</code>.
         Use it for readiness probes, load balancer health checks, and uptime monitors:
       </p>
       <pre>
@@ -120,6 +122,7 @@ export default function DeploymentPage(): React.JSX.Element {
   "tls": false,
   "deploymentId": "abc12345",
   "nodeReady": true,
+  "workers": { "configured": 2, "ready": 2 },
   "cacheEntries": 42,
   "uptimeSecs": 3600
 }`}</code>
@@ -266,14 +269,16 @@ accept_request_id = false   # the LB would pass a client's X-Request-Id through`
       <p>
         One GioJS server is two processes: the Rust server (the one your supervisor -
         systemd, Docker, Kubernetes, PM2 - starts) and the Node worker it spawns and
-        restarts on its own. Send the server <code>SIGTERM</code> to stop: it stops
+        restarts on its own (one worker per <code>[server] workers</code>, each
+        supervised on its own). Send the server <code>SIGTERM</code> to stop: it stops
         accepting, closes idle keep-alive connections at once, lets in-flight requests
-        finish (8 seconds at most), and takes the worker down with it.
+        finish (8 seconds at most), then gives every worker a few seconds to run its
+        plugin shutdown hooks and exit before taking whatever is left down with it.
       </p>
       <p>
         A server that dies without that chance - <code>SIGKILL</code>, the OOM killer, a
-        crash, a container runtime that kills only the main process - never leaves its
-        worker behind. The worker&apos;s stdin is a pipe the server holds open and never
+        crash, a container runtime that kills only the main process - never leaves a
+        worker behind. Each worker&apos;s stdin is a pipe the server holds open and never
         writes; the operating system closes it however the server dies, and the worker
         reads end-of-file and exits within moments (Windows uses a job object for the
         same guarantee). Launchers apply the same scheme one level up: <code>gio</code>{' '}
@@ -288,6 +293,47 @@ accept_request_id = false   # the LB would pass a client's X-Request-Id through`
         directly: with stdin attached to <code>/dev/null</code> or a terminal it is
         ignored anyway, but it exists for launchers that hold the pipe.
       </div>
+
+      <h2 id="sizing">Sizing</h2>
+      <p>
+        By default a server renders on one Node worker, which keeps memory low and is
+        plenty for sites where most traffic is cache hits and static files - Rust serves
+        those on all cores without touching Node. When renders are the bottleneck (many
+        uncached or personalized pages, slow <code>getServerSideProps</code>, CPU-heavy
+        route handlers), run a worker pool:
+      </p>
+      <pre>
+        <code>{`[server]
+workers = "auto"   # one per CPU core, at most 8 - or an exact count`}</code>
+      </pre>
+      <ul>
+        <li>
+          <strong>Memory.</strong> Each worker is a full Node process holding its own copy
+          of your app, React and any in-memory data - budget the RSS of one worker (often
+          100-200 MB, more for large apps) times the worker count, plus the Rust server.
+          In a container, set the memory limit for the whole pool; <code>&quot;auto&quot;</code>{' '}
+          counts the CPUs the container may use, not its memory.
+        </li>
+        <li>
+          <strong>CPU.</strong> More workers than cores only adds memory. Leave a core for
+          the Rust server when the box is busy with TLS, compression and images.
+        </li>
+        <li>
+          <strong>State.</strong> Anything a module keeps in memory (a counter, an
+          in-process cache, a rate limiter) exists once per worker. Requests from the same
+          visitor can land on different workers, so keep shared state outside the process.
+        </li>
+        <li>
+          <strong>Many small instances or one big one.</strong> A pool shares one page
+          cache, one image cache and one set of WebSocket rooms; separate instances each
+          keep their own. Prefer a pool per machine and scale out with instances beyond it.
+        </li>
+      </ul>
+      <p>
+        <code>/_gio/metrics</code> shows each worker&apos;s requests in flight and restart
+        count (<code>gio_worker_in_flight</code>, <code>gio_worker_restarts_total</code>),
+        which tells you whether a pool is saturated or a worker keeps crashing.
+      </p>
 
       <h2>Multi-instance deployments</h2>
       <p>
