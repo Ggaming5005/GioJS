@@ -574,6 +574,10 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
+    // Protections gio.toml turns off or loosens: allowed, never silent.
+    for warning in config_check::protections_off_warnings(&cfg) {
+        warn!("{warning}");
+    }
     let config_check::StartupEnv {
         app_dir,
         public_dir,

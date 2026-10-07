@@ -506,9 +506,12 @@ fn default_burst() -> u64 {
 pub struct WebsocketConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Concurrent WebSocket connections.
+    /// Concurrent WebSocket connections; past it new sockets are closed
+    /// with 1013 (try again later). 0 = unlimited.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// Ping every socket this often, so dead peers are noticed and closed.
+    /// 0 = no server pings.
     #[serde(default = "default_ping_interval")]
     pub ping_interval_secs: u64,
 }

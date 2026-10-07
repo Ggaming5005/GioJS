@@ -141,6 +141,22 @@ pub fn validate(config: &GioConfig, env: &StartupEnv) -> Result<Validated, Vec<S
     }
 }
 
+/// Every protection or limit gio.toml turns off or loosens, one line per
+/// setting that names its key. Startup logs each line as a warning and
+/// `--check-config` reports the same lines under `warnings`, so a guard
+/// switched off on purpose is still never silent.
+pub fn protections_off_warnings(config: &GioConfig) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if config.websocket.enabled && config.websocket.max_connections == 0 {
+        warnings.push(
+            "[websocket] max_connections = 0: WebSocket connections are unlimited - every \
+             open socket holds memory and a file descriptor"
+                .to_string(),
+        );
+    }
+    warnings
+}
+
 /// The `[[fonts]]` entries naming a file under public/ that startup could not
 /// copy: an invalid path, or a file that is missing or unreadable. Checked
 /// before the worker spawns, so a deploy that lost its font files fails here
@@ -249,7 +265,7 @@ fn report(
         json!({
             "ok": errors.is_empty(),
             "errors": errors,
-            "warnings": RuleSet::skipped_rules(&config.middleware_rules()),
+            "warnings": warnings(&config),
             "listen": {
                 "host": config.server.host,
                 "port": config.server.port,
@@ -268,6 +284,14 @@ fn report(
             "cacheDir": display(&absolute(&cache_dir)),
         }),
     )
+}
+
+/// What the server would warn about at startup without refusing: rules it
+/// skips, then the protections gio.toml turns off or loosens.
+fn warnings(config: &GioConfig) -> Vec<String> {
+    let mut warnings = RuleSet::skipped_rules(&config.middleware_rules());
+    warnings.extend(protections_off_warnings(config));
+    warnings
 }
 
 fn with_fields(mut base: Value, fields: Value) -> Value {
@@ -578,6 +602,38 @@ mod tests {
         let report_value = report(&loaded(&[]), parse(""), &env);
         assert_eq!(report_value["sessionSecret"], "valid");
         assert!(!report_value.to_string().contains(&"a".repeat(32)));
+    }
+
+    /// The warnings for `toml` (none expected from anything else in it).
+    fn protection_warnings(toml: &str) -> Vec<String> {
+        protections_off_warnings(&parse(toml).unwrap())
+    }
+
+    #[test]
+    fn the_defaults_loosen_no_protection() {
+        assert_eq!(protection_warnings(""), Vec::<String>::new());
+        let root = test_root();
+        assert_eq!(report(&loaded(&[]), parse(""), &env_in(&root))["warnings"], json!([]));
+    }
+
+    #[test]
+    fn unlimited_websocket_connections_are_a_warning() {
+        let warnings = protection_warnings("[websocket]\nmax_connections = 0\n");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("[websocket] max_connections = 0: "));
+        // Not while WebSockets are off.
+        assert!(protection_warnings("[websocket]\nenabled = false\nmax_connections = 0\n")
+            .is_empty());
+
+        // --check-config reports the same line, and still passes.
+        let root = test_root();
+        let report = report(
+            &loaded(&[]),
+            parse("[websocket]\nmax_connections = 0\n"),
+            &env_in(&root),
+        );
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["warnings"], json!(warnings));
     }
 
     #[test]

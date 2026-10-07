@@ -994,13 +994,14 @@
           "default": true
         },
         "max_connections": {
-          "description": "Concurrent WebSocket connections.",
+          "description": "Concurrent WebSocket connections; past it new sockets are closed\nwith 1013 (try again later). 0 = unlimited.",
           "type": "integer",
           "format": "uint",
           "default": 1000,
           "minimum": 0
         },
         "ping_interval_secs": {
+          "description": "Ping every socket this often, so dead peers are noticed and closed.\n0 = no server pings.",
           "type": "integer",
           "format": "uint64",
           "default": 30,
