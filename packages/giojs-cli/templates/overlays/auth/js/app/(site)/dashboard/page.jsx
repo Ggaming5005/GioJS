@@ -1,6 +1,6 @@
 import React from 'react';
 import { GioForm } from '@gio.js/react';
-import { sessions } from '../../lib/session.server';
+import { sessions } from '../../../lib/session.server';
 
 /** @type {import('@gio.js/core').Metadata} */
 export const metadata = { title: 'Dashboard' };

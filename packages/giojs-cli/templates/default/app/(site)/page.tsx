@@ -15,7 +15,7 @@ export default function HomePage(): React.JSX.Element {
         </h1>
 
         <p className="gio-starter__lead">
-          A minimal GioJS app, ready to build on. Edit <code>app/page.tsx</code> and reload.
+          A minimal GioJS app, ready to build on. Edit <code>app/(site)/page.tsx</code> and reload.
         </p>
 
         <div className="gio-term">
@@ -25,7 +25,7 @@ export default function HomePage(): React.JSX.Element {
               <span className="gio-term__dot" />
               <span className="gio-term__dot" />
             </span>
-            <span className="gio-term__name">app/page.tsx</span>
+            <span className="gio-term__name">app/(site)/page.tsx</span>
           </div>
           <div className="gio-term__body">
             <div className="gio-term__row"><span className="gio-term__ln">1</span><span><span className="tok-kw">export default function</span> <span className="tok-fn">Page</span>() {'{'}</span></div>

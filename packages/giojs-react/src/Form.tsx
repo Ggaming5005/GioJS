@@ -14,14 +14,15 @@
  *
  * Answers the router cannot render fall back to what the browser would do,
  * without ever running the action twice: a redirect to another site or to
- * a non-GioJS page is loaded (a GET). A refusal that comes before the action
- * runs - the server's 413 for an upload over max_body_bytes, a 429 from its
- * rate limiter, a deployment-skew 409 - is submitted again natively, so the
- * browser shows it with its real status. Every other answer that is not a
- * page may come after the action ran (a 500 when it threw past its writes,
- * a 504 while it is still running, a Response of its own): it goes to
- * onSuccess / onError with the response and is never sent again - nor is a
- * network failure, which leaves the form as it is, input intact.
+ * a non-GioJS page is loaded (a GET). A refusal the server marks as coming
+ * before the action runs - its 413 for an upload over max_body_bytes, a 429
+ * from its rate limiter (both `x-gio-refused: unread`), a deployment-skew
+ * 409 - is submitted again natively, so the browser shows it with its real
+ * status. Every other answer that is not a page may come after the action
+ * ran (a 500 when it threw past its writes, a 504 while it is still running,
+ * a Response of its own, a 413 or 429 included): it goes to onSuccess /
+ * onError with the response and is never sent again - nor is a network
+ * failure, which leaves the form as it is, input intact.
  *
  * While a submission is pending, further submits are ignored and the form
  * carries aria-busy. useGioFormState() exposes { pending, lastResult } to
@@ -91,11 +92,20 @@ export function useGioFormState(): GioFormState {
 }
 
 /**
- * Error statuses that mean the server refused the request unread - its 413
- * for a body over max_body_bytes, a 429 from its rate limiter - so handing
- * the browser the same submission cannot repeat the action.
+ * Error statuses the server may refuse a request with unread - its 413 for
+ * a body over max_body_bytes, a 429 from its rate limiter - so handing the
+ * browser the same submission cannot repeat the action.
  */
 const REFUSED_UNREAD: ReadonlySet<number> = new Set([413, 429]);
+
+/**
+ * Whether the GioJS server itself refused `res` before any handler ran: it
+ * marks those refusals (x-gio-refused: unread). The same status from a page
+ * action or route.ts - which already ran - carries no such mark.
+ */
+function refusedUnread(res: Response): boolean {
+  return REFUSED_UNREAD.has(res.status) && res.headers.get('x-gio-refused') === 'unread';
+}
 
 type Submitter = HTMLButtonElement | HTMLInputElement;
 
@@ -225,7 +235,7 @@ export const GioForm = React.forwardRef<HTMLFormElement, GioFormProps>(function 
     if (outcome.kind === 'response') {
       // Refused unread: the browser may send it again to show the answer.
       // Anything else is never re-sent - the action may already have run.
-      if (REFUSED_UNREAD.has(outcome.status)) submitNatively(form, submitter);
+      if (refusedUnread(outcome.response)) submitNatively(form, submitter);
       return;
     }
     // A re-render with errors: start keyboard and screen-reader users at

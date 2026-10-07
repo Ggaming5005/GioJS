@@ -16,14 +16,22 @@ export default function Page(): React.JSX.Element {
 }`} />
       <h2>Layouts</h2>
       <p>A layout.tsx wraps the pages in its folder and all nested folders. The root app/layout.tsx must render <code>&lt;html&gt;</code> and <code>&lt;body&gt;</code>.</p>
-      <CodeBlock lang="tsx" code={`export default function Layout({ children }) {
+      <CodeBlock lang="tsx" code={`// app/layout.tsx - server-only HTML
+export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body>
-        <Navbar />
-        <main>{children}</main>
-      </body>
+      <body>{children}</body>
     </html>
+  );
+}
+
+// app/(site)/layout.tsx - hydrated: the Navbar's links soft-navigate
+export default function SiteLayout({ children }) {
+  return (
+    <>
+      <Navbar />
+      <main>{children}</main>
+    </>
   );
 }`} />
       <p>

@@ -1,9 +1,9 @@
 import React from 'react';
 import { redirect } from '@gio.js/core';
 import { GioForm, useGioFormState } from '@gio.js/react';
-import { verifyCredentials } from '../../lib/auth.server';
-import { sessions } from '../../lib/session.server';
-import '../../components/forms.css';
+import { verifyCredentials } from '../../../lib/auth.server';
+import { sessions } from '../../../lib/session.server';
+import '../../../components/forms.css';
 
 /** @type {import('@gio.js/core').Metadata} */
 export const metadata = { title: 'Log in' };

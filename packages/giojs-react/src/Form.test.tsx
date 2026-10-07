@@ -8,9 +8,10 @@
  * pending until the answer is shown - a redirect's target pushed under its
  * own URL, an action's re-render (422 + actionData) swapped in place. A
  * second submit while pending is ignored. Of the answers the router cannot
- * render, only refusals that come before the action (413, 429, deployment
- * skew) are submitted again natively; a 5xx, an action's own error
- * Response, a 2xx and a network failure are reported and never re-sent. A
+ * render, only refusals that come before the action (the server's 413 and
+ * 429, marked x-gio-refused, and deployment skew) are submitted again
+ * natively; a 5xx, an action's own error Response (a 413 or 429 too), a 2xx
+ * and a network failure are reported and never re-sent. A
  * redirect named in x-gio-redirect is fetched (same origin) or handed to
  * the browser (another site). Submissions it must not touch (GET, other
  * targets, other origins, reloadDocument) stay native.
@@ -304,7 +305,13 @@ describe('GioForm submission', () => {
   });
 
   it('falls back to a native submission for an error answer that is not a page', async () => {
-    serve(() => new Response('413 Payload Too Large', { status: 413, headers: { 'content-type': 'text/plain' } }));
+    serve(
+      () =>
+        new Response('413 Payload Too Large', {
+          status: 413,
+          headers: { 'content-type': 'text/plain', 'x-gio-refused': 'unread' },
+        }),
+    );
     const onError = vi.fn();
     render(
       <mod.GioForm onError={onError} encType="multipart/form-data">
@@ -320,7 +327,13 @@ describe('GioForm submission', () => {
   });
 
   it('resubmits natively on a 429 too: the rate limiter refused it unread', async () => {
-    serve(() => new Response('429 Too Many Requests', { status: 429, headers: { 'content-type': 'text/plain' } }));
+    serve(
+      () =>
+        new Response('429 Too Many Requests', {
+          status: 429,
+          headers: { 'content-type': 'text/plain', 'x-gio-refused': 'unread' },
+        }),
+    );
     render(
       <mod.GioForm>
         <button type="submit">Go</button>
@@ -340,6 +353,10 @@ describe('GioForm submission', () => {
       () => new Response('<html><body>Bad Gateway</body></html>', { status: 502, headers: { 'content-type': 'text/html' } }),
       // The action answered with an error Response itself.
       () => Response.json({ error: 'conflict' }, { status: 409 }),
+      // ...or with the statuses the server refuses unread with, after it ran
+      // (it recorded the attempt; a route.ts upload handler rejected the file).
+      () => new Response('Too many attempts', { status: 429, headers: { 'content-type': 'text/plain' } }),
+      () => new Response('File too large', { status: 413, headers: { 'content-type': 'text/plain' } }),
     ];
     for (const answer of answers) {
       const calls = serve(answer);
@@ -404,15 +421,22 @@ describe('GioForm submission', () => {
   });
 
   it('resubmits natively on deployment skew (refused before the action ran)', async () => {
-    serve(() => new Response(null, { status: 409, headers: { 'x-gio-action': 'hard-reload' } }));
-    render(
-      <mod.GioForm>
-        <button type="submit">Go</button>
-      </mod.GioForm>,
-    );
-    click('button');
-    await settle();
-    expect(nativeSubmits).toHaveLength(1);
+    window.__GIO_DEPLOYMENT_ID__ = 'old-build';
+    try {
+      const calls = serve(() => new Response(null, { status: 409, headers: { 'x-gio-action': 'hard-reload' } }));
+      render(
+        <mod.GioForm>
+          <button type="submit">Go</button>
+        </mod.GioForm>,
+      );
+      click('button');
+      await settle();
+      // The id the server injected is what lets a newer build refuse it.
+      expect(calls[0]?.init.headers).toMatchObject({ 'x-deployment-id': 'old-build' });
+      expect(nativeSubmits).toHaveLength(1);
+    } finally {
+      delete window.__GIO_DEPLOYMENT_ID__;
+    }
   });
 
   it('loads a redirect target the router cannot render', async () => {

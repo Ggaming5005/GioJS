@@ -1,7 +1,5 @@
 import React from 'react';
 import type { LayoutProps, Metadata } from '@gio.js/core';
-import Navbar from '@/components/layout/Navbar';
-import Footer from '@/components/layout/Footer';
 // Global styles: bundled, hashed and linked in <head> by GioJS - no <link>
 // needed. Its fonts are self-hosted from public/fonts/ (see gio.toml).
 import './globals.css';
@@ -21,11 +19,9 @@ export default function RootLayout({ children }: LayoutProps): React.JSX.Element
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <link rel="icon" href="/public/giojs-logo.svg" type="image/svg+xml" />
       </head>
-      <body>
-        <Navbar />
-        <main>{children}</main>
-        <Footer />
-      </body>
+      {/* Server-only HTML: a GioLink here would be a plain link. The site's
+          navigation lives in app/(site)/layout, which hydrates. */}
+      <body>{children}</body>
     </html>
   );
 }

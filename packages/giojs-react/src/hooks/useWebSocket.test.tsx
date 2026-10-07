@@ -299,6 +299,20 @@ describe('useWebSocket', () => {
     expect(result.send('after close')).toBe(false); // nothing would ever flush it
   });
 
+  it('never delivers a message queued for one url to the next (switching rooms)', () => {
+    const options: UseWebSocketOptions = { queueWhileDisconnected: true };
+    mount('/chat/a', options);
+    const a = latest();
+    expect(result.send('hello room a')).toBe(true); // still connecting: queued
+    mount('/chat/b', options);
+    const b = latest();
+    expect(b).not.toBe(a);
+    expect(result.send('hello room b')).toBe(true);
+    act(() => b.serverOpen());
+    expect(b.sent).toEqual(['hello room b']);
+    expect(a.sent).toEqual([]);
+  });
+
   it('drops sends while disconnected by default', () => {
     mount('ws://example.test/ws');
     expect(result.send('x')).toBe(false);

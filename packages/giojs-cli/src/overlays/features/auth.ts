@@ -18,7 +18,7 @@ export const auth: Overlay = {
   templateDirs: ['_forms', 'auth'],
   agents:
     '- Auth: sessions in `lib/session.server.*`, the demo credential check in `lib/auth.server.*`\n' +
-    '  (DEMO_EMAIL/DEMO_PASSWORD, `.env.development`), `app/login` (page action), `app/logout/route.*`\n' +
+    '  (DEMO_EMAIL/DEMO_PASSWORD, `.env.development`), `app/(site)/login` (page action), `app/logout/route.*`\n' +
     '  (POST), and `/dashboard/*` guarded by `[[guards]]` in gio.toml. Production needs GIO_SESSION_SECRET.',
   toml: {
     entries: [

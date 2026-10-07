@@ -1,20 +1,22 @@
 import React from 'react';
-import { redirect } from '@gio.js/core';
+import { redirect, type ActionArgs, type GetServerSideProps, type Metadata, type WithActionData } from '@gio.js/core';
 import { GioForm, useGioFormState } from '@gio.js/react';
-import { createNote, listNotes } from '../../lib/db.server';
-import '../../components/forms.css';
+import { createNote, listNotes, type NoteItem } from '@/lib/db.server';
+import '../../../components/forms.css';
 
-/** @type {import('@gio.js/core').Metadata} */
-export const metadata = { title: 'Notes' };
+export const metadata: Metadata = { title: 'Notes' };
 
 const MAX_TITLE = 200;
 
-export async function getServerSideProps() {
-  return { props: { notes: await listNotes() } };
+interface Props {
+  notes: NoteItem[];
 }
 
-/** @param {import('@gio.js/core').ActionArgs} req */
-export async function action(req) {
+export const getServerSideProps: GetServerSideProps<Props> = async () => ({
+  props: { notes: await listNotes() },
+});
+
+export async function action(req: ActionArgs) {
   const value = (await req.formData()).get('title');
   const title = typeof value === 'string' ? value.trim() : '';
   if (title === '' || title.length > MAX_TITLE) {
@@ -25,7 +27,7 @@ export async function action(req) {
   return redirect('/notes');
 }
 
-function SubmitButton() {
+function SubmitButton(): React.JSX.Element {
   const { pending } = useGioFormState();
   return (
     <button type="submit" className="gio-btn gio-btn--primary" disabled={pending}>
@@ -34,12 +36,7 @@ function SubmitButton() {
   );
 }
 
-/**
- * @param {import('@gio.js/core').WithActionData<typeof action, {
- *   notes: import('../../lib/db.server').NoteItem[]
- * }>} props
- */
-export default function NotesPage({ notes, actionData }) {
+export default function NotesPage({ notes, actionData }: WithActionData<typeof action, Props>): React.JSX.Element {
   return (
     <section className="gio-container">
       <div className="gio-prose">
@@ -47,7 +44,7 @@ export default function NotesPage({ notes, actionData }) {
         <h1>Notes</h1>
         <p>
           Stored in SQLite (<code>data/app.db</code>) with Drizzle ORM: the schema is{' '}
-          <code>lib/schema.js</code>, the queries are in <code>lib/db.server.js</code>.
+          <code>lib/schema.ts</code>, the queries are in <code>lib/db.server.ts</code>.
         </p>
         <GioForm className="gio-form" resetOnSuccess>
           <label className="gio-field">
@@ -58,7 +55,7 @@ export default function NotesPage({ notes, actionData }) {
           <SubmitButton />
         </GioForm>
         <ul className="gio-list">
-          {notes.map((note) => (
+          {notes.map(note => (
             <li key={note.id}>
               {note.title}
               <small>{new Date(note.createdAt).toUTCString()}</small>

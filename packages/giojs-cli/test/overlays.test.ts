@@ -253,7 +253,7 @@ test('api: a JSON route.ts and a GioForm page over shared validation', async () 
       assert.match(route, /status: 400/);
       assert.match(route, /status: 422/);
       assert.match(route, /status: 201/);
-      const form = await read(project.dir, `app/guestbook/page.${page}`);
+      const form = await read(project.dir, `app/(site)/guestbook/page.${page}`);
       assert.match(form, /export async function action\(/);
       assert.match(form, /status: 422, data: \{ errors: result\.errors, values \}/);
       assert.match(form, /return redirect\('\/guestbook'\)/);
@@ -261,7 +261,7 @@ test('api: a JSON route.ts and a GioForm page over shared validation', async () 
       assert.ok(existsSync(join(project.dir, `lib/guestbook.server.${src}`)));
       assert.ok(existsSync(join(project.dir, 'components/forms.css')));
       // No TS variant leaks into a JS project and vice versa.
-      assert.ok(!existsSync(join(project.dir, `app/guestbook/page.${language === 'ts' ? 'jsx' : 'tsx'}`)));
+      assert.ok(!existsSync(join(project.dir, `app/(site)/guestbook/page.${language === 'ts' ? 'jsx' : 'tsx'}`)));
     });
   }
 });
@@ -273,12 +273,12 @@ test('auth: sessions, login/logout, a Rust guard and rate limit, the secret docu
     const auth = await read(project.dir, 'lib/auth.server.ts');
     assert.match(auth, /timingSafeEqual/);
     assert.match(auth, /process\.env\.DEMO_PASSWORD/);
-    const login = await read(project.dir, 'app/login/page.tsx');
+    const login = await read(project.dir, 'app/(site)/login/page.tsx');
     assert.match(login, /export async function action/);
     assert.match(login, /commitSession\(session\)/);
     assert.match(login, /CSRF/);
     assert.match(await read(project.dir, 'app/logout/route.ts'), /destroySession\(\)/);
-    assert.match(await read(project.dir, 'app/dashboard/page.tsx'), /sessions\.getSession\(ctx\)/);
+    assert.match(await read(project.dir, 'app/(site)/dashboard/page.tsx'), /sessions\.getSession\(ctx\)/);
 
     const gio = await read(project.dir, 'gio.toml');
     assert.match(gio, /\[\[guards\]\]\npath = "\/dashboard\/\*rest"\nrequire_session = true\nredirect_to = "\/login"/);
@@ -324,7 +324,7 @@ test('db: Drizzle on node:sqlite, migrations, a seeded table, data/ ignored by g
     assert.match(await read(project.dir, 'drizzle/0001_seed.sql'), /INSERT INTO `notes`/);
     const journal = await readJson<{ entries: Array<{ tag: string }> }>(project.dir, 'drizzle/meta/_journal.json');
     assert.deepEqual(journal.entries.map(entry => entry.tag), ['0000_init', '0001_seed']);
-    assert.match(await read(project.dir, 'app/notes/page.tsx'), /getServerSideProps[\s\S]*export async function action/);
+    assert.match(await read(project.dir, 'app/(site)/notes/page.tsx'), /getServerSideProps[\s\S]*export async function action/);
 
     assert.match(await read(project.dir, 'gio.toml'), /\[dev\]\n# .*\nwatch_ignore = \["data\/\*\*"\]/);
     assert.match(await read(project.dir, '.gitignore'), /^data\/$/m);
@@ -537,7 +537,7 @@ test('a plan tells the files it adds to from the files it writes whole', async (
     assert.match(await read(project.dir, '.env.development'), /^API_KEY=mine\n[\s\S]*^DEMO_EMAIL=/m);
     // Written whole: the Dockerfile --force replaced, and the new files.
     assert.ok(plan.updated.includes('Dockerfile'));
-    for (const path of ['Dockerfile', 'app/login/page.tsx', '.dockerignore']) {
+    for (const path of ['Dockerfile', 'app/(site)/login/page.tsx', '.dockerignore']) {
       assert.ok(!plan.merged.includes(path), `${path} is in merged`);
     }
     for (const path of plan.merged) assert.ok(plan.updated.includes(path), `${path} merged but not updated`);
@@ -550,7 +550,7 @@ test('add applies a feature to an existing project and is idempotent', async () 
   await withProject('ts', async project => {
     const first = runCli(['add', 'api', 'db'], project.dir);
     assert.equal(first.status, 0, first.stderr);
-    assert.match(first.stdout, /Did create:[\s\S]*app\/guestbook\/page\.tsx/);
+    assert.match(first.stdout, /Did create:[\s\S]*app\/\(site\)\/guestbook\/page\.tsx/);
     assert.match(first.stdout, /Run `npm install` to install drizzle-kit, drizzle-orm|Run `npm install` to install drizzle-orm, drizzle-kit/);
     const again = runCli(['add', 'api', 'db'], project.dir);
     assert.equal(again.status, 0, again.stderr);
@@ -563,28 +563,43 @@ test('add applies a feature to an existing project and is idempotent', async () 
 test('add refuses to overwrite a file of the user\'s in a new feature\'s way, shows the diff and writes nothing; --force overwrites', async () => {
   await withProject('ts', async project => {
     // The project has its own /guestbook page before the api feature.
-    const page = join(project.dir, 'app/guestbook/page.tsx');
-    await mkdir(join(project.dir, 'app/guestbook'), { recursive: true });
+    const page = join(project.dir, 'app/(site)/guestbook/page.tsx');
+    await mkdir(join(project.dir, 'app/(site)/guestbook'), { recursive: true });
     await writeFile(page, 'export default function Mine() { return null; }\n');
 
     const refused = runCli(['add', 'api', 'auth', '--cwd', project.dir], join(project.dir, '..'));
     assert.equal(refused.status, 1);
     assert.match(refused.stderr, /Nothing was written/);
-    assert.match(refused.stderr, /app\/guestbook\/page\.tsx: exists with different content/);
+    assert.match(refused.stderr, /app\/\(site\)\/guestbook\/page\.tsx: exists with different content/);
     assert.match(refused.stderr, /- export default function Mine\(\)/);
     assert.match(refused.stderr, /\+ import React from 'react';/);
     assert.match(refused.stderr, /more lines\)/, 'a long diff is capped');
     assert.match(refused.stderr, /--force/);
     // Neither feature was applied: a refused run is all or nothing.
     assert.ok(!existsSync(join(project.dir, 'app/api/guestbook/route.ts')));
-    assert.ok(!existsSync(join(project.dir, 'app/login/page.tsx')));
+    assert.ok(!existsSync(join(project.dir, 'app/(site)/login/page.tsx')));
     assert.doesNotMatch(await read(project.dir, 'gio.toml'), /guards/);
-    assert.equal(await read(project.dir, 'app/guestbook/page.tsx'), 'export default function Mine() { return null; }\n');
+    assert.equal(await read(project.dir, 'app/(site)/guestbook/page.tsx'), 'export default function Mine() { return null; }\n');
 
     const forced = runCli(['add', 'api', 'auth', '--force'], project.dir);
     assert.equal(forced.status, 0, forced.stderr);
-    assert.match(await read(project.dir, 'app/guestbook/page.tsx'), /GuestbookPage/);
-    assert.ok(existsSync(join(project.dir, 'app/login/page.tsx')));
+    assert.match(await read(project.dir, 'app/(site)/guestbook/page.tsx'), /GuestbookPage/);
+    assert.ok(existsSync(join(project.dir, 'app/(site)/login/page.tsx')));
+  });
+});
+
+test('add refuses a page whose URL the project already serves from another folder, --force or not', async () => {
+  await withProject('ts', async project => {
+    // The project's own /login page, outside the starter's (site) group.
+    await mkdir(join(project.dir, 'app/login'), { recursive: true });
+    await writeFile(join(project.dir, 'app/login/page.tsx'), 'export default function Mine() { return null; }\n');
+    for (const args of [['add', 'auth'], ['add', 'auth', '--force']]) {
+      const refused = runCli(args, project.dir);
+      assert.equal(refused.status, 1, args.join(' '));
+      assert.match(refused.stderr, /app\/\(site\)\/login\/page\.tsx: app\/login\/page\.tsx already serves this URL/);
+      assert.ok(!existsSync(join(project.dir, 'app/(site)/login/page.tsx')));
+      assert.ok(!existsSync(join(project.dir, 'lib/session.server.ts')));
+    }
   });
 });
 
@@ -592,8 +607,8 @@ test('add keeps the user\'s edits to a feature that is already set up, and still
   await withProject('ts', async project => {
     assert.equal(runCli(['add', 'auth'], project.dir).status, 0);
     // The expected next step after scaffolding: make the starter pages yours.
-    const loginPath = join(project.dir, 'app/login/page.tsx');
-    const login = (await read(project.dir, 'app/login/page.tsx')).replace('<h1>Log in</h1>', '<h1>Sign in</h1>');
+    const loginPath = join(project.dir, 'app/(site)/login/page.tsx');
+    const login = (await read(project.dir, 'app/(site)/login/page.tsx')).replace('<h1>Log in</h1>', '<h1>Sign in</h1>');
     assert.match(login, /Sign in/);
     await writeFile(loginPath, login);
     const forms = (await read(project.dir, 'components/forms.css')) + '\n.mine { color: red; }\n';
@@ -602,17 +617,17 @@ test('add keeps the user\'s edits to a feature that is already set up, and still
     const again = runCli(['add', 'auth'], project.dir);
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /Authentication is already set up - nothing to change\./);
-    assert.match(again.stdout, /Kept your version of:\n {2}app\/login\/page\.tsx\n/);
+    assert.match(again.stdout, /Kept your version of:\n {2}app\/\(site\)\/login\/page\.tsx\n/);
     assert.doesNotMatch(again.stdout, /Did (create|update)/);
 
     // Next to a new feature: auth keeps the edits, db (sharing forms.css) is added.
     const both = runCli(['add', 'auth', 'db'], project.dir);
     assert.equal(both.status, 0, both.stderr);
     assert.match(both.stdout, /Did create:[\s\S]*lib\/db\.server\.ts/);
-    assert.match(both.stdout, /Kept your version of:\n {2}app\/login\/page\.tsx\n/);
-    assert.equal(await read(project.dir, 'app/login/page.tsx'), login);
+    assert.match(both.stdout, /Kept your version of:\n {2}app\/\(site\)\/login\/page\.tsx\n/);
+    assert.equal(await read(project.dir, 'app/(site)/login/page.tsx'), login);
     assert.equal(await read(project.dir, 'components/forms.css'), forms);
-    assert.ok(existsSync(join(project.dir, 'app/notes/page.tsx')));
+    assert.ok(existsSync(join(project.dir, 'app/(site)/notes/page.tsx')));
 
     // A script of a set-up feature the user changed is kept the same way.
     await editPackageJson(project.dir, pkg => {
@@ -625,7 +640,7 @@ test('add keeps the user\'s edits to a feature that is already set up, and still
     // --force puts the starter's version back.
     const forced = runCli(['add', 'auth', '--force'], project.dir);
     assert.equal(forced.status, 0, forced.stderr);
-    assert.match(await read(project.dir, 'app/login/page.tsx'), /<h1>Log in<\/h1>/);
+    assert.match(await read(project.dir, 'app/(site)/login/page.tsx'), /<h1>Log in<\/h1>/);
   });
 });
 
@@ -835,7 +850,7 @@ test('create-giojs --force over an existing file lets the feature replace it; th
       const tracked = spawnSync('git', ['ls-files'], { cwd: app, encoding: 'utf8' }).stdout.split('\n');
       // The feature's files are this run's, so they are committed; a file
       // that was already there and that nothing wrote is left out.
-      for (const file of ['Dockerfile', '.dockerignore', 'docker-compose.yml', 'app/page.tsx']) {
+      for (const file of ['Dockerfile', '.dockerignore', 'docker-compose.yml', 'app/(site)/page.tsx']) {
         assert.ok(tracked.includes(file), `${file} not committed:\n${tracked.join('\n')}`);
       }
       assert.ok(!tracked.includes('notes.txt'));
@@ -882,7 +897,7 @@ test('create-giojs --force leaves a file of the user\'s that a feature added to 
     assert.ok(!tracked.includes('.env.development'), 'the user\'s .env.development was committed');
     assert.ok(!tracked.includes('notes.txt'));
     // Files the template wrote and the features added to are the scaffold's.
-    for (const file of ['.env.example', 'gio.toml', 'package.json', 'app/login/page.tsx', 'lib/db.server.ts']) {
+    for (const file of ['.env.example', 'gio.toml', 'package.json', 'app/(site)/login/page.tsx', 'lib/db.server.ts']) {
       assert.ok(tracked.includes(file), `${file} not committed:\n${tracked.join('\n')}`);
     }
     const committed = spawnSync('git', ['show', 'HEAD:.env.development'], { cwd: app, encoding: 'utf8' });

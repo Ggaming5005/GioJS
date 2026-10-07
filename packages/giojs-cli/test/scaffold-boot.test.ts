@@ -163,6 +163,14 @@ test('the server scaffold boots and serves the starter with self-hosted fonts', 
     const html = await home.text();
     assert.match(html, /Welcome to <em>your app<\/em>/);
     assert.match(html, /<title>server-app<\/title>/);
+    // The navigation renders inside the hydrated #__gio boundary (its
+    // GioLinks soft-navigate), not in the server-only root layout.
+    const boundary = html.indexOf('<div id="__gio"');
+    assert.ok(boundary !== -1 && html.indexOf('class="gio-nav"') > boundary, 'the navigation is outside #__gio');
+    // The 404 page brings the same navigation.
+    const missing = await fetch(`${base}/no-such-page`);
+    assert.equal(missing.status, 404);
+    assert.match(await missing.text(), /class="gio-nav"[\s\S]*Page not found/);
     // Font files are cached as immutable, so a public/fonts/ file is served
     // under a name with its content hash: an edited font gets a new URL.
     const preloads = [...html.matchAll(/<link rel="preload" href="(\/_gio\/fonts\/[^"]+)" as="font"/g)]

@@ -242,6 +242,61 @@ describe('navigate: what is rendered in place', () => {
     expect(assigned).toEqual([`${window.location.origin}/next`]);
   });
 
+  it('a streamed server-only page with a pending Suspense boundary is a full load', async () => {
+    // React streams the resolved content after the shell, outside #__gio,
+    // with the script that moves it in (inert in fetched HTML).
+    const streamed = (envelope: string): Response =>
+      new Response(
+        '<!DOCTYPE html><html><head><title>S</title></head><body><div id="__gio"><main><!--$?-->' +
+          '<template id="B:0"></template><p>LOADING</p><!--/$--></main></div>' +
+          envelope +
+          '<div hidden id="S:0"><p>LATE_CONTENT</p></div><script>$RC("B:0","S:0")</script></body></html>',
+        { headers: { 'content-type': 'text/html' } },
+      );
+    const done = (): Response =>
+      response({ body: '<main><!--$--><p>RESOLVED</p><!--/$--></main>' });
+    serve({
+      '/streamed': () => streamed(''),
+      '/streamed-envelope': () =>
+        streamed(
+          '<script id="__gio_props" type="application/json">' +
+            '{"props":{},"path":"/streamed-envelope","pattern":"/s","entry":""}</script>',
+        ),
+      '/resolved': done,
+    });
+    await nav.navigate('/streamed');
+    expect(assigned).toEqual(['/streamed']);
+    installLayoutRuntime();
+    await nav.navigate('/streamed-envelope');
+    expect(assigned).toEqual(['/streamed', '/streamed-envelope']);
+    expect(gioText()).toBe('initial');
+    expect(window.location.pathname).toBe('/');
+    // Boundaries that resolved inside the shell render in place.
+    delete (window as unknown as Record<string, unknown>)['__GIO_RUNTIME__'];
+    await nav.navigate('/resolved');
+    expect(gioText()).toBe('RESOLVED');
+  });
+
+  it('sends the deployment id the server injected, so a newer build can answer 409', async () => {
+    window.__GIO_DEPLOYMENT_ID__ = 'old-build';
+    try {
+      const fetchMock = serve({
+        '/b': () => response({ body: '<main>b</main>' }),
+        '/c': () => response({ body: '<main>c</main>' }),
+        '/': () => response({ body: '<main>home</main>' }),
+      });
+      await nav.navigate('/b');
+      nav.prefetch('/c');
+      await nav.refresh();
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      for (const call of fetchMock.mock.calls) {
+        expect(call[1]?.headers).toMatchObject({ 'x-deployment-id': 'old-build' });
+      }
+    } finally {
+      delete window.__GIO_DEPLOYMENT_ID__;
+    }
+  });
+
   it('other origins are full loads; script URLs are refused', async () => {
     serve({});
     await nav.navigate('https://other.example/x');
@@ -304,12 +359,31 @@ describe('navigate: the client runtime', () => {
   });
 
   it('never imports a chunk from another origin', async () => {
-    serve({
-      '/evil': () =>
-        response({ body: 'e', envelope: { props: {}, path: '/evil', pattern: '/evil', entry: '//cdn.evil/x.js' } }),
+    const prepare = vi.fn(async () => undefined);
+    (window as unknown as Record<string, unknown>)['__GIO_RUNTIME__'] = { prepare, commit: vi.fn() };
+    // A backslash reads as a slash to the URL parser import() uses, and a
+    // dot segment can normalize into a protocol-relative path.
+    const entries = [
+      '//cdn.evil/x.js',
+      '/\\cdn.evil/x.js',
+      '/\\/cdn.evil/x.js',
+      'https://cdn.evil/x.js',
+      '/.//cdn.evil/x.js',
+    ];
+    const routes: Record<string, () => Response> = {};
+    entries.forEach((entry, i) => {
+      routes[`/evil${i}`] = () =>
+        response({ body: 'e', envelope: { props: {}, path: `/evil${i}`, pattern: '/evil', entry } });
     });
-    await nav.navigate('/evil');
-    expect(assigned).toEqual(['/evil']);
+    routes['/ok'] = () =>
+      response({ body: 'o', envelope: { props: {}, path: '/ok', pattern: '/ok', entry: '/chunks/./a/../ok.js?v=1' } });
+    serve(routes);
+    for (let i = 0; i < entries.length; i++) await nav.navigate(`/evil${i}`);
+    expect(assigned).toEqual(entries.map((_, i) => `/evil${i}`));
+    expect(prepare).not.toHaveBeenCalled();
+    // A same-origin chunk is imported by the normalized path that was judged.
+    await nav.navigate('/ok');
+    expect(prepare).toHaveBeenCalledWith('/chunks/ok.js?v=1', '/ok');
   });
 });
 
@@ -548,6 +622,20 @@ describe('prefetch cache', () => {
     }
     expect(fetchMock).toHaveBeenCalledTimes(6);
     expect(assigned).toEqual([]);
+  });
+
+  it('a deployment-skew prefetch never reloads the page; the click is a full load of the new build', async () => {
+    const fetchMock = serve({
+      '/next': () => new Response('', { status: 409, headers: { 'x-gio-action': 'hard-reload' } }),
+    });
+    nav.prefetch('/next');
+    await settle();
+    expect(reloads).toBe(0);
+    expect(assigned).toEqual([]);
+    expect(gioText()).toBe('initial');
+    await nav.navigate('/next');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(assigned).toEqual([`${window.location.origin}/next`]);
   });
 
   it('a same-origin mutation invalidates prefetched pages', async () => {

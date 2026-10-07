@@ -139,7 +139,7 @@ test('a non-empty directory is refused, listing its contents, unless --force', a
 
   assertOk(runCli(['taken', '--no-install', '--no-git', '--force'], { cwd }));
   assert.ok(await exists(join(target, 'src')), 'unrelated files survive --force');
-  assert.ok(await exists(join(target, 'app', 'page.tsx')));
+  assert.ok(await exists(join(target, 'app', '(site)', 'page.tsx')));
 
   await writeFile(join(cwd, 'a-file'), '');
   const notDir = runCli(['a-file', '--no-install', '--no-git'], { cwd });
@@ -172,7 +172,7 @@ test('the package manager that ran create-giojs installs and appears in the step
   assert.match(bun.stdout, /Installing dependencies with bun/);
   assert.match(bun.stdout, /bun install failed/);
   assert.match(bun.stdout, /\n {2}bun install\n {2}bun run dev\n/);
-  assert.ok(await exists(join(cwd, 'c', 'app', 'page.tsx')));
+  assert.ok(await exists(join(cwd, 'c', 'app', '(site)', 'page.tsx')));
 });
 
 test('git init makes an initial commit of the scaffold', async () => {
@@ -184,7 +184,7 @@ test('git init makes an initial commit of the scaffold', async () => {
   const appDir = join(cwd, 'app');
   assert.equal(git(['log', '--format=%s'], appDir, env), 'Initial commit from create-giojs');
   const files = git(['ls-files'], appDir, env).split('\n');
-  assert.ok(files.includes('.gitignore') && files.includes('app/page.tsx'), files.join(', '));
+  assert.ok(files.includes('.gitignore') && files.includes('app/(site)/page.tsx'), files.join(', '));
   assert.equal(git(['status', '--porcelain'], appDir, env), '', 'everything is committed');
 });
 
@@ -212,7 +212,7 @@ test('a --force scaffold commits only what it created, never the files already t
   assert.match(result.stdout, /Initialized a git repository with an initial commit/);
   assert.match(result.stdout, /not in the commit: .*\.env/);
   const files = git(['ls-files'], target, env).split('\n');
-  for (const file of ['.gitignore', 'package.json', 'app/page.tsx', 'gio.toml']) {
+  for (const file of ['.gitignore', 'package.json', 'app/(site)/page.tsx', 'gio.toml']) {
     assert.ok(files.includes(file), `${file} is not committed: ${files.join(', ')}`);
   }
   if (pathWithNpm !== undefined) assert.ok(files.includes('package-lock.json'), 'the new lockfile is committed');

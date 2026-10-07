@@ -18,7 +18,7 @@ const templatesDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'templa
 
 for (const [template, file] of [['default', 'page.tsx'], ['default-js', 'page.jsx']] as const) {
   test(`${template}: the post page exports in static mode and its copy holds in both modes`, async () => {
-    const source = await readFile(join(templatesDir, template, 'app', 'posts', '[id]', file), 'utf8');
+    const source = await readFile(join(templatesDir, template, 'app', '(site)', 'posts', '[id]', file), 'utf8');
     // Static export needs the list of ids; the server ignores it.
     assert.match(source, /export const getStaticPaths\b/);
     // The visible copy explains both: on-demand rendering on the server, and
@@ -68,10 +68,37 @@ for (const [template, ext] of [['default', 'tsx'], ['default-js', 'jsx']] as con
   test(`${template}: pages set their own metadata`, async () => {
     const dir = join(templatesDir, template, 'app');
     assert.match(
-      await readFile(join(dir, 'about', `page.${ext}`), 'utf8'),
+      await readFile(join(dir, '(site)', 'about', `page.${ext}`), 'utf8'),
       /export const metadata(?:: Metadata)? = \{\n {2}title: 'Project structure'/,
     );
-    assert.match(await readFile(join(dir, 'posts', '[id]', `page.${ext}`), 'utf8'), /export const generateMetadata\b/);
+    assert.match(await readFile(join(dir, '(site)', 'posts', '[id]', `page.${ext}`), 'utf8'), /export const generateMetadata\b/);
+  });
+}
+
+for (const [template, ext] of [['default', 'tsx'], ['default-js', 'jsx']] as const) {
+  test(`${template}: the site navigation renders inside the hydrated tree, not the root layout`, async () => {
+    const app = join(templatesDir, template, 'app');
+    // The root layout is server-only HTML: GioLinks there never soft-navigate.
+    const root = await readFile(join(app, `layout.${ext}`), 'utf8');
+    assert.doesNotMatch(root, /<Navbar|<SiteShell|<GioLink|import .*components\/layout/);
+    assert.match(root, /<body>\{children\}<\/body>/);
+    // A (site) group layout wraps every page with the navigation instead.
+    assert.match(await readFile(join(app, '(site)', `layout.${ext}`), 'utf8'), /<SiteShell>\{children\}<\/SiteShell>/);
+    const pages: string[] = [];
+    const walk = async (dir: string, rel: string): Promise<void> => {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const path = rel === '' ? entry.name : `${rel}/${entry.name}`;
+        if (entry.isDirectory()) await walk(join(dir, entry.name), path);
+        else if (entry.name.startsWith('page.')) pages.push(path);
+      }
+    };
+    await walk(app, '');
+    assert.ok(pages.length > 0);
+    for (const page of pages) assert.match(page, /^\(site\)\//, `${page} is outside the (site) group`);
+    // The 404 and error pages are outside the group: they bring the navigation themselves.
+    for (const file of ['not-found', 'error']) {
+      assert.match(await readFile(join(app, `${file}.${ext}`), 'utf8'), /<SiteShell>/, file);
+    }
   });
 }
 
