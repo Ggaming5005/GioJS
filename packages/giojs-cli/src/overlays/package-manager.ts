@@ -65,6 +65,20 @@ export function packageManager(name: PackageManagerName): PackageManager {
   return MANAGERS[name];
 }
 
+/**
+ * The command a generated file (Dockerfile, CI workflow) runs a script
+ * with. A script the project does not have yet still runs with npm and pnpm
+ * - they skip a missing one themselves - so one added later (`add tailwind`
+ * gives a project its build script) runs without editing the file; yarn
+ * and bun fail on a missing script, so they get null.
+ */
+export function runScript(pm: PackageManager, script: string, defined: boolean): string | null {
+  if (defined) return pm.run(script);
+  if (pm.name === 'npm') return `npm run ${script} --if-present`;
+  if (pm.name === 'pnpm') return `pnpm run --if-present ${script}`;
+  return null;
+}
+
 /** `pnpm/9.1.0 npm/? node/v22...` → pnpm; undefined for anything else. */
 export function managerFromUserAgent(userAgent: string | undefined): PackageManagerName | undefined {
   const name = userAgent?.split('/')[0];

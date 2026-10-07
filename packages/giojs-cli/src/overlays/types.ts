@@ -97,8 +97,9 @@ export interface Overlay {
   modes: readonly OverlayMode[];
   /**
    * Directories under templates/overlays/, each with shared/, ts/ and js/
-   * file trees. Overlays may share one (_forms): a file another overlay
-   * already added with the same content is not a conflict.
+   * file trees. Overlays may share one whose name starts with `_` (_forms):
+   * a file from it that another overlay already added is never a conflict,
+   * and stays as it is (the user may have edited it since).
    */
   templateDirs?: readonly string[];
   generate?(ctx: OverlayContext): GeneratedFile[];

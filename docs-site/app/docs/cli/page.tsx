@@ -23,12 +23,13 @@ export default function Page(): React.JSX.Element {
       <h2>create-giojs add</h2>
       <p>
         Adds starter features to an existing project. A file you changed is never overwritten:
-        any conflict stops the run before anything is written and shows a diff. Running it
-        again is safe.
+        a feature that is already set up keeps your edits, so running it again is safe, and a
+        file in the way of a new feature stops the run before anything is written, with a
+        diff.
       </p>
       <CodeBlock lang="bash" code={`npx create-giojs add tailwind auth
 #   --dry-run      show what would change, write nothing
-#   --force        overwrite conflicting files and scripts
+#   --force        overwrite files and scripts that differ from the feature's
 #   --cwd <dir>    the project directory (default: the current one)`} />
       <h2>giojs-server / gio</h2>
       <p>The gio binary runs the server. npm run dev and npm run start call it for you.</p>

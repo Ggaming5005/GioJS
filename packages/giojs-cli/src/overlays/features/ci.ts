@@ -5,12 +5,18 @@
  * gets deployed - the `gio build standalone` folder for a server app, the
  * `gio export` site for a static one - and keep it as a workflow artifact.
  */
-import type { PackageManager } from '../package-manager.js';
-import type { Overlay, OverlayContext } from '../types.js';
+import { runScript, type PackageManager } from '../package-manager.js';
+import type { Overlay, OverlayContext, PackageJson } from '../types.js';
 
 /** Steps that put the package manager on the runner, before setup-node. */
-function managerSetup(pm: PackageManager): string[] {
-  if (pm.name === 'pnpm') return ['      - uses: pnpm/action-setup@v4', '        with:', '          version: 10'];
+function managerSetup(pm: PackageManager, pkg: PackageJson): string[] {
+  if (pm.name === 'pnpm') {
+    // pnpm/action-setup reads package.json's packageManager itself, and fails
+    // ("Multiple versions of pnpm specified") when a `version` input differs
+    // from it - which `10` does from any full "pnpm@10.x.y".
+    const pinned = typeof pkg['packageManager'] === 'string' && pkg['packageManager'].startsWith('pnpm@');
+    return ['      - uses: pnpm/action-setup@v4', ...(pinned ? [] : ['        with:', '          version: 10'])];
+  }
   if (pm.name === 'bun') return ['      - uses: oven-sh/setup-bun@v2'];
   return [];
 }
@@ -32,10 +38,12 @@ export function ciWorkflow(ctx: OverlayContext): string {
   const scripts = ctx.packageJson.scripts ?? {};
   const cache = pm.name === 'bun' ? [] : ['          cache: ' + pm.name];
   const test = testCommand(pm, scripts['test'] !== undefined);
+  // The project's build script first (tailwind builds its stylesheet there).
+  const build = runScript(pm, 'build', scripts['build'] !== undefined);
   const deploy =
     ctx.mode === 'server'
       ? [
-          ...(scripts['build'] !== undefined ? step('Build', pm.run('build')) : []),
+          ...(build !== null ? step('Build', build) : []),
           ...step('Build standalone', pm.exec('gio build standalone')),
           '      - uses: actions/upload-artifact@v4',
           '        with:',
@@ -71,7 +79,7 @@ export function ciWorkflow(ctx: OverlayContext): string {
     '    runs-on: ubuntu-latest',
     '    steps:',
     '      - uses: actions/checkout@v4',
-    ...managerSetup(pm),
+    ...managerSetup(pm, ctx.packageJson),
     '      - uses: actions/setup-node@v4',
     '        with:',
     '          node-version: 22',

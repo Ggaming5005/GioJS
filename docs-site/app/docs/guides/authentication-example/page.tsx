@@ -63,9 +63,12 @@ export const sessions = createSessionStorage<UserSession>();`} />
         <code>verifyCredentials</code> (<code>lib/auth.server.ts</code>) compares both the email
         and the password with <code>timingSafeEqual</code> over SHA-256 digests, always both,
         so response times reveal neither which field was wrong nor how much of it matched. When{' '}
-        <code>DEMO_EMAIL</code> or <code>DEMO_PASSWORD</code> is unset - as in production, which
-        never loads <code>.env.development</code> - nobody can log in. Replace it with a lookup
-        in your user store and a password-hash check (<code>node:crypto</code>&apos;s{' '}
+        <code>DEMO_EMAIL</code> or <code>DEMO_PASSWORD</code> is unset or empty - as in
+        production, which never loads <code>.env.development</code> - nobody can log in. (The
+        first file that sets a variable wins, and <code>.env.local</code> comes before{' '}
+        <code>.env.development</code>, which is why <code>.env.example</code> lists them
+        commented out: copied as is, empty values would turn the demo login off.) Replace it
+        with a lookup in your user store and a password-hash check (<code>node:crypto</code>&apos;s{' '}
         <code>scrypt</code>, for one) before going live.
       </p>
 

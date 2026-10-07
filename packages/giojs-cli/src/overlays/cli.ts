@@ -67,6 +67,7 @@ export function extractFeatureArgs(argv: readonly string[]): FeatureArgs {
   return { features, rest };
 }
 
+/** `auth needs a server app - ...`, or null when every feature fits the build target. */
 function unsupportedMessage(features: readonly FeatureName[], mode: OverlayMode): string | null {
   const unsupported = features.filter(feature => !OVERLAYS[feature].modes.includes(mode));
   if (unsupported.length === 0) return null;
@@ -81,7 +82,7 @@ export async function chooseFeatures(
 ): Promise<FeatureName[]> {
   if (given !== undefined) {
     const problem = unsupportedMessage(given, mode);
-    if (problem !== null) throw new Error(`Cannot add ${problem}.`);
+    if (problem !== null) throw new Error(`${problem}.`);
     return given;
   }
   if (!interactive) return [];
@@ -122,7 +123,7 @@ export async function applyCreateFeatures(
   if (features.length === 0) return '';
   const plan = await planOverlays(destDir, features, project);
   const problem = unsupportedMessage(plan.unsupported.map(u => u.feature), project.mode);
-  if (problem !== null) throw new Error(`Cannot add ${problem}.`);
+  if (problem !== null) throw new Error(`${problem}.`);
   if (plan.conflicts.length > 0) {
     throw new Error(`The template conflicts with the selected features:\n${formatConflicts(plan)}`);
   }

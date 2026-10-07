@@ -8,9 +8,13 @@
  * result. `add` refuses to apply a plan with conflicts, so a refused run
  * leaves the project exactly as it was - never half an overlay.
  *
- * A conflict is a file the overlay would add that already exists with
- * other content, or a package.json script already set to something else:
- * the user's change wins unless they pass --force.
+ * A feature counts as set up once every file it adds exists. Its files and
+ * scripts that differ from what it would write now are then the user's
+ * (edited since, or generated for an earlier state of the project) - kept
+ * (plan.kept), so running `add` again is safe. For a feature not set up
+ * yet, a file it would add that exists with other content, or a
+ * package.json script already set to something else, is a conflict. Either
+ * way the user's version wins unless they pass --force.
  */
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -47,6 +51,14 @@ export interface Conflict {
   diff: string[];
 }
 
+/** A user's edit to a set-up feature's file or script, left as it is. */
+export interface Kept {
+  feature: FeatureName;
+  path: string;
+  /** The script's name, for package.json. */
+  script?: string;
+}
+
 export interface OverlayPlan {
   features: FeatureName[];
   /** Final content per project-relative path, in planning order. */
@@ -54,6 +66,8 @@ export interface OverlayPlan {
   created: string[];
   updated: string[];
   conflicts: Conflict[];
+  /** Files and scripts of features already set up that the user changed. */
+  kept: Kept[];
   /** Changes that could not be made automatically. */
   manual: string[];
   /** Overlays that would change nothing: already set up. */
@@ -103,6 +117,9 @@ async function templateFiles(overlay: Overlay, ctx: OverlayContext): Promise<Gen
         files.push({
           path: templatePath(relative(root, file)),
           content: content.replaceAll('{{PROJECT_NAME}}', ctx.projectName),
+          // A file several overlays share (_forms) that is already there came
+          // with another feature, so it is the user's to edit.
+          ...(templateDir.startsWith('_') ? { onExisting: 'keep' as const } : {}),
         });
       }
     }
@@ -161,12 +178,13 @@ export function withAgentsNote(current: string, note: string): string {
   return `${base}${heading}\n${note}\n`;
 }
 
-const ENV_KEY = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/;
+/** `KEY=...`, or a commented-out `# KEY=...` (documented, deliberately unset). */
+const ENV_KEY = /^\s*(?:#\s*)?(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/;
 
 /**
  * Append `lines` to a dotenv-style or .gitignore-style file: each entry
- * (a KEY= line, or a pattern) is added when missing, together with the
- * comment lines right above it.
+ * (a KEY= line - commented out or not - or a pattern) is added when
+ * missing, together with the comment lines right above it.
  */
 export function appendMissingLines(
   current: string,
@@ -177,11 +195,11 @@ export function appendMissingLines(
   const added: string[] = [];
   let pendingComments: string[] = [];
   for (const line of lines) {
-    if (line.trim() === '' || line.trimStart().startsWith('#')) {
+    const key = keyOf(line);
+    if (key === undefined && (line.trim() === '' || line.trimStart().startsWith('#'))) {
       pendingComments.push(line);
       continue;
     }
-    const key = keyOf(line);
     if (key !== undefined && !present.has(key)) {
       // Leading blank lines only separated this entry from a skipped one.
       while (added.length === 0 && pendingComments[0]?.trim() === '') pendingComments.shift();
@@ -215,6 +233,7 @@ export async function planOverlays(
     created: [],
     updated: [],
     conflicts: [],
+    kept: [],
     manual: [],
     unchanged: [],
     unsupported: [],
@@ -248,8 +267,10 @@ export async function planOverlays(
     const pkg = JSON.parse(pkgRaw) as PackageJson;
     const ctx: OverlayContext = { dir, ...project, packageJson: pkg };
 
-    // Files.
+    // Files. All of them there means the feature is already set up: one
+    // that differs is the user's edit, not something in the feature's way.
     const files = [...(await templateFiles(overlay, ctx)), ...(overlay.generate?.(ctx) ?? [])];
+    const setUp = files.length > 0 && files.every(file => fs.exists(file.path));
     for (const file of files) {
       const existing = await fs.read(file.path);
       if (existing === undefined || existing === file.content) {
@@ -258,6 +279,8 @@ export async function planOverlays(
         continue;
       } else if (options.force === true) {
         await write(file.path, file.content);
+      } else if (setUp) {
+        plan.kept.push({ feature: name, path: file.path });
       } else {
         plan.conflicts.push({
           path: file.path,
@@ -293,6 +316,10 @@ export async function planOverlays(
       const next = typeof change === 'function' ? change(current) : change;
       if (next === undefined || next === current) continue;
       if (typeof change === 'string' && current !== undefined && options.force !== true) {
+        if (setUp) {
+          plan.kept.push({ feature: name, path: 'package.json', script });
+          continue;
+        }
         plan.conflicts.push({
           path: 'package.json',
           reason: `script "${script}" is already set`,

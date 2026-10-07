@@ -22,7 +22,7 @@ import { cp, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applyFeatures, coreDir, createNodeModules, read, repoRoot, scaffold, type Scaffold } from './overlay-helpers.ts';
+import { applyFeatures, coreDir, createNodeModules, read, repoRoot, runHealthcheck, scaffold, type Scaffold } from './overlay-helpers.ts';
 
 function findServerBinary(): string | null {
   const exe = process.platform === 'win32' ? 'giojs-server.exe' : 'giojs-server';
@@ -218,6 +218,8 @@ test('the docker overlay matches a real gio build standalone, which serves the a
     assert.equal((await fetch(`${base}/notes`, form({ title: 'From the image' }))).status, 303);
     assert.ok(existsSync(join(isolated, 'data', 'app.db')), 'data/ is where the compose volume mounts');
     assert.equal((await fetch(`${base}/dashboard`, { redirect: 'manual' })).status, 302);
+    // The image's HEALTHCHECK against the real /_gio/health.
+    assert.equal(await runHealthcheck(dockerfile, Number(new URL(base).port)), 0);
   } catch (error) {
     console.error(log);
     throw error;

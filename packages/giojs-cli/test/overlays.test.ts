@@ -12,7 +12,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -25,6 +27,7 @@ import {
   pm,
   read,
   readJson,
+  runHealthcheck,
   scaffold,
   toml,
   type Scaffold,
@@ -48,6 +51,12 @@ async function withProject(
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function editPackageJson(dir: string, edit: (pkg: Pkg & Record<string, unknown>) => void): Promise<void> {
+  const pkg = await readJson<Pkg & Record<string, unknown>>(dir, 'package.json');
+  edit(pkg);
+  await writeFile(join(dir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
 }
 
 function runCli(args: string[], cwd: string): { status: number | null; stdout: string; stderr: string } {
@@ -82,7 +91,12 @@ test('feature flags are taken out of argv; everything else is left for the creat
 });
 
 test('server-only features are refused for a static site; no flags and no TTY means no features', async () => {
-  await assert.rejects(overlayCli.chooseFeatures(['tailwind', 'auth'], 'static', false), /auth needs a server app/);
+  await assert.rejects(overlayCli.chooseFeatures(['tailwind', 'auth'], 'static', false), {
+    message: 'auth needs a server app - a static site has no server to run it.',
+  });
+  await assert.rejects(overlayCli.chooseFeatures(['auth', 'db'], 'static', false), {
+    message: 'auth, db need a server app - a static site has no server to run them.',
+  });
   assert.deepEqual(await overlayCli.chooseFeatures(['tailwind', 'ci'], 'static', false), ['tailwind', 'ci']);
   assert.deepEqual(await overlayCli.chooseFeatures(undefined, 'server', false), []);
 });
@@ -134,6 +148,14 @@ test('env and .gitignore lines are added only when their key or pattern is missi
   assert.equal(overlays.appendMissingLines('', lines, keyOf), '# the secret\nSECRET=\n\n# demo\nDEMO=1\n');
   assert.equal(overlays.appendMissingLines('SECRET=abc\n', lines, keyOf), 'SECRET=abc\n\n# demo\nDEMO=1\n');
   assert.equal(overlays.appendMissingLines('SECRET=abc\nDEMO=2\n', lines, keyOf), 'SECRET=abc\nDEMO=2\n');
+
+  // A commented-out key is documented but unset: added as a key (with its
+  // comments), and present once either form of it is in the file.
+  const commentedKeyOf = (line: string): string | undefined => /^(?:#\s*)?([A-Z_]+)=/.exec(line)?.[1];
+  const optional = ['# optional:', '# DEMO=', 'OTHER='];
+  assert.equal(overlays.appendMissingLines('', optional, commentedKeyOf), '# optional:\n# DEMO=\nOTHER=\n');
+  assert.equal(overlays.appendMissingLines('DEMO=x\n', optional, commentedKeyOf), 'DEMO=x\n\nOTHER=\n');
+  assert.equal(overlays.appendMissingLines('# DEMO=\nOTHER=1\n', optional, commentedKeyOf), '# DEMO=\nOTHER=1\n');
 });
 
 test('the package manager comes from the lockfile, then from the user agent', async () => {
@@ -260,7 +282,15 @@ test('auth: sessions, login/logout, a Rust guard and rate limit, the secret docu
     assert.match(example, /randomBytes\(32\)\.toString\('base64url'\)/);
     // Demo credentials only for development: production fails closed.
     assert.match(await read(project.dir, '.env.development'), /^DEMO_PASSWORD=\S+$/m);
-    assert.match(example, /^DEMO_PASSWORD=$/m);
+    // Documented but commented out: `cp .env.example .env.local` must not
+    // override .env.development's demo user with empty values (the first
+    // file that sets a variable wins, and .env.local comes first).
+    assert.match(example, /^# DEMO_EMAIL=$/m);
+    assert.match(example, /^# DEMO_PASSWORD=$/m);
+    assert.doesNotMatch(example, /^DEMO_/m);
+    // Applied again (or over a .env.example that already has them), nothing is added twice.
+    await applyFeatures(project, ['auth']);
+    assert.equal(await read(project.dir, '.env.example'), example);
   });
 });
 
@@ -318,6 +348,31 @@ test('docker: a multi-stage standalone Dockerfile, non-root, with a health check
   });
 });
 
+test('docker: the HEALTHCHECK passes only when /_gio/health reports a ready Node worker', async () => {
+  await withProject('ts', async project => {
+    await applyFeatures(project, ['docker']);
+    const dockerfile = await read(project.dir, 'Dockerfile');
+    let health: Record<string, unknown> = {};
+    // /_gio/health is a 200 whenever the Rust server runs, worker or not.
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(health));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      health = { status: 'ok', nodeReady: true, workers: { configured: 1, ready: 1 } };
+      assert.equal(await runHealthcheck(dockerfile, port), 0);
+      health = { status: 'ok', nodeReady: false, workers: { configured: 1, ready: 0 } };
+      assert.equal(await runHealthcheck(dockerfile, port), 1, 'every worker down is unhealthy');
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+    // Nothing listening: unhealthy, not a crash.
+    assert.equal(await runHealthcheck(dockerfile, port), 1);
+  });
+});
+
 test('docker and ci follow the package manager', async () => {
   await withProject('ts', async project => {
     await applyFeatures(project, ['docker', 'ci'], { packageManager: 'pnpm' });
@@ -326,12 +381,26 @@ test('docker and ci follow the package manager', async () => {
     assert.match(dockerfile, /corepack enable pnpm && if \[ -f pnpm-lock\.yaml \]; then pnpm install --frozen-lockfile/);
     assert.match(dockerfile, /RUN pnpm run build && pnpm exec gio build standalone/);
     const workflow = await read(project.dir, '.github/workflows/ci.yml');
-    assert.match(workflow, /uses: pnpm\/action-setup@v4/);
+    assert.match(workflow, /uses: pnpm\/action-setup@v4\n {8}with:\n {10}version: 10\n/);
     assert.match(workflow, /cache: pnpm/);
     assert.match(workflow, /run: pnpm install --frozen-lockfile/);
     assert.match(workflow, /run: pnpm exec tsc --noEmit/);
     assert.match(workflow, /run: pnpm run --if-present test/);
     assert.match(workflow, /run: pnpm exec gio build standalone/);
+  });
+});
+
+test('ci: pnpm/action-setup takes the version from packageManager when package.json pins one', async () => {
+  await withProject('ts', async project => {
+    // action-setup fails ("Multiple versions of pnpm specified") when its
+    // version input and packageManager disagree - `10` vs "pnpm@10.28.0" does.
+    await editPackageJson(project.dir, pkg => {
+      pkg['packageManager'] = 'pnpm@10.28.0';
+    });
+    await applyFeatures(project, ['ci'], { packageManager: 'pnpm' });
+    const workflow = await read(project.dir, '.github/workflows/ci.yml');
+    assert.match(workflow, /- uses: pnpm\/action-setup@v4\n {6}- uses: actions\/setup-node@v4/);
+    assert.doesNotMatch(workflow, /version: 10/);
   });
 });
 
@@ -384,6 +453,54 @@ test('tailwind + auth + db + docker compose, and docker builds the Tailwind outp
   });
 });
 
+test('tailwind gives a project without a build script one, which docker and ci run (a migrated app)', async () => {
+  await withProject('ts', async project => {
+    // `create-giojs migrate` deletes `next build` and adds no build script.
+    await editPackageJson(project.dir, pkg => {
+      delete pkg.scripts['build'];
+    });
+    await applyFeatures(project, ['tailwind', 'docker', 'ci']);
+    const build = 'tailwindcss -i ./app/tailwind.css -o ./app/tailwind.out.css --minify';
+    assert.equal((await readJson<Pkg>(project.dir, 'package.json')).scripts['build'], build);
+    // app/tailwind.out.css is git-ignored, so a clean checkout (the Docker
+    // build context, a CI runner) has it only if something runs the build.
+    assert.match(await read(project.dir, 'Dockerfile'), /^RUN npm run build && npx gio build standalone --out standalone$/m);
+    assert.match(await read(project.dir, '.github/workflows/ci.yml'), /- name: Build\n {8}run: npm run build\n/);
+    assert.deepEqual((await applyFeatures(project, ['tailwind', 'docker', 'ci'])).unchanged, ['tailwind', 'docker', 'ci']);
+  });
+});
+
+test('docker and ci run a build script added later, where the package manager can skip a missing one', async () => {
+  await withProject('ts', async project => {
+    await editPackageJson(project.dir, pkg => {
+      delete pkg.scripts['build'];
+    });
+    await applyFeatures(project, ['docker', 'ci']);
+    assert.match(await read(project.dir, 'Dockerfile'), /^RUN npm run build --if-present && npx gio build standalone/m);
+    assert.match(await read(project.dir, '.github/workflows/ci.yml'), /run: npm run build --if-present\n/);
+    // Tailwind afterwards: the build script it adds runs in both.
+    await applyFeatures(project, ['tailwind']);
+    assert.match((await readJson<Pkg>(project.dir, 'package.json')).scripts['build'] ?? '', /^tailwindcss /);
+  });
+  await withProject('ts', async project => {
+    await editPackageJson(project.dir, pkg => {
+      delete pkg.scripts['build'];
+    });
+    await applyFeatures(project, ['docker', 'ci'], { packageManager: 'pnpm' });
+    assert.match(await read(project.dir, 'Dockerfile'), /RUN pnpm run --if-present build && pnpm exec gio build standalone/);
+    assert.match(await read(project.dir, '.github/workflows/ci.yml'), /run: pnpm run --if-present build\n/);
+  });
+  // yarn fails on a missing script: no build step until there is a script.
+  await withProject('ts', async project => {
+    await editPackageJson(project.dir, pkg => {
+      delete pkg.scripts['build'];
+    });
+    await applyFeatures(project, ['docker', 'ci'], { packageManager: 'yarn' });
+    assert.match(await read(project.dir, 'Dockerfile'), /^RUN yarn gio build standalone --out standalone$/m);
+    assert.doesNotMatch(await read(project.dir, '.github/workflows/ci.yml'), /name: Build\n/);
+  });
+});
+
 test('applying every overlay twice changes nothing the second time', async () => {
   for (const language of ['ts', 'js'] as const) {
     await withProject(language, async project => {
@@ -415,10 +532,11 @@ test('add applies a feature to an existing project and is idempotent', async () 
   });
 });
 
-test('add refuses to overwrite a modified file, shows the diff and writes nothing; --force overwrites', async () => {
+test('add refuses to overwrite a file of the user\'s in a new feature\'s way, shows the diff and writes nothing; --force overwrites', async () => {
   await withProject('ts', async project => {
-    assert.equal(runCli(['add', 'api'], project.dir).status, 0);
+    // The project has its own /guestbook page before the api feature.
     const page = join(project.dir, 'app/guestbook/page.tsx');
+    await mkdir(join(project.dir, 'app/guestbook'), { recursive: true });
     await writeFile(page, 'export default function Mine() { return null; }\n');
 
     const refused = runCli(['add', 'api', 'auth', '--cwd', project.dir], join(project.dir, '..'));
@@ -429,7 +547,8 @@ test('add refuses to overwrite a modified file, shows the diff and writes nothin
     assert.match(refused.stderr, /\+ import React from 'react';/);
     assert.match(refused.stderr, /more lines\)/, 'a long diff is capped');
     assert.match(refused.stderr, /--force/);
-    // auth was not applied either: a refused run is all or nothing.
+    // Neither feature was applied: a refused run is all or nothing.
+    assert.ok(!existsSync(join(project.dir, 'app/api/guestbook/route.ts')));
     assert.ok(!existsSync(join(project.dir, 'app/login/page.tsx')));
     assert.doesNotMatch(await read(project.dir, 'gio.toml'), /guards/);
     assert.equal(await read(project.dir, 'app/guestbook/page.tsx'), 'export default function Mine() { return null; }\n');
@@ -438,6 +557,47 @@ test('add refuses to overwrite a modified file, shows the diff and writes nothin
     assert.equal(forced.status, 0, forced.stderr);
     assert.match(await read(project.dir, 'app/guestbook/page.tsx'), /GuestbookPage/);
     assert.ok(existsSync(join(project.dir, 'app/login/page.tsx')));
+  });
+});
+
+test('add keeps the user\'s edits to a feature that is already set up, and still adds the new ones', async () => {
+  await withProject('ts', async project => {
+    assert.equal(runCli(['add', 'auth'], project.dir).status, 0);
+    // The expected next step after scaffolding: make the starter pages yours.
+    const loginPath = join(project.dir, 'app/login/page.tsx');
+    const login = (await read(project.dir, 'app/login/page.tsx')).replace('<h1>Log in</h1>', '<h1>Sign in</h1>');
+    assert.match(login, /Sign in/);
+    await writeFile(loginPath, login);
+    const forms = (await read(project.dir, 'components/forms.css')) + '\n.mine { color: red; }\n';
+    await writeFile(join(project.dir, 'components/forms.css'), forms);
+
+    const again = runCli(['add', 'auth'], project.dir);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /Authentication is already set up - nothing to change\./);
+    assert.match(again.stdout, /Kept your version of:\n {2}app\/login\/page\.tsx\n/);
+    assert.doesNotMatch(again.stdout, /Did (create|update)/);
+
+    // Next to a new feature: auth keeps the edits, db (sharing forms.css) is added.
+    const both = runCli(['add', 'auth', 'db'], project.dir);
+    assert.equal(both.status, 0, both.stderr);
+    assert.match(both.stdout, /Did create:[\s\S]*lib\/db\.server\.ts/);
+    assert.match(both.stdout, /Kept your version of:\n {2}app\/login\/page\.tsx\n/);
+    assert.equal(await read(project.dir, 'app/login/page.tsx'), login);
+    assert.equal(await read(project.dir, 'components/forms.css'), forms);
+    assert.ok(existsSync(join(project.dir, 'app/notes/page.tsx')));
+
+    // A script of a set-up feature the user changed is kept the same way.
+    await editPackageJson(project.dir, pkg => {
+      pkg.scripts['db:migrate'] = 'node scripts/my-migrate.mjs';
+    });
+    const scripted = runCli(['add', 'db', '--dry-run'], project.dir);
+    assert.equal(scripted.status, 0, scripted.stderr);
+    assert.match(scripted.stdout, /Kept your version of:\n {2}package\.json \(script "db:migrate"\)/);
+
+    // --force puts the starter's version back.
+    const forced = runCli(['add', 'auth', '--force'], project.dir);
+    assert.equal(forced.status, 0, forced.stderr);
+    assert.match(await read(project.dir, 'app/login/page.tsx'), /<h1>Log in<\/h1>/);
   });
 });
 
@@ -511,7 +671,7 @@ test('create-giojs --static --auth fails before writing anything', async () => {
   try {
     const result = runCli(['app', '--yes', '--no-install', '--static', '--auth'], cwd);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /auth needs a server app/);
+    assert.match(result.stderr, /^auth needs a server app - a static site has no server to run it\.$/m);
     assert.ok(!existsSync(join(cwd, 'app')));
   } finally {
     await rm(cwd, { recursive: true, force: true });

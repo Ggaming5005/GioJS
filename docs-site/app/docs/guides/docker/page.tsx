@@ -48,8 +48,10 @@ COPY --from=build /app/standalone ./
 RUN mkdir -p .gio data && chown -R node:node .gio data
 USER node
 EXPOSE 3000
+# /_gio/health answers 200 whenever the Rust server is up; nodeReady says
+# whether a Node worker is too (false while every worker is restarting).
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \\
-  CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/_gio/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+  CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/_gio/health').then((r) => r.json()).then((health) => process.exit(health.nodeReady === true ? 0 : 1), () => process.exit(1))"]
 CMD ["node", "run.mjs"]`} />
       <ul>
         <li>
@@ -66,8 +68,10 @@ CMD ["node", "run.mjs"]`} />
           and <code>data/</code> (SQLite, uploads).
         </li>
         <li>
-          The health check calls <code>/_gio/health</code>, answered by the Rust server (its{' '}
-          <code>nodeReady</code> field says whether the Node worker is up).
+          The health check calls <code>/_gio/health</code>, which the Rust server answers with{' '}
+          <code>200</code> as long as it runs. The check passes only when its{' '}
+          <code>nodeReady</code> field is <code>true</code> - a Node worker is up - so a
+          container whose worker keeps crashing is reported unhealthy, not healthy.
         </li>
         <li>
           The server binary comes from the <code>@gio.js/server-&lt;platform&gt;</code> package

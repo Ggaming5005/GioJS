@@ -25,6 +25,17 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: '/docs/project-structure', label: 'Project Structure' },
     ],
   },
+  // The features create-giojs can add, and a guide to each.
+  {
+    title: 'Starter Features',
+    items: [
+      { href: '/docs/starter-features', label: 'Overview' },
+      { href: '/docs/guides/tailwind', label: 'Tailwind CSS' },
+      { href: '/docs/guides/authentication-example', label: 'Authentication Example' },
+      { href: '/docs/guides/database', label: 'Database (SQLite)' },
+      { href: '/docs/guides/docker', label: 'Deploying with Docker' },
+    ],
+  },
   {
     title: 'Building Your App',
     items: [

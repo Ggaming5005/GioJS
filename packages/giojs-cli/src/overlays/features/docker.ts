@@ -3,13 +3,14 @@
  * installs everything and packs the app into standalone/ (Rust server,
  * bundled worker.js, static assets, gio.toml - see the standalone docs), and
  * the runtime stage is a slim Node image holding only that folder, run as
- * the unprivileged `node` user with a HEALTHCHECK on /_gio/health.
+ * the unprivileged `node` user with a HEALTHCHECK on /_gio/health that
+ * needs a ready Node worker (`nodeReady`), not just the Rust server.
  *
  * The runtime image needs write access in exactly two places: .gio/ (the
  * server's page cache and IPC sockets) and data/ (SQLite, uploads); the app
  * itself stays root-owned and read-only to the process.
  */
-import type { PackageManager } from '../package-manager.js';
+import { runScript, type PackageManager } from '../package-manager.js';
 import type { Overlay, OverlayContext } from '../types.js';
 
 /** COPY + install lines for the build stage. */
@@ -40,9 +41,10 @@ function installLines(pm: PackageManager): string[] {
 
 export function dockerfile(ctx: OverlayContext): string {
   const pm = ctx.packageManager;
-  const hasBuild = ctx.packageJson.scripts?.['build'] !== undefined;
+  // The project's build script first (tailwind builds its stylesheet there).
+  const buildScript = runScript(pm, 'build', ctx.packageJson.scripts?.['build'] !== undefined);
   const build = [
-    ...(hasBuild ? [pm.run('build')] : []),
+    ...(buildScript !== null ? [buildScript] : []),
     pm.exec('gio build standalone --out standalone'),
   ].join(' && ');
   return `# syntax=docker/dockerfile:1
@@ -77,8 +79,10 @@ COPY --from=build /app/standalone ./
 RUN mkdir -p .gio data && chown -R node:node .gio data
 USER node
 EXPOSE 3000
+# /_gio/health answers 200 whenever the Rust server is up; nodeReady says
+# whether a Node worker is too (false while every worker is restarting).
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \\
-  CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/_gio/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+  CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/_gio/health').then((r) => r.json()).then((health) => process.exit(health.nodeReady === true ? 0 : 1), () => process.exit(1))"]
 CMD ["node", "run.mjs"]
 `;
 }

@@ -4,7 +4,7 @@
  * layout imports - GioJS bundles imported CSS itself and never compiles
  * Tailwind directives. `dev` runs the watcher next to the server
  * (scripts/dev.mjs, no extra dependencies); build/start/export build the
- * stylesheet once first.
+ * stylesheet once first, and a project without a build script gets one.
  *
  * The starter's own stylesheet moves into Tailwind's `base` layer
  * (`@import ... layer(base)`): unlayered CSS beats every layered rule, so
@@ -73,6 +73,16 @@ function withCssBuild(current: string | undefined): string | undefined {
   return `${CSS_BUILD} && ${current}`;
 }
 
+/**
+ * The build script builds the stylesheet even when the project had none (an
+ * app from `create-giojs migrate`): the Dockerfile and the CI workflow run
+ * `build` before `gio build standalone`, and the output is git-ignored, so
+ * nothing else would create it in a clean checkout.
+ */
+function buildWithCss(current: string | undefined): string | undefined {
+  return current === undefined ? CSS_BUILD : withCssBuild(current);
+}
+
 const layoutEdit: FileEdit = {
   paths: LAYOUTS,
   apply: content => importTailwindOutput(content),
@@ -101,7 +111,7 @@ export const tailwind: Overlay = {
       // that is the user's.
       dev: current =>
         current === undefined || ctx.packageJson.scripts?.['dev:server'] !== undefined ? current : DEV_RUNNER,
-      build: withCssBuild,
+      build: buildWithCss,
       start: withCssBuild,
       export: withCssBuild,
     };

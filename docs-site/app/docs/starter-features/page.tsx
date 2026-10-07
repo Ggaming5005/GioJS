@@ -32,13 +32,15 @@ npx create-giojs add auth db --dry-run   # show what would change
 npx create-giojs add docker --cwd ./my-app`} />
       <ul>
         <li>
-          <strong>Your changes win.</strong> If a file the feature adds already exists with
+          <strong>Your changes win.</strong> If a file a new feature adds already exists with
           different content (or a <code>package.json</code> script is already set to something
           else), nothing at all is written: the command lists each conflict with a diff of what
           it would change. Merge it by hand, or rerun with <code>--force</code> to overwrite.
         </li>
         <li>
-          <strong>Safe to run again.</strong> A feature that is already set up changes nothing.
+          <strong>Safe to run again.</strong> A feature whose files all exist is already set
+          up: your edits to them (the login page, say) are kept and listed, and nothing else
+          changes - so <code>add auth db</code> after customizing auth just adds the database.
           Additions merge into what is there: <code>gio.toml</code> keys go into the existing
           table, <code>[[guards]]</code> entries are added once per path, and{' '}
           <code>.env.example</code> / <code>.gitignore</code> lines are added only when missing.

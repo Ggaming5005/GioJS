@@ -4,8 +4,9 @@
  * `create-giojs add <feature...>` (exposed as `gio add` too): applies feature
  * overlays to an existing project. The whole run is planned first and
  * written only if nothing conflicts, so a refusal leaves the project as it
- * was; a feature that is already set up changes nothing, so running it
- * again is safe.
+ * was. A feature that is already set up keeps the user's edits to its files
+ * and changes nothing else, so running it again is safe - also together
+ * with a new feature (`add auth db` after editing the login page).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
@@ -20,14 +21,16 @@ export const ADD_USAGE = `Usage: create-giojs add <feature...> [options]
 Adds starter features to an existing GioJS project:
 ${FEATURE_NAMES.map(name => `  ${name.padEnd(10)} ${OVERLAYS[name].hint}`).join('\n')}
 
-Files you changed are never overwritten: a conflict stops the run before
-anything is written and shows what the feature would change. Running it
-again is safe - a feature that is already set up changes nothing.
+Files you changed are never overwritten. Running it again is safe: a
+feature that is already set up (all its files exist) keeps your edits to
+them and changes nothing. For a feature that is not set up yet, a file of
+yours in its way is a conflict: the run stops before anything is written
+and shows what the feature would change.
 
 Options:
   --cwd <dir>   the project directory (default: the current directory)
   --dry-run     show what would change without writing anything
-  --force       overwrite conflicting files and scripts
+  --force       overwrite files and scripts that differ from the feature's
   -h, --help    show this help`;
 
 interface AddArgs {
@@ -109,6 +112,11 @@ function report(plan: OverlayPlan, project: ProjectInfo, addedDeps: readonly str
   list('create', plan.created);
   list('update', plan.updated);
   for (const feature of plan.unchanged) console.log(`${OVERLAYS[feature].title} is already set up - nothing to change.`);
+  if (plan.kept.length > 0) {
+    const kept = plan.kept.map(k => `  ${k.path}${k.script === undefined ? '' : ` (script "${k.script}")`}`);
+    const them = kept.length === 1 ? 'it' : 'them';
+    console.log(`Kept your version of:\n${kept.join('\n')}\n(--force replaces ${them} with the feature's version)`);
+  }
 
   const steps = formatPostSteps(plan);
   if (steps !== '') console.log(`\nNext steps:\n${steps}`);

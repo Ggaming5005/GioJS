@@ -8,7 +8,8 @@
  * of the published packages looks (see template-typecheck.test.ts).
  */
 import assert from 'node:assert/strict';
-import { cp, mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { cp,mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -74,6 +75,26 @@ export async function applyFeatures(
 
 export async function read(dir: string, path: string): Promise<string> {
   return readFile(join(dir, path), 'utf8');
+}
+
+/**
+ * Runs the Dockerfile's HEALTHCHECK command (`node -e <script>`) against a
+ * server on 127.0.0.1:<port>, the way Docker runs it inside the container;
+ * resolves to its exit code (0 healthy).
+ */
+export async function runHealthcheck(dockerfile: string, port: number): Promise<number> {
+  const cmd = /^HEALTHCHECK [^\n]*\\\n\s*CMD (\[.*\])$/m.exec(dockerfile)?.[1];
+  assert.ok(cmd !== undefined, `no HEALTHCHECK CMD in:\n${dockerfile}`);
+  const argv = JSON.parse(cmd) as string[];
+  assert.deepEqual(argv.slice(0, 2), ['node', '-e']);
+  const child = spawn(process.execPath, argv.slice(1), {
+    env: { ...process.env, PORT: String(port) },
+    stdio: 'ignore',
+  });
+  return new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', code => resolve(code ?? -1));
+  });
 }
 
 export async function readJson<T = Record<string, unknown>>(dir: string, path: string): Promise<T> {

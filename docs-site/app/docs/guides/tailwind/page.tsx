@@ -86,7 +86,9 @@ npm install`} />
         <code>gio export</code> through <code>npm run build</code> run a minified one-off build
         first, so the output is never stale. The <a href="/docs/guides/docker">Docker</a> and
         CI features run <code>npm run build</code> before <code>gio build standalone</code> for
-        the same reason.
+        the same reason, and a project without a <code>build</code> script (an app from{' '}
+        <code>create-giojs migrate</code>) gets one that builds the stylesheet: the output is
+        git-ignored, so a clean checkout has to build it.
       </p>
     </>
   );
