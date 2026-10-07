@@ -14,7 +14,14 @@ const FEATURES = [
   { tag: 'Rust', title: 'Image optimization', desc: 'AVIF → WebP → JPEG with a two-layer cache. CDN-grade, fully self-hosted.' },
   { tag: 'Rust', title: 'ISR page cache', desc: 'Stale-while-revalidate out of the box. Serve cached HTML in microseconds.' },
   { tag: 'Rust', title: 'Brotli compression', desc: 'Zero-copy tower middleware on every response. No Node event-loop cost.' },
-  { tag: 'Node', title: 'React SSR', desc: 'The React you already know. getServerSideProps, layouts, streaming.' },
+  { tag: 'Rust', title: 'Secure by default', desc: 'Security headers, CSRF and WebSocket origin checks on every response; CSP nonces in one line.' },
+  { tag: 'Rust', title: 'Sessions & guards', desc: 'Encrypted cookie sessions, verified in Rust before a protected request reaches Node.' },
+  { tag: 'Rust', title: 'On-demand revalidation', desc: 'Tag pages and purge them by tag or path - from your code or a CMS webhook.' },
+  { tag: 'Node', title: 'React SSR', desc: 'The React you already know. getServerSideProps, layouts, streaming, partial prerendering.' },
+  { tag: 'Node', title: 'Forms that just work', desc: 'Page actions and GioForm: progressive enhancement, validation errors, Post/Redirect/Get.' },
+  { tag: 'Node', title: 'Metadata & CSS Modules', desc: 'Title templates, sitemaps, JSON-LD, CSS imports and Modules - bundled at startup.' },
+  { tag: 'Core', title: 'Worker pool', desc: 'Render on every core with supervised Node workers that can never be orphaned.' },
+  { tag: 'Core', title: 'Testing kit', desc: 'renderPage, callRoute and a real test server - under vitest or node:test.' },
   { tag: 'Core', title: 'Self-host anywhere', desc: 'One binary on a $5 VPS, bare metal, Windows, or Kubernetes. No CDN tax.' },
 ];
 
