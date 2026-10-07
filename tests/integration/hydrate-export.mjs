@@ -15,7 +15,10 @@
  *      same way.
  *
  * Each step also reports the head's metadata tags (`head`), so run.mjs can
- * check that navigation replaced the first page's tags with the second's.
+ * check that navigation replaced the first page's tags with the second's,
+ * and its useId-labelled field (`useId`): the id in the HTML (for the start
+ * page, as exported - before anything hydrated) and the one the browser
+ * computed, which must be the same.
  *
  * Run by run.mjs in a child process (it installs DOM globals and a module
  * resolve hook):
@@ -142,6 +145,7 @@ const headTags = () =>
   );
 
 const probe = () => document.querySelector('#__gio button[data-probe]');
+const idProbe = () => document.querySelector('#__gio input[data-id-probe]');
 const probeText = () => probe()?.textContent ?? null;
 const click = (el) =>
   el.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
@@ -154,6 +158,11 @@ async function exercise(target) {
   await until(`${window.location.pathname} click handler`, () => /clicks=1/.test(probeText() ?? ''));
   target.afterClick = probeText();
   target.head = headTags();
+  target.useId = {
+    html: target.useId?.html ?? idProbe()?.id ?? null,
+    client: idProbe()?.getAttribute('data-client-id') ?? null,
+    label: document.querySelector('#__gio label')?.getAttribute('for') ?? null,
+  };
 }
 
 // The bootstrap <script type="module"> the exported HTML references.
@@ -163,6 +172,8 @@ if (!bootstrap) {
   finish(1);
 }
 report.start.bootstrap = bootstrap;
+// The id the page was exported with, before the bundle hydrates it.
+report.start.useId = { html: idProbe()?.id ?? null };
 try {
   await import(pathToFileURL(join(outDir, ...bootstrap.split('/').filter(Boolean))).href);
 } catch (err) {

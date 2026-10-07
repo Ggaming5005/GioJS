@@ -94,6 +94,7 @@ import {
   type MetadataModule,
 } from './metadata.ts';
 import { withMetadata, type MetadataTag } from './metadata-tags.ts';
+import { hydrationBoundary } from './id-tree.ts';
 import {
   metadataRouteKindForPath,
   renderMetadataRoute,
@@ -1159,9 +1160,10 @@ async function answerRoute(
     let element: React.ReactNode = React.createElement(
       React.Fragment,
       null,
-      React.createElement(
-        'div',
-        { id: '__gio' },
+      // <div id="__gio">, stamped with its useId tree position: the client
+      // root starts from the same one, so useId values hydrate unchanged
+      // wherever the root layout puts it (id-tree.ts).
+      hydrationBoundary(
         // The client renders this same nesting: the runtime's withMetadata()
         // around the route entry's withStylesheets() (client-build.ts).
         withMetadata(

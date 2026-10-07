@@ -149,7 +149,9 @@ describe('metadata in the rendered document', () => {
     // The blog's openGraph sets no title or description: the page's fill them.
     expect(head).toContain('<meta property="og:title" content="Hello | Acme"/>');
     // Nothing of it is left inside the hydration boundary.
-    expect(html.slice(html.indexOf('<div id="__gio">'))).not.toContain('<title');
+    const boundary = html.indexOf('<div id="__gio" ');
+    expect(boundary).toBeGreaterThan(0);
+    expect(html.slice(boundary)).not.toContain('<title');
     expect(envelopeOf(html)['metadata']).toEqual([
       { tag: 'title', text: 'Hello | Acme' },
       { tag: 'meta', attrs: { name: 'description', content: 'Acme site' } },

@@ -15,7 +15,7 @@ vi.mock('react-dom/client', () => ({ hydrateRoot, createRoot: vi.fn() }));
 
 interface FakeDocument {
   readyState: string;
-  elements: Map<string, { textContent: string | null }>;
+  elements: Map<string, { textContent: string | null; getAttribute?: (name: string) => string | null }>;
   listeners: Map<string, () => void>;
 }
 
@@ -32,7 +32,8 @@ function installDom(readyState: string): FakeDocument {
     },
   });
   vi.stubGlobal('window', { addEventListener: vi.fn() });
-  fake.elements.set('__gio', { textContent: '' });
+  // The boundary at the root position (id-tree.ts): only the marks, no forks.
+  fake.elements.set('__gio', { textContent: '', getAttribute: name => (name === 'data-gio-tree' ? '1' : null) });
   return fake;
 }
 
@@ -197,9 +198,16 @@ describe('generated entries', () => {
       locale: '',
       pattern: '/ppr',
     });
+    // Then the boundary's useId tree position (id-tree.ts): at the root
+    // position, just its two useId marks.
+    type Wrapping = React.ReactElement<{ children: unknown }>;
+    const firstMark = provider?.props.children as unknown as Wrapping | undefined;
+    const secondMark = firstMark?.props.children as Wrapping | undefined;
+    expect(typeof firstMark?.type).toBe('function');
+    expect(secondMark?.type).toBe(firstMark?.type);
     // Then the metadata wrapper (metadata-tags.ts withMetadata): the page's
     // head tags in front of the tree, in the same shape with none.
-    const wrapper = provider?.props.children as unknown as
+    const wrapper = secondMark?.props.children as
       | React.ReactElement<{ children: React.ReactElement<{ fallback: unknown }>[] }>
       | undefined;
     expect(wrapper?.type).toBe(React.Fragment);

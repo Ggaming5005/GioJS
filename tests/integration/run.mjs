@@ -391,6 +391,34 @@ async function main() {
       assert.doesNotMatch(types, /declare module/);
     });
 
+    await test('useId under the root layout: the browser hydrates the ids the server rendered', async () => {
+      // A streamed page (a Suspense hole after the shell) whose fields are
+      // labelled through useId, hydrated by its real bundle (jsdom).
+      const browser = spawnSync(
+        process.execPath,
+        [join(repoRoot, 'tests', 'integration', 'hydrate-page.mjs'), BASE, '/use-id'],
+        { encoding: 'utf8', timeout: 60_000 },
+      );
+      let report;
+      try {
+        report = JSON.parse((browser.stdout ?? '').trim().split('\n').at(-1));
+      } catch {
+        assert.fail(`hydrate-page printed no report (exit ${browser.status}):\n${browser.stdout}\n${browser.stderr}`);
+      }
+      assert.deepEqual(report.errors, [], 'no hydration warning or runtime error');
+      assert.equal(browser.status, 0);
+      assert.equal(report.status, 200);
+      assert.equal(report.revealed, true, 'the streamed hole replaced its fallback');
+      // The boundary carries its position in the server's tree.
+      assert.match(report.treeAttribute ?? '', /^[0-9a-v]+$/);
+      assert.deepEqual(report.fields.map((f) => f.name), ['email', 'first', 'second', 'late']);
+      for (const field of report.fields) {
+        assert.match(field.server ?? '', /^_R_[0-9a-v]+_ _R_[0-9a-v]+H1_$/, field.name);
+        assert.equal(field.client, field.server, `${field.name}: client useId values equal the server's`);
+      }
+      assert.equal(new Set(report.fields.map((f) => f.server)).size, 4, 'every field has its own ids');
+    });
+
     await test('hydration chunk is served with immutable caching', async () => {
       const html = await (await fetch(`${BASE}/`)).text();
       const chunk = html.match(/\/_next\/static\/chunks\/route-index-[A-Z0-9]+\.js/)?.[0];
@@ -4193,12 +4221,17 @@ async function standalonePhase() {
     await mkdir(join(workDir, 'app', 'api', 'hello'), { recursive: true });
     // An interactive control for hydrate-export.mjs: its text shows whether
     // React mounted (an effect ran) and whether a click reached the handler.
+    // Next to it, a field labelled through useId: its data-client-id shows
+    // the id the browser computed, its id the one the HTML was exported with.
     const probe = (label) =>
       '  const [mounted, setMounted] = React.useState(false);\n' +
       '  const [clicks, setClicks] = React.useState(0);\n' +
-      '  React.useEffect(() => setMounted(true), []);\n' +
-      '  const probe = <button data-probe="" onClick={() => setClicks((n) => n + 1)}>' +
-      `{\`${label} mounted=\${mounted} clicks=\${clicks}\`}</button>;\n`;
+      '  const fieldId = React.useId();\n' +
+      "  const [clientFieldId, setClientFieldId] = React.useState('');\n" +
+      '  React.useEffect(() => { setMounted(true); setClientFieldId(fieldId); }, [fieldId]);\n' +
+      '  const probe = <><button data-probe="" onClick={() => setClicks((n) => n + 1)}>' +
+      `{\`${label} mounted=\${mounted} clicks=\${clicks}\`}</button>` +
+      '<label htmlFor={fieldId}>field</label><input id={fieldId} data-id-probe="" data-client-id={clientFieldId} /></>;\n';
     // GioLink's and the router hooks' source, copied in: a path into the
     // repo would not be a relative import (another drive on Windows CI) or a
     // resolvable package.
@@ -4477,6 +4510,15 @@ async function standalonePhase() {
       assert.match(report.nav.content, /ROUTER pathname=\[\/posts\/7\] id=\[7\]/);
       assert.equal(report.nav.mounted, 'POST mounted=true clicks=0');
       assert.equal(report.nav.afterClick, 'POST mounted=true clicks=1');
+      // useId: the exported HTML's id is the one the browser computed when
+      // it hydrated (and the label still points at it); the navigation's
+      // client render pairs them too.
+      assert.match(report.start.useId.html ?? '', /^_R_[0-9a-v]+_$/);
+      assert.equal(report.start.useId.client, report.start.useId.html);
+      assert.equal(report.start.useId.label, report.start.useId.html);
+      assert.ok(report.nav.useId.client, 'the post computed an id');
+      assert.equal(report.nav.useId.client, report.nav.useId.html);
+      assert.equal(report.nav.useId.label, report.nav.useId.html);
       // Head metadata: hydration adopted the home page's tags, and the
       // navigation replaced them with exactly the post's (no leftovers).
       assert.deepEqual(report.start.head, [
