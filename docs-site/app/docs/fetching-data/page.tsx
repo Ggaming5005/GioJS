@@ -21,6 +21,19 @@ export async function getServerSideProps(ctx) {
       <h2>Redirects</h2>
       <p>Return a redirect instead of props to send the visitor elsewhere.</p>
       <CodeBlock lang="tsx" code={`return { redirect: { destination: '/login', permanent: false } };`} />
+      <h2>After a form post</h2>
+      <p>
+        When a page&apos;s <code>action</code> re-renders it (a validation error, say),{' '}
+        <code>getServerSideProps</code> runs for that POST too, with the action&apos;s result in{' '}
+        <code>ctx.actionData</code>; the page component gets it as the <code>actionData</code>{' '}
+        prop. Neither render is ever cached. See <a href="/docs/forms">Forms and Mutations</a>.
+      </p>
+      <CodeBlock lang="tsx" code={`export async function getServerSideProps(ctx) {
+  const post = await db.posts.find(ctx.params.id);
+  // Keep the comment the visitor typed when the action rejected it.
+  const draft = ctx.actionData?.draft ?? '';
+  return { props: { post, draft } };
+}`} />
       <h2>Not found</h2>
       <p>
         When the data does not exist, call <code>notFound()</code> - or return{' '}

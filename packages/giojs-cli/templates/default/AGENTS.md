@@ -25,7 +25,19 @@ renders React. Full docs: https://giojs.com/llms.txt
 - Data fetching is `export async function getServerSideProps(ctx)` returning
   `{ props }` (optionally `{ props, headers }`, a redirect, or
   `{ notFound: true }`). There are NO
-  React Server Components, no `use client`/`use server`, no server actions.
+  React Server Components, no `use client`/`use server`, no server actions -
+  forms post to a page `action` export instead (below).
+- Forms/mutations: a page may `export async function action(req)`; POSTs to
+  the page's own URL run it (`await req.formData()`, plus params/cookies/
+  `getSession(req)` like route handlers). Return `redirect('/next')` (303,
+  from `@gio.js/core`) after a change, `{ status: 422, data: { errors } }` to
+  re-render the page with the `actionData` prop (also `ctx.actionData` in
+  getServerSideProps), or a `Response`. Action answers are never cached;
+  PUT/PATCH/DELETE on pages get 405 (use `route.ts`). Render forms with
+  `<GioForm>` from `@gio.js/react` - a real `<form method="post">` that works
+  without JavaScript and soft-navigates when hydrated; `useGioFormState()`
+  gives `{ pending, lastResult }`. Uploads need
+  `encType="multipart/form-data"` and stay under `[server] max_body_bytes`.
 - Never fetch inside a component render; never use `useEffect` for data that
   belongs in `getServerSideProps`.
 - Caching: `export const revalidate = <seconds>` on a page enables ISR in the

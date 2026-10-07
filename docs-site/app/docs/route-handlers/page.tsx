@@ -30,7 +30,7 @@ export async function POST(req: GioRequest) {
         Handlers receive a <code>GioRequest</code>: <code>method</code>, <code>path</code>,{' '}
         <code>params</code>, <code>query</code>, lowercased <code>headers</code>, parsed{' '}
         <code>cookies</code>, the raw <code>body</code> (<code>bodyBase64</code> is true for
-        binary bodies), and a <code>json()</code> helper.
+        binary bodies), and the <code>json()</code> and <code>formData()</code> helpers.
       </p>
       <p>
         It also says who is asking: <code>ip</code> is the client&apos;s address,{' '}
@@ -70,6 +70,16 @@ export function POST(req: GioRequest) {
     return { saved: new URLSearchParams(req.body ?? '').get('text') };  // form post
   }
 }`} />
+      <p>
+        <code>await req.formData()</code> is the form counterpart: it parses{' '}
+        <code>application/x-www-form-urlencoded</code> and <code>multipart/form-data</code>{' '}
+        bodies into a web-standard <code>FormData</code> (file fields are <code>File</code>{' '}
+        objects), answers <code>415</code> for any other content type and <code>400</code> for a
+        body that does not parse (<code>MalformedBodyError</code>). Bodies are limited by{' '}
+        <code>[server] max_body_bytes</code> (413 above it). For forms that post to a page,
+        a page <code>action</code> is usually simpler than a route handler - see{' '}
+        <a href="/docs/forms">Forms and Mutations</a>.
+      </p>
 
       <h2>What you can return</h2>
       <ul>
@@ -124,7 +134,11 @@ export function GET() {
       <ul>
         <li>Handler responses are never cached or coalesced - every request runs your code.</li>
         <li>Requests for methods you didn&apos;t export get <code>405</code> with an <code>Allow</code> header.</li>
-        <li>A GET without a GET handler falls through to a sibling <code>page.tsx</code> if one exists.</li>
+        <li>
+          A GET without a GET handler falls through to a sibling <code>page.tsx</code> if one
+          exists, and so does a POST without a POST handler - to the page&apos;s{' '}
+          <code>action</code>.
+        </li>
         <li>
           When a page and a route.ts in different folders both match a URL, the more specific
           pattern owns it (see Layouts &amp; Pages): <code>app/blog/about/page.tsx</code> wins
@@ -132,7 +146,11 @@ export function GET() {
           specific than a matching page answers every method itself (405 for those it does
           not export).
         </li>
-        <li>Pages only answer GET/HEAD - mutations belong in route handlers.</li>
+        <li>
+          Pages answer GET/HEAD, and POST when they export an <code>action</code> (see{' '}
+          <a href="/docs/forms">Forms and Mutations</a>); PUT/PATCH/DELETE belong in route
+          handlers.
+        </li>
         <li>A thrown error is logged server-side and answered with a JSON 500 (no internals leaked).</li>
         <li>
           Cross-site <code>POST</code>/<code>PUT</code>/<code>PATCH</code>/<code>DELETE</code>{' '}

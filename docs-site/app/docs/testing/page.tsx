@@ -27,8 +27,8 @@ export default function TestingPage(): React.JSX.Element {
           </tr>
           <tr>
             <td><code>callRoute(path, options)</code></td>
-            <td>Your <code>route.ts</code> handler, in your test process</td>
-            <td>API handlers: JSON bodies, status codes, cookies, event streams</td>
+            <td>Your <code>route.ts</code> handler (or a page <code>action</code>), in your test process</td>
+            <td>API handlers and form posts: JSON/form bodies, status codes, cookies, event streams</td>
           </tr>
           <tr>
             <td><code>createTestServer(options)</code></td>
@@ -200,7 +200,10 @@ it('rejects a form post to a JSON endpoint', async () => {
         like a fetch <code>Response</code>: <code>status</code>, <code>headers</code>,{' '}
         <code>setCookies</code>, and async <code>text()</code>, <code>json()</code> and{' '}
         <code>bytes()</code>. Handler failures answer like the server: <code>notFound()</code>{' '}
-        is a JSON 404, a throw is a 500 with a digest, an unexported method a 405.
+        is a JSON 404, a throw is a 500 with a digest, an unexported method a 405. A POST
+        to a page runs its <code>action</code>: pass the fields as{' '}
+        <code>URLSearchParams</code> and assert on the redirect or the re-rendered HTML (see{' '}
+        <a href="/docs/forms">Forms and Mutations</a>).
       </p>
       <h3>Event streams</h3>
       <p>
