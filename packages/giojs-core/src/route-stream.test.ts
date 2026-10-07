@@ -176,6 +176,14 @@ describe('route.ts Response: buffer or stream', () => {
     expect(socket.frames().at(-1)).toEqual({ type: 'chunk_end', id: 'req-1' });
   });
 
+  it('streams an empty event stream too, so it ends instead of waiting for SSE frames', async () => {
+    const result = await route(() => new Response(null, { headers: { 'content-type': 'text/event-stream' } }));
+    expect(isRouteStream(result)).toBe(true);
+    const socket = new FakeSocket();
+    await pumpRouteStream(socket, 'req-1', result as RouteStreamResult, new StreamFlowGate(), new AbortController().signal);
+    expect(socket.frames()).toEqual([{ type: 'chunk_end', id: 'req-1' }]);
+  });
+
   it('streams bodies over the read-ahead budget, split into bounded frames', async () => {
     const big = Buffer.alloc(ROUTE_BUFFER_LIMIT_BYTES * 2 + 123);
     for (let i = 0; i < big.length; i++) big[i] = (i * 7919) & 0xff;

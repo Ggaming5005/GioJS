@@ -1161,8 +1161,19 @@ async function routeResponseToIpc(
   const cookies = setCookiesField(setCookies);
   const eventStream = headers['content-type'].toLowerCase().startsWith('text/event-stream');
   const mayStream = bodyStreaming === 'all' || (bodyStreaming === 'event-stream' && eventStream);
-  if (res.body === null || !mayStream) {
+  if (!mayStream) {
     return { ...base, headers, ...bufferedBody(Buffer.from(await res.arrayBuffer())), ...cookies };
+  }
+  if (res.body === null) {
+    // A buffered empty event stream is exactly what a GioEventStream head
+    // looks like to Rust, which would then wait for sse_chunk frames.
+    if (!eventStream || req.method === 'HEAD') return { ...base, headers, body: '', ...cookies };
+    return {
+      type: 'route-stream',
+      head: { ...base, headers, body: '', streaming: true, ...cookies },
+      prelude: [],
+      rest: null,
+    };
   }
 
   const ahead = await readAhead(res.body);
