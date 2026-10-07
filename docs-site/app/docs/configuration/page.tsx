@@ -45,6 +45,7 @@ const SWITCHES: { what: string; key: string; href: string; on: string; off: stri
   { what: 'Connection cap', key: '[server] max_connections', href: '/docs/configuration/server', on: '10000', off: '0', lose: 'A connection flood can exhaust file descriptors and memory.', warns: true },
   { what: 'Connection timeouts', key: '[server] *_timeout_secs', href: '/docs/configuration/server', on: '10 to 60', off: '0', lose: 'Slow or idle clients can hold connections open.', warns: false },
   { what: 'Render timeout', key: '[server] render_timeout_secs', href: '/docs/configuration/server', on: '30', off: '0', lose: 'A render that never answers holds its connection and a worker.', warns: true },
+  { what: 'HTTP/2', key: '[server] http2', href: '/docs/configuration/server', on: 'true', off: 'false', lose: 'Clients speak HTTP/1.1 only (keep it on with TLS: a known issue).', warns: false },
   { what: 'Skew protection', key: '[server] skew_protection', href: '/docs/configuration/server', on: 'true', off: 'false', lose: 'Old clients keep navigating softly against a new deployment.', warns: true },
   { what: 'Trusting no proxy', key: '[server] trusted_proxies', href: '/docs/configuration/server', on: '[]', off: '["0.0.0.0/0"]', lose: 'Any client can pick its own IP, rate-limit bucket and request id.', warns: true },
   { what: 'Rate-limit memory cap', key: '[server] rate_limit_max_buckets', href: '/docs/configuration/server', on: '100000', off: '0', lose: 'Clients rotating addresses grow memory without bound.', warns: true },
@@ -62,7 +63,7 @@ const SWITCHES: { what: string; key: string; href: string; on: string; off: stri
   { what: 'CSS minification', key: '[css] minify', href: '/docs/configuration/css', on: 'true', off: 'false', lose: 'Bigger production stylesheets.', warns: false },
   { what: 'Critical CSS', key: '[css] critical_extraction', href: '/docs/configuration/css', on: 'true', off: 'false', lose: 'No inlined first-paint CSS.', warns: false },
   { what: 'Font preload', key: '[[fonts]] preload', href: '/docs/configuration/fonts', on: 'true', off: 'false', lose: 'The font loads when text needs it.', warns: false },
-  { what: 'WebSockets', key: '[websocket] enabled', href: '/docs/configuration/websocket', on: 'true', off: 'false', lose: 'Every upgrade gets 501.', warns: false },
+  { what: 'WebSockets', key: '[websocket] enabled', href: '/docs/configuration/websocket', on: 'true', off: 'false', lose: 'No WebSocket connections: upgrades get 501.', warns: false },
   { what: 'WebSocket cap', key: '[websocket] max_connections', href: '/docs/configuration/websocket', on: '1000', off: '0', lose: 'Open sockets are unbounded.', warns: true },
   { what: 'WebSocket pings', key: '[websocket] ping_interval_secs', href: '/docs/configuration/websocket', on: '30', off: '0', lose: 'Vanished peers are noticed later.', warns: false },
   { what: 'Metrics for this machine only', key: '[metrics] ip_allowlist', href: '/docs/configuration/metrics', on: '[]', off: '["0.0.0.0/0", "::/0"]', lose: 'Anyone can scrape /_gio/metrics.', warns: true },
@@ -298,9 +299,13 @@ anything = "goes"`} />
         instead of being silently ignored while the default you meant to change stays in
         effect:
       </p>
-      <CodeBlock lang="text" code={`giojs-server: configuration error: ./gio.toml:12: unknown key [image] - did you mean [images]?
-giojs-server: configuration error: ./gio.toml:14: unknown key \`images.allowed_width\` - did you mean \`images.allowed_widths\`?
-giojs-server: configuration error: ./gio.toml:21: invalid \`server.port\`: invalid type: string "http", expected u16`} />
+      <CodeBlock lang="text" code={`giojs-server: configuration error: gio.toml:12: unknown key [image] - did you mean [images]?
+giojs-server: configuration error: gio.toml:14: unknown key \`images.allowed_width\` - did you mean \`images.allowed_widths\`?
+giojs-server: configuration error: gio.toml:21: invalid \`server.port\`: invalid type: string "http", expected u16`} />
+      <p>
+        The file is named as the server found it: <code>gio.toml</code> in the directory it runs
+        in, or the path next to <code>GIO_APP_DIR</code> when that variable is set.
+      </p>
       <ul>
         <li>
           Wrong values fail the same way: a malformed <code>trusted_proxies</code> entry, a{' '}
@@ -995,7 +1000,7 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
           <tr><td><code>PORT</code></td><td>The port hosting platforms assign (Heroku, Render, Railway, Fly.io, Cloud Run): overrides <code>[server] port</code>; <code>GIO_PORT</code> wins over it</td><td>unset</td></tr>
           <tr><td><code>GIO_CACHE_DIR</code></td><td>Page cache directory, overriding <code>[cache] disk_path</code>; may be absolute</td><td><code>.gio/cache/pages</code></td></tr>
           <tr><td><code>GIO_ENV_FILES</code></td><td><code>0</code> skips the <a href="#env-files">.env files</a>, <code>1</code> loads them, whatever <code>[env] files</code> says (for platforms that inject the environment and should ignore stray files). Any other value stops startup</td><td>unset (<code>[env] files</code> decides)</td></tr>
-          <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the client build the server produced at startup, the app&apos;s server-side sources, the gio.toml <code>[images]</code> settings and <code>[css] minify</code>, the served <code>[[fonts]]</code> files and the i18n default locale). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
+          <tr><td><code>GIO_DEPLOYMENT_ID</code></td><td>Pin the deployment ID across pods (otherwise derived from the client build the server produced at startup, the app&apos;s server-side sources, the gio.toml <code>[images]</code> settings and <code>[css] minify</code>, the served <code>[[fonts]]</code> files, the i18n default locale and, in a standalone build, its <code>.gio/manifest.json</code>). Persisted pages are dropped when it changes, so change a pinned ID with every deploy</td><td>content-derived</td></tr>
           <tr><td><code>GIO_SOCKET_PATH</code></td><td>Rust-to-Node IPC path; the server passes the resolved value to the Node worker (in a <a href="#render-workers">worker pool</a>, the other workers get it with a <code>-w&lt;N&gt;</code> suffix)</td><td>per-instance <code>.gio/ipc-&lt;pid&gt;-&lt;rand&gt;.sock</code> (Unix), unique named pipe (Windows)</td></tr>
           <tr><td><code>GIO_IMAGE_CACHE_DIR</code></td><td>Directory of the optimized-image disk cache (see <a href="/docs/configuration/images"><code>[images]</code></a>)</td><td><code>.gio/cache/images</code></td></tr>
           <tr><td><code>GIO_FONTS_DIR</code></td><td>Directory the <a href="/docs/configuration/fonts"><code>[[fonts]]</code></a> files are fetched into and served from</td><td><code>.gio/fonts</code></td></tr>

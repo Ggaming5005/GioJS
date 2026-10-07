@@ -30,7 +30,7 @@ ping_interval_secs = 25`} />
 
       <h2 id="reference">Reference</h2>
       <ConfigKeyTable rows={[
-        { key: 'enabled', type: 'boolean', default: 'true', zero: <>Every upgrade is answered <code>501</code></>, description: <>Accept WebSocket upgrades and connect them to the worker&apos;s <code>wsHandler</code>s. Off, no socket is ever opened.</> },
+        { key: 'enabled', type: 'boolean', default: 'true', zero: <>Upgrades are answered <code>501</code></>, description: <>Accept WebSocket upgrades and connect them to the worker&apos;s <code>wsHandler</code>s. Off, no socket is ever opened. The <a href="/docs/configuration/security-websocket">origin check</a> still runs first, so a cross-site upgrade gets its <code>403</code> instead.</> },
         { key: 'max_connections', type: 'integer', default: '1000', zero: <>Unlimited. Warns.</>, description: <>Open WebSockets across the server. A socket over the cap is accepted and immediately closed with <code>1013</code> (try again later), reason <code>too many connections</code>, which clients read as a reason to back off and retry.</> },
         { key: 'ping_interval_secs', type: 'integer', default: '30', zero: 'No server pings', description: <>Ping every socket this often, so a peer that vanished is noticed when the ping cannot be sent and the socket is closed. The first ping goes out one interval after the connection opens.</> },
       ]} />

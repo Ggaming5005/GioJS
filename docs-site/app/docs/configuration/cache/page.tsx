@@ -47,8 +47,10 @@ disk_max_bytes = 1073741824     # 1 GiB`} />
         <code>X-Gio-Cache</code> on every page response says what happened:{' '}
         <code>miss; stored</code>, <code>hit; ttl=&lt;seconds&gt;</code>,{' '}
         <code>stale; age=&lt;seconds&gt;; revalidating</code> (served stale while one render
-        refreshes it), or <code>bypass</code> (not cacheable, or the cache is off). A cached page
-        carries, with <code>revalidate = 60</code> and the default multiplier:
+        refreshes it), or <code>bypass</code> (not cacheable, or the cache is off). A page with a
+        cached <a href="/docs/page-exports/shell">PPR shell</a> reports <code>ppr; shell=stored</code>,{' '}
+        <code>ppr; shell=hit</code> or <code>ppr; shell=stale; age=&lt;seconds&gt;; revalidating</code>.
+        A cached page carries, with <code>revalidate = 60</code> and the default multiplier:
       </p>
       <CodeBlock lang="text" code={`cache-control: public, max-age=0, s-maxage=60, stale-while-revalidate=540
 etag: W/"50b12c1658e2f16a5b78a9b93c564426"`} />
@@ -60,8 +62,9 @@ etag: W/"50b12c1658e2f16a5b78a9b93c564426"`} />
           <code>max-age=0</code>).
         </li>
         <li>
-          A render that read cookies, the <code>Authorization</code> header or the client address,
-          or that sets a cookie, is personal: it is sent <code>private, no-cache</code> and never
+          A render that read cookies, the <code>Authorization</code> header, the client address,
+          host or scheme (<code>ctx.ip</code>, <code>ctx.host</code>, <code>ctx.scheme</code>), or
+          that sets a cookie, is personal: it is sent <code>private, no-cache</code> and never
           stored.
         </li>
         <li>

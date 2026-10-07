@@ -66,9 +66,10 @@ status = 301`} />
 
       <h3 id="invalid-rules">Invalid rules</h3>
       <p>
-        A rule that cannot be compiled is skipped with a startup warning, and{' '}
-        <code>giojs-server --check-config</code> lists it under <code>warnings</code>; the server
-        still starts:
+        A rule that cannot be compiled is skipped with a startup warning (
+        <code>invalid redirect rule skipped</code>, with the rule&apos;s <code>from</code> and the
+        error), and the server still starts. <code>giojs-server --check-config</code> lists the
+        same problems under <code>warnings</code>:
       </p>
       <CodeBlock lang="text" code={`[[redirects]] /old: pattern must start with '/': https://example.com/new
 [[redirects]] /old: redirect status must be 301, 302, 307, or 308 (got 303)

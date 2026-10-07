@@ -76,7 +76,8 @@ trusted_origins = ["https://dashboard.example.com"]`} />
         </li>
         <li>
           With <a href="/docs/configuration/websocket"><code>[websocket] enabled = false</code></a>{' '}
-          every upgrade is answered <code>501</code> and this check has nothing to do.
+          upgrades are answered <code>501</code>. This check still runs before that, so a
+          cross-site upgrade gets <code>403</code>.
         </li>
       </ul>
 

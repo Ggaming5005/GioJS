@@ -51,7 +51,7 @@ to = "/posts/newest"`} />
       </ul>
 
       <h3 id="invalid-rules">Invalid rules</h3>
-      <p>A rule that cannot be compiled is skipped with a startup warning, which <code>--check-config</code> also lists:</p>
+      <p>A rule that cannot be compiled is skipped with a startup warning (<code>invalid rewrite rule skipped</code>), and <code>--check-config</code> lists it under <code>warnings</code>:</p>
       <CodeBlock lang="text" code={`[[rewrites]] /a/:id: target references unknown capture 'slug'`} />
 
       <h2 id="examples">Examples</h2>

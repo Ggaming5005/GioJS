@@ -3,7 +3,7 @@
  *
  * The key table of a gio.toml section page (/docs/configuration/<section>,
  * see docs-site/AGENTS.md): one row per key with its type, default, what
- * `0` / `false` means, the environment variable that overrides it, and a
+ * `0` / `false` / an empty value means, the environment variable that overrides it, and a
  * description that says what turning it off or loosening it costs. Three
  * columns (key and type, default, description with the `0` meaning and the
  * env override under it) keep the description readable in the content column.
@@ -54,7 +54,7 @@ export function ConfigKeyTable({ rows }: { rows: ConfigKeyRow[] }): React.JSX.El
               {row.description}
               {row.zero !== undefined && (
                 <span className="config-key-table__meta">
-                  <strong><code>0</code> / <code>false</code>:</strong> {row.zero}
+                  <strong><code>0</code> / <code>false</code> / empty:</strong> {row.zero}
                 </span>
               )}
               {row.env !== undefined && (

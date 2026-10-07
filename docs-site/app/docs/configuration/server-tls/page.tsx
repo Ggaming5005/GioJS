@@ -73,9 +73,9 @@ key_path  = "/etc/letsencrypt/live/example.com/privkey.pem"`} />
         <tbody>
           <tr><td><code>TLS enabled but cert_path not set in gio.toml</code></td><td><code>enabled = true</code> without <code>cert_path</code> (<code>key_path</code> likewise).</td></tr>
           <tr><td><code>TLS enabled but cert not found at &lt;path&gt;</code></td><td>The file cannot be opened (<code>key not found</code> for the key).</td></tr>
-          <tr><td><code>Failed to parse cert at &lt;path&gt;: ...</code></td><td>The certificate file is not valid PEM (<code>Failed to parse key</code> for the key).</td></tr>
-          <tr><td><code>No private key found at &lt;path&gt;</code></td><td>The key file holds no PKCS#8, PKCS#1 or SEC1 key.</td></tr>
-          <tr><td><code>Invalid TLS certificate/key: ...</code></td><td>The key does not match the certificate, or the certificate is unusable.</td></tr>
+          <tr><td><code>Failed to parse cert at &lt;path&gt;: ...</code></td><td>A PEM block in the certificate file is malformed (<code>Failed to parse key</code> for the key).</td></tr>
+          <tr><td><code>No private key found at &lt;path&gt;</code></td><td>The key file holds no PKCS#8, PKCS#1 or SEC1 key (a certificate passed as the key, a file that is not PEM).</td></tr>
+          <tr><td><code>Invalid TLS certificate/key: ...</code></td><td>The key does not match the certificate, the certificate is unusable, or the certificate file holds no certificate at all (<code>Invalid TLS certificate/key: peer sent no certificates</code>).</td></tr>
         </tbody>
       </table>
 

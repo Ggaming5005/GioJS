@@ -69,7 +69,7 @@ access-control-allow-origin = "https://app.example.com"`} />
       </ul>
 
       <h3 id="invalid-rules">Invalid rules</h3>
-      <p>A rule with an invalid header name or value, or a bad pattern, is skipped with a startup warning that <code>--check-config</code> also lists:</p>
+      <p>A rule with an invalid header name or value, or a bad pattern, is skipped with a startup warning (<code>invalid header rule skipped</code>), and <code>--check-config</code> lists it under <code>warnings</code>:</p>
       <CodeBlock lang="text" code={`[[headers]] /x: invalid header name: bad header`} />
 
       <h2 id="examples">Examples</h2>

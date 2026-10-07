@@ -88,7 +88,7 @@ max_per_second = 50`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Introduced as a gio.toml section with <code>enabled</code>, <code>max_concurrent</code> and <code>max_per_second</code>. <code>0</code> means unlimited (before, it refused every prefetch). <code>strategy</code> is rejected.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Introduced as a gio.toml section with <code>enabled</code>, <code>max_concurrent</code> and <code>max_per_second</code>; <code>0</code> means unlimited. <code>strategy</code> is rejected.</> },
         { version: 'v0.1.0-beta.1', changes: 'Fixed per-client prefetch budgets (5 in flight, 20 per second).' },
       ]} />
     </>
