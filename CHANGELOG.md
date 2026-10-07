@@ -124,8 +124,10 @@ first.
   `idle_timeout_secs` above it.
 - **Dev endpoints answer only local hosts.** `/_gio/devtools*` (dashboard,
   error-overlay codeframes, open-in-editor) refuse other `Host` values and
-  cross-site requests. If you open the dev server from a VM, a container host,
-  another device or a tunnel, add that host to `[dev] allowed_hosts`.
+  cross-site requests, and accept a localhost `Host` only on a connection from
+  the same machine. If you open the dev server from a VM, a container host
+  (including `localhost` through a container port mapping), another device or
+  a tunnel, add that host to `[dev] allowed_hosts`.
 - **Pages send `Cache-Control`.** Cached pages now carry
   `public, max-age=0, s-maxage=<revalidate>, stale-while-revalidate=...`, so a
   CDN in front of GioJS caches them for `s-maxage`, and an on-demand purge
@@ -195,9 +197,11 @@ first.
   and open-in-editor takes same-origin `POST` only, so a website can no longer
   launch your editor. Codeframes and open-in-editor resolve symlinks before
   checking the project root, so a source-named symlink cannot expose `.env`.
-  Dev error pages served to other hosts leave out the message and stack. A LAN
-  client can still forge these headers: bind the dev server to `127.0.0.1` on
-  untrusted networks.
+  Dev error pages served to other hosts leave out the message and stack.
+  Localhost names and loopback IPs count only on a loopback connection, so a
+  LAN client cannot get in by sending `Host: localhost` to the starter's
+  `0.0.0.0` bind; it must name the bind address or an `allowed_hosts` entry,
+  and listing one opens the endpoints to everyone who can reach the port.
 - **Default security headers** on every response: pages, cache hits, route
   handlers, static and public files, redirects, errors and `/_gio` endpoints.
   Behind a TLS-terminating proxy, `[security] hsts = true` (or a table or raw
@@ -622,7 +626,9 @@ first.
 - **`gio routes [--json]`** lists every route without starting the server:
   pages with their layouts and loading/error/not-found files, route-handler
   methods, WebSocket handlers and metadata routes. **`gio typegen`** writes
-  `.gio/routes.d.ts` without a server, for CI before `tsc`.
+  `.gio/routes.d.ts` without a server, for CI before `tsc`. A `route.ts` that
+  fails to import there (it needs a secret CI does not have) is still typed,
+  so the types match a dev machine's.
 - **`gio doctor [--dev | --prod] [--json]`** checks Node.js, the platform
   binary, `@gio.js/*` versions in lockstep, `gio.toml` (validated by the
   server itself), `tsconfig.json` including `.gio/routes.d.ts`,
@@ -675,7 +681,10 @@ first.
   keeps your edits, so running it again is safe. A file of yours in a new
   feature's way stops the run before anything is written and shows a diff
   (`--force` overwrites, `--dry-run` previews), and `gio.toml` additions merge
-  into existing tables.
+  into existing tables; a project without a `gio.toml` (a migrated app) gets
+  one, so `auth`'s guard is never left as a manual step. The overlay pages
+  import `lib/` by relative path, so a `@/*` alias pointing at `src/` does not
+  break them, and the auth dashboard checks the session itself as well.
 
 ### Testing
 
@@ -764,6 +773,10 @@ first.
 - Slow rate limits such as 1 per hour now refill correctly.
 - Under vitest, app modules in `[id]` folders or paths with spaces failed to
   load.
+- `gio build standalone --out <dir>` emptied the directory without checks:
+  `--out .` deleted the whole project. It now refuses the project directory,
+  an ancestor of it, anything under `app/`, and a non-empty directory that is
+  not a previous standalone build.
 
 ### Known limitations
 
