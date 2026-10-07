@@ -93,7 +93,7 @@ keep-alive: timeout=10`} />
           <tr><td><code>hit; ttl=&lt;secs&gt;</code></td><td>Served from the Rust page cache without Node; <code>ttl</code> is the seconds until the entry goes stale.</td></tr>
           <tr><td><code>stale; age=&lt;secs&gt;; revalidating</code></td><td>Served from the cache past its <code>revalidate</code> while one background render refreshes it; <code>age</code> is seconds since it was rendered.</td></tr>
           <tr><td><code>miss; stored</code></td><td>Rendered by the worker and stored; the next request is a hit.</td></tr>
-          <tr><td><code>bypass</code></td><td>Rendered (or refused) and not stored: no <code>revalidate</code>, not <code>GET</code>/<code>HEAD</code>, personal, a route handler, the page cache off (<code>[cache] enabled = false</code>), a <code>400</code> for a malformed path, or a CSRF <code>403</code>.</td></tr>
+          <tr><td><code>bypass</code></td><td>Rendered (or refused) and not stored: no <code>revalidate</code>, not <code>GET</code>/<code>HEAD</code>, personal, a route handler, the page cache off (<code>[cache] enabled = false</code>), a worker error (<code>500</code>, <code>504</code>), a <code>400</code> for a malformed path, or a CSRF <code>403</code>.</td></tr>
           <tr><td><code>static</code></td><td>Answered without the page pipeline: <code>public/</code> files, <code>/_next/static</code> assets, and the server&apos;s own early refusals (a rate-limit <code>429</code>, a skew <code>409</code>).</td></tr>
           <tr><td><code>ppr; shell=stored</code></td><td>A <a href="/docs/page-exports/shell">PPR</a> page rendered in full; its shell was captured and stored.</td></tr>
           <tr><td><code>ppr; shell=hit</code></td><td>The cached shell was sent at once and the holes streamed behind it.</td></tr>
@@ -104,8 +104,9 @@ keep-alive: timeout=10`} />
       <p>
         The other <code>/_gio</code> endpoints and <code>101</code> WebSocket upgrades carry no{' '}
         <code>X-Gio-Cache</code>. The <code>cache</code> label of{' '}
-        <code>gio_requests_total</code> uses the same words (<code>hit</code>,{' '}
-        <code>stale</code>, <code>miss</code>, <code>bypass</code>, <code>static</code>).
+        <code>gio_requests_total</code> uses similar words with its own meaning: there, a
+        render the worker answered is a <code>miss</code> whether it was stored or not (see{' '}
+        <a href="/docs/endpoints#gio-metrics">the metrics</a>).
       </p>
 
       <h3 id="cache-control">Cache-Control</h3>
@@ -239,8 +240,12 @@ referrer-policy: strict-origin-when-cross-origin`} />
       <h3 id="x-ratelimit-limit">X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After</h3>
       <p>
         On a request that a <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a>{' '}
-        rule covers, the response carries the rule&apos;s limit and the requests left in the
-        current window. Over the limit, the server answers before any app code runs:
+        rule covers, the response carries the rule&apos;s <code>per_ip</code> as{' '}
+        <code>X-RateLimit-Limit</code>, and in <code>X-RateLimit-Remaining</code> the
+        requests the client has left. Remaining counts the rule&apos;s <code>burst</code> too
+        (default <code>20</code>), so it can be higher than the limit: a fresh client of a{' '}
+        <code>per_ip = 3</code> rule sees <code>3</code> and <code>22</code>. Over the
+        limit, the server answers before any app code runs:
       </p>
       <CodeBlock lang="text" code={`HTTP/1.1 429 Too Many Requests
 content-type: application/json
@@ -251,7 +256,10 @@ x-gio-refused: unread
 
 {"error":"rate limit exceeded"}`} />
       <p>
-        <code>Retry-After</code> is in seconds. <code>POST /_gio/revalidate</code> also
+        <code>Retry-After</code> is in seconds: <code>window_seconds</code> divided by{' '}
+        <code>per_ip</code>, the time one request&apos;s worth of budget takes to come back (at least{' '}
+        <code>1</code>).{' '}
+        <code>POST /_gio/revalidate</code> also
         sends it on the <code>429</code>s that refuse a client after repeated wrong
         tokens.
       </p>
@@ -261,8 +269,9 @@ x-gio-refused: unread
         <code>x-gio-refused: unread</code> marks a refusal the server sent before reading the
         request body: the rate-limit <code>429</code> and the <code>413</code> for a body over{' '}
         <code>[server] max_body_bytes</code> (default 2 MiB). <code>&lt;GioForm&gt;</code>{' '}
-        resubmits natively only those, never a <code>413</code> or <code>429</code> your
-        action or route handler returned, because by then the action may have run.
+        resubmits natively only those (and the skew <code>409</code>), never a{' '}
+        <code>413</code> or <code>429</code> your action or route handler returned, because
+        by then the action may have run.
       </p>
 
       <h2 id="navigation-headers">Client router</h2>
@@ -361,7 +370,8 @@ x-gio-refused: unread
       <p>
         With <a href="/docs/configuration/compression"><code>[compression]</code></a> on (the
         default), responses of at least <code>min_size_bytes</code> (1024), and every
-        streamed one, are compressed with Brotli when the client accepts it (gzip with{' '}
+        streamed one except Server-Sent Events, are compressed with Brotli when the client
+        accepts it (gzip with{' '}
         <code>prefer_brotli = false</code>), else gzip, and carry{' '}
         <code>Vary: accept-encoding</code>. Images are never recompressed. A{' '}
         <code>304</code> keeps the <code>Vary</code> of its <code>200</code>.
@@ -371,8 +381,9 @@ x-gio-refused: unread
       <p>
         HTTP/1.1 responses carry <code>Keep-Alive: timeout=N</code>, the seconds an idle
         connection stays open: the smaller of <code>[server] header_read_timeout_secs</code>{' '}
-        (default <code>10</code>) and <code>idle_timeout_secs</code> (<code>60</code>).
-        Clients that honor it stop reusing the socket first, instead of racing the
+        (default <code>10</code>) and <code>idle_timeout_secs</code> (<code>60</code>),
+        leaving out one set to <code>0</code>. With both at <code>0</code> the header is not
+        sent. Clients that honor it stop reusing the socket first, instead of racing the
         server&apos;s close. Keep a proxy&apos;s upstream idle timeout below it.
       </p>
 

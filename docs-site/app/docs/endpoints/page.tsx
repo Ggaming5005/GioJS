@@ -24,7 +24,8 @@ export default function Page(): React.JSX.Element {
 {"cacheEntries":0,"deploymentId":"0e92bc3a01f4ea44","http2":true,"nodeReady":true,"status":"ok","tls":false,"uptimeSecs":28,"workers":{"configured":1,"ready":1}}`} />
       <p>
         These are answered by the Rust server, never by your app: no page,{' '}
-        <code>route.ts</code> or plugin can take over a path under <code>/_gio/</code>.
+        <code>route.ts</code> or <code>gio.config.ts</code> plugin can take over a path
+        under <code>/_gio/</code>.
       </p>
 
       <h2 id="reference">Reference</h2>
@@ -71,8 +72,8 @@ export default function Page(): React.JSX.Element {
         the body is only <code>{'{"nodeReady":true,"status":"ok"}'}</code>, for a server
         reachable from the internet that should not tell visitors its deployment ID or
         topology. With <code>enabled = false</code> the path is a <code>404</code>;{' '}
-        <code>gio dev</code>, <code>gio start</code> and the testing kit then take any answer
-        as ready, since the port only opens once a worker is connected.
+        <code>gio dev</code>, <code>gio start</code> and the testing kit then take that{' '}
+        <code>404</code> as ready, since the port only opens once a worker is connected.
       </p>
 
       <h3 id="gio-metrics"><code>/_gio/metrics</code></h3>
@@ -111,8 +112,12 @@ export default function Page(): React.JSX.Element {
         <code>route</code> is the matched pattern (<code>/posts/:id</code>), or{' '}
         <code>static</code> (assets and public files), <code>internal</code> (the{' '}
         <code>/_gio</code> endpoints) or <code>unmatched</code>, so the label set stays
-        bounded however many URLs are requested. <code>cache</code> is <code>hit</code>,{' '}
-        <code>stale</code>, <code>miss</code>, <code>bypass</code> or <code>static</code>.
+        bounded however many URLs are requested; past 1024 patterns, the others count as{' '}
+        <code>_other</code>. <code>cache</code> is <code>hit</code>, <code>stale</code>,{' '}
+        <code>miss</code> (rendered by the worker, stored or not), <code>stream</code> (a
+        streamed render), <code>error</code> (the worker failed or timed out),{' '}
+        <code>bypass</code> (the <code>/_gio</code> endpoints, and a body over{' '}
+        <code>max_body_bytes</code>) or <code>static</code>.
       </p>
 
       <h3 id="gio-image"><code>/_gio/image</code></h3>
@@ -183,7 +188,7 @@ export default function Page(): React.JSX.Element {
           <tr><td><code>401</code></td><td><code>{'{"error":"unauthorized"}'}</code></td><td>Missing or wrong token; carries <code>WWW-Authenticate: Bearer</code>.</td></tr>
           <tr><td><code>408</code></td><td><code>{'{"error":"request body timed out"}'}</code></td><td>The body took longer than <code>[server] request_body_timeout_secs</code>.</td></tr>
           <tr><td><code>413</code></td><td><code>{'{"error":"request body too large"}'}</code></td><td>Over 64 KiB.</td></tr>
-          <tr><td><code>429</code></td><td><code>{'{"error":"too many failed attempts"}'}</code></td><td>The 10th failed attempt from one client within a minute. Until that minute is over, every request from the client is refused the same way (with <code>Retry-After</code>) before its token is even checked.</td></tr>
+          <tr><td><code>429</code></td><td><code>{'{"error":"too many failed attempts"}'}</code></td><td>After 10 failed attempts from one client (an IPv6 client counts by its <code>/64</code>), every request from it is refused this way, with <code>Retry-After</code> and before its token is even checked, until a minute has passed since its first failure. The 10 failures themselves get <code>401</code>.</td></tr>
         </tbody>
       </table>
 
@@ -218,7 +223,7 @@ export default function Page(): React.JSX.Element {
           <tr><td><code>GET /_gio/devtools/state</code></td><td>The dashboard&apos;s data as JSON.</td><td>Not cross-site: <code>Sec-Fetch-Site</code> other than <code>cross-site</code>, and an <code>Origin</code> (if any) naming the host.</td></tr>
           <tr><td><code>GET /_gio/devtools/stream</code></td><td><code>text/event-stream</code> of log lines and snapshots; the live-reload channel.</td><td>Same as <code>state</code>.</td></tr>
           <tr><td><code>GET /_gio/devtools/codeframe?file=&amp;line=</code></td><td><code>{'{ file, line, lines: [{ no, text }] }'}</code>: the line and 4 lines around it, for the error overlay. <code>403</code> outside the project root (symlinks resolved), <code>404</code> for a missing file, <code>400</code> for a non-source file, a line out of range or a file over 2 MiB.</td><td>Same as <code>state</code>.</td></tr>
-          <tr><td><code>POST /_gio/devtools/open-in-editor?file=&amp;line=</code></td><td><code>{'{"ok":true}'}</code> after launching <a href="/docs/env-vars#gio-editor"><code>GIO_EDITOR</code></a> on the file. <code>GET</code> is <code>405</code>.</td><td>Same-origin only: <code>Sec-Fetch-Site</code> must be <code>same-origin</code> or <code>none</code>.</td></tr>
+          <tr><td><code>POST /_gio/devtools/open-in-editor?file=&amp;line=</code></td><td><code>{'{"ok":true}'}</code> after launching <a href="/docs/env-vars#gio-editor"><code>GIO_EDITOR</code></a> on the file. <code>GET</code> is <code>405</code>.</td><td>Same-origin only: <code>Sec-Fetch-Site</code>, when sent, must be <code>same-origin</code> or <code>none</code>, and an <code>Origin</code> must name the host.</td></tr>
         </tbody>
       </table>
       <p>

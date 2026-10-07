@@ -144,7 +144,7 @@ export {};`} />
         <tbody>
           <tr><td><code>app/blog/[slug]/</code></td><td><code>/blog/:slug</code></td><td><code>{'{ slug: string }'}</code></td></tr>
           <tr><td><code>app/docs/[...slug]/</code></td><td><code>/docs/*slug</code></td><td><code>{'{ slug: string }'}</code> - one string, <code>&apos;a/b&apos;</code></td></tr>
-          <tr><td><code>app/shop/[[...path]]/</code></td><td><code>/shop/*path?</code></td><td><code>{'{ path?: string }'}</code></td></tr>
+          <tr><td><code>app/shop/[[...path]]/</code></td><td><code>/shop/*path?</code></td><td><code>{'{ path?: string }'}</code> - <code>&apos;&apos;</code> at runtime for <code>/shop</code></td></tr>
           <tr><td><code>app/(marketing)/about/</code></td><td><code>/about</code></td><td><code>Record&lt;string, never&gt;</code></td></tr>
         </tbody>
       </table>
@@ -214,9 +214,14 @@ export {};`} />
 
       <h2 id="reference">Reference</h2>
       <p>
-        Every type is a type-only export: import it with <code>import type</code>. The
-        packages ship declaration files, so <code>tsc --noEmit</code> checks against them
-        without compiling the framework.
+        Every type in these tables is a type-only export: import it with{' '}
+        <code>import type</code>. The packages ship declaration files, so{' '}
+        <code>tsc --noEmit</code> checks against them without compiling the framework.{' '}
+        <code>@gio.js/core</code> also exports three classes, values you can use as types
+        too: <a href="/docs/functions/gio-event-stream"><code>GioEventStream</code></a>, and
+        the <a href="/docs/functions/request-errors"><code>MalformedBodyError</code> and{' '}
+        <code>UnsupportedMediaTypeError</code></a> that <code>req.formData()</code> and{' '}
+        <code>req.json()</code> throw.
       </p>
 
       <h3 id="pages-and-layouts">Pages and layouts</h3>
@@ -231,7 +236,7 @@ export {};`} />
       <h3 id="data-fetching">Data fetching</h3>
       <TypeTable rows={[
         { name: 'GetServerSideProps<Props, Route>', description: <>A page&apos;s <code>getServerSideProps</code>; types <code>ctx.params</code> and the result.</> },
-        { name: 'GetServerSidePropsContext<Route>, GsspContext<Route>', description: <>Its context: <code>params</code>, <code>query</code>, <code>headers</code>, <code>cookies</code>, <code>locale</code>, <code>ip</code>, <code>scheme</code>, <code>host</code>, <code>requestId</code>, <code>actionData</code>.</> },
+        { name: 'GetServerSidePropsContext<Route>, GsspContext<Route>', description: <>Its context: <code>method</code>, <code>path</code>, <code>params</code>, <code>query</code>, <code>headers</code>, <code>cookies</code>, <code>locale</code>, <code>ip</code>, <code>scheme</code>, <code>host</code>, <code>requestId</code>, <code>actionData</code>.</> },
         { name: 'GetServerSidePropsResult<Props>', description: <><code>PropsResult | RedirectResult | NotFoundResult | ActionRedirect</code>.</> },
         { name: 'PropsResult<Props>', description: <><code>{'{ props, headers?, tags? }'}</code>.</> },
         { name: 'RedirectResult', description: <><code>{'{ redirect: { destination, permanent }, headers? }'}</code>.</> },
@@ -257,8 +262,8 @@ export {};`} />
       <TypeTable rows={[
         { name: 'RouteHandler<Route>', description: <>A <code>route.ts</code> method handler: <code>(req: GioRequest&lt;Route&gt;) =&gt; unknown</code>.</> },
         { name: 'RouteHandlerFn', description: <>The untyped form the router calls.</> },
-        { name: 'GioRequest<Route>', description: <>The request: <code>method</code>, <code>path</code>, <code>params</code>, <code>query</code>, <code>headers</code>, <code>cookies</code>, <code>body</code>, <code>json()</code>, <code>formData()</code>, <code>ip</code>, <code>scheme</code>, <code>host</code>, <code>requestId</code>, <code>locale</code>.</> },
-        { name: 'SseStream, SseCleanupFn', description: <>The stream a <code>GioEventStream</code> callback writes to (<code>send</code>, <code>close</code>) and the cleanup it may return.</> },
+        { name: 'GioRequest<Route>', description: <>The request: <code>method</code>, <code>path</code>, <code>params</code>, <code>query</code>, <code>headers</code>, <code>cookies</code>, <code>body</code>, <code>bodyBase64</code>, <code>json()</code>, <code>formData()</code>, <code>ip</code>, <code>scheme</code>, <code>host</code>, <code>requestId</code>, <code>locale</code>.</> },
+        { name: 'SseStream, SseCleanupFn', description: <>The stream a <code>GioEventStream</code> callback writes to (<code>send</code>, <code>close</code>) and the cleanup function the callback returns.</> },
         { name: 'WsHandler, GioSocket', description: <>A <code>route.ts</code> <code>wsHandler</code> and the socket it gets (<code>send</code>, <code>close</code>, <code>join</code>, <code>leave</code>, <code>on</code>, <code>params</code>, <code>cookies</code>, ...).</> },
         { name: 'BroadcastOptions', description: <><code>broadcast()</code>&apos;s options: <code>{'{ except?: socketId }'}</code>.</> },
         { name: 'UseWebSocketOptions, UseWebSocketResult, ReconnectOptions, WebSocketData', description: <>From <code>@gio.js/react</code>: <code>useWebSocket()</code>&apos;s options, result, backoff settings and message type.</> },
@@ -297,7 +302,7 @@ export {};`} />
       <h3 id="client-router-types">Client router and components</h3>
       <TypeTable rows={[
         { name: 'GioRouter', description: <><code>useRouter()</code>: <code>push</code>, <code>replace</code>, <code>back</code>, <code>forward</code>, <code>refresh</code>, <code>prefetch</code>.</> },
-        { name: 'NavigateOptions, RouterNavigateOptions', description: <>Options of <code>navigate()</code> and of <code>router.push</code> / <code>replace</code> (<code>scroll</code>, <code>transition</code>).</> },
+        { name: 'NavigateOptions, RouterNavigateOptions', description: <>Options of <code>navigate()</code> (<code>replace</code>, <code>scroll</code>, <code>transition</code>) and of <code>router.push</code> / <code>replace</code> (the same without <code>replace</code>).</> },
         { name: 'ReadonlyURLSearchParams', description: <><code>useSearchParams()</code>: <code>URLSearchParams</code> without the mutating methods.</> },
         { name: 'TransitionPreset, AnimatePreset', description: <>Names of the view-transition and <code>&lt;Animate&gt;</code> presets.</> },
         { name: 'GioRegisteredRoutes, RouteParamsOf', description: <>The route registry as <code>@gio.js/react</code> sees it, and a registered pattern&apos;s params.</> },

@@ -36,8 +36,12 @@ GIO_PORT=4000 GIO_LOG_FORMAT=json npx gio start`} />
         route handlers and plugins run there and inherit the server&apos;s environment), the{' '}
         <strong>gio CLI</strong>, <code>gio export</code>, <code>gio build standalone</code>,
         the <strong>testing kit</strong> (<code>@gio.js/core/testing</code>) and{' '}
-        <strong>create-giojs</strong>. An empty value counts as unset everywhere except where
-        the row says otherwise.
+        <strong>create-giojs</strong>. An empty value counts as unset for the listen address,
+        the secrets, <code>GIO_CACHE_DIR</code>, <code>GIO_ENV_FILES</code>,{' '}
+        <code>GIO_LOG_FORMAT</code>, <code>GIO_DEPLOYMENT_ID</code> and the editor variables.
+        Do not set the other directory variables to an empty value: leave them unset. The
+        server reads an empty <code>GIO_PUBLIC_DIR</code>, <code>GIO_IMAGE_CACHE_DIR</code>,{' '}
+        <code>GIO_FONTS_DIR</code> or <code>GIO_STATIC_DIR</code> as its working directory.
       </p>
       <table>
         <thead>
@@ -69,7 +73,7 @@ GIO_PORT=4000 GIO_LOG_FORMAT=json npx gio start`} />
           <tr><td><a href="#gio-server-bin"><code>GIO_SERVER_BIN</code></a></td><td>installed platform binary</td><td>gio CLI, <code>createTestServer</code></td><td>-</td></tr>
           <tr><td><a href="#gio-standalone-server-bin"><code>GIO_STANDALONE_SERVER_BIN</code></a></td><td>installed platform binary</td><td><code>gio build standalone</code></td><td>-</td></tr>
           <tr><td><a href="#gio-out-dir"><code>GIO_OUT_DIR</code></a></td><td><code>./out</code></td><td><code>gio export</code></td><td>-</td></tr>
-          <tr><td><a href="#npm-config-user-agent"><code>npm_config_user_agent</code></a></td><td>set by your package manager</td><td>create-giojs, <code>gio migrate</code>, <code>gio add</code></td><td>-</td></tr>
+          <tr><td><a href="#npm-config-user-agent"><code>npm_config_user_agent</code></a></td><td>set by your package manager</td><td>create-giojs, <code>gio migrate</code>, <code>gio add</code>, <code>gio doctor</code></td><td>-</td></tr>
           <tr><td><a href="#no-color"><code>NO_COLOR</code></a></td><td>unset</td><td>create-giojs <code>migrate</code></td><td>-</td></tr>
           <tr><td><a href="#gio-worker-index"><code>GIO_WORKER_INDEX</code>, <code>GIO_WORKER_COUNT</code></a></td><td>set by the server</td><td>your code</td><td>-</td></tr>
           <tr><td><a href="#gio-export"><code>GIO_EXPORT</code></a></td><td>set by <code>gio export</code></td><td>your code, the worker</td><td>-</td></tr>
@@ -94,8 +98,9 @@ GIO_PORT=4000 GIO_LOG_FORMAT=json npx gio start`} />
         <a href="/docs/configuration#env-files"><code>.env</code> files</a>, which the server
         loads at startup before it reads <code>gio.toml</code>. A variable set in a{' '}
         <code>.env</code> file counts like one set in the shell for everything on this page,
-        except <code>NODE_ENV</code> and <code>GIO_ENV_FILES</code>, which decide which files
-        load and so must come from the real environment.
+        except <code>NODE_ENV</code>, <code>GIO_ENV_FILES</code> and <code>GIO_APP_DIR</code>,
+        which decide which files load and where they are, and so must come from the real
+        environment (the server ignores a <code>NODE_ENV</code> line, with a warning).
       </p>
 
       <h2 id="listen-address-and-directories">Listen address and directories</h2>
@@ -133,13 +138,21 @@ GIO_PORT=4000 GIO_LOG_FORMAT=json npx gio start`} />
       <p>
         The <code>app/</code> directory, relative to the working directory or absolute.
         Default <code>./app</code>. Its parent is the project root: <code>gio.toml</code>,{' '}
-        <code>public/</code>, the <code>.env</code> files and <code>.gio/</code> are found
-        there, so a server started from another directory still finds the whole project. If
-        there is no <code>gio.toml</code> next to <code>app/</code>, the server reads{' '}
-        <code>gio.toml</code> from the working directory instead. The worker, the{' '}
+        <code>public/</code>, the <code>.env</code> files and the <code>.gio/</code> caches
+        are found there. If there is no <code>gio.toml</code> next to <code>app/</code>, the
+        server reads <code>gio.toml</code> from the working directory instead. The worker, the{' '}
         <code>gio</code> commands that read routes (<code>routes</code>,{' '}
         <code>typegen</code>, <code>doctor</code>), <code>gio export</code>,{' '}
         <code>gio build standalone</code> and <code>renderPage()</code> all follow it.
+      </p>
+      <p>
+        Start the server from the project root all the same. The worker compiles your
+        TypeScript with the <code>tsconfig.json</code> of its working directory, which is the
+        server&apos;s. Started from another directory, settings such as{' '}
+        <code>&quot;jsx&quot;: &quot;react-jsx&quot;</code> do not apply, and a component that
+        does not import React fails with <code>React is not defined</code>. The IPC sockets
+        (<a href="#gio-socket-path"><code>GIO_SOCKET_PATH</code></a>) also go in the working
+        directory&apos;s <code>.gio/</code>.
       </p>
 
       <h3 id="gio-public-dir">GIO_PUBLIC_DIR</h3>
@@ -228,8 +241,8 @@ GIO_PORT=4000 GIO_LOG_FORMAT=json npx gio start`} />
         <li>Tests: when neither the environment nor a <code>.env</code> file sets it, <code>renderPage()</code> and <code>callRoute()</code> set a random one for the test process. A <code>createTestServer()</code> server does not get it.</li>
       </ul>
       <p>
-        <code>gio doctor</code> reports a missing or invalid secret when the app has{' '}
-        <code>require_session</code> guards.
+        <code>gio doctor</code> reports an invalid secret as an error, and a missing one when
+        the app has <code>require_session</code> guards.
       </p>
 
       <h3 id="gio-revalidate-token">GIO_REVALIDATE_TOKEN</h3>
@@ -248,9 +261,11 @@ GIO_PORT=4000 GIO_LOG_FORMAT=json npx gio start`} />
         The site&apos;s absolute origin (<code>https://example.com</code>), read by the
         worker. It is the <code>metadataBase</code> when no layout or page sets one, so
         relative Open Graph, canonical and alternate URLs become absolute; it resolves the
-        relative URLs <code>app/sitemap.ts</code> and <code>app/robots.ts</code> return; and{' '}
-        <code>gio export</code> generates <code>sitemap.xml</code> only when it is set. A
-        relative URL with no base logs a warning. GioJS never builds absolute URLs from the
+        relative URLs <code>app/sitemap.ts</code> and <code>app/robots.ts</code> return (a
+        relative one with the variable unset is sent as is, with the warning{' '}
+        <code>app/sitemap returned a relative URL but GIO_SITE_URL is not set</code>). For an
+        app with no <code>app/sitemap.ts</code>, <code>gio export</code> generates a{' '}
+        <code>sitemap.xml</code> only when it is set. GioJS never builds absolute URLs from the
         request&apos;s <code>Host</code> header: a cached page would carry whatever host the
         first visitor sent.
       </p>
@@ -302,9 +317,10 @@ GIO_PORT=4000 GIO_LOG_FORMAT=json npx gio start`} />
       <h3 id="gio-log-level">GIO_LOG_LEVEL</h3>
       <p>
         The worker&apos;s minimum log level: <code>debug</code>, <code>info</code>,{' '}
-        <code>warn</code> or <code>error</code>. Default <code>info</code>; any other value
-        means <code>info</code>. Read on every log call, so it applies to your plugins&apos;
-        and route handlers&apos; framework log lines too.
+        <code>warn</code> or <code>error</code> (lowercase). Default <code>info</code>; any
+        other value means <code>info</code>. It filters the JSON lines the framework logs in
+        the worker; what your own code writes with <code>console.log</code> is never
+        filtered.
       </p>
 
       <h2 id="development-and-processes">Development and processes</h2>
@@ -369,7 +385,9 @@ GIO_PORT=4000 GIO_LOG_FORMAT=json npx gio start`} />
         <code>create-giojs</code> with (<code>--pm</code> overrides it); in an existing
         project, <code>create-giojs add</code> and <code>migrate</code> go by the
         project&apos;s lockfile first. <code>gio add</code> and <code>gio migrate</code> read
-        it to choose how to run <code>create-giojs</code> (npx, pnpm dlx or bunx).
+        it before the lockfile to choose how to run a <code>create-giojs</code> the project
+        does not have installed (<code>npx</code>, <code>pnpm dlx</code> or{' '}
+        <code>bunx</code>), and <code>gio doctor</code> reports the package manager it names.
       </p>
 
       <h3 id="no-color">NO_COLOR</h3>
@@ -447,9 +465,15 @@ GIO_LOG_FORMAT=json`} />
 # existing cookies until they expire; then drop it.
 GIO_SESSION_SECRET="$NEW_SECRET,$OLD_SECRET" npx gio start`} />
 
-      <h3 id="run-a-server-from-another-directory">Run a server from another directory</h3>
-      <CodeBlock lang="bash" code={`# gio.toml, public/ and .env files are read from /srv/site
-GIO_APP_DIR=/srv/site/app GIO_CACHE_DIR=/var/cache/site giojs-server`} />
+      <h3 id="keep-the-page-cache-on-a-volume">Keep the page cache on a volume</h3>
+      <CodeBlock lang="bash" code={`# From the project root; the cache directory may be anywhere outside app/ and public/
+cd /srv/site
+GIO_CACHE_DIR=/var/cache/site npx gio start`} />
+      <p>
+        <code>[cache] disk_path</code> only takes a directory inside the project; the
+        variable takes any path, so the persisted pages can live on a volume that outlives
+        the container.
+      </p>
 
       <h3 id="one-job-per-pool">Run a startup job once per pool</h3>
       <CodeBlock lang="ts" title="gio.config.ts" code={`import { defineConfig } from '@gio.js/core';
