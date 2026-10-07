@@ -589,9 +589,6 @@ pub fn generate_request_id() -> String {
 /// WebSocket Origin) compare the browser's Origin against THIS, not the raw
 /// Host header: behind a proxy that rewrites Host to an upstream name, the
 /// raw header never matches the origin the browser saw.
-// The one host source for same-origin checks; their callers land with the
-// security middleware, until then only the tests call it.
-#[allow(dead_code)]
 pub fn effective_host<B>(req: &axum::http::Request<B>) -> Option<String> {
     if let Some(client) = req.extensions().get::<ClientInfo>() {
         return client.host.clone();

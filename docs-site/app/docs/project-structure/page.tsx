@@ -128,7 +128,7 @@ weight = 600`} />
       <ul>
         <li>A public file wins over a page with the same path (the Next.js precedence). In a static export, where a public file and a rendered page would need the same output file (public/index.html and app/page.tsx), the page is kept and the export lists the file as skipped.</li>
         <li>Not served at the root: dotfiles (except under .well-known/), symlinks, and a top-level public/_gio/ (the server&apos;s internal namespace). These stay reachable under /public/* only. Directory listings are never served.</li>
-        <li>Guards, header rules, and <code>[[rate_limits]]</code> written for a file&apos;s /public/... URL also apply at its root URL, so protecting /public/members/* protects /members/* too. Redirects and rewrites match only the URL requested - see <a href="/docs/middleware">Middleware</a>.</li>
+        <li>Guards, header rules, and <code>[[rate_limits]]</code> written for a file&apos;s /public/... URL also apply at its root URL, so protecting /public/members/* protects /members/* too, and /_gio/image serves the file only to visitors those guards admit. Redirects and rewrites match only the URL requested - see <a href="/docs/middleware">Middleware</a>.</li>
         <li>Root-served files use <code>Cache-Control: public, max-age=0, must-revalidate</code> with Last-Modified, so browsers revalidate instead of keeping an old copy after a deploy.</li>
         <li>The set of root-served files is indexed at startup, so the request path never pays a filesystem lookup. In development, edits to public/ refresh the index; in production, files added after startup need a restart.</li>
       </ul>

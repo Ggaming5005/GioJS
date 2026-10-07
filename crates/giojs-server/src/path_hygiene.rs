@@ -17,7 +17,20 @@
 //!   router would treat them as ordinary segments while every browser and
 //!   proxy resolves them, so no single canonical form is safe for both,
 //! - a `%` that does not start a valid escape is rejected too (as nginx,
-//!   Apache and Go's net/http do): no decoding of such a path is canonical.
+//!   Apache and Go's net/http do): no decoding of such a path is canonical,
+//! - a raw `\` is rejected: browsers never send one (WHATWG URL parsing
+//!   turns it into `/` in http(s) paths), and a segment carrying one into a
+//!   redirect target (`/blog/:slug` -> `/:slug`) would build `Location:
+//!   /\evil.example`, which browsers resolve to another host. Its escape
+//!   `%5C` stays encoded and is harmless there.
+//!
+//! `%2F` and `%5C` stay encoded in app paths (a dynamic segment may carry an
+//! encoded slash), but not under the `/public` file mount: ServeDir decodes
+//! them into path separators, so `/public/members%2Freport.txt` - one
+//! segment to every rule - would serve `public/members/report.txt` past the
+//! guards, header rules and rate limits written for `/public/members/*`.
+//! `file_mount_rejection` refuses those (and `public_files` never maps such
+//! a spelling onto a root-served file).
 //!
 //! The escape normalization is also applied to the URI forwarded to Node
 //! (see `path_hygiene_middleware` in main.rs), so the string the rules matched
@@ -40,10 +53,18 @@ pub enum PathRejection {
     DotSegment,
     /// A `%` not followed by two hex digits (`%zz`, `%6`, a trailing `%`).
     MalformedEscape,
+    /// A raw `\`, which browsers and proxies may read as a `/`.
+    Backslash,
+    /// `%2F` / `%5C` in a path served from the public/ directory.
+    EncodedSeparator,
 }
 
 /// The reserved namespace for Rust's own endpoints (`/_gio/health`, ...).
 const GIO_NAMESPACE_SEGMENT: &str = "_gio";
+
+/// The first segment of the public/ directory mount
+/// (`public_files::PUBLIC_URL_PREFIX`).
+const PUBLIC_MOUNT_SEGMENT: &str = "public";
 
 fn is_unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
@@ -115,6 +136,9 @@ fn is_dot_segment(segment: &str) -> bool {
 /// already-normalized forwarded path, see what the gate saw.
 pub fn canonical(path: &str) -> Result<Cow<'_, str>, PathRejection> {
     let normalized = normalize_escapes(path)?;
+    if normalized.contains('\\') {
+        return Err(PathRejection::Backslash);
+    }
     if normalized.split('/').any(is_dot_segment) {
         return Err(PathRejection::DotSegment);
     }
@@ -133,6 +157,17 @@ pub fn canonical(path: &str) -> Result<Cow<'_, str>, PathRejection> {
         out.push('/');
     }
     Ok(Cow::Owned(out))
+}
+
+/// Why a canonical path must not reach the public/ file mount, if it must
+/// not: an escaped separator there names a different file than the one
+/// every rule matched (see the module docs). Escapes in a canonical path are
+/// uppercase, so the two spellings below are the only ones.
+pub fn file_mount_rejection(canonical: &str) -> Option<PathRejection> {
+    let in_public_mount =
+        canonical.split('/').find(|segment| !segment.is_empty()) == Some(PUBLIC_MOUNT_SEGMENT);
+    (in_public_mount && (canonical.contains("%2F") || canonical.contains("%5C")))
+        .then_some(PathRejection::EncodedSeparator)
 }
 
 /// True when `path` lies in the reserved `/_gio` namespace. Compares the first
@@ -350,6 +385,43 @@ mod tests {
         assert_eq!(canon("/..."), "/...");
         assert_eq!(canon("/.well-known/x"), "/.well-known/x");
         assert_eq!(canon("/a..b"), "/a..b");
+    }
+
+    #[test]
+    fn raw_backslashes_are_rejected_but_their_escape_is_not() {
+        for path in ["/\\evil.example", "/blog/\\evil.example", "/a\\b", "\\"] {
+            assert_eq!(
+                canonical(path),
+                Err(PathRejection::Backslash),
+                "{path} must be rejected"
+            );
+        }
+        assert_eq!(canon("/blog/%5cevil.example"), "/blog/%5Cevil.example");
+    }
+
+    #[test]
+    fn encoded_separators_are_refused_only_under_the_public_mount() {
+        for path in [
+            "/public/members%2fReport.txt",
+            "/public/members%2Freport.txt",
+            "/public/members%5Creport.txt",
+            "//public//a%2Fb",
+        ] {
+            assert_eq!(
+                file_mount_rejection(&canon(path)),
+                Some(PathRejection::EncodedSeparator),
+                "{path} must be refused"
+            );
+        }
+        for path in [
+            "/public/members/report.txt",
+            "/public/hello%20world.txt",
+            "/blog/a%2Fb",
+            "/publicx/a%2Fb",
+            "/members%2Freport.txt",
+        ] {
+            assert_eq!(file_mount_rejection(&canon(path)), None, "{path}");
+        }
     }
 
     // ── /_gio namespace ──────────────────────────────────────────────────────

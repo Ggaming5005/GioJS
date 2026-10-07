@@ -238,12 +238,25 @@ to   = "/p/:post/by/:user"   # /u/alice/p/42 -> /p/42/by/alice`} />
           <code>/public/*rest</code> &rarr; <code>/*rest</code> redirect that moves old links
           to the root does not loop.
         </li>
+        <li>
+          <strong>The image optimizer</strong> is held to the guards of both URLs: a
+          local <code>/_gio/image</code> <code>src</code> that a guard covers gets{' '}
+          <code>403</code> for visitors the guard turns away, and{' '}
+          <code>Cache-Control: private, no-cache</code> for those it admits.
+        </li>
       </ul>
+      <p>
+        An escaped slash or backslash (<code>%2F</code>, <code>%5C</code>) never names a
+        file: under <code>/public/</code> it gets <code>400</code>, and at the root the
+        request goes to your pages, so <code>/members%2Freport.pdf</code> cannot reach the
+        file past the rules for <code>/members/*rest</code>.
+      </p>
 
       <div className="callout">
         GioJS&apos;s own <code>/_gio</code> endpoints (health, metrics, image
         optimization, fonts, and devtools in development) are exempt from all
-        middleware rules. Every other <code>/_gio/...</code> path answers{' '}
+        middleware rules (the image optimizer still checks the guards of the
+        public/ file it reads). Every other <code>/_gio/...</code> path answers{' '}
         <code>404</code> from Rust and never reaches your pages, so a
         top-level dynamic segment like <code>app/[org]/</code> can never be
         rendered with <code>org = &quot;_gio&quot;</code> behind your

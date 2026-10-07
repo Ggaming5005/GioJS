@@ -212,7 +212,10 @@ fn scan_public_files(root: &Path) -> HashSet<String> {
 }
 
 /// Percent-decode a URL path the way ServeDir does. `None` for malformed
-/// escapes or non-UTF-8 results - neither can name an indexed file.
+/// escapes or non-UTF-8 results - neither can name an indexed file - and for
+/// an escaped separator (`%2F`, `%5C`): every rule sees `/members%2Fx.txt`
+/// as one segment, so mapping it onto public/members/x.txt would serve that
+/// file past the guards, header rules and rate limits for `/members/*`.
 fn percent_decode_path(path: &str) -> Option<Cow<'_, str>> {
     if !path.contains('%') {
         return Some(Cow::Borrowed(path));
@@ -224,7 +227,11 @@ fn percent_decode_path(path: &str) -> Option<Cow<'_, str>> {
         if bytes[i] == b'%' {
             let hex = bytes.get(i + 1..i + 3)?;
             let hex = std::str::from_utf8(hex).ok()?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
+            let byte = u8::from_str_radix(hex, 16).ok()?;
+            if matches!(byte, b'/' | b'\\') {
+                return None;
+            }
+            out.push(byte);
             i += 3;
         } else {
             out.push(bytes[i]);
@@ -423,6 +430,24 @@ mod tests {
         assert_eq!(percent_decode_path("/plain").as_deref(), Some("/plain"));
         assert!(percent_decode_path("/bad%zz").is_none());
         assert!(percent_decode_path("/short%4").is_none());
+    }
+
+    #[test]
+    fn escaped_separators_never_name_an_indexed_file() {
+        let root = temp_public("escaped_separator");
+        write(&root, "members/report.txt", "secret");
+        let public = PublicFiles::load(root.clone());
+        assert!(public.contains("/members/report.txt"));
+        for path in [
+            "/members%2Freport.txt",
+            "/members%2freport.txt",
+            "/members%5Creport.txt",
+            "%2Fmembers/report.txt",
+        ] {
+            assert!(!public.contains(path), "{path} must not match");
+            assert_eq!(public.public_url(path), None, "{path}");
+        }
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]

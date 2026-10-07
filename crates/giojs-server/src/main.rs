@@ -1141,6 +1141,8 @@ async fn client_identity_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
+    // First of all, so plugins, guards and the worker all read one Cookie.
+    join_cookie_fields(req.headers_mut());
     let Some(ConnectInfo(peer)) = req.extensions().get::<ConnectInfo<SocketAddr>>().copied() else {
         return next.run(req).await;
     };
@@ -1482,14 +1484,37 @@ async fn prefetch_budget_middleware(
         return next.run(req).await;
     }
     let ip = client_identity::client_ip(&req, addr);
-    if !state.prefetch.try_acquire(ip) {
+    let Some(_slot) = PrefetchSlot::acquire(&state.prefetch, ip) else {
         warn!(ip = %ip, path = %req.uri().path(), "prefetch budget exceeded");
         state.metrics.record_prefetch_rejected();
         return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
+    next.run(req).await
+}
+
+/// One in-flight prefetch, released when dropped: when the response is
+/// ready, and also when the client disconnects (or resets the HTTP/2
+/// stream) first and the request future is dropped mid-await. A slot freed
+/// only after the await would leak there, and a handful of cancelled
+/// prefetches would 429 every later prefetch from that client.
+struct PrefetchSlot {
+    budgets: Arc<PrefetchBudgets>,
+    ip: std::net::IpAddr,
+}
+
+impl PrefetchSlot {
+    fn acquire(budgets: &Arc<PrefetchBudgets>, ip: std::net::IpAddr) -> Option<Self> {
+        budgets.try_acquire(ip).then(|| Self {
+            budgets: Arc::clone(budgets),
+            ip,
+        })
     }
-    let resp = next.run(req).await;
-    state.prefetch.release(ip);
-    resp
+}
+
+impl Drop for PrefetchSlot {
+    fn drop(&mut self) {
+        self.budgets.release(self.ip);
+    }
 }
 
 /// True when the router dispatched this request to one of Rust's own `/_gio`
@@ -1507,7 +1532,8 @@ fn is_internal_endpoint(req: &Request) -> bool {
 }
 
 /// Outermost path gate (see path_hygiene.rs), ahead of i18n, rate limits and
-/// rules. Dot segments and malformed escapes are refused, the `/_gio`
+/// rules. Dot segments, malformed escapes, raw backslashes and escaped
+/// separators under the public/ mount are refused, the `/_gio`
 /// namespace answers 404 for anything that is not a real internal endpoint
 /// (so `/_gio/x` can never render an app page under a top-level dynamic
 /// segment, nor reach the cache or Node), and unreserved percent-escapes are
@@ -1516,8 +1542,14 @@ fn is_internal_endpoint(req: &Request) -> bool {
 /// normalization, so the later matchers' own `canonical` calls decode nothing
 /// further.
 async fn path_hygiene_middleware(mut req: Request, next: Next) -> Response {
-    let in_gio_namespace = match path_hygiene::canonical(req.uri().path()) {
-        Ok(canonical) => path_hygiene::is_gio_namespace(&canonical),
+    let checked = path_hygiene::canonical(req.uri().path()).and_then(|canonical| {
+        match path_hygiene::file_mount_rejection(&canonical) {
+            Some(rejection) => Err(rejection),
+            None => Ok(path_hygiene::is_gio_namespace(&canonical)),
+        }
+    });
+    let in_gio_namespace = match checked {
+        Ok(in_gio_namespace) => in_gio_namespace,
         Err(rejection) => {
             warn!(path = %req.uri().path(), ?rejection, "request path rejected");
             let mut resp = (StatusCode::BAD_REQUEST, "400 Bad Request").into_response();
@@ -1631,17 +1663,26 @@ async fn cross_site_request_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    let csrf = state.security.csrf();
+    match cross_site_rejection(&state.security, &req) {
+        Some(resp) => resp,
+        None => next.run(req).await,
+    }
+}
+
+/// The 403 `cross_site_request_middleware` answers `req` with, or None to
+/// let it through.
+fn cross_site_rejection(security: &security::SecurityPolicy, req: &Request) -> Option<Response> {
+    let csrf = security.csrf();
     let websocket = ws::is_upgrade_request(req.headers());
-    if !state.security.checks_cross_site(req.method(), websocket) || is_internal_endpoint(&req) {
-        return next.run(req).await;
+    if !security.checks_cross_site(req.method(), websocket) || is_internal_endpoint(req) {
+        return None;
     }
     let path = match path_hygiene::canonical(req.uri().path()) {
         Ok(canonical) => canonical.into_owned(),
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        Err(_) => return Some(StatusCode::BAD_REQUEST.into_response()),
     };
     if csrf.is_exempt(&path) {
-        return next.run(req).await;
+        return None;
     }
     let headers = req.headers();
     // A present but non-UTF-8 header is not absent: it must not pass as
@@ -1651,14 +1692,16 @@ async fn cross_site_request_middleware(
             .get(name)
             .map(|value| value.to_str().unwrap_or("<invalid>"))
     };
-    let authority = security::expected_origin_authority(headers, req.uri());
+    // The host the client addressed: a trusted proxy's X-Forwarded-Host /
+    // Forwarded host= when it rewrote Host, else Host (or :authority).
+    let authority = client_identity::effective_host(req);
     let verdict = csrf.check(
         header_str("sec-fetch-site"),
         header_str(header::ORIGIN.as_str()),
         authority.as_deref(),
     );
     let Err(rejection) = verdict else {
-        return next.run(req).await;
+        return None;
     };
     let what = if security::is_unsafe_method(req.method()) {
         req.method().to_string()
@@ -1672,7 +1715,7 @@ async fn cross_site_request_middleware(
     } else {
         debug!(method = %req.method(), path = %path, ?rejection, "cross-site request blocked");
     }
-    security::cross_site_rejection_response(&rejection, &what)
+    Some(security::cross_site_rejection_response(&rejection, &what))
 }
 
 /// Declarative middleware rules (gio.toml + worker middleware.ts), executed
@@ -3645,6 +3688,19 @@ async fn image_handler_route(
     axum::extract::Query(query): axum::extract::Query<giojs_image::ImageQuery>,
     req_headers: axum::http::HeaderMap,
 ) -> Response {
+    let access = match query.src.as_deref() {
+        Some(src) => image_source_access(
+            &state.image,
+            &state.static_rules,
+            &state.ipc.worker_rules(),
+            src,
+            &req_headers,
+        ),
+        None => ImageSourceAccess::Open,
+    };
+    if access == ImageSourceAccess::Denied {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let accept = req_headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -3652,10 +3708,17 @@ async fn image_handler_route(
     match state.image.handle(query, accept.as_deref()).await {
         Ok((data, format, cache_hit)) => {
             state.metrics.record_image_processed(format.extension());
+            // A guarded file is for the visitors its guard admits: a shared
+            // cache keys by URL and would hand it to everyone.
+            let cache_control = if access == ImageSourceAccess::Admitted {
+                "private, no-cache"
+            } else {
+                "public, max-age=31536000, immutable"
+            };
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, format.content_type())
-                .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+                .header(header::CACHE_CONTROL, cache_control)
                 .header("vary", "Accept")
                 .header("x-gio-cache", if cache_hit { "HIT" } else { "MISS" })
                 .body(axum::body::Body::from(data))
@@ -3678,6 +3741,82 @@ async fn image_handler_route(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+/// What the guards say about the public/ file a local image `src` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageSourceAccess {
+    /// No guard covers it (or `src` is remote, or names no file).
+    Open,
+    /// A guard covers it and admitted this visitor.
+    Admitted,
+    /// A guard covers it and would turn this visitor away.
+    Denied,
+}
+
+/// `/_gio/image` is exempt from `rules_middleware`, yet a local `src` reads
+/// a public/ file that also answers at `/x` and `/public/x` - URLs guards
+/// may cover. The optimizer is a third URL for the same file, so it is held
+/// to the guards of both: those of the file it actually reads (symlinks
+/// resolved) and those of the path `src` spells.
+fn image_source_access(
+    image: &giojs_image::ImageHandler,
+    static_rules: &rules::RuleSet,
+    worker_rules: &rules::RuleSet,
+    src: &str,
+    headers: &axum::http::HeaderMap,
+) -> ImageSourceAccess {
+    if static_rules.is_empty() && worker_rules.is_empty() {
+        return ImageSourceAccess::Open;
+    }
+    // Remote, or no such file: the optimizer reads nothing from public/.
+    let Some(file) = image.local_file_path(src) else {
+        return ImageSourceAccess::Open;
+    };
+    let spelled = src.trim_start_matches('/');
+    let spelled = format!("/{}", spelled.strip_prefix("public/").unwrap_or(spelled));
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok());
+    let mut access = ImageSourceAccess::Open;
+    for (path, is_file) in [(file.as_str(), true), (spelled.as_str(), false)] {
+        let root_url = encode_url_path(path);
+        let public_url = format!("{}{root_url}", public_files::PUBLIC_URL_PREFIX);
+        for url in [root_url, public_url] {
+            let canonical = match path_hygiene::canonical(&url) {
+                Ok(canonical) => canonical.into_owned(),
+                // The file's own URL always canonicalizes; if it ever did
+                // not, no guard could be checked: refuse.
+                Err(_) if is_file => return ImageSourceAccess::Denied,
+                // A spelling with `..` or the like: the file's URL covers it.
+                Err(_) => continue,
+            };
+            if rules::check_guards_merged(static_rules, worker_rules, &canonical, cookie_header)
+                .is_some()
+            {
+                return ImageSourceAccess::Denied;
+            }
+            if static_rules.guards_path(&canonical) || worker_rules.guards_path(&canonical) {
+                access = ImageSourceAccess::Admitted;
+            }
+        }
+    }
+    access
+}
+
+/// Percent-encode a decoded URL path as a browser sends it: everything but
+/// `/`, unreserved characters and the sub-delims RFC 3986 allows in a path.
+fn encode_url_path(path: &str) -> String {
+    const PATH_SAFE: &[u8] = b"/-._~!$&'()*+,;=:@";
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || PATH_SAFE.contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -4297,15 +4436,48 @@ fn url_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The request headers for the worker (and the coalescing key), one entry
+/// per name. A repeated header is joined, not reduced to one of its fields:
+/// `cookie` fields with `"; "` (HTTP/2 cookie crumbs, RFC 9113 section
+/// 8.2.3), every other name with `", "` (RFC 9110 section 5.3).
 fn extract_headers(req: &Request) -> HashMap<String, String> {
-    req.headers()
-        .iter()
-        .filter_map(|(k, v)| {
-            v.to_str()
-                .ok()
-                .map(|s| (k.as_str().to_lowercase(), s.to_string()))
-        })
-        .collect()
+    let mut headers: HashMap<String, String> = HashMap::new();
+    for (name, value) in req.headers() {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        match headers.entry(name.as_str().to_string()) {
+            std::collections::hash_map::Entry::Occupied(mut joined) => {
+                let joined = joined.get_mut();
+                joined.push_str(if name == header::COOKIE { "; " } else { ", " });
+                joined.push_str(value);
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(value.to_string());
+            }
+        }
+    }
+    headers
+}
+
+/// Join every `cookie` field into one, in wire order. Over HTTP/2 browsers
+/// send each cookie as its own field (RFC 9113 section 8.2.3) and hyper
+/// keeps them apart, while guards read the first field and parsers read one:
+/// without this, a visitor with two cookies loses one of them to each.
+fn join_cookie_fields(headers: &mut axum::http::HeaderMap) {
+    let mut fields = headers.get_all(header::COOKIE).iter();
+    let (Some(first), Some(_)) = (fields.next(), fields.next()) else {
+        return;
+    };
+    let mut joined = first.as_bytes().to_vec();
+    for field in headers.get_all(header::COOKIE).iter().skip(1) {
+        joined.extend_from_slice(b"; ");
+        joined.extend_from_slice(field.as_bytes());
+    }
+    // Joined valid field values are a valid field value.
+    if let Ok(value) = HeaderValue::from_bytes(&joined) {
+        headers.insert(header::COOKIE, value);
+    }
 }
 
 /// The host a request was sent to: the Host header, or the HTTP/2
@@ -5800,6 +5972,381 @@ mod tests {
                 "{uri}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn raw_backslashes_are_rejected_with_400() {
+        // `/blog/:slug` -> `/:slug` would answer `Location: /\evil.example`,
+        // which browsers resolve to https://evil.example/.
+        let app = hygiene_router(false);
+        for uri in ["/blog/\\evil.example", "/\\evil.example", "/a\\b"] {
+            let (status, internal, body) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(internal, None, "{uri}");
+            assert!(!body.contains("fallback"), "{uri} reached the fallback");
+        }
+        // The escape stays encoded and is no redirect hazard.
+        let (status, _, body) = hygiene_get(&app, "/blog/%5cevil.example").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "fallback /blog/%5Cevil.example");
+    }
+
+    #[tokio::test]
+    async fn escaped_separators_never_reach_the_public_mount() {
+        // ServeDir decodes %2F into a separator: one segment to every rule,
+        // public/members/report.txt to the file service.
+        let app = hygiene_router(false);
+        for uri in [
+            "/public/members%2Freport.txt",
+            "/public/members%2freport.txt",
+            "/public/members%5Creport.txt",
+            "//public/members%2Freport.txt",
+        ] {
+            let (status, internal, body) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(internal, None, "{uri}");
+            assert!(!body.contains("fallback"), "{uri} reached the fallback");
+        }
+        // App paths keep their encoded slashes (a dynamic segment may carry
+        // one); the root alias never maps them onto a file (public_files.rs).
+        let (status, _, body) = hygiene_get(&app, "/members%2Freport.txt").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "fallback /members%2Freport.txt");
+    }
+
+    // ── cookie crumbs ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn cookie_crumbs_are_joined_in_wire_order() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append(header::COOKIE, HeaderValue::from_static("a=1"));
+        headers.append(header::COOKIE, HeaderValue::from_static("session=1"));
+        headers.append(header::COOKIE, HeaderValue::from_static("who=alice"));
+        join_cookie_fields(&mut headers);
+        let fields: Vec<_> = headers.get_all(header::COOKIE).iter().collect();
+        assert_eq!(fields, ["a=1; session=1; who=alice"]);
+
+        let mut single = axum::http::HeaderMap::new();
+        single.insert(header::COOKIE, HeaderValue::from_static("a=1; b=2"));
+        join_cookie_fields(&mut single);
+        assert_eq!(single[header::COOKIE], "a=1; b=2");
+        let mut none = axum::http::HeaderMap::new();
+        join_cookie_fields(&mut none);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn worker_headers_join_repeated_fields_instead_of_dropping_them() {
+        let req = Request::builder()
+            .uri("/personal")
+            .header(header::COOKIE, "who=alice")
+            .header(header::COOKIE, "z=1")
+            .header("x-tag", "a")
+            .header("x-tag", "b")
+            .header("Accept", "text/html")
+            .body(Body::empty())
+            .unwrap();
+        let headers = extract_headers(&req);
+        assert_eq!(headers["cookie"], "who=alice; z=1");
+        assert_eq!(headers["x-tag"], "a, b");
+        assert_eq!(headers["accept"], "text/html");
+    }
+
+    #[tokio::test]
+    async fn cookie_crumbs_reach_guards_as_one_header() {
+        // HTTP/2 browsers send one `cookie` field per cookie; the guard
+        // reads the Cookie header, and must see every crumb.
+        let guards = Arc::new(rules::RuleSet::compile(&rules::MiddlewareRules {
+            guards: vec![rules::GuardRule {
+                path: "/members/*rest".to_string(),
+                require_cookie: "session".to_string(),
+                require_session: false,
+                redirect_to: "/login".to_string(),
+            }],
+            ..rules::MiddlewareRules::default()
+        }));
+        let app = Router::new()
+            .fallback(move |req: Request<Body>| {
+                let guards = guards.clone();
+                async move {
+                    let cookie = req
+                        .headers()
+                        .get(header::COOKIE)
+                        .and_then(|value| value.to_str().ok());
+                    match guards.apply(req.uri().path(), cookie) {
+                        rules::RuleOutcome::None => "admitted",
+                        _ => "redirected",
+                    }
+                }
+            })
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(client_identity::ProxyTrust::default()),
+                client_identity_middleware,
+            ));
+        for crumbs in [
+            ["a=1", "session=1"].as_slice(),
+            ["session=1", "a=1"].as_slice(),
+            ["session=1"].as_slice(),
+        ] {
+            let mut req = Request::builder().uri("/members/report");
+            for crumb in crumbs {
+                req = req.header(header::COOKIE, *crumb);
+            }
+            let mut req = req.body(Body::empty()).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 4000))));
+            let resp = app.clone().call(req).await.unwrap();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(&body[..], b"admitted", "{crumbs:?}");
+        }
+    }
+
+    // ── CSRF behind a trusted proxy ───────────────────────────────────────────
+
+    fn csrf_router(trusted_proxies: &[&str]) -> Router {
+        let security = Arc::new(
+            security::SecurityPolicy::new(&config::SecurityConfig::default(), false).unwrap(),
+        );
+        let trust = Arc::new(client_identity::ProxyTrust {
+            trusted: serde_json::from_value(serde_json::json!(trusted_proxies)).unwrap(),
+            ..client_identity::ProxyTrust::default()
+        });
+        Router::new()
+            .fallback(|| async { "ok" })
+            .layer(axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: Next| {
+                    let security = security.clone();
+                    async move {
+                        match cross_site_rejection(&security, &req) {
+                            Some(resp) => resp,
+                            None => next.run(req).await,
+                        }
+                    }
+                },
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                trust,
+                client_identity_middleware,
+            ))
+    }
+
+    async fn csrf_post(app: &Router, peer: [u8; 4], headers: &[(&str, &str)]) -> StatusCode {
+        let mut req = Request::builder().method("POST").uri("/api/echo");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let mut req = req.body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((peer, 4000))));
+        app.clone().call(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn csrf_compares_origin_with_a_trusted_proxys_forwarded_host() {
+        let app = csrf_router(&["127.0.0.1"]);
+        let proxied = |origin| {
+            [
+                ("host", "127.0.0.1:39871"),
+                ("x-forwarded-host", "app.example"),
+                ("x-forwarded-proto", "https"),
+                ("origin", origin),
+            ]
+        };
+        // A Host-rewriting proxy (nginx's default proxy_pass): the browser's
+        // same-origin post names the forwarded host, not Host.
+        assert_eq!(
+            csrf_post(&app, [127, 0, 0, 1], &proxied("https://app.example")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            csrf_post(&app, [127, 0, 0, 1], &proxied("https://evil.example")).await,
+            StatusCode::FORBIDDEN
+        );
+        // From a peer that is not a trusted proxy, X-Forwarded-Host is the
+        // client's own claim and does not count.
+        assert_eq!(
+            csrf_post(&app, [203, 0, 113, 9], &proxied("https://app.example")).await,
+            StatusCode::FORBIDDEN
+        );
+        // RFC 7239 host= from a trusted proxy counts the same way.
+        let forwarded = Arc::new(client_identity::ProxyTrust {
+            trusted: serde_json::from_value(serde_json::json!(["127.0.0.1"])).unwrap(),
+            headers: client_identity::ProxyHeaders::Forwarded,
+            ..client_identity::ProxyTrust::default()
+        });
+        let security = Arc::new(
+            security::SecurityPolicy::new(&config::SecurityConfig::default(), false).unwrap(),
+        );
+        let app = Router::new()
+            .fallback(|| async { "ok" })
+            .layer(axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: Next| {
+                    let security = security.clone();
+                    async move {
+                        match cross_site_rejection(&security, &req) {
+                            Some(resp) => resp,
+                            None => next.run(req).await,
+                        }
+                    }
+                },
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                forwarded,
+                client_identity_middleware,
+            ));
+        assert_eq!(
+            csrf_post(
+                &app,
+                [127, 0, 0, 1],
+                &[
+                    ("host", "127.0.0.1:39871"),
+                    ("forwarded", "for=198.51.100.7;proto=https;host=app.example"),
+                    ("origin", "https://app.example"),
+                ],
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn csrf_without_proxies_still_compares_origin_with_host() {
+        let app = csrf_router(&[]);
+        let direct = |origin| [("host", "site.example"), ("origin", origin)];
+        assert_eq!(
+            csrf_post(&app, [192, 0, 2, 1], &direct("http://site.example")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            csrf_post(&app, [192, 0, 2, 1], &direct("http://evil.example")).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    // ── /_gio/image and guards ────────────────────────────────────────────────
+
+    #[test]
+    fn image_optimizer_honors_the_guards_of_the_file_it_reads() {
+        let base = std::env::temp_dir().join(format!("gio_image_guard_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let public = base.join("public");
+        std::fs::create_dir_all(public.join("members")).unwrap();
+        std::fs::create_dir_all(public.join("open")).unwrap();
+        std::fs::create_dir_all(public.join("vault")).unwrap();
+        std::fs::write(public.join("members").join("photo.png"), b"png").unwrap();
+        std::fs::write(public.join("open").join("logo.png"), b"png").unwrap();
+        std::fs::write(public.join("vault").join("key.png"), b"png").unwrap();
+        let image = giojs_image::ImageHandler::new(
+            giojs_image::ImageConfig::default(),
+            base.join("cache"),
+            public.clone(),
+        );
+        let guard = |path: &str| rules::GuardRule {
+            path: path.to_string(),
+            require_cookie: "session".to_string(),
+            require_session: false,
+            redirect_to: "/login".to_string(),
+        };
+        // A guard for the root URL (gio.toml) and one for the /public URL
+        // (middleware.ts).
+        let static_rules = rules::RuleSet::compile(&rules::MiddlewareRules {
+            guards: vec![guard("/members/*rest")],
+            ..rules::MiddlewareRules::default()
+        });
+        let worker_rules = rules::RuleSet::compile(&rules::MiddlewareRules {
+            guards: vec![guard("/public/vault/*rest")],
+            ..rules::MiddlewareRules::default()
+        });
+        let anonymous = axum::http::HeaderMap::new();
+        let mut member = axum::http::HeaderMap::new();
+        member.insert(header::COOKIE, HeaderValue::from_static("a=1; session=x"));
+        let access = |src: &str, headers: &axum::http::HeaderMap| {
+            image_source_access(&image, &static_rules, &worker_rules, src, headers)
+        };
+        for src in [
+            "/members/photo.png",
+            "/public/members/photo.png",
+            "members//photo.png",
+            "/open/../members/photo.png",
+            "/vault/key.png",
+            "/public/vault/key.png",
+        ] {
+            assert_eq!(access(src, &anonymous), ImageSourceAccess::Denied, "{src}");
+            assert_eq!(access(src, &member), ImageSourceAccess::Admitted, "{src}");
+        }
+        assert_eq!(
+            access("/open/logo.png", &anonymous),
+            ImageSourceAccess::Open
+        );
+        assert_eq!(
+            access("https://cdn.example/members/photo.png", &anonymous),
+            ImageSourceAccess::Open
+        );
+        #[cfg(unix)]
+        {
+            // A symlink outside the guarded folder still reads the guarded file.
+            std::os::unix::fs::symlink(
+                public.join("members").join("photo.png"),
+                public.join("open").join("alias.png"),
+            )
+            .unwrap();
+            assert_eq!(
+                access("/open/alias.png", &anonymous),
+                ImageSourceAccess::Denied
+            );
+        }
+        let none = rules::RuleSet::default();
+        assert_eq!(
+            image_source_access(&image, &none, &none, "/members/photo.png", &anonymous),
+            ImageSourceAccess::Open
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn encode_url_path_spells_paths_as_browsers_send_them() {
+        assert_eq!(encode_url_path("/a/b.png"), "/a/b.png");
+        assert_eq!(encode_url_path("/my photo.png"), "/my%20photo.png");
+        assert_eq!(encode_url_path("/caf\u{e9}/100%"), "/caf%C3%A9/100%25");
+        assert_eq!(encode_url_path("/a\\b?#"), "/a%5Cb%3F%23");
+    }
+
+    // ── prefetch budget ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_cancelled_prefetch_releases_its_budget_slot() {
+        let budgets = Arc::new(PrefetchBudgets::new(giojs_prefetch::PrefetchConfig {
+            max_in_flight: 1,
+            max_per_second: 100,
+        }));
+        let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        // What prefetch_budget_middleware does: hold the slot across the
+        // await of a render that never finishes - until the client goes away
+        // and hyper drops the request future.
+        let in_flight = {
+            let budgets = budgets.clone();
+            async move {
+                let _slot = PrefetchSlot::acquire(&budgets, ip).expect("first slot");
+                std::future::pending::<()>().await;
+            }
+        };
+        let mut in_flight = Box::pin(in_flight);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut in_flight)
+                .await
+                .is_err()
+        );
+        assert!(
+            PrefetchSlot::acquire(&budgets, ip).is_none(),
+            "the slot is held while the prefetch is in flight"
+        );
+        drop(in_flight);
+        assert!(
+            PrefetchSlot::acquire(&budgets, ip).is_some(),
+            "the cancelled prefetch released its slot"
+        );
     }
 
     // ── query decoding ────────────────────────────────────────────────────────

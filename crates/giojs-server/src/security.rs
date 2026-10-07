@@ -37,7 +37,7 @@ use std::task::{Context, Poll};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use bytes::{Bytes, BytesMut};
@@ -868,24 +868,6 @@ pub fn is_unsafe_method(method: &Method) -> bool {
     )
 }
 
-/// The authority (`host[:port]`) the client addressed - what a same-origin
-/// request's Origin names. The Host header, or the HTTP/2 :authority.
-///
-/// MERGE NOTE (client-identity workstream): this is the single place the
-/// cross-site checks learn the request's own host. Behind a trusted proxy
-/// that rewrites Host, return the X-Forwarded-Host it supplied here (for
-/// trusted peers only) - CSRF and the WebSocket origin check both follow.
-pub fn expected_origin_authority(headers: &HeaderMap, uri: &Uri) -> Option<String> {
-    headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-        .or_else(|| {
-            uri.authority()
-                .map(|authority| authority.as_str().to_string())
-        })
-}
-
 /// A parsed `http(s)://host[:port]` origin, port defaulted from the scheme.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Origin {
@@ -1075,7 +1057,9 @@ impl CsrfPolicy {
     }
 
     /// The decision for one unsafe request or WebSocket upgrade. `authority`
-    /// is `expected_origin_authority`; the other two are the raw headers.
+    /// is the host the client addressed (`client_identity::effective_host`:
+    /// a trusted proxy's forwarded host counts); the other two are the raw
+    /// headers.
     pub fn check(
         &self,
         sec_fetch_site: Option<&str>,
@@ -2027,20 +2011,5 @@ mod tests {
         for method in [Method::GET, Method::HEAD, Method::OPTIONS, Method::TRACE] {
             assert!(!is_unsafe_method(&method), "{method}");
         }
-    }
-
-    #[test]
-    fn expected_authority_prefers_host_then_uri_authority() {
-        let mut headers = HeaderMap::new();
-        let uri: Uri = "https://h2.example:8443/x".parse().unwrap();
-        assert_eq!(
-            expected_origin_authority(&headers, &uri).as_deref(),
-            Some("h2.example:8443")
-        );
-        headers.insert(header::HOST, HeaderValue::from_static("site.example"));
-        assert_eq!(
-            expected_origin_authority(&headers, &uri).as_deref(),
-            Some("site.example")
-        );
     }
 }

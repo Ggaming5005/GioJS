@@ -1684,6 +1684,53 @@ async function main() {
       assert.equal(member.headers.get('x-robots-tag'), 'noindex', '/public/* header rule stamped on the alias');
     });
 
+    await test('an escaped slash cannot reach a guarded public/ file', async () => {
+      // ServeDir decodes %2F into a separator, while every rule sees one
+      // segment: this used to serve the file with neither guard nor header.
+      for (const path of ['/public/members%2Freport.txt', '/public/members%2freport.txt', '/public/members%5Creport.txt']) {
+        const res = await rawGet(path);
+        assert.equal(res.status, 400, path);
+        assert.doesNotMatch(res.body, /FIXTURE_MEMBERS_ONLY/, path);
+      }
+      // At the root the spelling is an app path, never the file.
+      const root = await rawGet('/members%2Freport.txt');
+      assert.doesNotMatch(root.body, /FIXTURE_MEMBERS_ONLY/);
+    });
+
+    await test('/_gio/image honors the guards of the public/ file it reads', async () => {
+      for (const src of ['/members/report.txt', '/public/members/report.txt', 'members//report.txt']) {
+        const res = await fetch(`${BASE}/_gio/image?src=${encodeURIComponent(src)}&w=48`);
+        assert.equal(res.status, 403, src);
+        assert.doesNotMatch(await res.text(), /FIXTURE_MEMBERS_ONLY/, src);
+      }
+    });
+
+    await test('a raw backslash in the path is refused, so no redirect can point off-site', async () => {
+      for (const path of ['/\\evil.example', '/moved/\\evil.example', '/public/members/\\report.txt']) {
+        const res = await rawGet(path);
+        assert.equal(res.status, 400, path);
+        assert.equal(res.headers.location, undefined, path);
+      }
+    });
+
+    await test('split Cookie fields reach guards and the worker as one header', async () => {
+      // HTTP/2 browsers send one cookie field per cookie; several Cookie
+      // lines take the same path through the server.
+      const exchange = (path, crumbs) => rawExchange(
+        `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:39517\r\nConnection: close\r\n` +
+          crumbs.map((crumb) => `Cookie: ${crumb}\r\n`).join('') + '\r\n',
+      );
+      for (const crumbs of [['a=1', 'session=1'], ['session=1', 'a=1']]) {
+        const { data } = await exchange('/public/members/report.txt', crumbs);
+        assert.match(data, /^HTTP\/1\.1 200/, crumbs.join(' | '));
+        assert.match(data, /FIXTURE_MEMBERS_ONLY/, crumbs.join(' | '));
+      }
+      for (const crumbs of [['who=alice', 'z=1'], ['z=1', 'who=alice']]) {
+        const { data } = await exchange('/personal', crumbs);
+        assert.match(data, /PERSONAL_FIXTURE who=alice/, crumbs.join(' | '));
+      }
+    });
+
     await test('[[rate_limits]] for /public/* also hold for the root alias, one shared budget', async () => {
       const statuses = [];
       for (const path of ['/limited/file.txt', '/public/limited/file.txt', '/limited/file.txt']) {
@@ -2251,6 +2298,16 @@ async function main() {
       // Safe methods are never checked: cross-site links and images work.
       const get = await rawRequest('GET', '/cached', { origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' });
       assert.equal(get.status, 200);
+    });
+
+    await test('CSRF: behind a trusted proxy, Origin is compared with X-Forwarded-Host', async () => {
+      // A Host-rewriting proxy (nginx's default proxy_pass) and a browser
+      // that sends no Sec-Fetch-Site: the forwarded host is the origin's.
+      const proxied = { host: '127.0.0.1:39871', 'x-forwarded-host': 'app.example', 'x-forwarded-proto': 'https' };
+      const same = await postNote({ ...proxied, origin: 'https://app.example' }, 'csrf-proxied');
+      assert.equal(same.status, 200);
+      const forged = await postNote({ ...proxied, origin: 'https://evil.example' });
+      assert.equal(forged.status, 403);
     });
 
     // Page actions, the way a browser without JavaScript uses them: plain

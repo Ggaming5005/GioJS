@@ -173,15 +173,24 @@ first.
 - **Rules cannot be sidestepped by spelling.** Rate limits, guards, redirects,
   rewrites and header rules match the canonical path, so `/api/login/`,
   `//api/login`, `/api//login` and `/api/%6Cogin` no longer slip past a rule
-  for `/api/login`.
+  for `/api/login`. A raw `\` in a path gets `400` (a redirect target built
+  from it would send browsers to another host), as does an escaped `%2F` or
+  `%5C` under `/public/`; a root-served public file never answers such a
+  spelling, so `/members%2Freport.txt` cannot reach `public/members/report.txt`
+  past the rules for `/members/*`.
+- **Guards cover the image optimizer.** A local `/_gio/image` `src` is held to
+  the guards of the file's root and `/public/...` URLs: a visitor the guard
+  would turn away gets `403`, and an admitted one gets the image as
+  `private, no-cache` instead of `public, immutable`.
 - **No error details in production responses**, including `gio export` output
   and streamed Suspense errors (which render `data-dgst` instead of a
   message). The real error is logged under the digest.
 - **Bounded rate limiter.** At most 100k buckets (refilled buckets are dropped
   first, then the least recently seen), IPv6 clients are limited per /64, and
   long windows (5 per hour) are no longer reset after 5 idle minutes.
-- **Connection limits.** New `[server]` settings bound what one client can
-  hold open: `max_connections` (10000), `tls_handshake_timeout_secs` (10),
+- **Connection limits.** New `[server]` settings bound open connections and
+  slow clients: `max_connections` (10000, a server-wide cap, not a per-client
+  one), `tls_handshake_timeout_secs` (10),
   `header_read_timeout_secs` (10, the slowloris guard),
   `request_body_timeout_secs` (30; slow uploads get `408`),
   `idle_timeout_secs` (60), `http2_max_concurrent_streams` (250) and HTTP/2
@@ -762,6 +771,16 @@ first.
   exported, and the "Static site" starter's `/posts/1` link returned 404 after
   export.
 - Slow rate limits such as 1 per hour now refill correctly.
+- Over HTTP/2, where browsers send each cookie as its own `cookie` field,
+  guards saw only the first cookie and `getSession` / `ctx.cookies` only the
+  last: the fields are now joined into one Cookie header before anything
+  reads it, and other repeated request headers reach the worker joined with
+  `, ` instead of losing all but one.
+- A prefetch the client cancelled (a closed tab, an HTTP/2 reset) never gave
+  back its prefetch-budget slot, so a few of them made every later prefetch
+  from that IP `429`.
+- Each distinct WebSocket upgrade path left an entry in the server's route
+  index for good, so upgrades to ever-new paths grew memory without bound.
 - Under vitest, app modules in `[id]` folders or paths with spaces failed to
   load.
 

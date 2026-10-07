@@ -299,6 +299,26 @@ impl ImageHandler {
         Ok(parsed)
     }
 
+    /// The public/ file a local `src` reads, as its path below public/
+    /// (`/members/photo.png`, decoded, symlinks resolved) - the root URL the
+    /// server also answers it at. `None` for a remote `src` or one that
+    /// names no file inside public/. The server holds the file to the
+    /// guards for its URLs before it lets the optimizer read it.
+    pub fn local_file_path(&self, src: &str) -> Option<String> {
+        if src.starts_with("http://") || src.starts_with("https://") {
+            return None;
+        }
+        let file = self.validate_local_path(src).ok()?;
+        let root = self.public_dir.canonicalize().ok()?;
+        let relative = file.strip_prefix(&root).ok()?;
+        let mut path = String::new();
+        for component in relative.components() {
+            path.push('/');
+            path.push_str(component.as_os_str().to_str()?);
+        }
+        Some(path)
+    }
+
     /// A local `src` is the URL the server serves the file at: public/ is
     /// served at the site root and under /public/*, so `/hero.png` and
     /// `/public/hero.png` both name public/hero.png.
@@ -537,6 +557,39 @@ mod tests {
             resolve("/public/../../etc/passwd"),
             Err(ImageError::NotFound | ImageError::PathTraversal)
         ));
+        let _ = std::fs::remove_dir_all(&public);
+    }
+
+    #[test]
+    fn local_file_path_names_the_file_below_public() {
+        let public =
+            std::env::temp_dir().join(format!("gio_test_local_file_{}", std::process::id()));
+        std::fs::create_dir_all(public.join("members")).unwrap();
+        std::fs::write(public.join("members").join("photo.png"), b"png").unwrap();
+        let handler = ImageHandler::new(
+            ImageConfig::default(),
+            std::env::temp_dir().join("gio_test_image_cache"),
+            public.clone(),
+        );
+        for src in [
+            "/members/photo.png",
+            "/public/members/photo.png",
+            "members/photo.png",
+            "//members//photo.png",
+            "/members/./photo.png",
+            "/members/../members/photo.png",
+        ] {
+            assert_eq!(
+                handler.local_file_path(src).as_deref(),
+                Some("/members/photo.png"),
+                "{src}"
+            );
+        }
+        assert_eq!(handler.local_file_path("/missing.png"), None);
+        assert_eq!(
+            handler.local_file_path("https://cdn.example/members/photo.png"),
+            None
+        );
         let _ = std::fs::remove_dir_all(&public);
     }
 

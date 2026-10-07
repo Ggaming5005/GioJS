@@ -63,14 +63,22 @@ impl WsRegistry {
     pub fn deregister(&self, conn_id: &str, route_id: &str) {
         self.senders.remove(conn_id);
         self.pending.remove(conn_id);
-        if let Some(set) = self.by_route.get(route_id) {
-            set.remove(conn_id);
-        }
+        self.remove_from_route(route_id, conn_id);
         if let Some((_, joined)) = self.conn_rooms.remove(conn_id) {
             for room in joined.iter() {
                 self.remove_member(room.as_str(), conn_id);
             }
         }
+    }
+
+    /// Drop `conn_id` from the route index, and the route's entry with its
+    /// last connection: route ids are request paths, so entries left behind
+    /// would grow the map by one per distinct path ever upgraded.
+    fn remove_from_route(&self, route_id: &str, conn_id: &str) {
+        if let Some(set) = self.by_route.get(route_id) {
+            set.remove(conn_id);
+        }
+        self.by_route.remove_if(route_id, |_, set| set.is_empty());
     }
 
     /// Add a live connection to `room`. Returns false (and records nothing)
@@ -132,6 +140,11 @@ impl WsRegistry {
         self.rooms.len()
     }
 
+    #[cfg(test)]
+    pub fn route_count(&self) -> usize {
+        self.by_route.len()
+    }
+
     /// Returns `true` if the message was queued, `false` if connId is unknown or channel closed.
     pub fn send(&self, conn_id: &str, msg: Message) -> bool {
         match self.senders.get(conn_id) {
@@ -159,8 +172,9 @@ impl WsRegistry {
                 None => Some(conn_id.clone()),
             })
             .collect();
+        drop(set);
         for id in dead {
-            set.remove(&id);
+            self.remove_from_route(route_id, &id);
             self.senders.remove(&id);
         }
     }
@@ -274,6 +288,37 @@ mod tests {
         assert_eq!(reg.active_count(), 0);
         let sent = reg.send("conn1", Message::Text("gone".into()));
         assert!(!sent);
+    }
+
+    #[test]
+    fn emptied_routes_leave_no_index_entry() {
+        let reg = WsRegistry::new();
+        // One entry per distinct upgrade path would grow without bound.
+        for n in 0..100 {
+            let (tx, _rx) = make_conn();
+            let route = format!("/probe/{n}");
+            reg.register(&format!("conn{n}"), &route, tx);
+            reg.deregister(&format!("conn{n}"), &route);
+        }
+        assert_eq!(reg.route_count(), 0);
+
+        let (tx1, _rx1) = make_conn();
+        let (tx2, _rx2) = make_conn();
+        reg.register("conn1", "/chat", tx1);
+        reg.register("conn2", "/chat", tx2);
+        reg.deregister("conn1", "/chat");
+        assert_eq!(reg.route_count(), 1, "a route with members stays");
+        reg.deregister("conn2", "/chat");
+        assert_eq!(reg.route_count(), 0);
+
+        // A broadcast that finds only dead senders cleans up too.
+        let (tx3, rx3) = make_conn();
+        reg.register("conn3", "/feed", tx3);
+        reg.accept("conn3");
+        drop(rx3);
+        reg.broadcast("/feed", Message::Text("anyone?".into()));
+        assert_eq!(reg.route_count(), 0);
+        assert_eq!(reg.active_count(), 0);
     }
 
     #[test]
