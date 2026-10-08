@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::client_identity::ProxyHeaders;
-use crate::config::{self, ConfigError, GioConfig};
+use crate::config::{self, GioConfig, ParseFailure};
 use crate::env_files::{EnvFileError, LoadedEnvFiles};
 use crate::revalidate;
 use crate::security::SecurityPolicy;
@@ -104,15 +104,50 @@ pub struct Validated {
 /// messages startup prints after
 /// "configuration error:", all of them rather than the first.
 pub fn validate(config: &GioConfig, env: &StartupEnv) -> Result<Validated, Vec<String>> {
+    validate_except(config, env, |_| false)
+}
+
+/// `validate`'s errors for a gio.toml refused while parsing, so one run
+/// reports every problem: the checks run on the configuration parsed past
+/// the refused keys, except those that would read one of them at its
+/// default instead of the author's value. When parsing stopped (a missing
+/// required key, a syntax error) nothing more can be checked, which the
+/// last line says.
+pub fn checks_after_parse_errors(failure: &ParseFailure, env: &StartupEnv) -> Vec<String> {
+    match &failure.partial {
+        Some(config) => validate_except(config, env, |key| failure.touched(key))
+            .err()
+            .unwrap_or_default(),
+        None if failure.errors.is_empty() => Vec::new(),
+        None => vec![STOPPED_EARLY.to_string()],
+    }
+}
+
+/// The last line of a report that could not read gio.toml past an error.
+pub const STOPPED_EARLY: &str = "gio.toml could not be read past the errors above, so its rule \
+     tables, [i18n] and startup's other checks (cache directory, [security], revalidation token, \
+     [[fonts]] files, TLS) did not run - fix them and check again";
+
+/// `validate`, leaving out the checks of keys `skip` names (dotted paths):
+/// a key blanked by the parser reads as its default, and checking the
+/// default would report a problem the author never wrote.
+fn validate_except(
+    config: &GioConfig,
+    env: &StartupEnv,
+    skip: impl Fn(&str) -> bool,
+) -> Result<Validated, Vec<String>> {
     let mut errors = Vec::new();
 
     let cache_dir = config
         .cache
         .disk_dir(&env.project_root, env.cache_dir_env.as_deref());
     // A directory inside public/ must not even appear.
-    if let Err(error) =
+    let placement = if skip("cache.disk_path") {
+        Ok(())
+    } else {
         config::check_cache_dir_placement(&cache_dir, Path::new(&env.app_dir), &env.public_dir)
-    {
+    };
+    if let Err(error) = placement {
         let source = match env.cache_dir_env {
             Some(_) => "GIO_CACHE_DIR",
             None => "[cache] disk_path",
@@ -121,7 +156,7 @@ pub fn validate(config: &GioConfig, env: &StartupEnv) -> Result<Validated, Vec<S
     }
 
     let security = SecurityPolicy::new(&config.security, config.server.tls.enabled)
-        .map_err(|error| errors.push(error.to_string()))
+        .map_err(|security_errors| errors.extend(security_errors.iter().map(ToString::to_string)))
         .ok();
 
     let revalidate_token = revalidate::resolve_token(
@@ -133,7 +168,7 @@ pub fn validate(config: &GioConfig, env: &StartupEnv) -> Result<Validated, Vec<S
 
     errors.extend(local_font_errors(config, &env.public_dir));
 
-    let tls_acceptor = if config.server.tls.enabled {
+    let tls_acceptor = if config.server.tls.enabled && !skip("server.tls") {
         crate::load_tls_acceptor(&config.server.tls, config.server.http2)
             .map(Some)
             .map_err(|error| errors.push(format!("{error:#}")))
@@ -403,7 +438,7 @@ pub fn run(env_files: Result<&LoadedEnvFiles, &EnvFileError>) -> i32 {
 
 fn report(
     env_files: &LoadedEnvFiles,
-    config: Result<GioConfig, Vec<ConfigError>>,
+    config: Result<GioConfig, ParseFailure>,
     env: &CheckEnv,
 ) -> Value {
     let base = json!({
@@ -415,8 +450,13 @@ fn report(
     });
     let config = match config {
         Ok(config) => config,
-        Err(errors) => {
-            let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        Err(failure) => {
+            let errors: Vec<String> = failure
+                .errors
+                .iter()
+                .map(ToString::to_string)
+                .chain(checks_after_parse_errors(&failure, &env.startup))
+                .collect();
             return with_fields(base, json!({ "ok": false, "errors": errors }));
         }
     };
@@ -545,8 +585,8 @@ mod tests {
         }
     }
 
-    fn parse(raw: &str) -> Result<GioConfig, Vec<ConfigError>> {
-        GioConfig::parse_all(raw, "gio.toml")
+    fn parse(raw: &str) -> Result<GioConfig, ParseFailure> {
+        GioConfig::parse_checked(raw, "gio.toml")
     }
 
     /// A project root that is never created: the report only compares paths.
@@ -984,8 +1024,51 @@ mod tests {
         );
         assert_eq!(
             report["errors"],
-            json!(["gio.toml:2: invalid `rate_limits[0].path`: path \"api/*rest\" must start with '/'"])
+            json!([
+                "gio.toml:2: invalid `rate_limits[0].path`: path \"api/*rest\" must start with '/'",
+                STOPPED_EARLY,
+            ])
         );
+    }
+
+    #[test]
+    fn parse_errors_and_startup_refusals_are_reported_in_one_run() {
+        let root = test_root();
+        let mut env = env_in(&root);
+        env.startup.revalidate_token_env = Some("tiny".into());
+        let report = report(
+            &loaded(&[]),
+            parse(
+                "[security.csrf]\nenabeld = true\ntrusted_origins = [\"nope\"]\nexempt = [\"api/x\"]\n\n\
+                 [server.tls]\nenabled = true\ncert_path = 3\n",
+            ),
+            &env,
+        );
+        assert_eq!(report["ok"], false);
+        let errors: Vec<&str> = report["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|error| error.as_str().unwrap())
+            .collect();
+        assert_eq!(errors.len(), 5, "{errors:#?}");
+        assert!(errors[0].starts_with("gio.toml:2: unknown key `security.csrf.enabeld`"), "{errors:#?}");
+        assert!(errors[1].starts_with("gio.toml:8: invalid `server.tls.cert_path`"), "{errors:#?}");
+        // Every [security] entry, not just the first...
+        assert!(errors[2].starts_with("[security.csrf] trusted_origins entry \"nope\""), "{errors:#?}");
+        assert!(errors[3].starts_with("[security.csrf] exempt entry \"api/x\""), "{errors:#?}");
+        assert!(errors[4].contains("GIO_REVALIDATE_TOKEN) is 4 bytes"), "{errors:#?}");
+        // ...and no TLS error about the cert_path blanked out of it.
+        assert!(!errors.iter().any(|error| error.contains("TLS enabled")), "{errors:#?}");
+
+        // Reading stopped at a missing required key: the report says what
+        // it could not check.
+        let report = report_for_stopped(&env);
+        assert_eq!(report["errors"][1], STOPPED_EARLY);
+    }
+
+    fn report_for_stopped(env: &CheckEnv) -> Value {
+        report(&loaded(&[]), parse("[[guards]]\npath = \"/a\"\nrequire_session = true\n"), env)
     }
 
     #[test]

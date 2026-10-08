@@ -195,6 +195,46 @@ describe('makeFrameHandler frame reassembly', () => {
     expect(frames).toEqual(['12345']);
   });
 
+  it('reassembles frames fed one byte at a time, including an empty frame', () => {
+    const frames: string[] = [];
+    const handler = makeFrameHandler(data => frames.push(data.toString('utf8')));
+    const wire = Buffer.concat([
+      encodeFrame(Buffer.from('one')),
+      encodeFrame(Buffer.alloc(0)),
+      encodeFrame(Buffer.from('three')),
+    ]);
+    for (let i = 0; i < wire.length; i++) handler(wire.subarray(i, i + 1));
+    expect(frames).toEqual(['one', '', 'three']);
+  });
+
+  it('delivers a frame whose last chunk also starts the next one', () => {
+    const frames: string[] = [];
+    const handler = makeFrameHandler(data => frames.push(data.toString('utf8')));
+    const wire = Buffer.concat([encodeFrame(Buffer.from('first-frame')), encodeFrame(Buffer.from('second'))]);
+    handler(wire.subarray(0, 9));
+    handler(wire.subarray(9, 17));
+    expect(frames).toEqual(['first-frame']);
+    handler(wire.subarray(17));
+    expect(frames).toEqual(['first-frame', 'second']);
+  });
+
+  it('reads a near-cap frame in socket-sized chunks in linear time', () => {
+    // Re-concatenating on every chunk took ~15 s for 60 MB, past the Rust
+    // side's 10 s IPC write timeout (the worker connection was dropped).
+    const payload = Buffer.alloc(60 * 1024 * 1024, 0x61);
+    payload.writeUInt32BE(0xdeadbeef, payload.length - 4);
+    const wire = encodeFrame(payload);
+    const frames: Buffer[] = [];
+    const handler = makeFrameHandler(data => frames.push(data));
+    const started = performance.now();
+    for (let i = 0; i < wire.length; i += 64 * 1024) handler(wire.subarray(i, i + 64 * 1024));
+    const elapsed = performance.now() - started;
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.length).toBe(payload.length);
+    expect(frames[0]!.readUInt32BE(payload.length - 4)).toBe(0xdeadbeef);
+    expect(elapsed).toBeLessThan(3_000);
+  });
+
   it('defaults the cap to MAX_IPC_MESSAGE_SIZE', () => {
     let oversizedLength: number | null = null;
     const handler = makeFrameHandler(() => undefined, {

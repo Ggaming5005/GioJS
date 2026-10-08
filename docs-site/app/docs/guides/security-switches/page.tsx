@@ -43,15 +43,21 @@ export default function Page(): React.JSX.Element {
           <strong><code>0</code> lifts a limit.</strong> Every numeric limit uses{' '}
           <code>0</code> for unlimited and every timeout uses <code>0</code> for none, in
           every section. To turn a feature off, use its <code>enabled</code> key, not a limit
-          of <code>0</code>. The one exception is <code>[cache] memory_max_entries</code>,
-          which must be at least <code>1</code>: <code>[cache] enabled = false</code> is the
-          page cache&apos;s off switch.
+          of <code>0</code>. The exceptions: <code>[cache] memory_max_entries</code> must be at
+          least <code>1</code> (<code>[cache] enabled = false</code> is the page cache&apos;s off
+          switch); in <a href="/docs/configuration/rate-limits"><code>[[rate_limits]]</code></a>,{' '}
+          <code>per_ip = 0</code> means no refill (only <code>burst</code> requests, ever: the
+          strictest setting) and <code>window_seconds = 0</code> is treated as 1 second; and{' '}
+          <code>[images] quality = 0</code> is treated as <code>1</code>.
         </li>
         <li>
           <strong>Never silent.</strong> Turning a protection off, or lifting a limit that
           guards memory or connections to <code>0</code>, logs one <code>warn</code> line at
           startup that names the key and what it costs - the <em>Warns</em> column below says
-          which keys do. Timeouts and the prefetch budget lift without a warning. <a href="/docs/cli/giojs-server"><code>giojs-server --check-config</code></a> and{' '}
+          which keys do. Timeouts and the prefetch budget lift without a warning, except{' '}
+          <code>[server] render_timeout_secs</code> and <code>[images] remote_timeout_secs</code>,
+          which warn: at <code>0</code>, a render that never answers holds its connection and a
+          worker slot indefinitely, and a slow remote source holds its request open. <a href="/docs/cli/giojs-server"><code>giojs-server --check-config</code></a> and{' '}
           <a href="/docs/cli/doctor"><code>gio doctor</code></a> report the same text under{' '}
           <code>warnings</code>, so CI can catch it before a deploy.
         </li>
@@ -464,9 +470,11 @@ x-frame-options = ""                               # let partners frame one sect
       <p>Parts of switchable features stay fixed too:</p>
       <ul>
         <li>
-          Open-in-editor requires a same-origin request (or <code>Sec-Fetch-Site: none</code>)
-          even with <code>allowed_hosts = [&quot;*&quot;]</code>: no website should be able to
-          launch your editor.
+          Open-in-editor requires a same-origin request (or <code>Sec-Fetch-Site: none</code>),
+          and <code>allowed_hosts = [&quot;*&quot;]</code> does not cover it: it answers only
+          localhost hosts from this machine, a specific <code>[server] host</code> and hosts
+          listed by name, so no website, not even one rebound onto the dev server through DNS,
+          can launch your editor.
         </li>
         <li>
           The image optimizer always rejects path traversal, never follows redirects for

@@ -1004,15 +1004,110 @@ pub fn check_cache_dir_placement(
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct RemotePattern {
-    #[serde(default = "default_protocol")]
+    /// `"https"` or `"http"`, compared with the source's scheme as is.
+    #[serde(default = "default_protocol", deserialize_with = "remote_protocol")]
+    #[cfg_attr(test, schemars(with = "String", extend("enum" = ["https", "http"])))]
     pub protocol: String,
+    /// A host as a URL carries it (lowercase, no scheme, port or path),
+    /// optionally `*.` / `**.` wildcarded. Checked after parsing
+    /// (`remote_hostname_problem`): a required key refused while parsing
+    /// would end the report there.
+    #[cfg_attr(test, schemars(extend("minLength" = 1)))]
     pub hostname: String,
-    /// Exact path, or a prefix with a trailing `*`.
+    /// Exact path, or a prefix with a trailing `*`; starts with `/`.
+    #[serde(default, deserialize_with = "remote_pathname")]
+    #[cfg_attr(test, schemars(with = "Option<String>", extend("pattern" = "^/")))]
     pub pathname: Option<String>,
 }
 
 fn default_protocol() -> String {
     "https".to_string()
+}
+
+// A remote pattern that can never match fails closed (the source is a
+// 403), so these are about the author's intent: an entry that allows
+// nothing is refused at startup like any other rule, not left to puzzle
+// over at request time.
+
+fn remote_protocol<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    if raw == "https" || raw == "http" {
+        return Ok(raw);
+    }
+    let hint = config_diagnostics::closest(&raw, ["https", "http"])
+        .map(|suggestion| format!(" - did you mean \"{suggestion}\"?"))
+        .unwrap_or_default();
+    Err(serde::de::Error::custom(format!(
+        "expected \"https\" or \"http\" (lowercase), found {raw:?}{hint}"
+    )))
+}
+
+/// Why a `remote_patterns` hostname can never match, if it cannot.
+fn remote_hostname_problem(raw: &str) -> Option<String> {
+    let problem = if raw.trim().is_empty() {
+        Some("is empty, which matches no host".to_string())
+    } else if raw.contains("://") || raw.contains('/') {
+        Some("is a URL - list the host alone, with the scheme in protocol and the path in pathname".to_string())
+    } else if raw.chars().any(|c| c.is_ascii_uppercase()) {
+        Some(format!(
+            "has uppercase letters, which never match (URLs carry hosts lowercase) - did you mean {:?}?",
+            raw.to_ascii_lowercase()
+        ))
+    } else if !raw.starts_with('[') && raw.contains(':') {
+        Some("has a port, which hostname never matches - list the host alone".to_string())
+    } else if raw.chars().any(char::is_whitespace) {
+        Some("contains whitespace, which matches no host".to_string())
+    } else {
+        None
+    };
+    problem.map(|problem| format!("hostname {raw:?} {problem}"))
+}
+
+/// `[[images.remote_patterns]]` hostnames that can never match, each on
+/// its own line.
+fn remote_pattern_problems(
+    patterns: &[RemotePattern],
+    doc: &toml_edit::ImDocument<&str>,
+    raw: &str,
+    file: &str,
+) -> Vec<(usize, ConfigError)> {
+    let entries = doc
+        .as_table()
+        .get("images")
+        .and_then(|images| images.get("remote_patterns"))
+        .and_then(toml_edit::Item::as_array_of_tables);
+    patterns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, pattern)| {
+            let message = remote_hostname_problem(&pattern.hostname)?;
+            let line = entries
+                .and_then(|entries| entries.get(index))
+                .and_then(|entry| entry.key("hostname").and_then(|key| key.span()).or_else(|| entry.span()))
+                .map(|span| config_diagnostics::line_of(raw, span.start));
+            Some((
+                line.unwrap_or(0),
+                ConfigError::InvalidValue {
+                    location: location(file, line),
+                    key: format!("`images.remote_patterns[{index}].hostname`"),
+                    message,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn remote_pathname<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    if raw.starts_with('/') {
+        return Ok(Some(raw));
+    }
+    Err(serde::de::Error::custom(format!(
+        "pathname {raw:?} must start with '/', or it matches no path - did you mean \"/{}\"?",
+        raw.trim_start_matches('/')
+    )))
 }
 
 /// A modern format `/_gio/image` may negotiate from the Accept header.
@@ -1576,11 +1671,16 @@ impl Default for ServerConfig {
 }
 
 impl GioConfig {
+    /// The configuration, or exit 1 after printing every reason startup
+    /// refuses it: gio.toml's own problems, then what startup's later checks
+    /// (`config_check::checks_after_parse_errors`) find in the rest of it.
     pub fn load() -> Self {
         match Self::try_load() {
             Ok(config) => config,
-            Err(errors) => {
-                for error in errors {
+            Err(failure) => {
+                let env = crate::config_check::StartupEnv::from_process();
+                let later = crate::config_check::checks_after_parse_errors(&failure, &env);
+                for error in failure.errors.iter().map(ToString::to_string).chain(later) {
                     eprintln!("giojs-server: configuration error: {error}");
                 }
                 std::process::exit(1);
@@ -1590,15 +1690,19 @@ impl GioConfig {
 
     /// `load` without the exit: the config, or every reason startup would
     /// refuse it.
-    pub fn try_load() -> Result<Self, Vec<ConfigError>> {
+    pub fn try_load() -> Result<Self, ParseFailure> {
         let mut config = Self::read_path(&Self::path())?;
-        config
-            .apply_listen_overrides(
-                std::env::var("GIO_HOST").ok().as_deref(),
-                std::env::var("GIO_PORT").ok().as_deref(),
-                std::env::var("PORT").ok().as_deref(),
-            )
-            .map_err(|error| vec![error])?;
+        if let Err(error) = config.apply_listen_overrides(
+            std::env::var("GIO_HOST").ok().as_deref(),
+            std::env::var("GIO_PORT").ok().as_deref(),
+            std::env::var("PORT").ok().as_deref(),
+        ) {
+            return Err(ParseFailure {
+                errors: vec![error],
+                partial: Some(Box::new(config)),
+                blanked: Vec::new(),
+            });
+        }
         Ok(config)
     }
 
@@ -1617,23 +1721,25 @@ impl GioConfig {
 
     #[cfg(test)]
     fn load_from_path(path: &std::path::Path) -> Result<Self, ConfigError> {
-        Self::read_path(path).map_err(first_error)
+        Self::read_path(path).map_err(|failure| first_error(failure.errors))
     }
 
-    fn read_path(path: &std::path::Path) -> Result<Self, Vec<ConfigError>> {
+    fn read_path(path: &std::path::Path) -> Result<Self, ParseFailure> {
         if !path.exists() {
             return Ok(Self {
                 port_source: "default",
                 ..Self::default()
             });
         }
-        let raw = std::fs::read_to_string(path).map_err(|source| {
-            vec![ConfigError::Read {
+        let raw = std::fs::read_to_string(path).map_err(|source| ParseFailure {
+            errors: vec![ConfigError::Read {
                 path: path.display().to_string(),
                 source,
-            }]
+            }],
+            partial: None,
+            blanked: Vec::new(),
         })?;
-        Self::parse_all(&raw, &path.display().to_string())
+        Self::parse_checked(&raw, &path.display().to_string())
     }
 
     /// Parse gio.toml's contents; `file` names it in errors. The first
@@ -1643,15 +1749,24 @@ impl GioConfig {
         Self::parse_all(raw, file).map_err(first_error)
     }
 
+    /// `parse_checked`'s errors alone.
+    #[cfg(test)]
+    pub(crate) fn parse_all(raw: &str, file: &str) -> Result<Self, Vec<ConfigError>> {
+        Self::parse_checked(raw, file).map_err(|failure| failure.errors)
+    }
+
     /// Parse gio.toml's contents, reporting every problem in line order:
     /// each unknown section and key, each value of the wrong type or out of
     /// range, rules that cannot be enforced and an inconsistent `[i18n]`.
     /// serde stops at its first error, so the key or value it names is
     /// blanked out of the text (line breaks kept, so every other key stays
     /// on its line) and the text parsed again, until it parses or fails in a
-    /// way that may be the blanking's own doing (a missing field, a syntax
-    /// error) - reported only when it is the first error.
-    pub(crate) fn parse_all(raw: &str, file: &str) -> Result<Self, Vec<ConfigError>> {
+    /// way blanking cannot get past: a missing required key (reported unless
+    /// a key blanked from its own table may be why it is missing) or a
+    /// syntax error (reported when it is the first error). The failure
+    /// carries the configuration parsed past the blanked keys, when parsing
+    /// got that far, so startup's later checks can run on the rest.
+    pub(crate) fn parse_checked(raw: &str, file: &str) -> Result<Self, ParseFailure> {
         // A syntax error leaves no document: toml's own error (line,
         // column) is then the best there is.
         let doc = toml_edit::ImDocument::parse(raw).ok();
@@ -1659,8 +1774,10 @@ impl GioConfig {
         if let Some(doc) = &doc {
             errors.extend(unknown_sections(doc, raw, file));
         }
-        // Key paths blanked so far (`server.prot`, `guards.require_session`).
+        // Key paths blanked so far (`server.prot`, `guards.require_session`),
+        // and the same with array indexes (`guards[1].require_session`).
         let mut blanked: Vec<String> = Vec::new();
+        let mut blanked_at: Vec<String> = Vec::new();
         let mut text = raw.to_string();
         let parsed = loop {
             let source = match toml::from_str::<Self>(&text) {
@@ -1682,7 +1799,20 @@ impl GioConfig {
                 ConfigError::InvalidValue { .. } => config_diagnostics::value_extent(current, offset),
                 _ => None,
             });
-            if text == raw || blank.is_some() {
+            // The (indexed) key the error is about: for a missing field, the
+            // table entry it is missing from (`guards[2]`).
+            let at = current
+                .as_ref()
+                .zip(offset)
+                .and_then(|(current, offset)| config_diagnostics::key_at(current, offset))
+                .map(|key| key.path);
+            // A missing key is the author's unless a key blanked from its
+            // own table entry was it (`path = 3` blanked leaves no path).
+            let missing_untouched = matches!(error, ConfigError::InvalidValue { .. })
+                && at
+                    .as_deref()
+                    .is_some_and(|table| !blanked_at.iter().any(|key| keys_overlap(key, table)));
+            if text == raw || blank.is_some() || missing_untouched {
                 errors.push((line, error));
             }
             let Some(blank) = blank.filter(|_| errors.len() < MAX_REPORTED_ERRORS) else {
@@ -1693,10 +1823,15 @@ impl GioConfig {
                 break None;
             }
             blanked.push(blank.path);
+            blanked_at.extend(at);
             text = next;
         };
         let Some(mut config) = parsed else {
-            return Err(in_line_order(errors));
+            return Err(ParseFailure {
+                errors: in_line_order(errors),
+                partial: None,
+                blanked,
+            });
         };
         // Rules and [i18n] are checked as written: one whose keys were all
         // left alone is the author's, while one with a blanked key would
@@ -1713,9 +1848,12 @@ impl GioConfig {
             if untouched("i18n.locales") && untouched("i18n.default_locale") {
                 errors.extend(i18n_problems(&config.i18n, doc, raw, file));
             }
-        }
-        if !errors.is_empty() {
-            return Err(in_line_order(errors));
+            errors.extend(remote_pattern_problems(
+                &config.images.remote_patterns,
+                doc,
+                raw,
+                file,
+            ));
         }
         let port_in_file = doc
             .as_ref()
@@ -1723,6 +1861,13 @@ impl GioConfig {
             .and_then(|server| server.get("port"))
             .is_some();
         config.port_source = if port_in_file { "gio.toml" } else { "default" };
+        if !errors.is_empty() {
+            return Err(ParseFailure {
+                errors: in_line_order(errors),
+                partial: Some(Box::new(config)),
+                blanked,
+            });
+        }
         Ok(config)
     }
 
@@ -1783,6 +1928,27 @@ fn project_root_of(app_dir: Option<&str>) -> std::path::PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .map(|parent| parent.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Why gio.toml was refused (`GioConfig::parse_checked`).
+#[derive(Debug)]
+pub struct ParseFailure {
+    /// Every problem found, in line order.
+    pub errors: Vec<ConfigError>,
+    /// The configuration read past the problems (their keys blanked, so at
+    /// their defaults); None when reading stopped at one (a missing required
+    /// key, a syntax error, a file that cannot be read).
+    pub partial: Option<Box<GioConfig>>,
+    /// Paths of the keys blanked out (`server.tls.cert`, `guards.path`).
+    pub blanked: Vec<String>,
+}
+
+impl ParseFailure {
+    /// Whether the key at `path` (or a key inside it, or the table holding
+    /// it) was blanked: its value in `partial` is a default, not the author's.
+    pub fn touched(&self, path: &str) -> bool {
+        self.blanked.iter().any(|key| keys_overlap(key, path))
+    }
 }
 
 /// Past this many, a report stops looking: the rest is likely fallout.
@@ -2571,6 +2737,83 @@ redirect_to    = "/"
         let errors = all_errors("[i18n]\nlocales = \"en\"\ndefault_locale = \"fr\"\n");
         assert_eq!(errors.len(), 1, "{errors:#?}");
         assert!(errors[0].starts_with("gio.toml:2: invalid `i18n.locales`"), "{errors:#?}");
+    }
+
+    #[test]
+    fn a_missing_required_key_after_other_errors_is_still_reported() {
+        // The guard missing redirect_to was untouched by the blanking of
+        // the keys before it, so the missing key is the author's.
+        let failure = GioConfig::parse_checked(
+            "[server]\nprot = 1\n\n[i18n]\ndetect_from = [\"acept-language\"]\n\n\
+             [[guards]]\npath = \"/a\"\nrequire_session = true\n\n[[redirects]]\nfrom = \"//evil.com\"\nto = \"/\"\n",
+            "gio.toml",
+        )
+        .unwrap_err();
+        let errors: Vec<String> = failure.errors.iter().map(ToString::to_string).collect();
+        assert_eq!(errors.len(), 3, "{errors:#?}");
+        assert!(errors[0].starts_with("gio.toml:2: unknown key `server.prot`"), "{errors:#?}");
+        assert!(errors[1].starts_with("gio.toml:5: invalid `i18n.detect_from`"), "{errors:#?}");
+        assert!(errors[2].starts_with("gio.toml:7: invalid `guards[0]`"), "{errors:#?}");
+        assert!(errors[2].contains("missing field `redirect_to`"), "{errors:#?}");
+        // Reading stopped there: no configuration to run later checks on.
+        assert!(failure.partial.is_none());
+
+        // A required key blanked for its invalid value is reported once,
+        // as the invalid value: missing it afterwards is fallout.
+        let failure = GioConfig::parse_checked(
+            "[server]\nprot = 1\n\n[[guards]]\npath = 3\nrequire_session = true\nredirect_to = \"/\"\n",
+            "gio.toml",
+        )
+        .unwrap_err();
+        let errors: Vec<String> = failure.errors.iter().map(ToString::to_string).collect();
+        assert_eq!(errors.len(), 2, "{errors:#?}");
+        assert!(errors[1].starts_with("gio.toml:5: invalid `guards[0].path`"), "{errors:#?}");
+    }
+
+    #[test]
+    fn a_failure_past_blanked_keys_carries_the_rest_of_the_config() {
+        let failure = GioConfig::parse_checked(
+            "[server]\nprot = 1\nport = 4100\n\n[server.tls]\nenabled = true\ncert_path = 3\n",
+            "gio.toml",
+        )
+        .unwrap_err();
+        assert_eq!(failure.errors.len(), 2, "{:#?}", failure.errors);
+        let partial = failure.partial.as_ref().expect("parsed past the blanked keys");
+        assert_eq!(partial.server.port, 4100);
+        assert!(failure.touched("server.tls"), "{:?}", failure.blanked);
+        assert!(failure.touched("server.prot"));
+        assert!(!failure.touched("security"));
+    }
+
+    #[test]
+    fn remote_patterns_that_can_never_match_are_refused() {
+        for (entry, needle) in [
+            ("hostname = \"\"", "is empty"),
+            ("hostname = \"https://cdn.example.com\"", "is a URL"),
+            ("hostname = \"cdn.example.com/img\"", "is a URL"),
+            ("hostname = \"CDN.example.com\"", "did you mean \"cdn.example.com\"?"),
+            ("hostname = \"cdn.example.com:8443\"", "has a port"),
+            ("hostname = \"cdn.example.com\"\nprotocol = \"ftp\"", "expected \"https\" or \"http\""),
+            ("hostname = \"cdn.example.com\"\nprotocol = \"HTTPS\"", "did you mean \"https\"?"),
+            ("hostname = \"cdn.example.com\"\npathname = \"nope\"", "did you mean \"/nope\"?"),
+        ] {
+            let errors = all_errors(&format!("[[images.remote_patterns]]\n{entry}\n"));
+            assert_eq!(errors.len(), 1, "{entry}: {errors:#?}");
+            assert!(errors[0].contains("invalid `images.remote_patterns[0]."), "{entry}: {errors:#?}");
+            assert!(errors[0].contains(needle), "{entry}: {errors:#?}");
+        }
+        let config = parse(
+            "[[images.remote_patterns]]\nhostname = \"**.example.com\"\npathname = \"/uploads/*\"\n\n\
+             [[images.remote_patterns]]\nprotocol = \"http\"\nhostname = \"[::1]\"\n\n\
+             [[images.remote_patterns]]\nhostname = \"192.168.1.20\"\n",
+        )
+        .unwrap();
+        let patterns = &config.images.remote_patterns;
+        assert_eq!(patterns.len(), 3);
+        assert_eq!(patterns[0].protocol, "https");
+        assert_eq!(patterns[0].pathname.as_deref(), Some("/uploads/*"));
+        assert_eq!(patterns[1].protocol, "http");
+        assert_eq!(patterns[2].pathname, None);
     }
 
     #[test]

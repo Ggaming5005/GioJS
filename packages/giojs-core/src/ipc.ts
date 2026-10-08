@@ -846,31 +846,49 @@ export interface FrameHandlerOptions {
  * whenever a complete length-prefixed frame arrives. A declared frame length
  * above `maxFrameBytes` triggers `onOversize` and disables the handler - the
  * stream is unrecoverable at that point and the caller must drop the socket.
+ *
+ * Chunks are queued and joined once per completed frame, so reading a frame
+ * is linear in its size: re-concatenating the buffer on every chunk made a
+ * 50 MB request body take longer than the server's 10 s IPC write timeout.
  */
 export function makeFrameHandler(
   onFrame: (data: Buffer) => void,
   options?: FrameHandlerOptions,
 ): (chunk: Buffer) => void {
   const maxFrameBytes = options?.maxFrameBytes ?? MAX_IPC_MESSAGE_SIZE;
-  let buf = Buffer.alloc(0);
+  let chunks: Buffer[] = [];
+  let queued = 0;
+  // Declared length of the frame being received, once its header is in.
+  let frameLen = -1;
   let poisoned = false;
 
   return function handler(chunk: Buffer) {
     if (poisoned) return;
-    buf = Buffer.concat([buf, chunk]);
+    chunks.push(chunk);
+    queued += chunk.length;
 
-    while (buf.length >= 4) {
-      const len = buf.readUInt32BE(0);
-      if (len > maxFrameBytes) {
-        poisoned = true;
-        buf = Buffer.alloc(0);
-        options?.onOversize?.(len);
-        return;
+    for (;;) {
+      if (frameLen < 0) {
+        if (queued < 4) return;
+        if (chunks[0]!.length < 4) chunks = [Buffer.concat(chunks, queued)];
+        const len = chunks[0]!.readUInt32BE(0);
+        if (len > maxFrameBytes) {
+          poisoned = true;
+          chunks = [];
+          queued = 0;
+          options?.onOversize?.(len);
+          return;
+        }
+        frameLen = len;
       }
-      if (buf.length < 4 + len) break;
-      const frame = buf.subarray(4, 4 + len);
-      buf = buf.subarray(4 + len);
-      onFrame(Buffer.from(frame));
+      if (queued < 4 + frameLen) return;
+      const all = chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks, queued);
+      const frame = Buffer.from(all.subarray(4, 4 + frameLen));
+      const rest = all.subarray(4 + frameLen);
+      chunks = rest.length > 0 ? [rest] : [];
+      queued = rest.length;
+      frameLen = -1;
+      onFrame(frame);
     }
   };
 }

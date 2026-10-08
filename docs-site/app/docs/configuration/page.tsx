@@ -321,8 +321,9 @@ giojs-server: configuration error: gio.toml:21: invalid \`server.port\`: invalid
           invalid value, the TLS certificate, <code>[security]</code>, the revalidation token
           and local <code>[[fonts]]</code> files included - before the worker starts. Rules and{' '}
           <code>[i18n]</code> locales holding a misspelled or invalid key are checked once it
-          is fixed (left out, it would only report fallout), and a required key whose value is
-          invalid (<code>path = 3</code>) ends the report there.
+          is fixed (left out, it would only report fallout). A required key that is missing, or
+          whose value is invalid (<code>path = 3</code>), ends the report there, and its last line
+          says which checks did not run.
         </li>
       </ul>
       <p>
@@ -869,9 +870,10 @@ allowed_hosts = ["192.168.1.20", "myvm.local", "*.tunnel.example"]  # "*." or ".
       <p>
         <code>allowed_hosts = [&quot;*&quot;]</code> answers any <code>Host</code> from
         any machine, error details included, and logs a loud warning at startup: DNS
-        rebinding is no longer blocked. The <code>Origin</code> and{' '}
-        <code>Sec-Fetch-Site</code> checks still apply, so open-in-editor stays
-        same-origin. To have no dev endpoints at all, set{' '}
+        rebinding is no longer blocked. Open-in-editor ignores <code>&quot;*&quot;</code>: it
+        stays same-origin and answers only localhost hosts from this machine, a
+        specific <code>[server] host</code> and the hosts listed by name, so a
+        rebound site cannot launch your editor. To have no dev endpoints at all, set{' '}
         <code>[dev] devtools = false</code>: <code>/_gio/devtools*</code> answers{' '}
         <code>404</code>, and the error overlay shows the message and stack without
         codeframes, editor links or live reload.

@@ -20,8 +20,10 @@
 //! `[dev] allowed_hosts`. Listing a host there opts in to that host from any
 //! peer, which is what a LAN device, a VM or a container's port mapping needs.
 //! `allowed_hosts = ["*"]` opts in to every Host from every peer (startup
-//! warns); the Origin and Sec-Fetch-Site checks still apply, so
-//! open-in-editor stays same-origin even then.
+//! warns) for the read endpoints only. A DNS-rebound page is same-origin with
+//! whatever Host it rebinds, so open-in-editor ignores `"*"` and keeps the
+//! host rules above: it answers only localhost-style hosts from this machine,
+//! the bind address and the hosts `[dev] allowed_hosts` names explicitly.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
@@ -74,6 +76,9 @@ pub enum DevGuardRejection {
     RemotePeer(String),
     CrossSite(String),
     ForeignOrigin(String),
+    /// open-in-editor through a Host that only `allowed_hosts = ["*"]`
+    /// admits (normalized, no port): `"*"` never covers the editor.
+    StarExcludesEditor(String),
 }
 
 impl DevGuardRejection {
@@ -118,6 +123,13 @@ impl DevGuardRejection {
                 }
                 msg
             }
+            Self::StarExcludesEditor(host) => format!(
+                "allowed_hosts = [\"*\"] does not cover open-in-editor (DNS rebinding \
+                 protection): a website rebound onto this server would be same-origin and \
+                 could launch your editor. To open files through \"{host}\", list it in \
+                 gio.toml:\n\n\
+                 [dev]\nallowed_hosts = [\"*\", \"{host}\"]\n"
+            ),
         }
     }
 }
@@ -175,17 +187,36 @@ impl DevHostPolicy {
     /// machine every header is forgeable, so only the hosts the developer
     /// configured (the bind address, `[dev] allowed_hosts`) are trusted.
     pub fn is_trusted_host_from(&self, host_header: &str, peer: Option<IpAddr>) -> bool {
-        self.host_verdict(host_header, peer).is_ok()
+        self.host_verdict(host_header, peer, true).is_ok()
     }
 
+    /// `honor_any_host` false judges the Host as if `"*"` were not listed
+    /// (open-in-editor), turning what only `"*"` would admit into
+    /// `StarExcludesEditor`.
     fn host_verdict(
         &self,
         host_header: &str,
         peer: Option<IpAddr>,
+        honor_any_host: bool,
     ) -> Result<(), DevGuardRejection> {
         if self.any_host {
-            return Ok(());
+            if honor_any_host {
+                return Ok(());
+            }
+            return self.host_verdict_strict(host_header, peer).map_err(|_| {
+                DevGuardRejection::StarExcludesEditor(
+                    normalize_hostname(host_header).unwrap_or_else(|| host_header.to_string()),
+                )
+            });
         }
+        self.host_verdict_strict(host_header, peer)
+    }
+
+    fn host_verdict_strict(
+        &self,
+        host_header: &str,
+        peer: Option<IpAddr>,
+    ) -> Result<(), DevGuardRejection> {
         let Some(host) = normalize_hostname(host_header) else {
             return Err(DevGuardRejection::UntrustedHost(host_header.to_string()));
         };
@@ -251,7 +282,7 @@ impl DevHostPolicy {
             .map(str::trim)
             .filter(|h| !h.is_empty())
             .ok_or(DevGuardRejection::MissingHost)?;
-        self.host_verdict(host, peer)?;
+        self.host_verdict(host, peer, kind != DevEndpointKind::Privileged)?;
         if kind == DevEndpointKind::Page {
             return Ok(());
         }
@@ -548,11 +579,61 @@ mod tests {
                 Ok(())
             );
         }
-        // Only the Host check is lifted: open-in-editor stays same-origin.
+        // "*" never reaches open-in-editor: a DNS-rebound page is same-origin
+        // with its own Host, so the editor keeps the host rules without "*".
+        let rebinding = p.check_from(
+            DevEndpointKind::Privileged,
+            Some("rebind.attacker.example"),
+            Some("http://rebind.attacker.example"),
+            Some("same-origin"),
+            None,
+        );
+        assert_eq!(
+            rebinding,
+            Err(DevGuardRejection::StarExcludesEditor(
+                "rebind.attacker.example".into()
+            ))
+        );
+        let msg = rebinding.unwrap_err().message();
+        assert!(
+            msg.contains("allowed_hosts = [\"*\", \"rebind.attacker.example\"]"),
+            "{msg}"
+        );
         assert_eq!(
             p.check_from(
                 DevEndpointKind::Privileged,
-                Some("evil.example"),
+                Some("localhost:3000"),
+                Some("http://localhost:3000"),
+                Some("same-origin"),
+                remote,
+            ),
+            Err(DevGuardRejection::StarExcludesEditor("localhost".into())),
+            "a forged localhost Host from another machine stays refused"
+        );
+        // The hosts "*" sits beside keep working, as do localhost hosts
+        // from this machine.
+        for (host, peer) in [
+            ("myvm.local:3000", remote),
+            ("localhost:3000", None),
+            ("127.0.0.1:3000", Some("127.0.0.1".parse().unwrap())),
+        ] {
+            assert_eq!(
+                p.check_from(
+                    DevEndpointKind::Privileged,
+                    Some(host),
+                    Some(&format!("http://{host}")),
+                    Some("same-origin"),
+                    peer,
+                ),
+                Ok(()),
+                "{host}"
+            );
+        }
+        // On an allowed host, open-in-editor still has to be same-origin.
+        assert_eq!(
+            p.check_from(
+                DevEndpointKind::Privileged,
+                Some("myvm.local"),
                 Some("https://attacker.example"),
                 Some("cross-site"),
                 remote,
@@ -562,22 +643,12 @@ mod tests {
         assert_eq!(
             p.check_from(
                 DevEndpointKind::Privileged,
-                Some("evil.example"),
+                Some("myvm.local"),
                 Some("https://attacker.example"),
                 None,
                 remote,
             ),
             Err(DevGuardRejection::ForeignOrigin("https://attacker.example".into()))
-        );
-        assert_eq!(
-            p.check_from(
-                DevEndpointKind::Privileged,
-                Some("evil.example:3000"),
-                Some("http://evil.example:3000"),
-                Some("same-origin"),
-                remote,
-            ),
-            Ok(())
         );
         assert_eq!(
             p.check_from(DevEndpointKind::Read, None, None, None, remote),
