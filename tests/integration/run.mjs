@@ -3703,7 +3703,10 @@ async function buildChangeCachePhase() {
   );
 
   try {
-    for (const run of [1, 2, 3, 4, 5]) {
+    // Run 3 restarts the same code several times: the client build must
+    // come out byte-identical every time (it once varied with the order
+    // esbuild resolved a module's imports in, a few starts in thirty).
+    for (const run of [1, 2, 3, 3, 3, 3, 3, 4, 5]) {
       if (run === 2) {
         await writeFile(cssPath, `${await readFile(cssPath, 'utf8')}\n.build-change-marker { color: teal; }\n`);
       }
@@ -3754,7 +3757,7 @@ async function buildChangeCachePhase() {
           scripts: scripts(html),
           html,
         });
-        const current = runs[run - 1];
+        const current = runs[runs.length - 1];
         assert.equal(res.status, 200);
         assert.ok(current.css.length > 0, `/cached links a stylesheet: ${html.slice(0, 400)}`);
 
@@ -3798,15 +3801,17 @@ async function buildChangeCachePhase() {
         }
 
         if (run === 3) {
-          await test('a restart of the same code keeps the deployment ID and the disk cache', () => {
+          const restart = runs.length - 2;
+          await test(`a restart of the same code keeps the deployment ID and the disk cache (restart ${restart})`, () => {
             assert.equal(current.deploymentId, runs[1].deploymentId);
             assert.match(current.cache, /^hit\b/, 'the page persisted by this build must be served');
             assert.deepEqual(current.css, runs[1].css);
+            assert.deepEqual(current.scripts, runs[1].scripts, 'the same code must build the same chunks');
           });
           continue;
         }
 
-        const before = runs[run - 2];
+        const before = runs[runs.length - 2];
         const [what, fresh, stale] = run === 4
           ? ['the root layout', /content="ROOT_LAYOUT_V2"/, null]
           : ["a page's metadata export", /<title>BUILD_CHANGE_TITLE_V2<\/title>/, /BUILD_CHANGE_TITLE_V1/];

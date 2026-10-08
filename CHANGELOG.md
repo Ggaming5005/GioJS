@@ -1196,6 +1196,22 @@ first.
 - `handleHardReload()` from `@gio.js/react` threw `window is not defined`
   when called during server rendering; like the other deployment helpers,
   it now does nothing there.
+- The client build was not reproducible. Whether a module counted as
+  side-effect free (and so dropped with the `getServerSideProps` that used
+  it) depended on which import of it esbuild resolved first, so a module
+  imported both bare (`import './init'`) and by binding, or an npm package
+  or workspace source imported by the app and by another dependency, could
+  be bundled differently from one start to the next. Identical code then got
+  different chunk hashes and a different deployment ID: a restart of
+  unchanged code could drop the persisted page cache, and pods of one deploy
+  behind a load balancer could disagree and send clients into version-skew
+  reloads. A bare
+  import could also lose its side effects when a binding import won the race.
+  The verdict is now a property of the module alone - the project's own
+  modules and what they import by binding are side-effect free unless some
+  project file imports them bare - decided from a scan of the project's
+  imports before the build resolves any, so the same code always builds the
+  same chunks.
 
 ### Known limitations
 

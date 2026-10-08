@@ -11,14 +11,18 @@
  *
  * Server-only code is kept out of the bundles structurally, never by
  * rewriting source text: each generated entry imports ONLY the default export
- * of each app file, and every non-bare import made by a project file is
- * marked side-effect free. esbuild's tree-shaking then drops
- * `getServerSideProps` / `getStaticPaths` in every export form (declarations,
- * `export { x as getServerSideProps }`, `export ... from`, `export *`)
- * together with whatever only they imported - project helpers and npm
- * packages alike. Bare `import 'x'` statements keep their side effects. Node
- * builtin imports that survive are stubbed so a stray server import can never
- * fail the build.
+ * of each app file, and the project's own modules - plus every module a
+ * project file imports by binding (`import { x } from`, `export ... from`,
+ * `import()`) - are marked side-effect free. esbuild's tree-shaking then
+ * drops `getServerSideProps` / `getStaticPaths` in every export form
+ * (declarations, `export { x as getServerSideProps }`, `export ... from`,
+ * `export *`) together with whatever only they imported - project helpers
+ * and npm packages alike. A module some project file imports bare
+ * (`import 'x'`) keeps its side effects. The verdict is a function of the
+ * module alone, decided from a scan of the project's imports before any
+ * import is resolved, so the same code always builds the same chunks
+ * (gioServerCodePlugin). Node builtin imports that survive are stubbed so a
+ * stray server import can never fail the build.
  *
  * The `server-only` guard is the loud backstop: if `@gio.js/core/server-only`
  * (or the bare `server-only` specifier) or any `*.server.*` file is still
@@ -41,13 +45,15 @@ import {
   build,
   transform,
   type Loader,
+  type ImportKind,
   type Metafile,
   type OutputFile,
   type Plugin,
+  type ResolveResult,
 } from 'esbuild';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, join, resolve, sep } from 'node:path';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   emptySegmentFiles,
@@ -214,6 +220,31 @@ export function bareImportSpecifiers(source: string): Set<string> {
   return specifiers;
 }
 
+/** One import of a module that binds something from it (or loads it lazily). */
+export interface BoundImport {
+  specifier: string;
+  kind: 'import-statement' | 'dynamic-import' | 'require-call';
+}
+
+/**
+ * The binding imports in `source`: `import ... from`, `export ... from`,
+ * `import()` and `require()` of a literal specifier. Loose like
+ * bareImportSpecifiers(): a false positive (the text inside a comment or
+ * string) only marks a module the project names side-effect free - the
+ * verdict a real import of it gets anyway.
+ */
+export function boundImportSpecifiers(source: string): BoundImport[] {
+  const found: BoundImport[] = [];
+  const pattern =
+    /(?<![\w$.])(?:from\s*(['"])([^'"\r\n]+)\1|import\s*\(\s*(['"])([^'"\r\n]+)\3\s*[,)]|require\s*\(\s*(['"])([^'"\r\n]+)\5\s*\))/g;
+  for (const match of source.matchAll(pattern)) {
+    if (match[2] !== undefined) found.push({ specifier: match[2], kind: 'import-statement' });
+    else if (match[4] !== undefined) found.push({ specifier: match[4], kind: 'dynamic-import' });
+    else if (match[6] !== undefined) found.push({ specifier: match[6], kind: 'require-call' });
+  }
+  return found;
+}
+
 /**
  * The `GIO_PUBLIC_*` variables in `env`. Keys esbuild cannot express as a
  * member chain (dashes etc.) are skipped instead of failing the whole build.
@@ -294,8 +325,191 @@ function unbundledDynamicImports(metafile: Metafile): string[] {
   return [...found];
 }
 
-function gioServerCodePlugin(projectRoot: string, dynamicImports: DynamicImports): Plugin {
-  const root = resolve(projectRoot);
+/** Marks gioServerCodePlugin's own nested resolutions, which its onResolve passes through. */
+const GIO_RESOLVING = 'gio-resolving';
+/** Modules the side-effect scan reads for imports (declaration files import nothing that ships). */
+const SCANNED_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
+const DECLARATION_FILE = /\.d\.[cm]?ts$/;
+/** Top-level project folders that hold no app source: static files and export output. */
+const NON_SOURCE_TOP_DIRS = new Set(['public', 'out']);
+
+/** Whether `path` is strictly inside `root`. */
+function isInside(root: string, path: string): boolean {
+  const rel = relative(root, resolve(path));
+  return rel !== '' && !isAbsolute(rel) && rel.split(/[\\/]/)[0] !== '..';
+}
+
+/**
+ * Whether `path` is one of the project's own source files: inside `root`
+ * and not under node_modules, a dot folder (`.gio`, `.git`, ...), a
+ * top-level `public/` or `out/`, or one of `excludedDirs`.
+ */
+export function isProjectSource(
+  root: string,
+  path: string,
+  excludedDirs: readonly string[] = [],
+): boolean {
+  if (!isInside(root, path)) return false;
+  if (excludedDirs.some(dir => path === dir || isInside(dir, path))) return false;
+  const segments = relative(root, resolve(path)).split(/[\\/]/);
+  if (segments.length > 1 && NON_SOURCE_TOP_DIRS.has(segments[0] as string)) return false;
+  return segments.every(segment => segment !== 'node_modules' && !segment.startsWith('.'));
+}
+
+/** The project's source modules (isProjectSource) the side-effect scan reads. */
+async function projectSourceModules(
+  root: string,
+  excludedDirs: readonly string[],
+): Promise<string[]> {
+  const found: string[] = [];
+  const visit = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        // A folder is walked when a file directly inside it would count.
+        if (isProjectSource(root, join(path, 'x'), excludedDirs)) await visit(path);
+      } else if (
+        entry.isFile() &&
+        SCANNED_FILE.test(entry.name) &&
+        !DECLARATION_FILE.test(entry.name) &&
+        isProjectSource(root, path, excludedDirs)
+      ) {
+        found.push(path);
+      }
+    }
+  };
+  await visit(root);
+  return found;
+}
+
+/** The imports one scanned module makes. */
+interface ScannedModule {
+  file: string;
+  bare: string[];
+  bound: BoundImport[];
+}
+
+/** What the project's modules import, resolved: targetKey()s. */
+interface ProjectImportTargets {
+  /** Modules some project file imports for their side effects (`import 'x'`). */
+  sideEffect: Set<string>;
+  /** Modules some project file binds from, or loads with import() / require(). */
+  bound: Set<string>;
+  /** False when a resolution threw (not merely failed to resolve): worth retrying. */
+  complete: boolean;
+}
+
+/** A resolved module's identity: esbuild keys modules by namespace and path. */
+function targetKey(resolved: { namespace: string; path: string }): string {
+  return `${resolved.namespace}:${resolved.path}`;
+}
+
+/**
+ * Read the imports of every project source module plus `extraFiles` (the
+ * generated entries). Order-free: only set membership is used.
+ */
+async function scanProjectImports(
+  root: string,
+  extraFiles: readonly string[],
+  excludedDirs: readonly string[],
+): Promise<ScannedModule[]> {
+  const files = [...(await projectSourceModules(root, excludedDirs)), ...extraFiles];
+  return Promise.all(
+    files.map(async file => {
+      const source = await readFile(file, 'utf8').catch(() => '');
+      return { file, bare: [...bareImportSpecifiers(source)], bound: boundImportSpecifiers(source) };
+    }),
+  );
+}
+
+type ResolveFrom = (
+  specifier: string,
+  importer: string,
+  resolveDir: string,
+  kind: ImportKind,
+) => Promise<ResolveResult>;
+
+/**
+ * Resolve the scanned imports, as esbuild resolves them from those files.
+ * A binding import whose path already names a project source is not
+ * resolved: such a module is side-effect free without being listed. That
+ * shortcut (like any miss here) can only leave a module with esbuild's
+ * default; it never makes the verdict depend on the import.
+ */
+async function resolveImportTargets(
+  scanned: Promise<ScannedModule[]>,
+  resolveFrom: ResolveFrom,
+  isSource: (path: string) => boolean,
+): Promise<ProjectImportTargets> {
+  const targets: ProjectImportTargets = { sideEffect: new Set(), bound: new Set(), complete: true };
+  // One resolution per (directory, specifier, kind): the result depends on
+  // nothing else (the tsconfig is the build's).
+  const resolutions = new Map<string, Promise<string | null>>();
+  const add = async (
+    into: Set<string>,
+    file: string,
+    specifier: string,
+    kind: ImportKind,
+  ): Promise<void> => {
+    const resolveDir = dirname(file);
+    const memo = `${resolveDir}\0${kind}\0${specifier}`;
+    let pending = resolutions.get(memo);
+    if (pending === undefined) {
+      // (A resolver that throws, even synchronously, lands in the rejection.)
+      pending = Promise.resolve()
+        .then(() => resolveFrom(specifier, file, resolveDir, kind))
+        .then(
+          // Unresolvable: no module to decide for.
+          resolved =>
+            resolved.errors.length === 0 && !resolved.external ? targetKey(resolved) : null,
+          () => {
+            targets.complete = false;
+            return null;
+          },
+        );
+      resolutions.set(memo, pending);
+    }
+    const key = await pending;
+    if (key !== null) into.add(key);
+  };
+  const namesSource = (file: string, specifier: string): boolean =>
+    (specifier.startsWith('.') || isAbsolute(specifier)) &&
+    isSource(resolve(dirname(file), specifier));
+  await Promise.all(
+    (await scanned).flatMap(({ file, bare, bound }) => [
+      ...bare.map(specifier => add(targets.sideEffect, file, specifier, 'import-statement')),
+      ...bound
+        .filter(({ specifier }) => !namesSource(file, specifier))
+        .map(({ specifier, kind }) => add(targets.bound, file, specifier, kind)),
+    ]),
+  );
+  return targets;
+}
+
+interface ServerCodePluginOptions {
+  projectRoot: string;
+  dynamicImports: DynamicImports;
+  /** Generated entry modules: their imports count as the project's. */
+  entryFiles: readonly string[];
+  /** Folders inside the project that hold no source (a static export's output). */
+  excludedDirs: readonly string[];
+}
+
+export function gioServerCodePlugin(options: ServerCodePluginOptions): Plugin {
+  const root = resolve(options.projectRoot);
+  const { dynamicImports } = options;
+  const excludedDirs = options.excludedDirs.map(dir => resolve(dir));
+  const isSource = (path: string): boolean => isProjectSource(root, path, excludedDirs);
+  // Found once, during the first build that needs them, for every pass and
+  // every build of one buildClientBundles(): they all decide alike. That
+  // build cannot end first - the onResolve that started it awaits it.
+  let targets: Promise<ProjectImportTargets> | undefined;
   return {
     name: 'gio-server-code',
     setup(pluginBuild) {
@@ -325,40 +539,67 @@ function gioServerCodePlugin(projectRoot: string, dynamicImports: DynamicImports
         loader: 'js',
       }));
 
-      // Any non-bare import a project file makes is side-effect free: once
-      // the server exports it served are shaken out, the import (a project
-      // helper or an npm package) drops with them - including through
-      // `export ... from` and `export *` chains and path aliases.
-      const bareImportsByFile = new Map<string, Promise<Set<string>>>();
-      const bareImportsOf = (file: string): Promise<Set<string>> => {
-        let pending = bareImportsByFile.get(file);
-        if (pending === undefined) {
-          pending = readFile(file, 'utf8').then(bareImportSpecifiers, () => new Set<string>());
-          bareImportsByFile.set(file, pending);
-        }
-        return pending;
-      };
-      pluginBuild.onResolve({ filter: /.*/ }, async args => {
-        if (args.pluginData === 'gio-resolving') return null;
-        if (args.namespace !== 'file') return null;
-        if (args.importer === '' || args.importer.includes('node_modules')) return null;
-        if (!resolve(args.importer).startsWith(root)) return null;
-        const dynamic = args.kind === 'dynamic-import';
-        if (!dynamic && (await bareImportsOf(args.importer)).has(args.path)) return null;
-        const resolved = await pluginBuild.resolve(args.path, {
-          importer: args.importer,
-          resolveDir: args.resolveDir,
-          kind: args.kind,
-          pluginData: 'gio-resolving',
+      // Which modules are side-effect free, i.e. drop when nothing they
+      // export is used (sideEffectFree): once the server exports that used
+      // them are shaken out, a project helper or an npm package drops with
+      // them - including through `export ... from` and `export *` chains
+      // and path aliases. esbuild keeps the flag of whichever resolution of
+      // a module finishes first, so the verdict depends only on the module,
+      // never on the import that reached it: anything else would make the
+      // output - and the deployment ID - vary from build to build.
+      const resolveFrom: ResolveFrom = (specifier, importer, resolveDir, kind) =>
+        pluginBuild.resolve(specifier, {
+          importer,
+          resolveDir,
+          kind,
+          namespace: 'file',
+          pluginData: GIO_RESOLVING,
         });
-        if (resolved.errors.length > 0 || resolved.external) return null;
-        // An import() is bundled only once a pass saw it survive (DynamicImports).
-        if (dynamic) {
-          return dynamicImports.live.has(resolved.path) || resolved.namespace !== 'file'
-            ? { path: resolved.path, namespace: resolved.namespace }
-            : { path: `${DYNAMIC_IMPORT_MARKER}${resolved.path}`, external: true };
+      const importTargets = (): Promise<ProjectImportTargets> => {
+        if (targets === undefined) {
+          const found = resolveImportTargets(
+            scanProjectImports(root, options.entryFiles, excludedDirs),
+            resolveFrom,
+            isSource,
+          );
+          targets = found;
+          // A resolver failure (not a missing module) is retried by the next build.
+          void found.then(result => {
+            if (!result.complete && targets === found) targets = undefined;
+          });
         }
-        return { path: resolved.path, namespace: resolved.namespace, sideEffects: false };
+        return targets;
+      };
+      const sideEffectFree = async (resolved: ResolveResult): Promise<boolean> => {
+        const { sideEffect, bound } = await importTargets();
+        const key = targetKey(resolved);
+        if (sideEffect.has(key)) return false;
+        return bound.has(key) || (resolved.namespace === 'file' && isSource(resolved.path));
+      };
+
+      pluginBuild.onResolve({ filter: /.*/ }, async args => {
+        if (args.pluginData === GIO_RESOLVING) return null;
+        // Generated entries (importer '') and virtual modules import nothing
+        // the verdict could apply to.
+        if (args.namespace !== 'file' || args.importer === '') return null;
+        const resolved = await resolveFrom(args.path, args.importer, args.resolveDir, args.kind);
+        if (resolved.errors.length > 0 || resolved.external) return null;
+        // A project file's import() is bundled only once a pass saw it
+        // survive (DynamicImports).
+        if (
+          args.kind === 'dynamic-import' &&
+          resolved.namespace === 'file' &&
+          !dynamicImports.live.has(resolved.path) &&
+          isInside(root, args.importer) &&
+          !args.importer.includes('node_modules')
+        ) {
+          return { path: `${DYNAMIC_IMPORT_MARKER}${resolved.path}`, external: true };
+        }
+        // null: esbuild resolves it again itself, to the same module, and
+        // keeps its default (package.json `sideEffects`, else side effects).
+        return (await sideEffectFree(resolved))
+          ? { path: resolved.path, namespace: resolved.namespace, sideEffects: false }
+          : null;
       });
 
       pluginBuild.onLoad({ filter: /\.(?:[cm]?[jt]s|[jt]sx)$/ }, args =>
@@ -684,7 +925,12 @@ export async function buildClientBundles(options: ClientBuildOptions): Promise<C
     // One class-map plugin for every pass: each module compiles once.
     const dynamicImports: DynamicImports = { live: new Set() };
     const plugins = [
-      gioServerCodePlugin(projectRoot, dynamicImports),
+      gioServerCodePlugin({
+        projectRoot,
+        dynamicImports,
+        entryFiles: entries.map(entry => entry.file),
+        excludedDirs: exportDir !== undefined ? [exportDir] : [],
+      }),
       cssImportsAsClassMapsPlugin(),
     ];
     const tsconfig = projectTsconfig(projectRoot);

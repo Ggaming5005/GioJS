@@ -1141,7 +1141,10 @@ API_ENDPOINT=\${GIO_PUBLIC_API_URL}/v2`} />
         everything only they import: your helper modules, Node builtins, and npm packages
         such as database clients. Code is never rewritten as text, so strings and comments
         that look like exports are left alone. Bare side-effect imports (
-        <code>import './polyfill'</code>) are kept.
+        <code>import './polyfill'</code>) are kept: a module any project file imports
+        bare keeps its top-level code in every bundle that reaches it, even one where
+        only server code uses its exports. The decision is made per module, never per
+        import, so the same code always builds the same bundles.
       </p>
       <p>
         To turn an accidental client import into a loud error, mark server modules as

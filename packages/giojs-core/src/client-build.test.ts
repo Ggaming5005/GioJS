@@ -8,20 +8,26 @@
  * that the server-only guard rejects bundles that would ship server code, and
  * that only GIO_PUBLIC_* variables are inlined.
  */
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { build } from 'esbuild';
+import { build, type Plugin } from 'esbuild';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { clientBuildHash } from './build-manifest.ts';
 import {
   bareImportSpecifiers,
+  boundImportSpecifiers,
   buildClientBundles,
   clientBuildErrorFor,
   clientEnvDefines,
+  gioServerCodePlugin,
+  isProjectSource,
   type ClientManifest,
 } from './client-build.ts';
 import { logger } from './logger.ts';
+import { emptyStyleManifest } from './style-manifest.ts';
 import { discoverLayouts, discoverRoutes } from './router.ts';
 import type { RouteModule, LayoutEntry, PageModule, LayoutModule } from './router.ts';
 
@@ -663,6 +669,218 @@ export default missing;
       await rm(root, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+/**
+ * A module reached by imports that disagree about its side effects: a bare
+ * `import` and a binding one from project files, an npm package imported by
+ * a page and by another package, and workspace sources outside the project
+ * root importing each other. esbuild keeps the side-effect flag of whichever
+ * resolution of a module finishes first, so a verdict that depended on the
+ * import (not the module) changed the output - and the deployment ID - from
+ * build to build.
+ */
+describe('a deterministic client build', () => {
+  let base: string;
+  let root: string;
+  const PAGES = ['side', 'bound', 'pkg', 'ws'];
+
+  beforeAll(async () => {
+    base = await writeProject('gio-client-determinism-', {
+      'project/lib/init.ts': `(globalThis as Record<string, unknown>).__detInit = 'DET_INIT_SIDE_EFFECT_KEPT';
+export const INIT = 'DET_INIT_BINDING';
+`,
+      'project/app/side/page.tsx': page('DET_SIDE_PAGE', `import '../../lib/init.ts';`),
+      'project/app/bound/page.tsx': page('DET_BOUND_PAGE', `import { INIT } from '../../lib/init.ts';
+export async function getServerSideProps() { return { props: { init: INIT } }; }`),
+      'project/app/pkg/page.tsx': `import React from 'react';
+import { user } from 'det-user';
+import { shared } from 'det-shared';
+export default function Page() { return React.createElement('p', null, user); }
+export async function getServerSideProps() { return { props: { shared } }; }
+`,
+      'project/app/ws/page.tsx': `import React from 'react';
+import { wsIndex } from '../../../ws/index.ts';
+import { wsShared } from '../../../ws/shared.ts';
+export default function Page() { return React.createElement('p', null, wsIndex); }
+export async function getServerSideProps() { return { props: { wsShared } }; }
+`,
+      'project/node_modules/det-shared/package.json': JSON.stringify({
+        name: 'det-shared',
+        type: 'module',
+        main: 'index.js',
+      }),
+      'project/node_modules/det-shared/index.js': `globalThis.__detShared = 'DET_SHARED_SIDE_EFFECT';
+export const shared = 'DET_SHARED_BINDING';
+`,
+      'project/node_modules/det-user/package.json': JSON.stringify({
+        name: 'det-user',
+        type: 'module',
+        main: 'index.js',
+      }),
+      'project/node_modules/det-user/index.js': `import { shared } from 'det-shared';
+export const user = 'DET_USER_KEPT';
+export const viaShared = () => shared;
+`,
+      // A workspace package next to the project, imported by relative path.
+      'ws/shared.ts': `(globalThis as Record<string, unknown>).__detWs = 'DET_WS_SHARED_SIDE_EFFECT';
+export const wsShared = 'DET_WS_SHARED_BINDING';
+`,
+      'ws/index.ts': `import { wsShared } from './shared.ts';
+export const wsIndex = 'DET_WS_INDEX_KEPT';
+export const viaWs = () => wsShared;
+`,
+      // Like the generated entries: each imports only its page's default export.
+      ...Object.fromEntries(
+        PAGES.map(name => [
+          `project/.entries/${name}.tsx`,
+          `import Page from '../app/${name}/page.tsx';\n(globalThis as Record<string, unknown>).page = Page;\n`,
+        ]),
+      ),
+    });
+    root = join(base, 'project');
+  });
+
+  afterAll(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const entryFiles = (): string[] => PAGES.map(name => join(root, '.entries', `${name}.tsx`));
+
+  /** Outputs of one bundle of the pages, with every resolution delayed by `seed`. */
+  async function scrambledBuild(seed: number): Promise<string> {
+    // Delays a resolution by up to 7ms, differently per seed: esbuild then
+    // sees the resolutions of one module finish in a different order.
+    const scrambler: Plugin = {
+      name: 'scramble-resolution-order',
+      setup(pluginBuild) {
+        pluginBuild.onResolve({ filter: /.*/ }, async args => {
+          const digest = createHash('sha256')
+            .update(`${seed}\0${args.importer}\0${args.path}\0${String(args.pluginData)}`)
+            .digest();
+          await new Promise(done => setTimeout(done, (digest[0] as number) % 8));
+          return null;
+        });
+      },
+    };
+    const result = await build({
+      entryPoints: entryFiles(),
+      bundle: true,
+      format: 'esm',
+      splitting: true,
+      outdir: join(root, 'out-scrambled'),
+      absWorkingDir: root,
+      minify: true,
+      jsx: 'automatic',
+      platform: 'browser',
+      write: false,
+      logLevel: 'silent',
+      nodePaths: [join(packageDir, 'node_modules')],
+      plugins: [
+        scrambler,
+        gioServerCodePlugin({
+          projectRoot: root,
+          dynamicImports: { live: new Set() },
+          entryFiles: entryFiles(),
+          excludedDirs: [],
+        }),
+      ],
+    });
+    return result.outputFiles
+      .map(file => `${basename(file.path)}\n${file.text}`)
+      .sort()
+      .join('\n\n');
+  }
+
+  it('decides side effects per module, whatever import of it resolves first', async () => {
+    const first = await scrambledBuild(0);
+    for (let seed = 1; seed < 12; seed++) {
+      expect(await scrambledBuild(seed), `seed ${seed}`).toBe(first);
+    }
+    // A bare import keeps the module's side effects, even though another
+    // page binds from it.
+    expect(first).toContain('DET_INIT_SIDE_EFFECT_KEPT');
+    // What only shaken-out server code used drops, however else it is reached.
+    expect(first).toContain('DET_USER_KEPT');
+    expect(first).not.toContain('DET_SHARED_SIDE_EFFECT');
+    expect(first).toContain('DET_WS_INDEX_KEPT');
+    expect(first).not.toContain('DET_WS_SHARED_SIDE_EFFECT');
+  }, 120_000);
+
+  it('gives byte-identical chunks and clientBuildHash build after build', async () => {
+    const routes = new Map<string, RouteModule>(
+      PAGES.map(name => [`/${name}`, routeFor(`/${name}`, join(root, 'app', name, 'page.tsx'))]),
+    );
+    const chunksDir = join(root, '.gio', 'build', 'static', 'chunks');
+    const builds: { hash: string; chunks: string }[] = [];
+    for (let i = 0; i < 8; i++) {
+      const manifest = await buildClientBundles({
+        routes,
+        layouts: new Map(),
+        projectRoot: root,
+        dev: false,
+        nodePaths: [join(packageDir, 'node_modules')],
+      });
+      expect(manifest.size).toBe(PAGES.length);
+      const files = (await readdir(chunksDir)).sort();
+      const contents = await Promise.all(files.map(f => readFile(join(chunksDir, f), 'utf8')));
+      builds.push({
+        hash: clientBuildHash({ clientScripts: manifest, stylesheets: emptyStyleManifest() }),
+        chunks: files.map((f, n) => `${f}\n${contents[n]}`).join('\n\n'),
+      });
+    }
+    for (const [i, built] of builds.entries()) {
+      expect(built.chunks, `build ${i + 1}`).toBe(builds[0]?.chunks);
+      expect(built.hash, `build ${i + 1}`).toBe(builds[0]?.hash);
+    }
+    expect(builds[0]?.chunks).toContain('DET_INIT_SIDE_EFFECT_KEPT');
+    expect(builds[0]?.chunks).not.toContain('DET_SHARED_SIDE_EFFECT');
+  }, 120_000);
+});
+
+describe('boundImportSpecifiers', () => {
+  it('finds binding, re-export, dynamic and require imports but not bare ones', () => {
+    const source = `import './styles.css';
+import React from 'react';
+import { a,
+  b } from "./a";
+export * from './c';
+export { d } from './d';
+import type { T } from './types';
+const lazy = import('./lazy');
+const opts = import('./with-options', { with: { type: 'json' } });
+const legacy = require('./legacy');
+const computed = import(name);
+`;
+    expect(boundImportSpecifiers(source)).toEqual([
+      { specifier: 'react', kind: 'import-statement' },
+      { specifier: './a', kind: 'import-statement' },
+      { specifier: './c', kind: 'import-statement' },
+      { specifier: './d', kind: 'import-statement' },
+      { specifier: './types', kind: 'import-statement' },
+      { specifier: './lazy', kind: 'dynamic-import' },
+      { specifier: './with-options', kind: 'dynamic-import' },
+      { specifier: './legacy', kind: 'require-call' },
+    ]);
+  });
+});
+
+describe('isProjectSource', () => {
+  const root = join(tmpdir(), 'gio-project');
+  it('counts project files but not dependencies, dot folders, public/ or out/', () => {
+    expect(isProjectSource(root, join(root, 'app', 'page.tsx'))).toBe(true);
+    expect(isProjectSource(root, join(root, 'lib', 'out', 'x.ts'))).toBe(true);
+    expect(isProjectSource(root, join(root, 'app', 'public', 'page.tsx'))).toBe(true);
+    expect(isProjectSource(root, join(root, 'node_modules', 'pkg', 'index.js'))).toBe(false);
+    expect(isProjectSource(root, join(root, 'lib', 'node_modules', 'pkg', 'index.js'))).toBe(false);
+    expect(isProjectSource(root, join(root, '.gio', 'build', 'entries', 'route-index.tsx'))).toBe(false);
+    expect(isProjectSource(root, join(root, 'public', 'vendor.js'))).toBe(false);
+    expect(isProjectSource(root, join(root, 'out', 'chunk.js'))).toBe(false);
+    expect(isProjectSource(root, join(root, 'dist', 'chunk.js'), [join(root, 'dist')])).toBe(false);
+    expect(isProjectSource(root, join(tmpdir(), 'gio-project-other', 'x.ts'))).toBe(false);
+    expect(isProjectSource(root, join(tmpdir(), 'elsewhere', 'x.ts'))).toBe(false);
+    expect(isProjectSource(root, root)).toBe(false);
+  });
 });
 
 describe('client env inlining', () => {
