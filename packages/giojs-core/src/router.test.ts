@@ -116,6 +116,26 @@ describe('export const revalidate at discovery', () => {
     const routes = await discoverRoutes(appDir);
     expect([...routes.keys()].sort()).toEqual(['/a', '/b', '/c', '/d', '/e', '/f']);
   });
+
+  it('reads the export from code only - not from comments, strings or template literals', async () => {
+    const rest = 'export default function P() { return null; }\n';
+    await touch('a/page.tsx', `/*\nexport const revalidate = -1;\n*/\nexport const revalidate = 60;\n${rest}`);
+    await touch('b/page.tsx', `const code = \`\nexport const revalidate = '60';\n\`;\n${rest}`);
+    await touch('c/page.tsx', `const code = \`\${'x'}\nexport const revalidate = -1;\n\${\`\nexport const revalidate = 1.5;\n\`}\`;\n${rest}`);
+    await touch('d/page.tsx', `const s = "it's \\"quoted\\"";\nconst re = /'/g;\nconst t = \`\nexport const revalidate = NaN;\n\`;\n${rest}`);
+    const routes = await discoverRoutes(appDir);
+    expect([...routes.keys()].sort()).toEqual(['/a', '/b', '/c', '/d']);
+  });
+
+  it('still refuses a real export that follows a comment or a code sample', async () => {
+    await touch(
+      'blog/page.tsx',
+      `/* export const revalidate = 60; */\nconst code = \`\nexport const revalidate = 60;\n\`;\nexport const revalidate = '60';\nexport default function P() { return null; }\n`,
+    );
+    await expect(discoverRoutes(appDir)).rejects.toThrow(
+      'app/blog/page.tsx: export const revalidate must be a whole number of seconds (0 or more) or false - got "60"',
+    );
+  });
 });
 
 describe('dynamic segment conventions', () => {

@@ -242,8 +242,19 @@ export default function OldPricing() {
         </li>
         <li>
           <strong>Open redirects.</strong> The URL is used as given. Check a target that comes
-          from the request (a <code>?next=</code> parameter) before redirecting to it - for
-          example, accept only paths that start with <code>/</code> and not <code>//</code>.
+          from the request (a <code>?next=</code> parameter) before redirecting to it. Accept
+          only a path that starts with <code>/</code> but not with <code>//</code> or{' '}
+          <code>/\</code> (a browser reads both as another host), and that holds no control
+          characters (a browser drops tabs and newlines, so <code>/</code>, a tab and{' '}
+          <code>/evil.example</code> is another host too):
+          <CodeBlock lang="ts" code={`/** Same-site paths only; \`//evil.example\`, \`/\\evil.example\` and absolute URLs fall back to \`/\`. */
+export function safeNext(value: string | undefined): string {
+  // A browser drops tabs and newlines, and reads a leading // or /\\ as another host.
+  if (value === undefined || !value.startsWith('/') || /[\\u0000-\\u001f\\u007f]/.test(value)) return '/';
+  return /^\\/[/\\\\]/.test(value) ? '/' : value;
+}`} />
+          The <a href="/docs/guides/redirecting#good-to-know">Redirecting guide</a> uses the
+          same check.
         </li>
         <li>
           <strong>Do not swallow it.</strong> A <code>try</code>/<code>catch</code> around code

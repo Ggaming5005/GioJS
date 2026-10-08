@@ -79,7 +79,10 @@ export default function Page(): React.JSX.Element {
         <code>!</code> warn, <code>✗</code> error, <code>-</code> skipped. A skipped check
         says why in its title. The <code>config</code> check is skipped when no binary of the
         CLI&apos;s own version is available (a different version may not know the flag); the
-        other checks then read <code>gio.toml</code> leniently. That reader still fails the{' '}
+        other checks then read <code>gio.toml</code> leniently. That reader follows dotted
+        keys and inline tables as the server does (<code>env.files = false</code> and{' '}
+        <code>{'env = { files = false }'}</code> turn the <code>.env</code> files off just like{' '}
+        <code>[env] files = false</code>), and still fails the{' '}
         <code>config</code> check on an invalid <code>GIO_ENV_FILES</code>, with the
         server&apos;s own error. When it cannot read <code>gio.toml</code> either (a line that
         is not TOML, such as an unclosed <code>[server</code> header), the <code>config</code>{' '}

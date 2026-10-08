@@ -280,6 +280,53 @@ describe('getServerSideProps redirect', () => {
     const result = await renderRoute(makeRequest('/'), routes, noLayouts);
     expect('cacheable' in result && result.cacheable).toBe(false);
   });
+
+  it('a redirect key that is not { destination } is flat props, never a Location-less 302', async () => {
+    for (const result of [
+      { redirect: '/dash', title: 'Sign in' },
+      { redirect: { permanent: false } },
+      { redirect: null },
+      { redirect: ['/x'] },
+    ]) {
+      const routes = makeRoute('/login', {
+        getServerSideProps: async () => result,
+        default: function Page(props: Record<string, unknown>) {
+          return React.createElement('p', null, `page:${typeof props['redirect']}`);
+        },
+      });
+      const response = await renderRoute(makeRequest('/login'), routes, noLayouts);
+      expect('status' in response && response.status, JSON.stringify(result)).toBe(200);
+      expect('headers' in response && response.headers['location']).toBeUndefined();
+      expect('body' in response && response.body).toContain('page:');
+    }
+  });
+
+  it('a destination redirect() would refuse answers 500, never sent', async () => {
+    const logs = captureLogs();
+    try {
+      for (const destination of ['/x\r\nSet-Cookie: evil=1', '', 42, undefined, { href: '/x' }]) {
+        const routes = makeRoute('/', {
+          getServerSideProps: async () => ({
+            redirect: { destination, permanent: false },
+            headers: { 'set-cookie': 'sid=1' },
+          }),
+        });
+        const result = await renderRoute(makeRequest('/'), routes, noLayouts);
+        // The render-error answer Rust sends as a 500, with its digest.
+        expect('code' in result && result.code, JSON.stringify(destination)).toBe('RENDER_ERROR');
+        expect('digest' in result && result.digest).toMatch(DIGEST);
+        expect('headers' in result).toBe(false);
+        expect('setCookies' in result).toBe(false);
+      }
+      const failures = logs.lines().filter(l => l['msg'] === 'ssr render failed');
+      expect(failures.length).toBe(5);
+      expect(String(failures[0]?.['error'])).toContain(
+        '{ redirect: { destination } } that cannot be sent',
+      );
+    } finally {
+      logs.restore();
+    }
+  });
 });
 
 // ─── getServerSideProps props extraction ─────────────────────────────────────

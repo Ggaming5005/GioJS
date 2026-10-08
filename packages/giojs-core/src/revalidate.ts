@@ -491,6 +491,120 @@ function revalidateLiteral(text: string): unknown {
  * imported constant) is checked when the page renders.
  */
 export function assertStaticRevalidate(source: string, file: string): void {
-  const value = revalidateLiteral(REVALIDATE_EXPORT.exec(source)?.[1] ?? '');
+  // The export is looked for in code only: a commented-out one or a code
+  // sample in a string or template literal is not the page's export. The
+  // mask keeps every offset, so the value is read from the source itself.
+  const found = REVALIDATE_EXPORT.exec(maskNonCode(source));
+  if (found === null) return;
+  const value = revalidateLiteral(REVALIDATE_EXPORT.exec(source.slice(found.index))?.[1] ?? '');
   if (value !== NOT_A_LITERAL) assertValidRevalidate(value, file);
+}
+
+/** Keywords after which a `/` starts a regular expression, not a division. */
+const REGEX_AFTER_WORD = new Set([
+  'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw',
+  'case', 'do', 'else', 'yield', 'await',
+]);
+
+/**
+ * `source` with the contents of comments and string, template and regular
+ * expression literals blanked (line breaks kept), so a line regex sees
+ * code only. Every offset is unchanged. A lexer, not a parser: JSX text is
+ * read as code, so a stray quote there blanks at most the rest of its line
+ * and a stray backtick up to the next one - either way the export is then
+ * missed here and left to the render-time check, never invented.
+ */
+export function maskNonCode(source: string): string {
+  const out = source.split('');
+  const blank = (from: number, to: number): void => {
+    for (let k = from; k < to; k++) if (out[k] !== '\n' && out[k] !== '\r') out[k] = ' ';
+  };
+  const n = source.length;
+
+  // Code from `start` until a `}` at depth 0 when `inTemplate` (returns the
+  // index of that `}`), or to the end.
+  const code = (start: number, inTemplate: boolean): number => {
+    let i = start;
+    let depth = 0;
+    // The last significant token, to tell a regex from a division.
+    let prev = '';
+    while (i < n) {
+      const c = source[i] as string;
+      const next = source[i + 1];
+      if (c === '/' && next === '/') {
+        let end = source.indexOf('\n', i);
+        if (end < 0) end = n;
+        blank(i, end);
+        i = end;
+      } else if (c === '/' && next === '*') {
+        const close = source.indexOf('*/', i + 2);
+        const end = close < 0 ? n : close + 2;
+        blank(i, end);
+        i = end;
+      } else if (c === '"' || c === "'") {
+        let j = i + 1;
+        while (j < n && source[j] !== c && source[j] !== '\n') j += source[j] === '\\' ? 2 : 1;
+        blank(i + 1, Math.min(j, n));
+        i = j + 1;
+        prev = 'x';
+      } else if (c === '`') {
+        i = template(i + 1);
+        prev = 'x';
+      } else if (c === '/' && (prev === '' || /[(,=:[!&|?{};+\-*%<>~^]$/.test(prev) || REGEX_AFTER_WORD.has(prev))) {
+        let j = i + 1;
+        let inClass = false;
+        while (j < n && source[j] !== '\n' && (inClass || source[j] !== '/')) {
+          if (source[j] === '\\') j += 1;
+          else if (source[j] === '[') inClass = true;
+          else if (source[j] === ']') inClass = false;
+          j += 1;
+        }
+        blank(i + 1, Math.min(j, n));
+        i = j + 1;
+        prev = 'x';
+      } else if (inTemplate && c === '}' && depth === 0) {
+        return i;
+      } else {
+        if (c === '{') depth += 1;
+        else if (c === '}') depth -= 1;
+        if (/[A-Za-z0-9_$]/.test(c)) {
+          let j = i;
+          while (j < n && /[A-Za-z0-9_$]/.test(source[j] as string)) j += 1;
+          prev = source.slice(i, j);
+          i = j;
+          continue;
+        }
+        if (!/\s/.test(c)) prev = c;
+        i += 1;
+      }
+    }
+    return n;
+  };
+
+  // A template literal's text from `start` (after the opening backtick);
+  // returns the index after the closing one.
+  const template = (start: number): number => {
+    let i = start;
+    let textFrom = start;
+    while (i < n) {
+      const c = source[i];
+      if (c === '\\') {
+        i += 2;
+      } else if (c === '`') {
+        blank(textFrom, i);
+        return i + 1;
+      } else if (c === '$' && source[i + 1] === '{') {
+        blank(textFrom, i);
+        i = code(i + 2, true) + 1;
+        textFrom = i;
+      } else {
+        i += 1;
+      }
+    }
+    blank(textFrom, n);
+    return n;
+  };
+
+  code(0, false);
+  return out.join('');
 }

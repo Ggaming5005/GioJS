@@ -109,13 +109,117 @@ function parseValue(raw) {
 }
 
 /**
+ * A TOML key - `files`, `env.files`, `headers."x-frame-options"`,
+ * `'a b'.c` - as its list of names, or null when it is not one.
+ */
+function parseKeyPath(text) {
+  const keys = [];
+  let rest = String(text).trim();
+  for (;;) {
+    const match = /^(?:([A-Za-z0-9_-]+)|"((?:[^"\\]|\\.)*)"|'([^']*)')\s*/.exec(rest);
+    if (!match) return null;
+    if (match[1] !== undefined) keys.push(match[1]);
+    else if (match[2] !== undefined) keys.push(match[2].replace(/\\(["\\])/g, '$1'));
+    else keys.push(match[3]);
+    rest = rest.slice(match[0].length);
+    if (rest === '') return keys;
+    if (rest[0] !== '.') return null;
+    rest = rest.slice(1).trimStart();
+  }
+}
+
+/** Index of the first `=` outside quotes in `text`, or -1. */
+function assignmentEquals(text) {
+  let quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"') i++;
+      else if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '=') {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** `text` split at the commas outside quotes, brackets and braces. */
+function splitTopLevel(text) {
+  const parts = [];
+  let depth = 0;
+  let quote = null;
+  let current = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"') {
+        current += ch + (text[i + 1] || '');
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '[' || ch === '{') {
+      depth++;
+    } else if (ch === ']' || ch === '}') {
+      depth--;
+    } else if (ch === ',' && depth === 0) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
+}
+
+/**
+ * Set `value` at `keys` under `table`, creating the tables between. False
+ * when a name on the way already holds something other than a table.
+ */
+function setKeyPath(table, keys, value) {
+  let node = table;
+  for (const key of keys.slice(0, -1)) {
+    if (node[key] === undefined) node[key] = {};
+    else if (typeof node[key] !== 'object' || node[key] === null || Array.isArray(node[key])) return false;
+    node = node[key];
+  }
+  node[keys[keys.length - 1]] = value;
+  return true;
+}
+
+/** `{ a = 1, b.c = "x", d = { e = true } }` as an object, or null. */
+function parseInlineTable(text) {
+  const value = text.trim();
+  if (!value.startsWith('{') || !value.endsWith('}')) return null;
+  const table = {};
+  const inner = value.slice(1, -1);
+  if (inner.trim() === '') return table;
+  for (const part of splitTopLevel(inner)) {
+    const equals = assignmentEquals(part);
+    if (equals < 0) return null;
+    const keys = parseKeyPath(part.slice(0, equals));
+    const raw = part.slice(equals + 1).trim();
+    if (keys === null || raw === '') return null;
+    const item = raw.startsWith('{') ? parseInlineTable(raw) : parseValue(raw);
+    if (item === null || !setKeyPath(table, keys, item)) return null;
+  }
+  return table;
+}
+
+/**
  * Tables, arrays of tables, and `key = value` with strings, integers,
- * booleans and (possibly multi-line) arrays of those. Dotted or quoted keys,
- * inline tables, multi-line strings and tables with quoted names are
- * skipped. Never throws: a line it cannot read is ignored, and described in
- * `problems` (when given) as `gio.toml:<line>: <reason>` - never quoting the
- * line, which may hold a token - so a caller can tell a file it read from
- * one whose settings it may have missed.
+ * booleans, (possibly multi-line) arrays of those and inline tables. Keys
+ * and table names may be dotted or quoted (`env.files = false` sets what
+ * `[env] files = false` does). Multi-line strings are skipped. Never throws:
+ * a line it cannot read is ignored, and described in `problems` (when
+ * given) as `gio.toml:<line>: <reason>` - never quoting the line, which may
+ * hold a token - so a caller can tell a file it read from one whose
+ * settings it may have missed.
  */
 function parseTomlLite(text, problems = null) {
   const root = {};
@@ -127,17 +231,17 @@ function parseTomlLite(text, problems = null) {
   for (let i = 0; i < lines.length; i++) {
     let line = stripComment(lines[i]).trim();
     if (!line) continue;
-    const arrayTable = /^\[\[\s*([A-Za-z0-9_.-]+)\s*\]\]$/.exec(line);
-    const plainTable = /^\[\s*([A-Za-z0-9_.-]+)\s*\]$/.exec(line);
-    if (!arrayTable && !plainTable && line.startsWith('[')) {
-      // `[a."b.c"]` is valid TOML this reader does not follow: its keys go
-      // nowhere. `[server` is not TOML at all.
-      if (!/^\[\[?[^[\]]+\]\]?$/.test(line)) problem(i, 'not a table header');
+    const arrayTable = /^\[\[(.+)\]\]$/.exec(line);
+    const plainTable = !arrayTable && /^\[([^[].*)\]$/.exec(line);
+    const tablePath = arrayTable || plainTable ? parseKeyPath((arrayTable || plainTable)[1]) : null;
+    if (tablePath === null && line.startsWith('[')) {
+      // `[server` is not TOML at all: its keys go nowhere.
+      problem(i, 'not a table header');
       table = {};
       continue;
     }
-    if (arrayTable || plainTable) {
-      const path = (arrayTable || plainTable)[1].split('.');
+    if (tablePath !== null) {
+      const path = tablePath;
       let node = root;
       for (const key of path.slice(0, -1)) {
         if (Array.isArray(node[key])) node = node[key][node[key].length - 1];
@@ -153,14 +257,14 @@ function parseTomlLite(text, problems = null) {
       }
       continue;
     }
-    const assignment = /^([A-Za-z0-9_-]+)\s*=\s*(.*)$/.exec(line);
-    const otherKey = !assignment && /^([A-Za-z0-9_.\-\s]|"[^"]*"|'[^']*')+=\s*(.*)$/.exec(line);
-    if (!assignment && !otherKey) {
+    const equals = assignmentEquals(line);
+    const keys = equals < 0 ? null : parseKeyPath(line.slice(0, equals));
+    if (keys === null) {
       problem(i, 'not a `key = value` line or a table header');
       continue;
     }
     const start = i;
-    let raw = (assignment || otherKey)[2];
+    let raw = line.slice(equals + 1).trim();
     if (raw.trim() === '') {
       problem(i, 'a key without a value');
       continue;
@@ -187,8 +291,12 @@ function parseTomlLite(text, problems = null) {
       problem(start, 'a string that never ends');
       continue;
     }
-    if (otherKey || raw.trim().startsWith('{')) continue;
-    table[assignment[1]] = parseValue(raw);
+    const value = raw.trim().startsWith('{') ? parseInlineTable(raw) : parseValue(raw);
+    if (value === null) {
+      problem(start, 'an inline table this reader cannot follow');
+      continue;
+    }
+    if (!setKeyPath(table, keys, value)) problem(start, 'a key under a name that is not a table');
   }
   return root;
 }

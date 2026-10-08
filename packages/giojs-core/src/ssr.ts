@@ -74,6 +74,7 @@ import {
 } from './request-body.ts';
 import {
   actionOutcome,
+  assertRedirectTarget,
   assertValidRedirect,
   isActionRedirect,
   type ActionOutcome,
@@ -650,8 +651,14 @@ export function serializeEnvelope(envelope: {
   }
 }
 
+/**
+ * `{ redirect: { destination, permanent } }` - a `redirect` record that has
+ * a `destination`. Anything else under a `redirect` key (a string, a record
+ * without one) is flat props, as a non-true `notFound` is. The destination
+ * itself is checked before it is sent (gsspRedirectResponse).
+ */
 function isRedirect(result: unknown): result is RedirectResult {
-  return typeof result === 'object' && result !== null && 'redirect' in result;
+  return isRecord(result) && isRecord(result['redirect']) && 'destination' in result['redirect'];
 }
 
 /** `{ notFound: true }` - strictly `true`, so flat props holding a notFound value still render. */
@@ -919,19 +926,8 @@ async function answerRoute(
         return withActionHeaders(redirectResponse(req, result), actionHeaders);
       }
       if (isRedirect(result)) {
-        const extra = isHeaderRecord(result.headers)
-          ? flattenResponseHeaders(result.headers)
-          : { headers: {}, setCookies: [] };
         return withActionHeaders(
-          {
-            id: req.id,
-            status: result.redirect.permanent ? 301 : 302,
-            headers: redirectHeaders(extra.headers, result.redirect.destination),
-            body: '',
-            cacheable: false,
-            cacheMaxAge: 0,
-            ...setCookiesField(extra.setCookies),
-          },
+          gsspRedirectResponse(req, result, match.module.urlPattern),
           actionHeaders,
         );
       }
@@ -1946,6 +1942,36 @@ function redirectResponse(req: IPCRequest, redirect: ActionRedirect): IPCRespons
     id: req.id,
     status: redirect.status,
     headers: redirectHeaders(extra.headers, redirect.location),
+    body: '',
+    cacheable: false,
+    cacheMaxAge: 0,
+    ...setCookiesField(extra.setCookies),
+  };
+}
+
+/**
+ * The answer to getServerSideProps' `{ redirect: { destination, permanent } }`:
+ * 301 or 302, with its headers. The destination gets the check redirect()
+ * makes - a non-string, empty or control-character destination throws (a
+ * 500 with a digest), never a 302 without a usable Location.
+ */
+function gsspRedirectResponse(req: IPCRequest, result: RedirectResult, pattern: string): IPCResponse {
+  const status = result.redirect.permanent ? 301 : 302;
+  try {
+    assertRedirectTarget(result.redirect.destination, status);
+  } catch (err) {
+    throw new Error(
+      `getServerSideProps for route "${pattern}" returned { redirect: { destination } } that cannot be sent: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const extra = isHeaderRecord(result.headers)
+    ? flattenResponseHeaders(result.headers)
+    : { headers: {}, setCookies: [] };
+  return {
+    id: req.id,
+    status,
+    headers: redirectHeaders(extra.headers, result.redirect.destination),
     body: '',
     cacheable: false,
     cacheMaxAge: 0,
