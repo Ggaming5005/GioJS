@@ -22,6 +22,7 @@ import {
   buildClientBundles,
   clientBuildErrorFor,
   clientEnvDefines,
+  computedImportDirs,
   gioServerCodePlugin,
   isProjectSource,
   type ClientManifest,
@@ -836,6 +837,138 @@ export const viaWs = () => wsShared;
     expect(builds[0]?.chunks).toContain('DET_INIT_SIDE_EFFECT_KEPT');
     expect(builds[0]?.chunks).not.toContain('DET_SHARED_SIDE_EFFECT');
   }, 120_000);
+});
+
+/**
+ * Only the imports of files the browser bundle can reach decide a module's
+ * side effects. A route handler, gio.config.ts, middleware.ts, a test or a
+ * script that imports a module bare must not keep it - and the secrets at
+ * its top level - in a page that uses it only in getServerSideProps; one
+ * that binds from a module must not strip the side effects a dependency or
+ * workspace source imports it bare for.
+ */
+describe('side effects decided by the client graph', () => {
+  let base: string;
+  let root: string;
+  let manifest: ClientManifest;
+  let chunks: string;
+  const PAGES = ['db', 'env', 'pkg', 'locale'];
+
+  beforeAll(async () => {
+    base = await writeProject('gio-client-graph-', {
+      // Server modules a page binds from only in getServerSideProps.
+      'project/lib/db.ts': `import 'server-only';
+const DATABASE_URL = 'postgres://admin:CG_LEAK_DB_PASSWORD@db.internal/app';
+(globalThis as Record<string, unknown>).__pool = DATABASE_URL;
+export const pool = DATABASE_URL;
+`,
+      'project/lib/env.ts': `const read = (name: string, fallback: string): string => process.env[name] ?? fallback;
+export const env = { STRIPE_SECRET_KEY: read('STRIPE_SECRET_KEY', 'sk_test_CG_LEAK_STRIPE') };
+`,
+      'project/app/db/page.tsx': page('CG_DB_PAGE', `import { pool } from '../../lib/db.ts';
+export async function getServerSideProps() { return { props: { ok: pool.length > 0 } }; }`),
+      'project/app/env/page.tsx': page('CG_ENV_PAGE', `import { env } from '../../lib/env.ts';
+export async function getServerSideProps() { return { props: { ok: env.STRIPE_SECRET_KEY !== '' } }; }`),
+      // ...and the server-side files that import them bare.
+      'project/app/api/health/route.ts': `import '../../../lib/db.ts';
+export async function GET() { return new Response('ok'); }
+`,
+      'project/gio.config.ts': `import './lib/env.ts';
+export default {};
+`,
+      'project/middleware.ts': `import './lib/db.ts';
+export default function middleware() {}
+`,
+      'project/scripts/seed.ts': `import '../lib/env.ts';\n`,
+      'project/tests/db.test.ts': `import '../lib/db.ts';\n`,
+
+      // A page using a package and a workspace source that import their
+      // registration / polyfill modules bare...
+      'project/app/pkg/page.tsx': `import React from 'react';
+import { pkg } from 'cg-pkg';
+import { ui } from '../../../ws/ui.ts';
+export default function Page() { return React.createElement('p', null, pkg + ui); }
+`,
+      'project/node_modules/cg-pkg/package.json': JSON.stringify({
+        name: 'cg-pkg',
+        type: 'module',
+        main: 'index.js',
+      }),
+      'project/node_modules/cg-pkg/index.js': `import './register.js';
+export const pkg = 'CG_PKG_USED';
+`,
+      'project/node_modules/cg-pkg/register.js': `globalThis.__cgRegister = 'CG_PKG_REGISTER_RAN';
+export const registered = 1;
+`,
+      'ws/ui.ts': `import './ws-poly.ts';
+export const ui = 'CG_WS_UI_USED';
+`,
+      'ws/ws-poly.ts': `(globalThis as Record<string, unknown>).__cgWsPoly = 'CG_WS_POLY_RAN';
+export const wsPolyVersion = 2;
+`,
+      // ...and a unit test that binds from both.
+      'project/lib/register.test.ts': `import { registered } from 'cg-pkg/register.js';
+import { wsPolyVersion } from '../../ws/ws-poly.ts';
+if (registered !== 1 || wsPolyVersion !== 2) throw new Error('bad');
+`,
+
+      // A computed import(): esbuild bundles every file it may load, so
+      // their bare imports count.
+      'project/app/locale/page.tsx': page('CG_LOCALE_PAGE', `import { POLY } from '../../lib/poly.ts';
+if (typeof window !== 'undefined') void import(\`../../locales/\${navigator.language}.ts\`);
+export async function getServerSideProps() { return { props: { poly: POLY } }; }`),
+      'project/locales/en.ts': `import '../lib/poly.ts';
+export const msg = 'CG_LOCALE_EN';
+`,
+      'project/lib/poly.ts': `(globalThis as Record<string, unknown>).__cgPoly = 'CG_POLY_RAN';
+export const POLY = 1;
+`,
+    });
+    root = join(base, 'project');
+    manifest = await buildPages(root, PAGES);
+    chunks = await allChunks(root);
+  }, 60_000);
+
+  afterAll(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  it('keeps out what only gSSP uses, though a route, config, middleware, test or script imports it bare', () => {
+    expect([...manifest.keys()].sort()).toEqual(PAGES.map(name => `/${name}`).sort());
+    expect(clientBuildErrorFor('/db')).toBeUndefined();
+    expect(chunks).toContain('CG_DB_PAGE');
+    expect(chunks).toContain('CG_ENV_PAGE');
+    expect(chunks).not.toContain('CG_LEAK_DB_PASSWORD');
+    expect(chunks).not.toContain('CG_LEAK_STRIPE');
+    expect(chunks).not.toContain('server-only module bundled for the browser');
+  });
+
+  it("keeps a dependency's or workspace source's bare imports, though a test binds from them", () => {
+    expect(chunks).toContain('CG_PKG_USED');
+    expect(chunks).toContain('CG_PKG_REGISTER_RAN');
+    expect(chunks).toContain('CG_WS_UI_USED');
+    expect(chunks).toContain('CG_WS_POLY_RAN');
+  });
+
+  it('counts the bare imports of the files a computed import() may load', () => {
+    expect(chunks).toContain('CG_LOCALE_EN');
+    expect(chunks).toContain('CG_POLY_RAN');
+  });
+});
+
+describe('computedImportDirs', () => {
+  it('finds the literal folder of template and concatenated import() / require()', () => {
+    const source = [
+      'import(`./locales/${lang}.json`);',
+      'require(`../messages/${a}/${b}.ts`);',
+      "import('./pages/' + name);",
+      'import(`./${name}.ts`);',
+      "import('./fixed.ts');",
+      'import(`pkg/${name}`);',
+      'obj.import(`./not/${x}`);',
+    ].join('\n');
+    expect(computedImportDirs(source)).toEqual(['./locales/', '../messages/', './pages/', './']);
+  });
 });
 
 describe('boundImportSpecifiers', () => {

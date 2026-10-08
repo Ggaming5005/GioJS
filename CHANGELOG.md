@@ -1209,9 +1209,13 @@ first.
   import could also lose its side effects when a binding import won the race.
   The verdict is now a property of the module alone - the project's own
   modules and what they import by binding are side-effect free unless some
-  project file imports them bare - decided from a scan of the project's
-  imports before the build resolves any, so the same code always builds the
-  same chunks.
+  file of the client graph (a page, layout or component, what they import,
+  or a package they use) imports them bare - decided from a walk of the
+  client graph's imports before the build resolves any, so the same code
+  always builds the same chunks. Files the browser never loads (`route.ts`
+  handlers, `gio.config.ts`, `middleware.ts`, tests, scripts) do not count:
+  their bare `import './lib/db'` never pulls a module a page uses only in
+  `getServerSideProps` into its bundle.
 
 ### Known limitations
 

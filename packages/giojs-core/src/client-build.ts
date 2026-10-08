@@ -12,16 +12,18 @@
  * Server-only code is kept out of the bundles structurally, never by
  * rewriting source text: each generated entry imports ONLY the default export
  * of each app file, and the project's own modules - plus every module a
- * project file imports by binding (`import { x } from`, `export ... from`,
- * `import()`) - are marked side-effect free. esbuild's tree-shaking then
+ * project file of the client graph imports by binding (`import { x } from`,
+ * `export ... from`, `import()`) - are marked side-effect free. esbuild's tree-shaking then
  * drops `getServerSideProps` / `getStaticPaths` in every export form
  * (declarations, `export { x as getServerSideProps }`, `export ... from`,
  * `export *`) together with whatever only they imported - project helpers
- * and npm packages alike. A module some project file imports bare
- * (`import 'x'`) keeps its side effects. The verdict is a function of the
- * module alone, decided from a scan of the project's imports before any
- * import is resolved, so the same code always builds the same chunks
- * (gioServerCodePlugin). Node builtin imports that survive are stubbed so a
+ * and npm packages alike. A module that some file of the client graph (the
+ * app's or a dependency's) imports bare (`import 'x'`) keeps its side
+ * effects; files the browser never loads - route handlers, gio.config,
+ * middleware, tests, scripts - do not count. The verdict is a function of
+ * the module alone, decided from a walk of the client graph's imports
+ * before esbuild resolves any, so the same code always builds the same
+ * chunks (gioServerCodePlugin). Node builtin imports that survive are stubbed so a
  * stray server import can never fail the build.
  *
  * The `server-only` guard is the loud backstop: if `@gio.js/core/server-only`
@@ -356,50 +358,56 @@ export function isProjectSource(
   return segments.every(segment => segment !== 'node_modules' && !segment.startsWith('.'));
 }
 
-/** The project's source modules (isProjectSource) the side-effect scan reads. */
-async function projectSourceModules(
-  root: string,
-  excludedDirs: readonly string[],
-): Promise<string[]> {
+/**
+ * The project folders a computed `import()` / `require()` in `source` may
+ * load from: the literal start of a template literal (`./locales/${lang}`)
+ * or of a concatenation (`'./locales/' + lang`), which esbuild bundles as a
+ * glob. Loose: a false positive only scans more files.
+ */
+export function computedImportDirs(source: string): string[] {
+  const dirs: string[] = [];
+  const pattern =
+    /(?<![\w$.])(?:import|require)\s*\(\s*(?:`(\.{1,2}\/[^`$]*)\$\{|(['"])(\.{1,2}\/[^'"\r\n]*)\2\s*\+)/g;
+  for (const match of source.matchAll(pattern)) {
+    const prefix = (match[1] ?? match[3]) as string;
+    dirs.push(prefix.slice(0, prefix.lastIndexOf('/') + 1));
+  }
+  return dirs;
+}
+
+function isScannedModule(path: string): boolean {
+  return SCANNED_FILE.test(path) && !DECLARATION_FILE.test(path);
+}
+
+/** The scannable modules under `dir`, walking only folders `canWalk` accepts. */
+async function modulesUnder(dir: string, canWalk: (dir: string) => boolean): Promise<string[]> {
+  if (!canWalk(dir)) return [];
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
   const found: string[] = [];
-  const visit = async (dir: string): Promise<void> => {
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        // A folder is walked when a file directly inside it would count.
-        if (isProjectSource(root, join(path, 'x'), excludedDirs)) await visit(path);
-      } else if (
-        entry.isFile() &&
-        SCANNED_FILE.test(entry.name) &&
-        !DECLARATION_FILE.test(entry.name) &&
-        isProjectSource(root, path, excludedDirs)
-      ) {
-        found.push(path);
-      }
-    }
-  };
-  await visit(root);
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) found.push(...(await modulesUnder(path, canWalk)));
+    else if (entry.isFile() && isScannedModule(path)) found.push(path);
+  }
   return found;
 }
 
-/** The imports one scanned module makes. */
-interface ScannedModule {
-  file: string;
-  bare: string[];
-  bound: BoundImport[];
-}
-
-/** What the project's modules import, resolved: targetKey()s. */
+/** What the client graph imports, resolved: targetKey()s. */
 interface ProjectImportTargets {
-  /** Modules some project file imports for their side effects (`import 'x'`). */
+  /**
+   * Modules some file of the client graph - the app's or a dependency's -
+   * imports for their side effects (`import 'x'`).
+   */
   sideEffect: Set<string>;
-  /** Modules some project file binds from, or loads with import() / require(). */
+  /**
+   * Modules a project file of the client graph (or a generated entry) binds
+   * from, or loads with import() / require().
+   */
   bound: Set<string>;
   /** False when a resolution threw (not merely failed to resolve): worth retrying. */
   complete: boolean;
@@ -410,24 +418,6 @@ function targetKey(resolved: { namespace: string; path: string }): string {
   return `${resolved.namespace}:${resolved.path}`;
 }
 
-/**
- * Read the imports of every project source module plus `extraFiles` (the
- * generated entries). Order-free: only set membership is used.
- */
-async function scanProjectImports(
-  root: string,
-  extraFiles: readonly string[],
-  excludedDirs: readonly string[],
-): Promise<ScannedModule[]> {
-  const files = [...(await projectSourceModules(root, excludedDirs)), ...extraFiles];
-  return Promise.all(
-    files.map(async file => {
-      const source = await readFile(file, 'utf8').catch(() => '');
-      return { file, bare: [...bareImportSpecifiers(source)], bound: boundImportSpecifiers(source) };
-    }),
-  );
-}
-
 type ResolveFrom = (
   specifier: string,
   importer: string,
@@ -435,28 +425,40 @@ type ResolveFrom = (
   kind: ImportKind,
 ) => Promise<ResolveResult>;
 
+/** Files the client-graph walk reads at once: a large dependency graph must not exhaust descriptors. */
+const SCAN_CONCURRENCY = 64;
+
 /**
- * Resolve the scanned imports, as esbuild resolves them from those files.
- * A binding import whose path already names a project source is not
- * resolved: such a module is side-effect free without being listed. That
- * shortcut (like any miss here) can only leave a module with esbuild's
- * default; it never makes the verdict depend on the import.
+ * Walk the client graph from the generated entries as esbuild will - every
+ * import of every file reached, resolved as esbuild resolves it from that
+ * file, the app's files and its dependencies' alike - and collect the
+ * modules imported bare and the ones project files bind from.
+ *
+ * Only files the browser bundle can reach count. A route handler,
+ * gio.config.ts, middleware.ts, a test or a script is never in that graph,
+ * so its `import './lib/db'` cannot keep a module that a page uses only in
+ * getServerSideProps in the bundle, and its binding import cannot make a
+ * module that a dependency imports bare lose its side effects. The walk is
+ * order-free (only set membership is used), so the verdict stays a property
+ * of the module. It over-approximates esbuild's graph (code only
+ * getServerSideProps reaches is walked too), which can only keep side
+ * effects, never drop them.
  */
-async function resolveImportTargets(
-  scanned: Promise<ScannedModule[]>,
+async function clientImportTargets(
+  entryFiles: readonly string[],
   resolveFrom: ResolveFrom,
   isSource: (path: string) => boolean,
 ): Promise<ProjectImportTargets> {
   const targets: ProjectImportTargets = { sideEffect: new Set(), bound: new Set(), complete: true };
+  const entries = new Set(entryFiles.map(file => resolve(file)));
   // One resolution per (directory, specifier, kind): the result depends on
   // nothing else (the tsconfig is the build's).
-  const resolutions = new Map<string, Promise<string | null>>();
-  const add = async (
-    into: Set<string>,
+  const resolutions = new Map<string, Promise<ResolveResult | null>>();
+  const resolveOnce = (
     file: string,
     specifier: string,
     kind: ImportKind,
-  ): Promise<void> => {
+  ): Promise<ResolveResult | null> => {
     const resolveDir = dirname(file);
     const memo = `${resolveDir}\0${kind}\0${specifier}`;
     let pending = resolutions.get(memo);
@@ -466,8 +468,7 @@ async function resolveImportTargets(
         .then(() => resolveFrom(specifier, file, resolveDir, kind))
         .then(
           // Unresolvable: no module to decide for.
-          resolved =>
-            resolved.errors.length === 0 && !resolved.external ? targetKey(resolved) : null,
+          resolved => (resolved.errors.length === 0 && !resolved.external ? resolved : null),
           () => {
             targets.complete = false;
             return null;
@@ -475,27 +476,70 @@ async function resolveImportTargets(
         );
       resolutions.set(memo, pending);
     }
-    const key = await pending;
-    if (key !== null) into.add(key);
+    return pending;
   };
-  const namesSource = (file: string, specifier: string): boolean =>
-    (specifier.startsWith('.') || isAbsolute(specifier)) &&
-    isSource(resolve(dirname(file), specifier));
-  await Promise.all(
-    (await scanned).flatMap(({ file, bare, bound }) => [
-      ...bare.map(specifier => add(targets.sideEffect, file, specifier, 'import-statement')),
-      ...bound
-        .filter(({ specifier }) => !namesSource(file, specifier))
-        .map(({ specifier, kind }) => add(targets.bound, file, specifier, kind)),
-    ]),
-  );
+
+  let reading = 0;
+  const waiting: (() => void)[] = [];
+  const readLimited = async (file: string): Promise<string> => {
+    while (reading >= SCAN_CONCURRENCY) await new Promise<void>(go => waiting.push(go));
+    reading++;
+    try {
+      return await readFile(file, 'utf8');
+    } catch {
+      return '';
+    } finally {
+      reading--;
+      waiting.shift()?.();
+    }
+  };
+
+  const visited = new Set<string>();
+  const work: Promise<void>[] = [];
+  const visit = (file: string): void => {
+    if (visited.has(file)) return;
+    visited.add(file);
+    work.push(scan(file));
+  };
+  const follow = (resolved: ResolveResult): void => {
+    if (resolved.namespace === 'file' && isScannedModule(resolved.path)) visit(resolved.path);
+  };
+  async function scan(file: string): Promise<void> {
+    const source = await readLimited(file);
+    const project = entries.has(file) || isSource(file);
+    await Promise.all([
+      ...[...bareImportSpecifiers(source)].map(async specifier => {
+        const resolved = await resolveOnce(file, specifier, 'import-statement');
+        if (resolved === null) return;
+        targets.sideEffect.add(targetKey(resolved));
+        follow(resolved);
+      }),
+      ...boundImportSpecifiers(source).map(async ({ specifier, kind }) => {
+        const resolved = await resolveOnce(file, specifier, kind);
+        if (resolved === null) return;
+        if (project) targets.bound.add(targetKey(resolved));
+        follow(resolved);
+      }),
+      // A computed import() of project files: esbuild bundles every match.
+      ...(project ? computedImportDirs(source) : []).map(async prefix => {
+        const dir = resolve(dirname(file), prefix);
+        for (const module of await modulesUnder(dir, path => isSource(join(path, 'x')))) {
+          visit(module);
+        }
+      }),
+    ]);
+  }
+
+  for (const file of entries) visit(file);
+  // `work` grows while it is awaited: a scan queues what it reaches before it settles.
+  for (let i = 0; i < work.length; i++) await work[i];
   return targets;
 }
 
 interface ServerCodePluginOptions {
   projectRoot: string;
   dynamicImports: DynamicImports;
-  /** Generated entry modules: their imports count as the project's. */
+  /** Generated entry modules: the client graph starts here; their imports count as the project's. */
   entryFiles: readonly string[];
   /** Folders inside the project that hold no source (a static export's output). */
   excludedDirs: readonly string[];
@@ -557,11 +601,7 @@ export function gioServerCodePlugin(options: ServerCodePluginOptions): Plugin {
         });
       const importTargets = (): Promise<ProjectImportTargets> => {
         if (targets === undefined) {
-          const found = resolveImportTargets(
-            scanProjectImports(root, options.entryFiles, excludedDirs),
-            resolveFrom,
-            isSource,
-          );
+          const found = clientImportTargets(options.entryFiles, resolveFrom, isSource);
           targets = found;
           // A resolver failure (not a missing module) is retried by the next build.
           void found.then(result => {

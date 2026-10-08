@@ -1141,9 +1141,14 @@ API_ENDPOINT=\${GIO_PUBLIC_API_URL}/v2`} />
         everything only they import: your helper modules, Node builtins, and npm packages
         such as database clients. Code is never rewritten as text, so strings and comments
         that look like exports are left alone. Bare side-effect imports (
-        <code>import './polyfill'</code>) are kept: a module any project file imports
-        bare keeps its top-level code in every bundle that reaches it, even one where
-        only server code uses its exports. The decision is made per module, never per
+        <code>import './polyfill'</code>) are kept: a module that client code imports
+        bare - a page, layout or component, anything they import, or an npm package
+        they use - keeps its top-level code in every bundle that reaches it, even one
+        where only server code uses its exports. Only files the browser bundle can
+        reach count: a bare import in a <code>route.ts</code> handler,{' '}
+        <code>gio.config.ts</code>, <code>middleware.ts</code>, a test or a script
+        never pulls a module into a page that uses it only in{' '}
+        <code>getServerSideProps</code>. The decision is made per module, never per
         import, so the same code always builds the same bundles.
       </p>
       <p>
