@@ -733,9 +733,8 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
 
     // Everything the deployment ID covers besides the build the worker is
     // about to produce: the worker's render settings, and what the server
-    // composes into cached pages itself - the font links above and the
-    // deployment script's default locale and locales (see
-    // `deployment_script`; the locales are in GIO_I18N_CONFIG).
+    // composes into cached pages itself (`composed_page_settings`; the
+    // deployment script's locales are in GIO_I18N_CONFIG).
     let default_locale = if cfg.i18n.locales.is_empty() {
         "en".to_string()
     } else {
@@ -745,10 +744,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let deployment = ipc::DeploymentInputs::from_process(
         &project_root,
         &worker_env,
-        vec![
-            ("fonts".to_string(), font_snippets.join("\n")),
-            ("i18n.default_locale".to_string(), default_locale),
-        ],
+        composed_page_settings(&font_snippets, default_locale, &cfg.css),
     );
 
     // Before the worker spawns: it renders with the nonce placeholder.
@@ -2235,11 +2231,10 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
     }
 
     parts.extensions.insert(locale.clone());
-    // No locale prefix in the URL: the locale (default included) is the
-    // answer of whichever request headers detection reads.
-    let header_negotiated =
-        result.path == original_path && i18n_cfg.detect_from.iter().any(|source| source != "path");
-    if header_negotiated {
+    // Request headers took part in picking the locale (default included):
+    // no locale prefix decided first, either because the URL has none or
+    // because detect_from tries a header ahead of "path".
+    if result.header_dependent {
         parts.extensions.insert(HeaderNegotiatedLocale);
     }
     let req = Request::from_parts(parts, body);
@@ -2257,11 +2252,20 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
         let is_streamed = response.extensions().get::<StreamedBody>().is_some();
         // A 304 has no body to inject into, and must not gain one.
         let not_modified = response.status() == StatusCode::NOT_MODIFIED;
-        if is_html && !is_streamed && !not_modified {
-            let (resp_parts, resp_body) = response.into_parts();
+        // A public/ file is served as written: one body per file, under its
+        // own Content-Length, validators and public caching.
+        let static_file = response
+            .headers()
+            .get("x-gio-cache")
+            .is_some_and(|v| v.as_bytes() == b"static");
+        if is_html && !is_streamed && !not_modified && !static_file {
+            let (mut resp_parts, resp_body) = response.into_parts();
             match axum::body::to_bytes(resp_body, 16 * 1024 * 1024).await {
                 Ok(bytes) => {
                     let modified = inject_html_lang(bytes, &locale);
+                    // The body changed size: exact_length_middleware sets
+                    // the new length.
+                    resp_parts.headers.remove(header::CONTENT_LENGTH);
                     response = Response::from_parts(resp_parts, axum::body::Body::from(modified));
                 }
                 Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -2270,6 +2274,28 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
     }
 
     response
+}
+
+/// What the server composes into cached pages itself, as deployment-ID
+/// inputs: the font links, the deployment script's default locale (see
+/// `deployment_script`), and whether critical CSS from the path-served
+/// stylesheets is inlined (`[css] enabled` and `critical_extraction`).
+/// Changing one starts a new cache epoch, so persisted pages composed under
+/// the old setting are not served as hits.
+fn composed_page_settings(
+    font_snippets: &[String],
+    default_locale: String,
+    css: &config::CssConfig,
+) -> Vec<(String, String)> {
+    vec![
+        ("fonts".to_string(), font_snippets.join("\n")),
+        ("i18n.default_locale".to_string(), default_locale),
+        ("css.enabled".to_string(), css.enabled.to_string()),
+        (
+            "css.critical_extraction".to_string(),
+            css.critical_extraction.to_string(),
+        ),
+    ]
 }
 
 /// Set the buffered document's `<html lang>` to the request locale,
@@ -4897,6 +4923,12 @@ async fn build_response_from_entry(
     let status = StatusCode::from_u16(entry.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder().status(status);
     for (k, v) in &entry.headers {
+        // The stored body is whole and buffered: exact_length_middleware
+        // states its length. A stored Content-Length is the render's, from
+        // before composition or injection grew the HTML.
+        if k.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
         if let Ok(val) = HeaderValue::from_str(v) {
             builder = builder.header(k.as_str(), val);
         }
@@ -4953,7 +4985,8 @@ fn build_html_response(
     css_config: &config::CssConfig,
     dev_mode: bool,
 ) -> Response {
-    let body_bytes = if composed || !is_html_content_type(headers) {
+    let html = is_html_content_type(headers);
+    let body_bytes = if composed || !html {
         body
     } else {
         let script = deployment_script(deployment_id, default_locale);
@@ -4973,7 +5006,9 @@ fn build_html_response(
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder().status(status);
     for (k, v) in headers {
-        if is_hop_by_hop(k) {
+        // Composition or the injection here made an HTML body longer than
+        // the length the app stated; exact_length_middleware sets the real one.
+        if is_hop_by_hop(k) || (html && k.eq_ignore_ascii_case("content-length")) {
             continue;
         }
         if let Ok(val) = HeaderValue::from_str(v) {
@@ -6396,6 +6431,94 @@ mod tests {
         let s = std::str::from_utf8(&body).unwrap();
         assert!(!s.contains("__GIO_DEPLOYMENT_ID__"));
         assert!(s.contains("__gio_dev_overlay_script"));
+    }
+
+    #[tokio::test]
+    async fn grown_html_bodies_lose_the_apps_content_length() {
+        let doc = "<!doctype html><html><head></head><body>hi</body></html>";
+        let headers = HashMap::from([
+            ("content-type".to_string(), "text/html".to_string()),
+            ("content-length".to_string(), doc.len().to_string()),
+        ]);
+        let css_cache = Arc::new(DashMap::new());
+        let css = config::CssConfig::default();
+        // A route.ts answer (uncomposed: injected here) and a composed page.
+        for composed in [false, true] {
+            let resp = build_html_response(
+                200,
+                &headers,
+                Bytes::from(doc),
+                false,
+                composed,
+                "dep-1",
+                "en",
+                &[],
+                &css_cache,
+                &css,
+                false,
+            );
+            let length = resp.headers().get(header::CONTENT_LENGTH);
+            assert_eq!(length, None, "composed: {composed}");
+        }
+        // A stored entry's length is the render's, from before composition.
+        let mut entry = html_entry(doc, false);
+        entry.headers = headers.clone();
+        let resp =
+            build_response_from_entry(entry, "dep-1", "en", &[], &css_cache, &css, false).await;
+        assert_eq!(resp.headers().get(header::CONTENT_LENGTH), None);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(body.len() > doc.len());
+
+        // A body sent as the app wrote it keeps the app's length.
+        let json = HashMap::from([
+            ("content-type".to_string(), "application/json".to_string()),
+            ("content-length".to_string(), "2".to_string()),
+        ]);
+        let resp = build_html_response(
+            200,
+            &json,
+            Bytes::from_static(b"{}"),
+            false,
+            false,
+            "dep-1",
+            "en",
+            &[],
+            &css_cache,
+            &css,
+            false,
+        );
+        assert_eq!(resp.headers()[header::CONTENT_LENGTH], "2");
+    }
+
+    #[test]
+    fn css_composition_switches_change_the_deployment_id() {
+        if std::env::var(ipc::DEPLOYMENT_ID_ENV).is_ok() {
+            return; // A pinned ID never changes.
+        }
+        let root = std::env::temp_dir().join("gio-no-such-project");
+        let id = |css: config::CssConfig| {
+            ipc::DeploymentInputs::from_process(
+                &root,
+                &[],
+                composed_page_settings(&[], "en".to_string(), &css),
+            )
+            .before_build()
+        };
+        let default = id(config::CssConfig::default());
+        assert_eq!(default, id(config::CssConfig::default()));
+        let no_critical = id(config::CssConfig {
+            critical_extraction: false,
+            ..config::CssConfig::default()
+        });
+        let no_css = id(config::CssConfig {
+            enabled: false,
+            ..config::CssConfig::default()
+        });
+        assert_ne!(default, no_critical);
+        assert_ne!(default, no_css);
+        assert_ne!(no_critical, no_css);
     }
 
     #[test]

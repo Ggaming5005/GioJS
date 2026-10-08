@@ -39,7 +39,10 @@ prefer_brotli = true`} />
         <li>
           Never compressed: images (<code>image/*</code>), server-sent events (
           <code>text/event-stream</code>), gRPC, responses that already carry a{' '}
-          <code>Content-Encoding</code>, and partial (<code>Content-Range</code>) responses.
+          <code>Content-Encoding</code>, and partial (<code>Content-Range</code>) responses. A{' '}
+          <code>route.ts</code> returning <code>fetch(upstream)</code> does not count: the body{' '}
+          <code>fetch()</code> decoded is sent without the upstream&apos;s encoding and compressed
+          here.
         </li>
         <li>
           Every response the layer could compress carries <code>Vary: accept-encoding</code>, so

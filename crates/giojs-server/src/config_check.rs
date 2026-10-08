@@ -612,22 +612,56 @@ mod tests {
         for (toml, expected) in [
             (
                 "[security.csrf]\ntrusted_origins = [\"admin.example.com\"]\n",
-                "[security.csrf] trusted_origins entry \"admin.example.com\"",
+                "gio.toml:2: [security.csrf] trusted_origins entry \"admin.example.com\"",
             ),
             (
                 "[security.csrf]\nexempt = [\"api/webhooks\"]\n",
-                "[security.csrf] exempt entry \"api/webhooks\"",
+                "gio.toml:2: [security.csrf] exempt entry \"api/webhooks\"",
             ),
             (
                 "[security.headers]\n\"bad header\" = \"x\"\n",
-                "[security.headers] \"bad header\" is not a valid header name",
+                "gio.toml:2: [security.headers] \"bad header\" is not a valid header name",
+            ),
+            (
+                "[security]\ncsp = \"default-src 'self'\\u0001\"\n",
+                "gio.toml:2: [security] csp: invalid header value",
             ),
         ] {
             let report = report(&loaded(&[]), parse(toml), &env_in(&root));
             assert_eq!(report["ok"], false, "{toml}: {report}");
             let error = report["errors"][0].as_str().unwrap();
             assert!(error.starts_with(expected), "{toml}: {error}");
-            assert!(report["listen"].is_object(), "the rest of the report is still there");
+        }
+    }
+
+    #[test]
+    fn every_security_refusal_is_listed_with_the_other_config_errors() {
+        let root = test_root();
+        let toml = "[server]\nport = \"abc\"\n\n\
+                    [security.csrf]\n\
+                    exempt = [\n  \"api/webhooks\",\n  \"/x/*rest/y\",\n]\n\
+                    trusted_origins = [\"admin.example.com\", \"https://ok.example.com\"]\n\n\
+                    [security.headers]\n\"bad header\" = \"x\"\n\
+                    content-security-policy = \"default-src 'self'\"\n";
+        let report = report(&loaded(&[]), parse(toml), &env_in(&root));
+        assert_eq!(report["ok"], false);
+        let errors: Vec<&str> = report["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|error| error.as_str().unwrap())
+            .collect();
+        let expected = [
+            "gio.toml:2: invalid `server.port`",
+            "gio.toml:6: [security.csrf] exempt entry \"api/webhooks\"",
+            "gio.toml:7: [security.csrf] exempt entry \"/x/*rest/y\"",
+            "gio.toml:9: [security.csrf] trusted_origins entry \"admin.example.com\"",
+            "gio.toml:12: [security.headers] \"bad header\" is not a valid header name",
+            "gio.toml:13: [security.headers] cannot set content-security-policy",
+        ];
+        assert_eq!(errors.len(), expected.len(), "{errors:#?}");
+        for (error, expected) in errors.iter().zip(expected) {
+            assert!(error.starts_with(expected), "{error} - expected {expected}");
         }
     }
 
@@ -683,13 +717,11 @@ mod tests {
         let root = test_root();
         let mut env = env_in(&root);
         env.startup.cache_dir_env = Some(root.join("public/cache").display().to_string());
-        let errors = validate(
-            &parse("[security.csrf]\ntrusted_origins = [\"nope\"]\n\n[revalidate]\ntoken = \"x\"\n")
-                .unwrap(),
-            &env.startup,
-        )
-        .err()
-        .expect("refused");
+        // Parsing reports a bad [security] entry first; validate() still
+        // refuses one in a config built some other way.
+        let mut config = parse("[revalidate]\ntoken = \"x\"\n").unwrap();
+        config.security.csrf.trusted_origins = vec!["nope".to_string()];
+        let errors = validate(&config, &env.startup).err().expect("refused");
         assert_eq!(errors.len(), 3, "{errors:?}");
         assert!(errors[0].starts_with("GIO_CACHE_DIR: "));
         assert!(errors[1].starts_with("[security.csrf] "));

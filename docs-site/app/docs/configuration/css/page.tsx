@@ -42,7 +42,9 @@ minify = false              # readable production CSS while debugging`} />
           The server hands <code>minify</code> to the Node worker in the{' '}
           <code>GIO_CSS_CONFIG</code> environment variable. It is one of the settings the
           deployment id covers, so changing it drops persisted pages, which link the stylesheets
-          it builds.
+          it builds. <code>enabled</code> and <code>critical_extraction</code> are covered too:
+          the server inlines critical CSS into the pages it persists, so turning either off
+          drops them instead of serving their inlined CSS until they expire.
         </li>
         <li>
           Path-served stylesheets have no content hash in their URL, so they are sent with{' '}
@@ -87,7 +89,7 @@ critical_extraction = false`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <><code>minify</code> also covers the bundled route stylesheets (the server passes <code>[css]</code> to the worker in <code>GIO_CSS_CONFIG</code>); <code>enabled</code> is documented as covering path-served stylesheets only. <code>engine</code> is rejected.</> },
+        { version: 'v0.1.0-beta.8', changes: <><code>minify</code> also covers the bundled route stylesheets (the server passes <code>[css]</code> to the worker in <code>GIO_CSS_CONFIG</code>); <code>enabled</code> is documented as covering path-served stylesheets only. <code>engine</code> is rejected. <code>enabled</code> and <code>critical_extraction</code> are part of the deployment id.</> },
         { version: 'v0.1.0-beta.1', changes: <>Introduced with <code>enabled</code>, <code>minify</code> and <code>critical_extraction</code>.</> },
       ]} />
     </>

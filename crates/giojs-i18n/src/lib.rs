@@ -18,6 +18,12 @@ pub struct LocaleResult {
     pub locale: String,
     /// De-localized path - locale prefix stripped if path detection matched.
     pub path: String,
+    /// Whether request headers took part in the decision: a header strategy
+    /// (cookie or Accept-Language) was tried before one decided, so other
+    /// header values could have picked another locale for the same URL.
+    /// False only when the URL alone decides (its locale prefix, checked
+    /// ahead of every header strategy) or no header strategy is configured.
+    pub header_dependent: bool,
 }
 
 pub fn detect_locale(
@@ -29,45 +35,40 @@ pub fn detect_locale(
         return LocaleResult {
             locale: config.default_locale.clone(),
             path: path.to_string(),
+            header_dependent: false,
         };
     }
 
     // Always extract path locale - stripping is structural even if "path" strategy is disabled.
     let (path_locale, delocalized_path) = extract_path_locale(path, &config.locales);
 
+    let mut header_dependent = false;
     for strategy in &config.detect_from {
-        match strategy.as_str() {
-            "path" => {
-                if let Some(ref locale) = path_locale {
-                    return LocaleResult {
-                        locale: locale.clone(),
-                        path: delocalized_path.clone(),
-                    };
-                }
-            }
+        let detected = match strategy.as_str() {
+            "path" => path_locale.clone(),
             "cookie" => {
-                if let Some(locale) = detect_from_cookie(headers, &config.locales) {
-                    return LocaleResult {
-                        locale,
-                        path: delocalized_path.clone(),
-                    };
-                }
+                header_dependent = true;
+                detect_from_cookie(headers, &config.locales)
             }
             "accept-language" => {
-                if let Some(locale) = detect_from_accept_language(headers, &config.locales) {
-                    return LocaleResult {
-                        locale,
-                        path: delocalized_path.clone(),
-                    };
-                }
+                header_dependent = true;
+                detect_from_accept_language(headers, &config.locales)
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some(locale) = detected {
+            return LocaleResult {
+                locale,
+                path: delocalized_path,
+                header_dependent,
+            };
         }
     }
 
     LocaleResult {
         locale: config.default_locale.clone(),
         path: delocalized_path,
+        header_dependent,
     }
 }
 
@@ -302,5 +303,42 @@ mod tests {
         let r = detect_locale("/fr/about", &no_headers(), &cfg);
         assert_eq!(r.locale, "en");
         assert_eq!(r.path, "/fr/about");
+    }
+
+    fn ordered(detect_from: &[&str]) -> I18nConfig {
+        I18nConfig {
+            detect_from: detect_from.iter().map(|s| s.to_string()).collect(),
+            ..config(&["en", "de"])
+        }
+    }
+
+    #[test]
+    fn header_dependence_follows_the_strategy_order() {
+        let german = accept_language("de");
+        // Path first: a prefixed URL is decided by the URL alone.
+        let path_first = ordered(&["path", "accept-language"]);
+        let r = detect_locale("/de/about", &german, &path_first);
+        assert_eq!((r.locale.as_str(), r.header_dependent), ("de", false));
+        // An unprefixed URL fell through to the header.
+        let r = detect_locale("/about", &no_headers(), &path_first);
+        assert_eq!((r.locale.as_str(), r.header_dependent), ("en", true));
+
+        // A header ahead of the path: the prefixed URL varies by header,
+        // even when the header is absent and the path ends up deciding.
+        let header_first = ordered(&["accept-language", "path"]);
+        let r = detect_locale("/de/about", &accept_language("en"), &header_first);
+        assert_eq!((r.locale.as_str(), r.path.as_str()), ("en", "/about"));
+        assert!(r.header_dependent);
+        let r = detect_locale("/de/about", &no_headers(), &header_first);
+        assert_eq!((r.locale.as_str(), r.header_dependent), ("de", true));
+        let r = detect_locale("/de/about", &no_headers(), &ordered(&["cookie", "path"]));
+        assert!(r.header_dependent);
+
+        // No path strategy: the prefix is stripped but never decides.
+        let r = detect_locale("/de/about", &german, &ordered(&["accept-language"]));
+        assert_eq!((r.path.as_str(), r.header_dependent), ("/about", true));
+        // No header strategy: nothing depends on headers.
+        let r = detect_locale("/about", &german, &ordered(&["path"]));
+        assert_eq!((r.locale.as_str(), r.header_dependent), ("en", false));
     }
 }

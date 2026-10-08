@@ -14,11 +14,12 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readlinkSync } from 'node:fs';
-import { request as httpRequest } from 'node:http';
+import { createServer as createHttpServer, request as httpRequest } from 'node:http';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createHmac, hkdfSync } from 'node:crypto';
 import { connect, createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
+import { gzipSync } from 'node:zlib';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -3080,6 +3081,44 @@ async function opsPhase() {
       '  return <nav><LocaleLink href="/x">x</LocaleLink><LocaleLink href="/de/y">y</LocaleLink>' +
       '<LocaleLink href="https://example.com/z">z</LocaleLink></nav>;\n}\n',
   );
+  // public/ HTML in a non-default locale: served as written, one without a
+  // lang and one whose lang differs in length from the locale's.
+  const publicDocs = {
+    'doc.html': '<!doctype html><html><head><title>Doc</title></head><body><p>OPS_PUBLIC_DOC</p></body></html>',
+    'promo.html': '<!doctype html><html lang="en-US"><head></head><body><p>OPS_PUBLIC_PROMO</p></body></html>',
+  };
+  await mkdir(join(workDir, 'public'), { recursive: true });
+  for (const [name, html] of Object.entries(publicDocs)) {
+    await writeFile(join(workDir, 'public', name), html);
+  }
+  // A route.ts answering HTML with its own Content-Length: the server
+  // injects into it, so that length is no longer the body's.
+  await mkdir(join(workDir, 'app', 'api', 'html'), { recursive: true });
+  await writeFile(
+    join(workDir, 'app', 'api', 'html', 'route.ts'),
+    "const html = '<!doctype html><html><head></head><body><p>OPS_ROUTE_HTML</p></body></html>';\n" +
+      'export function GET(): Response {\n' +
+      "  return new Response(html, { headers: { 'content-type': 'text/html', 'content-length': String(html.length) } });\n}\n",
+  );
+  // A route.ts proxying a gzip upstream with fetch(), which decodes the body
+  // but keeps the upstream's Content-Encoding.
+  const upstreamText = 'console.log("OPS_UPSTREAM");\n'.repeat(80);
+  const upstreamGzip = gzipSync(upstreamText);
+  const upstream = createHttpServer((_req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/javascript',
+      'content-encoding': 'gzip',
+      'content-length': String(upstreamGzip.length),
+    });
+    res.end(upstreamGzip);
+  });
+  await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+  await mkdir(join(workDir, 'app', 'api', 'proxy'), { recursive: true });
+  await writeFile(
+    join(workDir, 'app', 'api', 'proxy', 'route.ts'),
+    'export function GET(): Promise<Response> {\n' +
+      `  return fetch('http://127.0.0.1:${upstream.address().port}/chunk.js', { headers: { 'accept-encoding': 'gzip' } });\n}\n`,
+  );
   await linkFixtureDeps(workDir);
   await writeFile(join(workDir, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
   await writeFile(
@@ -3203,6 +3242,44 @@ async function opsPhase() {
       assert.equal((await links('/links', { 'accept-language': 'en;q=0, de' })).hrefs[0], '/de/x');
     });
 
+    await test('i18n: public/ HTML is served as written in every locale, under its own length', async () => {
+      for (const [name, html] of Object.entries(publicDocs)) {
+        for (const [path, headers] of [
+          [`/de/${name}`, {}],
+          [`/${name}`, { 'accept-language': 'de' }],
+          [`/public/${name}`, { 'accept-language': 'de' }],
+        ]) {
+          const res = await rawGet(path, headers);
+          assert.equal(res.status, 200, path);
+          assert.equal(res.body, html, path);
+          assert.equal(res.headers['content-length'], String(Buffer.byteLength(html)), path);
+          assert.equal(res.headers['x-gio-cache'], 'static', path);
+        }
+      }
+    });
+
+    await test('route.ts HTML with its own Content-Length is sent whole after injection', async () => {
+      for (const [path, lang] of [['/api/html', null], ['/de/api/html', 'de']]) {
+        const res = await rawGet(path);
+        assert.equal(res.status, 200, path);
+        assert.match(res.body, /window\.__GIO_DEPLOYMENT_ID__=/, path);
+        assert.match(res.body, /OPS_ROUTE_HTML<\/p><\/body><\/html>$/, path);
+        assert.equal(res.headers['content-length'], String(Buffer.byteLength(res.body)), path);
+        if (lang) assert.match(res.body, new RegExp(`<html lang="${lang}">`), path);
+      }
+    });
+
+    await test('route.ts returning fetch(upstream) sends the decoded body without the upstream encoding', async () => {
+      const plain = await rawGet('/api/proxy');
+      assert.equal(plain.status, 200);
+      assert.equal(plain.headers['content-encoding'], undefined);
+      assert.equal(plain.body, upstreamText);
+      // Compressed again by the server for a client that asks.
+      const res = await fetch(`${BASE}/api/proxy`, { headers: { 'accept-encoding': 'gzip' } });
+      assert.equal(res.headers.get('content-encoding'), 'gzip');
+      assert.equal(await res.text(), upstreamText);
+    });
+
     if (process.platform !== 'win32') {
       await test('a SIGKILLed server takes its worker tree down within seconds', async () => {
         const tree = descendantPids(server.pid);
@@ -3226,6 +3303,7 @@ async function opsPhase() {
   } finally {
     if (!serverGone) server.kill();
     await serverExited;
+    await new Promise((resolve) => upstream.close(resolve));
     await rm(workDir, { recursive: true, force: true });
   }
 }
