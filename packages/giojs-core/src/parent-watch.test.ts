@@ -9,7 +9,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { parentWatchEnabled, watchParent, type WatchedStdin } from './parent-watch.ts';
+import { isPipeMode, parentWatchEnabled, watchParent, type WatchedStdin } from './parent-watch.ts';
 
 const watchModule = fileURLToPath(new URL('./parent-watch.ts', import.meta.url));
 
@@ -131,5 +131,17 @@ describe('watchParent', () => {
     expect(parentWatchEnabled({ GIO_EXIT_ON_STDIN_EOF: '1' })).toBe(true);
     expect(parentWatchEnabled({ GIO_EXIT_ON_STDIN_EOF: '0' })).toBe(false);
     expect(parentWatchEnabled({})).toBe(false);
+  });
+
+  it('tells a pipe from its stat mode, as libuv reports one on Windows too', () => {
+    // Windows: libuv's fstat of a pipe is the bare S_IFIFO bits, which
+    // Stats.isFIFO() ignores there - so the watch reads the bits itself.
+    expect(isPipeMode(0o010000)).toBe(true);
+    expect(isPipeMode(0o010600)).toBe(true);
+    expect(isPipeMode(0o140777)).toBe(true);
+    // A file, /dev/null or NUL, a terminal, a directory: no parent signal.
+    expect(isPipeMode(0o100644)).toBe(false);
+    expect(isPipeMode(0o020666)).toBe(false);
+    expect(isPipeMode(0o040755)).toBe(false);
   });
 });

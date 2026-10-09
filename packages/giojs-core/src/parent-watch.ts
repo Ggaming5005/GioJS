@@ -46,6 +46,21 @@ export interface ParentWatchOptions {
   pollIntervalMs?: number;
 }
 
+/** File-type bits of a stat mode, as POSIX defines them. */
+const S_IFMT = 0o170000;
+const S_IFIFO = 0o010000;
+const S_IFSOCK = 0o140000;
+
+/**
+ * True for the stat mode of a pipe or socket. Read from the bits, not
+ * Stats.isFIFO() / isSocket(): those answer false on Windows whatever the
+ * mode says, while libuv reports a Windows pipe with these same S_IFIFO bits.
+ */
+export function isPipeMode(mode: number): boolean {
+  const type = mode & S_IFMT;
+  return type === S_IFIFO || type === S_IFSOCK;
+}
+
 /**
  * True when fd 0 is a pipe or socket. Anything else - /dev/null, a file, a
  * terminal - either reads EOF at once or never, and says nothing about the
@@ -53,8 +68,7 @@ export interface ParentWatchOptions {
  */
 export function stdinIsPipe(): boolean {
   try {
-    const stat = fs.fstatSync(0);
-    return stat.isFIFO() || stat.isSocket();
+    return isPipeMode(fs.fstatSync(0).mode);
   } catch {
     return false;
   }

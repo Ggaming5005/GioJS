@@ -142,10 +142,11 @@ describe('route.ts Response: buffer or stream', () => {
         let body: string;
         let head: IPCResponse;
         if (isRouteStream(result)) {
-          // The body may still be arriving: streamed like any other.
+          // The body may still be arriving: streamed like any other. The
+          // frames carry the prelude too, however much of the body it holds.
           const socket = new FakeSocket();
           await pumpRouteStream(socket, 'req-1', result, new StreamFlowGate(), new AbortController().signal);
-          body = Buffer.concat([...result.prelude, bodyOf(socket.frames())]).toString();
+          body = bodyOf(socket.frames()).toString();
           head = result.head;
         } else {
           body = (result as IPCResponse).body;

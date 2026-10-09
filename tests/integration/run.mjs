@@ -3073,7 +3073,11 @@ async function untrustedProxyPhase() {
  */
 async function opsPhase() {
   const binary = findServerBinary();
-  const workDir = await mkdtemp(join(tmpdir(), 'gio-int-ops-'));
+  // In the repo, not tmpdir(): on a Windows runner the temp dir is on another
+  // drive, where no relative import reaches the framework sources.
+  const workDir = join(repoRoot, 'tests', 'integration', '.ops-fixture');
+  await rm(workDir, { recursive: true, force: true });
+  await mkdir(workDir, { recursive: true });
   await mkdir(join(workDir, 'app', 'api', 'ping'), { recursive: true });
   await writeFile(
     join(workDir, 'app', 'api', 'ping', 'route.ts'),
