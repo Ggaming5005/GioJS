@@ -47,3 +47,4 @@ export function queryTerms(query: string): string[];
 export function editDistance(a: string, b: string, max: number): number;
 export function highlight(text: string, tokens: readonly string[]): TextPart[];
 export function snippet(text: string, tokens: readonly string[], length?: number): string;
+export function stem(word: string): string;

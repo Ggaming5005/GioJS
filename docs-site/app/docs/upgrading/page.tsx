@@ -69,6 +69,16 @@ export default function Page(): React.JSX.Element {
       </p>
       <CodeBlock lang="diff" title="Dockerfile" code={`- CMD ["npx", "gio"]
 + CMD ["npx", "gio", "start"]`} />
+      <p>
+        The <a href="/docs/cli/giojs-server"><code>giojs-server</code></a> binary now takes{' '}
+        <code>--check-config</code> alone. Any other argument - <code>--port 4000</code>,{' '}
+        <code>--version</code> - prints <code>unexpected argument</code> and exits with code{' '}
+        <code>2</code> without starting; beta.7 ignored it and started. Set the port with{' '}
+        <code>GIO_PORT</code> (or <code>[server] port</code>), and use <code>gio --version</code>{' '}
+        for versions:
+      </p>
+      <CodeBlock lang="diff" title="package.json" code={`-    "start": "giojs-server --port 4000"
++    "start": "cross-env NODE_ENV=production GIO_PORT=4000 giojs-server"`} />
 
       <h2 id="3-validate-your-configuration">3. Validate your configuration</h2>
       <p>
@@ -78,12 +88,53 @@ export default function Page(): React.JSX.Element {
         <code>name</code>), and a <a href="/docs/configuration/guards"><code>[[guards]]</code></a> entry with a misspelled key, no
         requirement or an invalid path fails startup instead of being skipped. Run the check
         before you deploy. It never binds a port, and lists every validation problem at
-        once; an unknown key or a TOML syntax error is reported on its own, so run it again
-        after fixing one:
+        once - unknown keys and sections together with invalid values, broken rules and{' '}
+        <code>[i18n]</code> mistakes. Only a TOML syntax error is reported on its own, and a
+        required key whose value is invalid (<code>path = 3</code>) holds back the problems
+        after it, so run the check again after fixing those:
       </p>
       <CodeBlock lang="bash" code={`npx giojs-server --check-config     # JSON report; exit code 1 when startup would fail
 npx gio doctor                       # the same check, plus Node, versions, tsconfig and the port`} />
       <CodeBlock lang="text" code={`gio.toml:5: unknown key [image] - did you mean [images]?`} />
+      <p>Startup also refuses rules and settings that beta.7 skipped or ignored:</p>
+      <ul>
+        <li>
+          <strong>Rules that cannot be enforced.</strong> A{' '}
+          <a href="/docs/configuration/redirects"><code>[[redirects]]</code></a>,{' '}
+          <a href="/docs/configuration/rewrites"><code>[[rewrites]]</code></a> or{' '}
+          <a href="/docs/configuration/headers"><code>[[headers]]</code></a> rule that cannot be
+          compiled - a relative pattern, a catch-all that is not last, an unknown capture, a
+          bad status or header - stops startup, like a broken guard. A redirect or rewrite{' '}
+          <code>to</code>, and a guard&apos;s <code>redirect_to</code>, must be a path on this
+          site: <code>//evil.com</code> and <code>/\evil.com</code>, which a browser reads as
+          another site, are refused. Send visitors to another site from a route handler.
+          <CodeBlock lang="text" code={`gio.toml:1: invalid [[redirects]] entry for "/a": target "//evil.com" is another site (a browser reads a leading // or /\\ as one): redirect to another site from a route handler`} />
+        </li>
+        <li>
+          <strong><a href="/docs/configuration/i18n"><code>[i18n]</code></a> is checked.</strong>{' '}
+          An unknown <code>detect_from</code> value, an empty or duplicate locale, and a{' '}
+          <code>default_locale</code> that is not one of a non-empty <code>locales</code> stop
+          startup. <code>default_locale</code> defaults to <code>&quot;en&quot;</code>, so an
+          app that lists <code>locales</code> without <code>en</code> must now name its
+          default:
+          <CodeBlock lang="diff" title="gio.toml" code={`  [i18n]
+  locales = ["de", "fr"]
++ default_locale = "de"`} />
+        </li>
+        <li>
+          <strong><a href="/docs/file-conventions/middleware"><code>middleware.ts</code></a> fails closed.</strong>{' '}
+          A <code>middleware.ts</code> that throws while it loads, has no default export, or
+          holds a rule that cannot be enforced (an invalid pattern, a malformed field, an
+          unknown key, a guard without a requirement, a target that leaves the site) stops
+          the worker at boot with every problem listed. In production the server exits with
+          code <code>1</code>; in development it waits for you to save a fix. Beta.7 dropped
+          the rules - every rule, guards included, for a file that threw - with a warning and
+          kept serving. <code>--check-config</code> does not load <code>middleware.ts</code>:
+          start the app once (<code>npm start</code>) to check it.
+          <CodeBlock lang="text" code={`giojs-server: the Node worker exited before it was ready (exit status: 1):
+  /srv/shop/middleware.ts failed to load: GIO_SESSION_SECRET is not set`} />
+        </li>
+      </ul>
       <p>Keys that never did anything are now rejected with what to use instead:</p>
       <CodeBlock lang="diff" title="gio.toml" code={`  [cache]
 - memory_mb = 256
@@ -253,6 +304,28 @@ x-frame-options = ""          # "" removes the default for these paths`} />
 +   headers: { 'content-type': 'application/json' },
     body: JSON.stringify(post),
   });`} />
+      <p>
+        A body that is empty, not UTF-8 or not valid JSON now throws{' '}
+        <code>MalformedBodyError</code> - a <code>400</code> unless caught - instead of the
+        parser&apos;s <code>SyntaxError</code> or a plain <code>Error</code> (a{' '}
+        <code>500</code>). A <code>catch</code> that tests{' '}
+        <code>err instanceof SyntaxError</code> silently stops matching; test{' '}
+        <code>isMalformedBodyError(err)</code> instead:
+      </p>
+      <CodeBlock lang="diff" title="app/api/posts/route.ts" code={`- import type { GioRequest } from '@gio.js/core';
++ import { isMalformedBodyError, type GioRequest } from '@gio.js/core';
+
+  export function POST(req: GioRequest) {
+    let post: unknown;
+    try {
+      post = req.json();
+    } catch (err) {
+-     if (err instanceof SyntaxError) return Response.json({ error: 'Invalid JSON' }, { status: 400 });
++     if (isMalformedBodyError(err)) return Response.json({ error: 'Invalid JSON' }, { status: 400 });
+      throw err;
+    }
+    return { created: post };
+  }`} />
       <p>
         <code>req.body</code> still holds the raw body for other formats, and{' '}
         <code>req.formData()</code> parses forms. See{' '}

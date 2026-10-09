@@ -7,8 +7,14 @@
  * open, together with the index; the tests import it directly.
  *
  * Matching, per query word: the exact token, then tokens it is a prefix of
- * ("revalid" → revalidate), then tokens within one or two typos
- * ("revalidte", and a mistyped prefix of the word still being typed).
+ * ("revalid" → revalidate), other inflections of it ("cookies" → cookie,
+ * "upgrade" → upgrading), the words a small synonym map gives ("vars" →
+ * variables, "isr" → revalidate), then tokens within one or two typos
+ * ("revalidte", and a mistyped prefix of the word still being typed). The
+ * last segment of a page's URL counts as part of its title (/docs/env-vars
+ * answers "env vars"). A number is a weak word: next to other words a
+ * section need not hold it (the line number of a pasted error), and it is
+ * never an API name (`429` quoted in reference code).
  * Identifiers are indexed whole and by their parts, so `useRouter`,
  * `max_body_bytes` and `GIO_PUBLIC_` are found by "userouter", "router",
  * "body bytes" or "gio_public".
@@ -35,7 +41,14 @@
  * the gio.toml key, `proxyHeaders` a report field. A CLI flag row defines
  * its flags as typed (`--json`, `-H`), never the bare word (`json`). Within
  * a page, a table row that defines a plain word (`details`) opens the page
- * before a mere mention of it, such as the version history.
+ * before a mere mention of it, such as the version history. A query that
+ * names a page in another inflection or by its URL ("rate limiting" →
+ * `[[rate_limits]]`) puts that page near an exact title, and one that names
+ * a gio.toml section among other words ("disable csrf") lifts that section's
+ * page. Only identifier-shaped queries get the code-reference bonus: a
+ * header (`x-frame-options`) or a path quoted there is no API name, and
+ * "POST /_gio/revalidate" names the `/_gio/revalidate` heading. A page's
+ * version history counts for little and comes after its other sections.
  *
  * Results are grouped by page, best page first, each with its best
  * sections and a snippet around the first match; matched spans come back
@@ -60,6 +73,10 @@ const Q_PREFIX = 0.75;
 const Q_TYPO_1 = 0.55;
 const Q_TYPO_2 = 0.35;
 const Q_TYPO_PREFIX = 0.4;
+/** Another inflection of the word (`upgrading` for "upgrade", `cookie` for "cookies"). */
+const Q_STEM = 0.85;
+/** A word the docs use for the one typed (`variables` for "vars"). */
+const Q_SYNONYM = 0.7;
 const MAX_CANDIDATES = 80;
 
 /** Bonuses for a query that names a page or section exactly. */
@@ -89,6 +106,23 @@ const B_ROW_IN_PAGE = 40;
 const B_EXACT_REFERENCE_CODE = 70;
 const B_EXACT_HEADING = 60;
 const B_TITLE_PREFIX = 12;
+/**
+ * The query names a page in another inflection, or by its URL: "upgrade" is
+ * Upgrading, "rate limiting" is `[[rate_limits]]`, "env vars" is
+ * /docs/env-vars. Below a title as typed, above a mention in reference code.
+ */
+const B_STEM_TITLE = 75;
+/**
+ * A gio.toml section page whose table the query names among other words:
+ * "disable csrf" → `[security.csrf]`, "disable rate limit" → `[[rate_limits]]`.
+ */
+const B_TABLE_CONCEPT = 20;
+/**
+ * The version history of a page only mentions what changed: its score
+ * counts this much, and it comes after every other section of its page.
+ */
+const VERSION_HISTORY_FACTOR = 0.3;
+const VERSION_HISTORY = 'version-history';
 const B_EXACT_CODE = 6;
 /** The pages whose inline code names the API itself - the page and its subpages. */
 const CODE_REFERENCE = /^\/docs\/(?:components|hooks|functions|page-exports)(?:\/|$)/;
@@ -102,6 +136,15 @@ const IDENTIFIER = /[_$.-]|\p{Lu}/u;
  */
 const FLAG_ROW = /^-/;
 const FLAG = /^-[\w-]+$/;
+/**
+ * A query that can be an API name as typed: no space, slash, colon or dash,
+ * and not only digits. A header (`x-frame-options`), a path
+ * (`POST /_gio/revalidate`) or a status code (`429`) quoted in a code
+ * reference is not the API that page documents.
+ */
+const API_NAME = /^[^\s/:-]*[\p{L}_$][^\s/:-]*$/u;
+/** An HTTP method before a path: "POST /_gio/revalidate" names the `/_gio/revalidate` heading. */
+const METHOD_PREFIX = /^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)\s+(?=\/)/i;
 /** The title of a gio.toml section page: `[server]`, `[[rate_limits]]`. */
 const GIO_TOML_TABLE = /^\[\[?([\w.]+)\]\]?$/;
 /** A CLI command's page title (`gio typegen`) also answers the bare command (`typegen`). */
@@ -112,13 +155,55 @@ const STOP_WORDS = new Set([
   'of', 'on', 'or', 'the', 'to', 'what', 'when', 'where', 'with', 'can', 'my',
 ]);
 
+/**
+ * Words a reader types for a word the docs use instead. Each query word
+ * also matches its listed words, a little below its own inflections.
+ */
+const SYNONYMS = new Map([
+  ['env', ['environment']],
+  ['vars', ['variables']],
+  ['var', ['variable']],
+  ['isr', ['revalidate', 'revalidation', 'revalidating']],
+  ['config', ['configuration']],
+  ['disable', ['off']],
+]);
+
 const WORD = /[\p{L}\p{N}_$]+/gu;
 /** A word that splits into parts: snake_case, $-joined, camelCase or PascalCase. */
 const HAS_PARTS = /[_$]|[\p{Ll}\p{N}]\p{Lu}|\p{Lu}\p{Lu}\p{Ll}/u;
+/** A word that is only digits, such as a status code: never an API name. */
+const NUMBER = /^\p{N}+$/u;
 
 /** Lowercase, punctuation-free form used to compare a query with a name: "useRouter()" → "userouter". */
 export function normalizeName(text) {
   return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+/**
+ * A light stem of a lowercase word, so its inflections meet: `upgrade` and
+ * `upgrading` → upgrad; `cookies` and `cookie` → cooki; `limits` and
+ * `limiting` → limit. It drops a plural `s`, then an `ing` or `ed` ending,
+ * then a final `e`, and reads a final `y` as `i` (`entry`, `entries`). A
+ * stem keeps at least four letters, so short words stay whole.
+ */
+export function stem(word) {
+  let out = word;
+  if (out.length > 4 && out.endsWith('s') && !out.endsWith('ss')) out = out.slice(0, -1);
+  if (out.length > 6 && out.endsWith('ing')) out = out.slice(0, -3);
+  else if (out.length > 5 && out.endsWith('ed')) out = out.slice(0, -2);
+  if (out.length > 4 && out.endsWith('e')) out = out.slice(0, -1);
+  if (out.length > 4 && out.endsWith('y')) out = `${out.slice(0, -1)}i`;
+  return out;
+}
+
+/** The stems of the words of `text`, joined: "Rate limiting" and `rate_limits` → ratelimit. */
+function stemName(text) {
+  const words = [];
+  for (const [word] of text.matchAll(WORD)) {
+    const parts = HAS_PARTS.test(word) ? identifierParts(word) : [];
+    for (const part of parts.length > 0 ? parts : [word.toLowerCase()]) words.push(stem(part));
+  }
+  return words.join('');
 }
 
 /** The parts of an identifier: `useRouter` → use, router; `max_body_bytes` → max, body, bytes. */
@@ -273,11 +358,15 @@ export function createSearch(index) {
   /** token → flat [sectionIndex, weight, sectionIndex, weight, ...] */
   const postings = new Map();
 
-  const titleTokens = pages.map((page) => {
+  // The last segment of a page's URL names it as well as its title does:
+  // /docs/env-vars is found by "env" and "vars", /docs/upgrading by "upgrading".
+  const slugs = pages.map((page) => page.u.split('/').at(-1) ?? '');
+  const titleTokens = pages.map((page, p) => {
     const map = new Map();
     forEachToken(`${page.t} ${page.n ?? ''}`, (token, part) => {
       if (!map.has(token) || !part) map.set(token, part ? PART_FACTOR : 1);
     });
+    forEachToken(slugs[p], (token) => map.set(token, 1));
     return map;
   });
 
@@ -318,6 +407,14 @@ export function createSearch(index) {
   });
 
   const vocabulary = [...postings.keys()].sort();
+  /** stem → the indexed tokens with that stem */
+  const stems = new Map();
+  for (const token of vocabulary) {
+    const key = stem(token);
+    const list = stems.get(key);
+    if (list === undefined) stems.set(key, [token]);
+    else list.push(token);
+  }
   const pageNames = pages.map((page) => [normalizeName(page.t), normalizeName(page.n ?? '')]);
   const literalTitles = pages.map((page) => [page.t, page.n ?? ''].map((text) => text.trim().toLowerCase()));
   // A page titled with a list of names (`GET, POST, PUT, PATCH, DELETE`) is
@@ -330,6 +427,9 @@ export function createSearch(index) {
     pageNames[p].push(...items.map(normalizeName));
     literalTitles[p].push(...items.map((item) => item.toLowerCase()));
   });
+  // Titles, nav labels and URL slugs by stem: "upgrade" names Upgrading.
+  const pageStemNames = pages.map((page, p) =>
+    [page.t, page.n ?? '', slugs[p]].map(stemName).filter((name) => name.length > 0));
   const commandNames = pages.map((page) =>
     (COMMAND_PREFIX.test(page.t) ? normalizeName(page.t.replace(COMMAND_PREFIX, '')) : ''));
   const codeReference = pages.map((page) => CODE_REFERENCE.test(page.u));
@@ -346,6 +446,11 @@ export function createSearch(index) {
   // every key is also defined by its full name: `server.idle_timeout_secs`,
   // `[security.headers]`. A flag row defines only its flags as typed.
   const tableNames = pages.map((page) => GIO_TOML_TABLE.exec(page.t)?.[1]);
+  // The words of the table a gio.toml section page is about, by stem: the
+  // last part of its name (`[security.csrf]` → csrf, `[[rate_limits]]` → rate, limit).
+  const tableConcepts = tableNames.map((name) =>
+    (name === undefined ? null : (name.split('.').at(-1) ?? '').split('_').map(stem)));
+  const versionHistory = sections.map((section) => section.a === VERSION_HISTORY);
   const definedNames = [];
   const definedLiterals = [];
   const definedFlags = [];
@@ -399,9 +504,16 @@ export function createSearch(index) {
     for (const token of completions.slice(0, MAX_CANDIDATES)) {
       offer(token, Q_PREFIX * Math.sqrt(term.length / token.length));
     }
-    // Typos: only for a word that names nothing as typed, and is long
-    // enough that one edit is unlikely to make it a different word.
-    if (term.length >= 4 && !exact && completions.length < 3) {
+    // Other inflections ("cookies" → cookie, "upgrade" → upgrading), then
+    // the words the docs use for it ("vars" → variables), in any inflection.
+    const inflections = stems.get(stem(term)) ?? [];
+    for (const token of inflections) offer(token, Q_STEM);
+    for (const synonym of SYNONYMS.get(term) ?? []) {
+      for (const token of stems.get(stem(synonym)) ?? []) offer(token, Q_SYNONYM);
+    }
+    // Typos: only for a word that names nothing as typed or inflected, and
+    // is long enough that one edit is unlikely to make it a different word.
+    if (term.length >= 4 && !exact && inflections.length === 0 && completions.length < 3) {
       const max = term.length >= 8 ? 2 : 1;
       for (const token of vocabulary) {
         if (Math.abs(token.length - term.length) > max) continue;
@@ -440,6 +552,10 @@ export function createSearch(index) {
     const nameQuery = normalizeName(query);
     const typedQuery = query.trim();
     const literalQuery = typedQuery.toLowerCase();
+    const apiName = API_NAME.test(typedQuery);
+    const headingQuery = normalizeName(typedQuery.replace(METHOD_PREFIX, ''));
+    const stemQuery = stemName(query);
+    const queryStems = new Set(terms.map(stem));
 
     // Per query word, each section's best score for it.
     const termScores = terms.map((term, t) => {
@@ -458,17 +574,24 @@ export function createSearch(index) {
       candidates(term, t === terms.length - 1).slice(0, 12).map(([token]) => token)))]
       .sort((a, b) => b.length - a.length);
 
+    // A number (a status code, the line of a pasted error) is a weak word:
+    // next to other words, a section need not hold it to match them all.
+    const required = terms.map((term) => !NUMBER.test(term) || terms.every((other) => NUMBER.test(other)));
+    const requiredCount = required.filter(Boolean).length;
+
     const complete = [];
     const partial = [];
     for (let s = 0; s < sections.length; s++) {
       let score = 0;
       let matched = 0;
-      for (const scores of termScores) {
+      let matchedRequired = 0;
+      termScores.forEach((scores, t) => {
         if (scores[s] > 0) {
           matched++;
+          if (required[t]) matchedRequired++;
           score += scores[s];
         }
-      }
+      });
       if (matched === 0) continue;
       const section = sections[s];
       let bonus = 0;
@@ -479,9 +602,15 @@ export function createSearch(index) {
         if (section.l === 1 && named) {
           bonus += B_EXACT_TITLE;
           if (literalTitles[section.p].includes(literalQuery)) bonus += B_LITERAL_TITLE;
+        } else if (section.l === 1 && pageStemNames[section.p].includes(stemQuery)) {
+          bonus += B_STEM_TITLE;
         } else if (section.l === 1 && title.startsWith(nameQuery)) bonus += B_TITLE_PREFIX;
-        const exactHeading = headingNames[s] === nameQuery;
-        const apiHeading = exactHeading && apiReference[section.p] && pageCodeNames[section.p].has(nameQuery);
+        const concept = tableConcepts[section.p];
+        if (concept && !named && queryStems.size > concept.length && concept.every((word) => queryStems.has(word))) {
+          bonus += B_TABLE_CONCEPT;
+        }
+        const exactHeading = headingNames[s] === nameQuery || headingNames[s] === headingQuery;
+        const apiHeading = exactHeading && apiReference[section.p] && pageCodeNames[section.p].has(headingNames[s]);
         // A definition outranks a mention; the two do not add up, so a
         // reference page that also quotes the name stays below its own page.
         const literalRow = (definedLiterals[s]?.has(literalQuery) || definedFlags[s]?.has(typedQuery)) ?? false;
@@ -490,14 +619,19 @@ export function createSearch(index) {
           if (literalRow || (apiHeading && literalHeadings[s] === literalQuery)) bonus += B_LITERAL_DEFINED;
         } else {
           if (exactHeading) bonus += B_EXACT_HEADING;
-          if (codeNames[s]?.has(nameQuery)) {
-            bonus += codeReference[section.p] ? B_EXACT_REFERENCE_CODE : B_EXACT_CODE;
+          if (codeNames[s]?.has(nameQuery) && !NUMBER.test(nameQuery)) {
+            bonus += codeReference[section.p] && apiName ? B_EXACT_REFERENCE_CODE : B_EXACT_CODE;
           }
         }
         // A plain-word row: above the page's mentions, below its heading for the name.
         if (bonus < B_EXACT_HEADING && rowNames[s]?.has(nameQuery)) inPage = B_ROW_IN_PAGE;
       }
-      if (matched === terms.length) {
+      if (versionHistory[s]) {
+        score *= VERSION_HISTORY_FACTOR;
+        bonus *= VERSION_HISTORY_FACTOR;
+        inPage = 0;
+      }
+      if (matchedRequired === requiredCount) {
         complete.push({ s, score: score + bonus, base: score, rank: score + bonus + inPage, complete: true });
       } else {
         const share = 0.2 * (matched / terms.length);
@@ -517,14 +651,17 @@ export function createSearch(index) {
       else group.push(entry);
     }
     const ranked = [...byPage].map(([p, entries]) => {
-      entries.sort((a, b) => Number(b.complete) - Number(a.complete) || b.score - a.score || a.s - b.s);
+      const history = (entry) => Number(versionHistory[entry.s]);
+      entries.sort((a, b) =>
+        Number(b.complete) - Number(a.complete) || history(a) - history(b) || b.score - a.score || a.s - b.s);
       // The best section decides; more matching sections nudge a page up -
       // by how well they match, not by the exact-name bonus, so an overview
       // naming an API in several sections stays below that API's own page.
       const rest = entries.slice(1, 4).reduce((sum, entry) => sum + entry.base, 0);
       const best = entries[0];
       // Then the page's own order, which only B_ROW_IN_PAGE changes.
-      entries.sort((a, b) => Number(b.complete) - Number(a.complete) || b.rank - a.rank || a.s - b.s);
+      entries.sort((a, b) =>
+        Number(b.complete) - Number(a.complete) || history(a) - history(b) || b.rank - a.rank || a.s - b.s);
       return { p, entries, complete: best.complete, score: best.score + 0.15 * rest };
     });
     ranked.sort((a, b) => Number(b.complete) - Number(a.complete) || b.score - a.score || a.p - b.p);

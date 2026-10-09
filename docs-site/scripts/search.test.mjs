@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 
 import { htmlToText, slugify, uniqueSlug } from '../lib/text.mjs';
 import { buildSearchIndex, extractSections } from '../lib/search-index.mjs';
-import { createSearch, editDistance, highlight, queryTerms, tokenize } from '../lib/search.mjs';
+import { createSearch, editDistance, highlight, queryTerms, stem, tokenize } from '../lib/search.mjs';
 
 /** A rendered docs page as the layout wraps it (chrome outside the article). */
 const html = (body) =>
@@ -372,6 +372,112 @@ test('prefixes and typos still find the page', () => {
   assert.ok(urls('middlwa').includes('/docs/middleware'));
   // A short wrong word is not "fixed" into something else.
   assert.deepEqual(urls('xyz'), []);
+});
+
+test('stem meets the inflections of a word, and only those', () => {
+  const same = [
+    ['upgrade', 'upgrading', 'upgraded', 'upgrades'],
+    ['cookie', 'cookies'],
+    ['session', 'sessions'],
+    ['limit', 'limits', 'limiting', 'limited'],
+    ['cache', 'caches', 'caching', 'cached'],
+    ['entry', 'entries'],
+    ['deploy', 'deploying', 'deploys'],
+    ['variable', 'variables'],
+  ];
+  for (const [word, ...others] of same) {
+    for (const other of others) assert.equal(stem(other), stem(word), `${other} ~ ${word}`);
+  }
+  // Short words and words that only look inflected stay whole.
+  for (const word of ['string', 'process', 'need', 'vars', 'use', 'is']) assert.equal(stem(word), word);
+  assert.notEqual(stem('vars'), stem('variables'));
+});
+
+test('inflections, URL slugs and synonyms find the page; version histories and numbers are weak', () => {
+  const pages = [
+    ['/docs/upgrading', 'Getting Started', undefined, `
+      <h1>Upgrading</h1><p>Move an app to the new release, step by step.</p>
+      <h2 id="1-update">1. Update the packages</h2><p>Install the new versions together.</p>`],
+    ['/docs/headers', 'API Reference', 'Runtime', `
+      <h1>Headers</h1><p>Every header the server sends.</p>
+      <h2 id="keep-alive">Keep-alive</h2><p>A WebSocket upgrade request keeps its connection.</p>
+      <h3 id="x-frame-options">X-Content-Type-Options, X-Frame-Options</h3><p>Sent on every response.</p>
+      <h2 id="version-history">Version history</h2><p>Rate limiting headers, and skew detection.</p>`],
+    ['/docs/env-vars', 'API Reference', 'Runtime', `
+      <h1>Environment Variables</h1><p>Every variable the server reads.</p>`],
+    ['/docs/guides/deploying', 'Getting Started', undefined, `
+      <h1>Deploying</h1><p>Platforms.</p>
+      <h2 id="render">Render</h2><p>Set the env vars in the dashboard.</p>`],
+    ['/docs/functions/cookies', 'API Reference', 'Functions', `
+      <h1>Cookie helpers</h1><p>Read and sign a cookie with <code>parseCookies</code>.</p>`],
+    ['/docs/page-exports/get-server-side-props', 'API Reference', 'Page Exports', `
+      <h1>getServerSideProps</h1><p>Load data for a page.</p>
+      <h2 id="behavior">Behavior</h2><p>Reads <code>cookies</code> from the request; a refused one is a <code>429</code>.</p>`],
+    ['/docs/functions/create-session-storage', 'API Reference', 'Functions', `
+      <h1>createSessionStorage</h1><p>Encrypted cookie storage for a user.</p>`],
+    ['/docs/known-issues', 'Guides', 'App', `
+      <h1>Known issues</h1><p>What does not work yet.</p>
+      <h2 id="requests">Requests and sessions</h2><p>A long request holds its slot.</p>`],
+    ['/docs/configuration/rate-limits', 'API Reference', 'gio.toml', `
+      <h1>[[rate_limits]]</h1><p>Per-client budgets; a refused request gets <code>429</code>.</p>
+      <h2 id="good-to-know">Good to know</h2><p><code>per_ip = 0</code> is not an off switch: remove the rule.</p>`],
+    ['/docs/configuration/security-csrf', 'API Reference', 'gio.toml', `
+      <h1>[security.csrf]</h1><p>Cross-site request checks.</p>
+      <h2 id="reference">Reference</h2><p>CSRF checks; <code>enabled = false</code> turns them off.</p>`],
+    ['/docs/authentication', 'Guides', 'App', `
+      <h1>Authentication</h1><p>Log visitors in.</p>
+      <h2 id="csrf">CSRF</h2><p>Every form is checked for CSRF. Do not disable it.</p>`],
+    ['/docs/caching', 'Getting Started', undefined, `
+      <h1>Caching</h1><p>Export <code>revalidate</code> to cache a page.</p>`],
+    ['/docs/hooks/use-web-socket', 'API Reference', 'Hooks', `
+      <h1>useWebSocket</h1><p>A socket that reconnects.</p>
+      <h2 id="returns">Returns</h2><p>Whether it is ready, <code>isReady</code>.</p>`],
+    ['/docs/endpoints', 'API Reference', 'Runtime', `
+      <h1>Endpoints</h1><p>What the server answers itself.</p>
+      <h3 id="post-gio-revalidate"><code>/_gio/revalidate</code></h3><p>POST only. Purge pages from outside.</p>`],
+    ['/docs/page-exports/revalidate', 'API Reference', 'Page Exports', `
+      <h1>revalidate</h1><p>Cache a page.</p>
+      <h2 id="behavior">Behavior</h2><p>Purge it from outside with <code>POST /_gio/revalidate</code>.</p>`],
+    ['/docs/functions/define-middleware', 'API Reference', 'Functions', `
+      <h1>defineMiddleware</h1><p>Type middleware.ts.</p>
+      <h2 id="reference">Reference</h2><p>Header rules such as <code>X-Frame-Options</code>.</p>`],
+    ['/docs/configuration', 'API Reference', 'gio.toml', `
+      <h1>gio.toml</h1><p>Every section.</p>
+      <h2 id="strict">Strict by design</h2><p>An unknown key in gio.toml stops startup.</p>`],
+  ];
+  const search = createSearch(buildSearchIndex(
+    pages.map(([route, , , body]) => ({ route, html: html(body) })),
+    (route) => {
+      const page = pages.find(([r]) => r === route);
+      return page && { section: page[1], group: page[2], label: page[0] === '/docs/configuration/rate-limits' ? 'rate_limits' : 'label' };
+    },
+  ));
+  const first = (query) => search.search(query).pages[0]?.items[0].url;
+  const firstPage = (query) => search.search(query).pages[0]?.url;
+  // Another inflection of the title: the page, not a heading that says it as typed.
+  assert.equal(firstPage('upgrade'), '/docs/upgrading');
+  assert.equal(firstPage('upgrade guide'), '/docs/upgrading');
+  assert.equal(firstPage('rate limiting'), '/docs/configuration/rate-limits');
+  // A plural finds the singular title, above reference code that names the plural.
+  assert.equal(firstPage('cookies'), '/docs/functions/cookies');
+  assert.equal(firstPage('sessions'), '/docs/functions/create-session-storage');
+  // The URL names the page: "env vars" is /docs/env-vars, titled Environment Variables.
+  assert.equal(first('env vars'), '/docs/env-vars');
+  // Synonyms: ISR is revalidation; disabling is turning off.
+  assert.ok(['/docs/page-exports/revalidate', '/docs/caching'].includes(firstPage('isr')), firstPage('isr'));
+  assert.equal(firstPage('disable csrf'), '/docs/configuration/security-csrf');
+  assert.equal(firstPage('disable rate limit'), '/docs/configuration/rate-limits');
+  // A page's version history comes after its other sections, and below other pages.
+  assert.notEqual(first('rate limiting'), '/docs/headers#version-history');
+  assert.equal(search.search('skew').pages[0].items[0].url, '/docs/headers#version-history');
+  assert.ok(search.search('skew').pages[0].score < 5);
+  assert.equal(search.search('websocket headers').pages[0].items.at(-1).url, '/docs/headers#version-history');
+  // A header, a path or a status code quoted in reference code is not that page's API.
+  assert.equal(first('x-frame-options'), '/docs/headers#x-frame-options');
+  assert.equal(first('POST /_gio/revalidate'), '/docs/endpoints#post-gio-revalidate');
+  assert.ok(search.search('429').pages.every((page) => page.score < 20));
+  // A number in a pasted error need not match: the words still find the page.
+  assert.equal(first('gio.toml:5: unknown key'), '/docs/configuration#strict');
 });
 
 test('words inside identifiers and code blocks are found, and the matching section is linked', () => {

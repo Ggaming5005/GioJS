@@ -105,6 +105,41 @@ test('names lead to the section that defines them in the real index', { skip }, 
   }
 });
 
+test('everyday words, plurals, URLs and pasted text find the right page in the real index', { skip }, () => {
+  const search = createSearch(index);
+  const expected = {
+    // Another inflection of the title, or the page's URL.
+    upgrade: ['/docs/upgrading'],
+    'upgrade guide': ['/docs/upgrading'],
+    'env vars': ['/docs/env-vars'],
+    cookies: ['/docs/functions/cookies'],
+    sessions: ['/docs/functions/create-session-storage'],
+    'rate limiting': ['/docs/configuration/rate-limits'],
+    // A gio.toml section named among other words.
+    'disable rate limit': ['/docs/configuration/rate-limits', '/docs/guides/security-switches'],
+    'disable csrf': ['/docs/configuration/security-csrf', '/docs/guides/security-switches'],
+    isr: ['/docs/page-exports/revalidate', '/docs/caching', '/docs/configuration/revalidate'],
+    // A header or a path quoted in reference code is not that page's API.
+    'x-frame-options': ['/docs/headers'],
+    'POST /_gio/revalidate': ['/docs/endpoints'],
+    // Pasted errors.
+    'gio.toml:5: unknown key': ['/docs/configuration'],
+    'Unexpected token in JSON': ['/docs/functions/request-errors'],
+  };
+  for (const [query, urls] of Object.entries(expected)) {
+    const first = search.search(query).pages[0]?.url;
+    assert.ok(urls.includes(first), `${query}: first result is ${first}`);
+  }
+  // A version history only mentions a word: never the first section to open.
+  for (const query of ['rate limiting', 'skew', 'details', 'csrf', 'x-frame-options']) {
+    for (const [rank, page] of search.search(query).pages.slice(0, 2).entries()) {
+      assert.ok(!page.items[0].url.endsWith('#version-history'), `${query}: #${rank + 1} is ${page.items[0].url}`);
+    }
+  }
+  // A status code is no API name: reference code quoting it gets no bonus.
+  assert.ok(search.search('429').pages.every((page) => page.score < 30));
+});
+
 test('a docs page\'s share card carries its own title and description', { skip }, () => {
   for (const route of docsRoutes()) {
     const html = pageHtml(route);

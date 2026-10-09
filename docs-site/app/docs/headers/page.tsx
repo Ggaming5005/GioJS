@@ -359,9 +359,12 @@ x-gio-refused: unread
       <p>
         With <a href="/docs/configuration/i18n"><code>[i18n]</code></a>, one of the sources{' '}
         <code>detect_from</code> lists (default <code>path</code>,{' '}
-        <code>accept-language</code>, <code>cookie</code>, in that order). A page whose
-        locale came from a header or cookie rather than the URL is{' '}
-        <code>private, no-cache</code>, because one URL then serves several languages.
+        <code>accept-language</code>, <code>cookie</code>, in that order). While{' '}
+        <code>detect_from</code> lists <code>accept-language</code> or <code>cookie</code>,
+        every page requested without a locale prefix is <code>private, no-cache</code> with
+        no <code>ETag</code> - whether or not the request carried the header or the cookie,
+        since one URL then serves several languages. URLs with a locale prefix stay
+        shareable.
       </p>
 
       <h3 id="accept-and-accept-encoding">Accept and Accept-Encoding</h3>

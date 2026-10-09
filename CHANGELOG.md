@@ -44,8 +44,12 @@ first.
   order: each unknown key and section, each invalid value, each rule that
   cannot be enforced and each `[i18n]` mistake. A rule table, or the
   `[i18n]` locales, holding a misspelled or invalid key is checked once that
-  key is fixed, and a required key whose value is invalid (`path = 3`) ends
-  the list there.
+  key is fixed. A required key whose value is invalid (`path = 3`, or a
+  `[[rate_limits]]` `path` that is not a valid pattern) cuts the list short:
+  it is listed with every unknown section and the unknown keys and invalid
+  values on the lines before it, and the rest of the file - every rule and
+  `[i18n]` problem included, even on earlier lines - is checked once it is
+  fixed.
 - **`gio.config.ts` is validated at boot:** unknown keys and plugins without a
   `name` are errors.
 - **The server binary refuses arguments it does not take.** `giojs-server`
@@ -991,8 +995,10 @@ first.
   or `/`) covers every page section by section, ranks an exact API name
   first - an identifier-shaped gio.toml key or prop (`skew_protection`,
   `onSuccess`) opens the reference table that defines it, a bare command
-  (`typegen`) its CLI page - tolerates typos and unfinished words, and runs
-  in the browser with no third-party service. The sidebar has four sections (Getting
+  (`typegen`) its CLI page - tolerates typos and unfinished words, matches
+  other inflections (`cookies`, `upgrade`, `rate limiting`), a page's URL
+  (`env vars`) and a few synonyms (`isr`, `disable`), ranks a page's version
+  history last, and runs in the browser with no third-party service. The sidebar has four sections (Getting
   Started, Guides, API Reference, Architecture) with collapsible groups, and
   every page gets breadcrumbs, an "On this page" outline, `#` links on its
   headings, previous/next links, "Edit this page on GitHub", "Copy page" as
