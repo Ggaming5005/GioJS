@@ -103,6 +103,9 @@ impl RateLimitStore {
                 Some(entry.bucket.clone())
             }
             Entry::Vacant(vacant) => {
+                // fetch_update: Rust 1.99 renames it try_update, which the
+                // 1.89 MSRV does not have yet.
+                #[allow(deprecated)]
                 let admitted = self
                     .distinct_counts
                     .entry(group.to_string())
@@ -187,6 +190,8 @@ impl RateLimitStore {
     fn release_group_slot(&self, entry: &BucketEntry) {
         if let Some(group) = entry.group.as_deref() {
             if let Some(count) = self.distinct_counts.get(group) {
+                // fetch_update: see the note in get_or_create_in_group.
+                #[allow(deprecated)]
                 let _ =
                     count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_sub(1));
             }

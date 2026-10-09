@@ -124,6 +124,9 @@ impl PrefetchBudgets {
     /// check-and-decrement atomic, so racing releases cannot wrap.
     pub fn release(&self, ip: IpAddr) {
         if let Some(entry) = self.budgets.get(&ip) {
+            // fetch_update: Rust 1.99 renames it try_update, which the 1.89
+            // MSRV does not have yet.
+            #[allow(deprecated)]
             let _ = entry
                 .in_flight
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
