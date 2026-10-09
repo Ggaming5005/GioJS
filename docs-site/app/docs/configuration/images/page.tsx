@@ -126,6 +126,15 @@ enabled = false        # <GioImage> renders plain src; the CDN resizes`} />
           <code>unknown variant `png`, expected one of `avif`, `image/avif`, `image/webp`, `webp`</code>
           ): PNG and JPEG are always available through <code>f=</code>.
         </li>
+        <li>
+          A <code>remote_patterns</code> entry that could never match is a startup error naming
+          its line: a <code>protocol</code> other than <code>&quot;https&quot;</code> or{' '}
+          <code>&quot;http&quot;</code> (lowercase), an empty <code>hostname</code> or one with a
+          scheme, path, port or uppercase letters, and a <code>pathname</code> that does not
+          start with <code>/</code> (
+          <code>pathname &quot;uploads/*&quot; must start with &apos;/&apos;, or it matches no path - did you mean &quot;/uploads/*&quot;?</code>
+          ).
+        </li>
         <li>In a static export there is no optimizer: every image renders its plain <code>src</code>.</li>
       </ul>
       <h3 id="not-configurable">Not configurable</h3>

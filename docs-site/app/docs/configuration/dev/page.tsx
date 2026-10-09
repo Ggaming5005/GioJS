@@ -32,7 +32,7 @@ watch_ignore = ["data/**", "*.db.json"]`} />
 
       <h2 id="reference">Reference</h2>
       <ConfigKeyTable rows={[
-        { key: 'allowed_hosts', type: 'string[]', default: '[]', zero: <>Empty: only the hosts named above</>, description: <>Extra <code>Host</code> names the <code>/_gio/devtools*</code> endpoints and render error details answer to, besides <code>localhost</code>, <code>*.localhost</code> and loopback IPs (from this machine) and a specific <code>[server] host</code>. Hostnames or IPs; a leading <code>.</code> or <code>*.</code> matches subdomains; a pasted <code>http(s)://</code> and port are ignored. An entry that is not a host is skipped with a warning. <code>[&quot;*&quot;]</code> answers any <code>Host</code> from any machine and warns.</> },
+        { key: 'allowed_hosts', type: 'string[]', default: '[]', zero: <>Empty: only the hosts named above</>, description: <>Extra <code>Host</code> names the <code>/_gio/devtools*</code> endpoints and render error details answer to, besides <code>localhost</code>, <code>*.localhost</code> and loopback IPs (from this machine) and a specific <code>[server] host</code>. Hostnames or IPs; a leading <code>.</code> or <code>*.</code> matches subdomains; a pasted <code>http(s)://</code> and port are ignored. An entry that is not a host is skipped with a warning. <code>[&quot;*&quot;]</code> answers any <code>Host</code> from any machine and warns; open-in-editor never follows it (see <a href="#not-configurable">Not configurable</a>).</> },
         { key: 'devtools', type: 'boolean', default: 'true', zero: <><code>/_gio/devtools*</code> answers <code>404</code></>, description: <>Route the dev endpoints: the dashboard, its state and event stream (which drives live reload), error-overlay codeframes and open-in-editor. Off, the error overlay still shows the message and stack, without codeframes, editor links or live reload.</> },
         { key: 'watch', type: 'boolean', default: 'true', zero: <>No watcher; restart by hand</>, description: <>Restart the worker when a source file changes (and reload open tabs). Turn it off in a huge monorepo, on a network filesystem or when the machine runs out of inotify watches.</> },
         { key: 'watch_ignore', type: 'string[]', default: '[]', description: <>Globs, relative to the project root, the watcher never restarts for: data files the app writes. <code>*</code> stays within a segment, <code>**</code> spans segments, and a pattern without <code>/</code> matches a name at any depth. See <a href="/docs/configuration#dev-watcher">Dev watcher</a>.</> },
@@ -94,10 +94,13 @@ watch_ignore = ["data/**"]           # lowdb, uploads, caches the app writes`} /
       <h3 id="not-configurable">Not configurable</h3>
       <ul>
         <li>
-          <strong>open-in-editor stays same-origin.</strong> It accepts <code>POST</code> only and
-          refuses anything but a same-origin request (or <code>Sec-Fetch-Site: none</code>), even
-          with <code>allowed_hosts = [&quot;*&quot;]</code>, so a link or form on another site
-          cannot launch your editor.
+          <strong>open-in-editor stays same-origin and ignores <code>&quot;*&quot;</code>.</strong>{' '}
+          It accepts <code>POST</code> only and refuses anything but a same-origin request (or{' '}
+          <code>Sec-Fetch-Site: none</code>), so a link or form on another site cannot launch your
+          editor. A DNS-rebound page is same-origin with its own <code>Host</code>, so{' '}
+          <code>allowed_hosts = [&quot;*&quot;]</code> never covers it: open-in-editor answers only
+          localhost hosts from this machine, a specific <code>[server] host</code> and the hosts{' '}
+          <code>allowed_hosts</code> names explicitly (<code>[&quot;*&quot;, &quot;myvm.local&quot;]</code>).
         </li>
         <li>
           <strong><code>/_gio/devtools*</code> is a <code>404</code> in production.</strong>

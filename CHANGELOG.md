@@ -42,10 +42,12 @@ first.
   `trusted_proxies` one (it used to match nobody, so every scrape got `403`).
   `giojs-server --check-config` lists every problem in one run, in line
   order: each unknown key and section, each invalid value, each rule that
-  cannot be enforced and each `[i18n]` mistake. A rule table, or the
-  `[i18n]` locales, holding a misspelled or invalid key is checked once that
-  key is fixed, and a required key whose value is invalid (`path = 3`) ends
-  the list there.
+  cannot be enforced and each `[i18n]` mistake, followed by what startup's
+  later checks find in the rest of the file. A rule table, or the `[i18n]`
+  locales, holding a misspelled or invalid key is checked once that key is
+  fixed. A required key that is missing, or whose value is invalid
+  (`path = 3`), ends the list there, and the last line says which checks did
+  not run. Startup prints the same list.
 - **`gio.config.ts` is validated at boot:** unknown keys and plugins without a
   `name` are errors.
 - **The server binary refuses arguments it does not take.** `giojs-server`
@@ -61,7 +63,10 @@ first.
   catch-all that is not last, an unknown capture, a bad status or header). A
   redirect or rewrite `to` or a guard's `redirect_to` must be a path on this
   site: `//evil.com` and `/\evil.com`, which a browser reads as another
-  site, are refused.
+  site, are refused. So is an `[[images.remote_patterns]]` entry that could
+  never match: a `protocol` other than lowercase `"https"` or `"http"`, an
+  empty `hostname` or one with a scheme, path, port or uppercase letters,
+  and a `pathname` without a leading `/`.
 - **`middleware.ts` is strict and fails closed.** A file that throws while
   it loads, has no default export, or holds a rule that cannot be enforced
   (an invalid pattern, a malformed field, an unknown key, a guard without a
@@ -222,7 +227,9 @@ first.
 - **`[dev] allowed_hosts = ["*"]` answers any host.** The entry used to be
   dropped as invalid; it now opens the dev endpoints and error details to
   every `Host` from every machine, with a startup warning. open-in-editor
-  still needs a same-origin request.
+  ignores `"*"` (a DNS-rebound page would be same-origin): it still needs a
+  same-origin request on a localhost host from this machine, the bind
+  address or a host `allowed_hosts` names explicitly.
 
 ### Security
 
@@ -464,7 +471,7 @@ first.
   `Cache-Control: public, max-age=0, s-maxage=..., stale-while-revalidate=...`
   and a weak `ETag` (one tag covers the page's gzip, br and uncompressed
   bytes), and a matching `If-None-Match` gets a `304` that keeps the page's
-  `Vary`. Personal, streamed, PPR, error and guarded pages,
+  `Vary`. `HEAD` shares the `GET`'s cache entry and `ETag`. Personal, streamed, PPR, error and guarded pages,
   requests with an `Authorization` header and header-negotiated locales get
   `private, no-cache`. A `Cache-Control` set by the app or a header rule
   always wins.
@@ -733,7 +740,8 @@ first.
   `/_gio/image` unrouted (404) and `<GioImage>` renders its plain `src`.
   `[cache] enabled = false` stores and serves nothing (`X-Gio-Cache: bypass`)
   while `Cache-Control` still follows `revalidate`, so a CDN can keep caching.
-  `[cache]` also gets `disk_enabled` (`false`: memory only, no files), `etag`
+  `[cache]` also gets `disk_enabled` (`false`: memory only, no files, not
+  even the `pages` directory), `etag`
   (`false`: no page ETags, no 304s) and `swr_multiplier` (default 10, was
   fixed; `0` never serves stale and drops `stale-while-revalidate`). A
   `[[fonts]]` entry with `preload = false` keeps its `@font-face` but drops
@@ -788,8 +796,9 @@ first.
   placement, `[security]`, the revalidation token, local `[[fonts]]` files,
   TLS) and prints a JSON
   report: the listen address, every error (each unknown key and section,
-  invalid value and unenforceable rule, not just the first), warnings, and
-  guard and proxy settings. It exits 1 when the server would refuse to start, never
+  invalid value, unenforceable rule and `[security]` entry startup refuses,
+  not just the first; see the strict `gio.toml` note above for where the list
+  stops), warnings, and guard and proxy settings. It exits 1 when the server would refuse to start, never
   binds a port and never prints secrets, so it works as a CI step.
 - Startup reports every configuration refusal at once and checks the TLS
   certificate and key, and fetches the `[[fonts]]`, before starting the
@@ -1011,6 +1020,19 @@ first.
 
 ### Fixed
 
+- The worker reassembled each IPC frame by copying everything received so
+  far on every socket read, so a large request body (a raised
+  `max_body_bytes`) blocked it for seconds - and from about 50 MB missed the
+  server's 10-second write timeout: `503`, with every request in flight on
+  that worker dropped. Frames are now read in linear time, so bodies up to
+  the 64 MiB message cap (about 48 MiB binary) are served.
+- `HEAD` and `GET` of a cached page were separate cache entries with
+  different `ETag`s, so a validator from a `HEAD` never got a `304`.
+- `[cache] disk_enabled = false` (or `enabled = false`) still created the
+  page cache directory, so a read-only filesystem failed at startup with
+  only `No such file or directory`. Nothing is created without the disk
+  tier, and a directory that cannot be created is named in the error with
+  the setting that placed it.
 - Enabling `[server.tls]` panicked at startup: rustls could not choose between
   the two compiled-in crypto providers.
 - The accept loop kept a record of every finished connection until shutdown,

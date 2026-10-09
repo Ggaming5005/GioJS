@@ -698,7 +698,18 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         public_dir,
         ..
     } = startup_env;
-    tokio::fs::create_dir_all(&cache_dir).await?;
+    // Only the disk tier writes under the page cache directory: memory-only
+    // (or no) caching creates nothing there, so it runs on a read-only
+    // filesystem.
+    let page_cache_on_disk = cfg.cache.enabled && cfg.cache.disk_enabled;
+    if page_cache_on_disk {
+        let source = if std::env::var_os("GIO_CACHE_DIR").is_some_and(|dir| !dir.is_empty()) {
+            "GIO_CACHE_DIR"
+        } else {
+            "[cache] disk_path"
+        };
+        create_dir_for(&cache_dir, &format!("the page cache directory ({source})")).await?;
+    }
 
     // Fonts before the worker spawns: a font that cannot be fetched or
     // copied fails startup before the build starts (validate already refused
@@ -706,7 +717,7 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
     let fonts_dir = std::env::var("GIO_FONTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/fonts"));
-    tokio::fs::create_dir_all(&fonts_dir).await?;
+    create_dir_for(&fonts_dir, "the fonts directory (GIO_FONTS_DIR)").await?;
 
     let font_entries: Vec<giojs_font::FontEntry> = cfg
         .fonts
@@ -759,10 +770,16 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         // everything else the ID covers (GIO_DEPLOYMENT_ID when pinned, a
         // standalone build's manifest, the render settings). The cache epoch
         // below still includes the build, so a code change drops every page.
-        security::load_or_create_nonce_placeholder(
-            &cache_dir.join("meta"),
-            &deployment.before_build(),
-        )
+        // Without the disk tier no stored page outlives the process, so the
+        // placeholder need not either (and nothing is written).
+        if page_cache_on_disk {
+            security::load_or_create_nonce_placeholder(
+                &cache_dir.join("meta"),
+                &deployment.before_build(),
+            )
+        } else {
+            security::process_nonce_placeholder()
+        }
     });
     let security = match &nonce_placeholder {
         Some(placeholder) => {
@@ -860,7 +877,11 @@ async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/cache/images"));
     if cfg.images.enabled {
-        tokio::fs::create_dir_all(&image_cache_dir).await?;
+        create_dir_for(
+            &image_cache_dir,
+            "the image cache directory (GIO_IMAGE_CACHE_DIR)",
+        )
+        .await?;
     } else {
         info!("image optimizer disabled ([images] enabled = false): /_gio/image is not routed");
     }
@@ -2425,7 +2446,7 @@ async fn dynamic_handler(
     } else {
         path.clone()
     };
-    let cache_key = PageCache::build_key(&method, &keyed_path, &query_str);
+    let cache_key = PageCache::build_key(cache_key_method(&method), &keyed_path, &query_str);
     let deployment_id = state.ipc.deployment_id().to_string();
     let font_snippets: Vec<&str> = state.font_snippets.iter().map(|s| s.as_str()).collect();
 
@@ -2959,6 +2980,26 @@ async fn read_request_body(
         Err(not_utf8) => {
             BodyReadOutcome::Read(Some(ws_ipc::b64::encode(not_utf8.as_bytes())), true)
         }
+    }
+}
+
+/// `create_dir_all` whose error names the directory and the setting that
+/// placed it: a bare "No such file or directory" at startup says neither.
+async fn create_dir_for(dir: &std::path::Path, what: &str) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(dir).await.map_err(|error| {
+        anyhow::anyhow!("cannot create {what} {}: {error}", dir.display())
+    })
+}
+
+/// The method a page's cache key is built from. HEAD answers with GET's
+/// headers (RFC 9110 9.3.2) and the worker renders it as a GET, so it shares
+/// GET's entry: one render, one ETag, and a validator taken from a HEAD
+/// revalidates the GET (and the reverse).
+fn cache_key_method(method: &str) -> &str {
+    if method == "HEAD" {
+        "GET"
+    } else {
+        method
     }
 }
 
@@ -8224,6 +8265,14 @@ mod tests {
     fn first_ticket() -> FillTicket {
         let (cache, _dir) = temp_cache("coalesce-ticket");
         cache.fill_ticket()
+    }
+
+    #[test]
+    fn head_shares_the_get_cache_entry() {
+        let key = |method| PageCache::build_key(cache_key_method(method), "/cached", "a=1");
+        assert_eq!(key("HEAD"), key("GET"));
+        assert_ne!(key("POST"), key("GET"));
+        assert_eq!(cache_key_method("POST"), "POST");
     }
 
     #[test]

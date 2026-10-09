@@ -158,6 +158,12 @@ pub fn load_or_create_nonce_placeholder(dir: &Path, deployment_id: &str) -> Stri
     placeholder
 }
 
+/// A placeholder for this process only, persisted nowhere: what the server
+/// uses when no disk-cached page has to survive a restart.
+pub fn process_nonce_placeholder() -> String {
+    generate_placeholder()
+}
+
 fn load_or_create_placeholder_file(dir: &Path, path: &Path) -> String {
     let fresh = generate_placeholder();
     // The second attempt follows the removal of a corrupt file.
@@ -559,8 +565,10 @@ const DEFAULT_HEADERS: [(&str, &str); 3] = [
 impl SecurityPolicy {
     /// Compile and validate the section. Any invalid entry is a startup
     /// error: a security setting that silently does nothing is worse than
-    /// one that refuses to start.
-    pub fn new(cfg: &SecurityConfig, tls_enabled: bool) -> Result<Self, SecurityConfigError> {
+    /// one that refuses to start. Every invalid entry is reported, not just
+    /// the first.
+    pub fn new(cfg: &SecurityConfig, tls_enabled: bool) -> Result<Self, Vec<SecurityConfigError>> {
+        let mut errors = Vec::new();
         // `default_headers = false` drops the built-in three; HSTS and the
         // [security.headers] entries below are separate settings.
         let built_in: &[(&str, &str)] = if cfg.default_headers {
@@ -578,50 +586,64 @@ impl SecurityPolicy {
             })
             .collect();
         if let Some(hsts) = hsts_value(cfg.hsts.as_ref(), tls_enabled) {
-            let value = HeaderValue::from_str(&hsts)
-                .map_err(|_| SecurityConfigError::InvalidPolicy("hsts"))?;
-            defaults.push((header::STRICT_TRANSPORT_SECURITY, value));
+            match HeaderValue::from_str(&hsts) {
+                Ok(value) => defaults.push((header::STRICT_TRANSPORT_SECURITY, value)),
+                Err(_) => errors.push(SecurityConfigError::InvalidPolicy("hsts")),
+            }
         }
         for (raw_name, raw_value) in &cfg.headers {
-            let name = HeaderName::from_bytes(raw_name.trim().as_bytes())
-                .map_err(|_| SecurityConfigError::InvalidHeaderName(raw_name.clone()))?;
-            if name == header::CONTENT_SECURITY_POLICY {
-                return Err(SecurityConfigError::ReservedHeader(raw_name.clone(), "csp"));
-            }
-            if name == header::CONTENT_SECURITY_POLICY_REPORT_ONLY {
-                return Err(SecurityConfigError::ReservedHeader(
-                    raw_name.clone(),
-                    "csp_report_only",
-                ));
-            }
-            if name == header::STRICT_TRANSPORT_SECURITY {
-                return Err(SecurityConfigError::ReservedHeader(
-                    raw_name.clone(),
-                    "hsts",
-                ));
+            let Ok(name) = HeaderName::from_bytes(raw_name.trim().as_bytes()) else {
+                errors.push(SecurityConfigError::InvalidHeaderName(raw_name.clone()));
+                continue;
+            };
+            let reserved = if name == header::CONTENT_SECURITY_POLICY {
+                Some("csp")
+            } else if name == header::CONTENT_SECURITY_POLICY_REPORT_ONLY {
+                Some("csp_report_only")
+            } else if name == header::STRICT_TRANSPORT_SECURITY {
+                Some("hsts")
+            } else {
+                None
+            };
+            if let Some(key) = reserved {
+                errors.push(SecurityConfigError::ReservedHeader(raw_name.clone(), key));
+                continue;
             }
             defaults.retain(|(existing, _)| *existing != name);
             let value = raw_value.trim();
             if value.is_empty() {
                 continue;
             }
-            let value = HeaderValue::from_str(value)
-                .map_err(|_| SecurityConfigError::InvalidHeaderValue(raw_name.clone()))?;
-            defaults.push((name, value));
+            match HeaderValue::from_str(value) {
+                Ok(value) => defaults.push((name, value)),
+                Err(_) => errors.push(SecurityConfigError::InvalidHeaderValue(raw_name.clone())),
+            }
         }
-        Ok(SecurityPolicy {
-            defaults,
-            csp: CspTemplate::compile(header::CONTENT_SECURITY_POLICY, cfg.csp.as_deref(), "csp")?,
-            csp_report_only: CspTemplate::compile(
-                header::CONTENT_SECURITY_POLICY_REPORT_ONLY,
-                cfg.csp_report_only.as_deref(),
-                "csp_report_only",
-            )?,
-            placeholder: None,
-            csrf: CsrfPolicy::new(&cfg.csrf)?,
-            websocket_origin_check: cfg.websocket.check_origin,
-            refused_encoded: WarnOnce::default(),
-        })
+        let csp = CspTemplate::compile(header::CONTENT_SECURITY_POLICY, cfg.csp.as_deref(), "csp")
+            .map_err(|error| errors.push(error))
+            .ok()
+            .flatten();
+        let csp_report_only = CspTemplate::compile(
+            header::CONTENT_SECURITY_POLICY_REPORT_ONLY,
+            cfg.csp_report_only.as_deref(),
+            "csp_report_only",
+        )
+        .map_err(|error| errors.push(error))
+        .ok()
+        .flatten();
+        let csrf = CsrfPolicy::new(&cfg.csrf).map_err(|csrf_errors| errors.extend(csrf_errors));
+        match csrf {
+            Ok(csrf) if errors.is_empty() => Ok(SecurityPolicy {
+                defaults,
+                csp,
+                csp_report_only,
+                placeholder: None,
+                csrf,
+                websocket_origin_check: cfg.websocket.check_origin,
+                refused_encoded: WarnOnce::default(),
+            }),
+            _ => Err(errors),
+        }
     }
 
     /// Whether a configured policy contains `{nonce}`: the worker must then
@@ -1018,23 +1040,26 @@ pub struct CsrfPolicy {
 }
 
 impl CsrfPolicy {
-    fn new(cfg: &crate::config::CsrfConfig) -> Result<Self, SecurityConfigError> {
-        let trusted_origins = cfg
-            .trusted_origins
-            .iter()
-            .map(|raw| {
-                Origin::parse(raw)
-                    .ok_or_else(|| SecurityConfigError::InvalidTrustedOrigin(raw.clone()))
-            })
-            .collect::<Result<_, _>>()?;
-        let exempt = cfg
-            .exempt
-            .iter()
-            .map(|raw| {
-                PathPattern::compile(raw)
-                    .map_err(|e| SecurityConfigError::InvalidExempt(raw.clone(), e))
-            })
-            .collect::<Result<_, _>>()?;
+    /// Every invalid `trusted_origins` and `exempt` entry, or the policy.
+    fn new(cfg: &crate::config::CsrfConfig) -> Result<Self, Vec<SecurityConfigError>> {
+        let mut errors = Vec::new();
+        let mut trusted_origins = Vec::new();
+        for raw in &cfg.trusted_origins {
+            match Origin::parse(raw) {
+                Some(origin) => trusted_origins.push(origin),
+                None => errors.push(SecurityConfigError::InvalidTrustedOrigin(raw.clone())),
+            }
+        }
+        let mut exempt = Vec::new();
+        for raw in &cfg.exempt {
+            match PathPattern::compile(raw) {
+                Ok(pattern) => exempt.push(pattern),
+                Err(e) => errors.push(SecurityConfigError::InvalidExempt(raw.clone(), e)),
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
         Ok(CsrfPolicy {
             enabled: cfg.enabled,
             trusted_origins,
@@ -1319,7 +1344,10 @@ mod tests {
         let with_header = |name: &str, value: &str| {
             let mut cfg = SecurityConfig::default();
             cfg.headers.insert(name.into(), value.into());
-            SecurityPolicy::new(&cfg, false)
+            SecurityPolicy::new(&cfg, false).map_err(|mut errors| {
+                assert_eq!(errors.len(), 1, "{errors:?}");
+                errors.remove(0)
+            })
         };
         assert!(matches!(
             with_header("bad name", "x"),
@@ -1344,8 +1372,8 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            SecurityPolicy::new(&csp, false),
-            Err(SecurityConfigError::InvalidPolicy("csp"))
+            SecurityPolicy::new(&csp, false).unwrap_err()[..],
+            [SecurityConfigError::InvalidPolicy("csp")]
         ));
         let csrf = |cfg: CsrfConfig| SecurityConfig {
             csrf: cfg,
@@ -1363,8 +1391,8 @@ mod tests {
             });
             assert!(
                 matches!(
-                    SecurityPolicy::new(&cfg, false),
-                    Err(SecurityConfigError::InvalidTrustedOrigin(_))
+                    SecurityPolicy::new(&cfg, false).unwrap_err()[..],
+                    [SecurityConfigError::InvalidTrustedOrigin(_)]
                 ),
                 "{origin}"
             );
@@ -1374,9 +1402,39 @@ mod tests {
             ..Default::default()
         });
         assert!(matches!(
-            SecurityPolicy::new(&cfg, false),
-            Err(SecurityConfigError::InvalidExempt(..))
+            SecurityPolicy::new(&cfg, false).unwrap_err()[..],
+            [SecurityConfigError::InvalidExempt(..)]
         ));
+    }
+
+    #[test]
+    fn every_invalid_security_entry_is_reported_at_once() {
+        let mut cfg = SecurityConfig {
+            csp: Some("default-src 'self'\u{7}".into()),
+            csrf: CsrfConfig {
+                trusted_origins: vec!["admin.example.com".into(), "https://ok.example".into()],
+                exempt: vec!["api/x".into(), "/api/hooks/*".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        cfg.headers.insert("bad name".into(), "x".into());
+        cfg.headers.insert("strict-transport-security".into(), "x".into());
+        let errors: Vec<String> = SecurityPolicy::new(&cfg, false)
+            .unwrap_err()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(errors.len(), 5, "{errors:#?}");
+        for needle in [
+            "\"bad name\" is not a valid header name",
+            "cannot set strict-transport-security",
+            "[security] csp: invalid header value",
+            "trusted_origins entry \"admin.example.com\"",
+            "exempt entry \"api/x\"",
+        ] {
+            assert!(errors.iter().any(|e| e.contains(needle)), "{needle} in {errors:#?}");
+        }
     }
 
     // ── CSP and nonces ───────────────────────────────────────────────────────

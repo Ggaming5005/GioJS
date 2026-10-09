@@ -16,7 +16,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readlinkSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { createHmac, hkdfSync } from 'node:crypto';
+import { createHash, createHmac, hkdfSync, randomBytes } from 'node:crypto';
 import { connect, createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -1203,6 +1203,22 @@ async function main() {
       const changed = await rawGet('/cached', { 'if-none-match': '"0123456789abcdef0123456789abcdef"' });
       assert.equal(changed.status, 200);
       assert.equal(changed.body, body);
+    });
+
+    await test('cached pages: HEAD and GET share one entry and one ETag', async () => {
+      // A fresh URL, so the HEAD is the miss that renders and stores.
+      const head = await rawRequest('HEAD', '/cached?head-probe=1');
+      assert.equal(head.status, 200);
+      assert.equal(head.body, '');
+      assert.equal(head.headers['x-gio-cache'], 'miss; stored');
+      const etag = head.headers.etag;
+      assert.match(etag ?? '', /^W\/"[0-9a-f]{32}"$/);
+      const get = await rawGet('/cached?head-probe=1');
+      assert.match(get.headers['x-gio-cache'] ?? '', /^hit; ttl=\d+$/, 'the GET is served from the HEAD\'s render');
+      assert.equal(get.headers.etag, etag);
+      assert.equal((await rawGet('/cached?head-probe=1', { 'if-none-match': etag })).status, 304);
+      const headAgain = await rawRequest('HEAD', '/cached?head-probe=1', { 'if-none-match': etag });
+      assert.equal(headAgain.status, 304);
     });
 
     await test('guarded or authorized cached pages never go public: a CDN would skip the guard', async () => {
@@ -5798,13 +5814,14 @@ async function featureSwitchesPhase() {
     assert.ok(hrefs.length > 0, 'the page links its stylesheets');
     return Promise.all(hrefs.map(async (href) => (await fetch(`${BASE}${href}`)).text()));
   };
-  const cacheFiles = async (dir) =>
-    (await readdir(dir, { recursive: true }).catch(() => [])).filter((f) => f.endsWith('.json'));
 
   /** Start the fixture copy with `toml`, run `fn`, stop it. */
   async function run(label, toml, fn) {
     await writeFile(tomlPath, toml);
-    const cacheDir = await mkdtemp(join(tmpdir(), 'gio-int-switches-'));
+    const scratch = await mkdtemp(join(tmpdir(), 'gio-int-switches-'));
+    // Not created up front: a server that keeps no disk tier must not create
+    // it either (a read-only filesystem).
+    const cacheDir = join(scratch, 'pages');
     const env = {
       ...process.env,
       GIO_APP_DIR: join(appRoot, 'app'),
@@ -5835,7 +5852,7 @@ async function featureSwitchesPhase() {
     } finally {
       if (!serverGone) server.kill();
       await serverExited;
-      await rm(cacheDir, { recursive: true, force: true });
+      await rm(scratch, { recursive: true, force: true });
     }
   }
 
@@ -5895,7 +5912,7 @@ async function featureSwitchesPhase() {
           );
         }
         await sleep(500);
-        assert.deepEqual(await cacheFiles(cacheDir), [], 'nothing written to the page cache directory');
+        assert.equal(existsSync(cacheDir), false, 'the page cache directory is not even created');
       });
 
       await test('[css] minify = false leaves the bundled stylesheets unminified', async () => {
@@ -6020,7 +6037,7 @@ async function featureSwitchesPhase() {
         await hit.text();
         assert.match(hit.headers.get('x-gio-cache') ?? '', /^hit; ttl=\d+$/, 'memory still serves hits');
         await sleep(500);
-        assert.deepEqual(await cacheFiles(cacheDir), [], 'no entry files');
+        assert.equal(existsSync(cacheDir), false, 'no entry files, not even the directory');
       });
 
       await test('[cache] etag = false sends no page ETag and never a 304', async () => {
@@ -6316,6 +6333,27 @@ async function switchesOffPhase() {
       assert.match(await res.text(), new RegExp(`GUESTBOOK_UPLOAD name=big\\.bin size=${size} `));
     });
 
+    await test('[server] max_body_bytes = 0 serves a 45 MiB binary body under the worker message cap', async () => {
+      // Base64 in the IPC message makes this ~60 MiB, under the 64 MiB cap.
+      // The worker used to reassemble frames quadratically and missed the
+      // server's 10 s IPC write timeout: 503 and a dropped worker connection.
+      const body = randomBytes(45 * 1024 * 1024);
+      const started = Date.now();
+      const res = await fetch(`${BASE}/api/binary`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream' },
+        body,
+      });
+      const text = await res.text();
+      assert.equal(res.status, 200, text.slice(0, 500));
+      assert.deepEqual(JSON.parse(text), {
+        bytes: body.length,
+        sha256: createHash('sha256').update(body).digest('hex'),
+      });
+      assert.ok(Date.now() - started < 8_000, `took ${Date.now() - started} ms`);
+      assert.doesNotMatch(run.log(), /IPC write (error|timed out)/);
+    });
+
     await test('[server] skew_protection = false serves another deployment\'s client', async () => {
       const res = await fetch(`${BASE}/cached`, { headers: { 'x-deployment-id': 'an-older-deployment' } });
       assert.equal(res.status, 200);
@@ -6415,7 +6453,7 @@ async function switchesOffPhase() {
 
 /**
  * Phase 2c (dev switches): `[dev] allowed_hosts = ["*"]` answers any Host
- * but keeps open-in-editor same-origin, `watch = false` restarts nothing,
+ * but not for open-in-editor, which stays same-origin on a local host, `watch = false` restarts nothing,
  * and `devtools = false` unroutes /_gio/devtools* and strips the overlay's
  * devtools features. devWatchPhase covers the defaults.
  */
@@ -6449,7 +6487,7 @@ async function devSwitchesPhase() {
       assert.doesNotMatch(run.log(), /ignoring \[dev\] allowed_hosts entry/);
     });
 
-    await test('dev: ...but open-in-editor still needs a same-origin request', async () => {
+    await test('dev: ...but open-in-editor ignores "*" and still needs a same-origin request', async () => {
       const editor = '/_gio/devtools/open-in-editor?file=app%2Fpage.tsx&line=1';
       const crossSite = await rawRequest('POST', editor, {
         host: 'evil.example',
@@ -6459,9 +6497,19 @@ async function devSwitchesPhase() {
       assert.equal(crossSite.status, 403);
       const foreignOrigin = await rawRequest('POST', editor, { host: 'evil.example', origin: 'https://attacker.example' });
       assert.equal(foreignOrigin.status, 403);
+      // A DNS-rebound page is same-origin with its own Host: "*" must not
+      // let it launch the editor.
+      const rebound = await rawRequest('POST', editor, {
+        host: 'rebind.attacker.example',
+        origin: 'http://rebind.attacker.example',
+        'sec-fetch-site': 'same-origin',
+      });
+      assert.equal(rebound.status, 403, rebound.body);
+      assert.match(rebound.body, /does not cover open-in-editor/);
+      assert.match(rebound.body, /allowed_hosts = \["\*", "rebind\.attacker\.example"\]/);
       const sameOrigin = await rawRequest('POST', editor, {
-        host: 'evil.example',
-        origin: 'http://evil.example',
+        host: new URL(BASE).host,
+        origin: BASE,
         'sec-fetch-site': 'same-origin',
       });
       assert.equal(sameOrigin.status, 200, sameOrigin.body);

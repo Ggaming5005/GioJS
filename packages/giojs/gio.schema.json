@@ -858,18 +858,27 @@
       "type": "object",
       "properties": {
         "hostname": {
-          "type": "string"
+          "description": "A host as a URL carries it (lowercase, no scheme, port or path),\noptionally `*.` / `**.` wildcarded. Checked after parsing\n(`remote_hostname_problem`): a required key refused while parsing\nwould end the report there.",
+          "type": "string",
+          "minLength": 1
         },
         "pathname": {
-          "description": "Exact path, or a prefix with a trailing `*`.",
+          "description": "Exact path, or a prefix with a trailing `*`; starts with `/`.",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "default": null,
+          "pattern": "^/"
         },
         "protocol": {
+          "description": "`\"https\"` or `\"http\"`, compared with the source's scheme as is.",
           "type": "string",
-          "default": "https"
+          "default": "https",
+          "enum": [
+            "https",
+            "http"
+          ]
         }
       },
       "additionalProperties": false,

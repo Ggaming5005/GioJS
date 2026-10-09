@@ -330,8 +330,9 @@ ip_allowlist = ["10.0.0.0/8"]`} />
           default security headers and an <code>X-Request-Id</code>.
         </li>
         <li>
-          Fixed, by design: the closed <code>/_gio</code> namespace, the same-origin check on
-          open-in-editor (even with <code>allowed_hosts = [&quot;*&quot;]</code>), the
+          Fixed, by design: the closed <code>/_gio</code> namespace, the same-origin and
+          host checks on open-in-editor (<code>allowed_hosts = [&quot;*&quot;]</code> does not
+          cover it), the
           optimizer&apos;s path-traversal and redirect checks, and the 32-byte minimum for the
           revalidation token.
         </li>

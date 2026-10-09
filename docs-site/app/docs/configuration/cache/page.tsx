@@ -108,6 +108,14 @@ enabled = false`} />
       <CodeBlock lang="toml" title="gio.toml" code={`[cache]
 disk_enabled = false        # memory only: nothing is written under .gio/cache/pages
 memory_max_entries = 2000`} />
+      <p>
+        Without the disk tier (or with <code>enabled = false</code>) the page cache directory is
+        not even created. The server still creates <code>.gio/fonts</code>{' '}
+        (<code>GIO_FONTS_DIR</code>) and, with the image optimizer on,{' '}
+        <code>.gio/cache/images</code> (<code>GIO_IMAGE_CACHE_DIR</code>): create them before
+        deploying or point those variables at a writable path. A directory that cannot be created
+        stops startup with its path and the setting that placed it.
+      </p>
 
       <h3 id="never-serve-stale-pages">Never serve stale pages</h3>
       <p>A page past its <code>revalidate</code> window renders before it is served:</p>
