@@ -53,14 +53,9 @@ platform/*/bin/*
 /SPEC.md
 /SPEC2.md
 /OPEN_QUESTIONS.md
-tests/integration/.dev-fixture/
-tests/integration/.image-cache-fixture/
-tests/integration/.build-cache-fixture/
-tests/integration/.config-fixture/
-tests/integration/.dev-cache-fixture/
-tests/integration/.switches-fixture/
-tests/integration/.dev-switches-fixture/
-tests/integration/.feature-switches-fixture/
+# Fixture copies the integration suite makes while it runs (.dev-fixture,
+# .boot-fixture, .csp-fixture, ...).
+tests/integration/.*-fixture/
 
 # stray local probe file
 probe.tmp
