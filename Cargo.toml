@@ -46,7 +46,7 @@ sha2               = "0.10"
 # Session-cookie verification for require_session guards (HMAC + HKDF over sha2).
 hmac               = "0.12"
 hkdf               = "0.12"
-lru                = "0.12"
+lru                = "0.18"
 tokio-stream       = { version = "0.1", features = ["sync"] }
 # default-features=false drops reqwest's native-tls (OpenSSL) backend, which
 # has no musl build and broke the Alpine target. rustls-tls is the only TLS
