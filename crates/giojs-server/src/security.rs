@@ -855,6 +855,108 @@ fn substitute_header_values(headers: &mut HeaderMap, placeholder: &Bytes, nonce:
 /// server terminates TLS": over plain HTTP the header is either ignored
 /// (direct) or a promise only the operator can make (TLS proxy), so sending
 /// it there is opt-in.
+/// One `[security]` entry `SecurityPolicy::new` refuses, with where it is
+/// written: `key` is the path below `[security]` (`["csrf", "exempt"]`,
+/// `["headers", "<name>"]`), `index` the entry's position in an array.
+#[derive(Debug)]
+pub struct SecurityProblem {
+    pub key: Vec<String>,
+    pub index: Option<usize>,
+    pub error: SecurityConfigError,
+}
+
+/// Every entry `SecurityPolicy::new` would refuse, not just the first: what
+/// gio.toml parsing reports, each with its line, next to its other errors.
+pub fn problems(cfg: &SecurityConfig, tls_enabled: bool) -> Vec<SecurityProblem> {
+    let mut problems = Vec::new();
+    let mut report = |key: &[&str], index: Option<usize>, error: SecurityConfigError| {
+        problems.push(SecurityProblem {
+            key: key.iter().map(|part| part.to_string()).collect(),
+            index,
+            error,
+        });
+    };
+    if let Err(error) = hsts_header(cfg.hsts.as_ref(), tls_enabled) {
+        report(&["hsts"], None, error);
+    }
+    for (raw_name, raw_value) in &cfg.headers {
+        if let Err(error) = custom_header(raw_name, raw_value) {
+            report(&["headers", raw_name], None, error);
+        }
+    }
+    let policies = [
+        (header::CONTENT_SECURITY_POLICY, &cfg.csp, "csp"),
+        (
+            header::CONTENT_SECURITY_POLICY_REPORT_ONLY,
+            &cfg.csp_report_only,
+            "csp_report_only",
+        ),
+    ];
+    for (name, raw, key) in policies {
+        if let Err(error) = CspTemplate::compile(name, raw.as_deref(), key) {
+            report(&[key], None, error);
+        }
+    }
+    for (index, raw) in cfg.csrf.trusted_origins.iter().enumerate() {
+        if let Err(error) = trusted_origin(raw) {
+            report(&["csrf", "trusted_origins"], Some(index), error);
+        }
+    }
+    for (index, raw) in cfg.csrf.exempt.iter().enumerate() {
+        if let Err(error) = exempt_pattern(raw) {
+            report(&["csrf", "exempt"], Some(index), error);
+        }
+    }
+    problems
+}
+
+/// The Strict-Transport-Security value `[security] hsts` sends, if any.
+fn hsts_header(
+    setting: Option<&HstsSetting>,
+    tls_enabled: bool,
+) -> Result<Option<HeaderValue>, SecurityConfigError> {
+    hsts_value(setting, tls_enabled)
+        .map(|hsts| {
+            HeaderValue::from_str(&hsts).map_err(|_| SecurityConfigError::InvalidPolicy("hsts"))
+        })
+        .transpose()
+}
+
+/// One `[security.headers]` entry: the header, and its value (None for an
+/// empty one, which only removes a built-in default).
+fn custom_header(
+    raw_name: &str,
+    raw_value: &str,
+) -> Result<(HeaderName, Option<HeaderValue>), SecurityConfigError> {
+    let name = HeaderName::from_bytes(raw_name.trim().as_bytes())
+        .map_err(|_| SecurityConfigError::InvalidHeaderName(raw_name.to_string()))?;
+    // Each has its own [security] key.
+    let reserved = [
+        (header::CONTENT_SECURITY_POLICY, "csp"),
+        (header::CONTENT_SECURITY_POLICY_REPORT_ONLY, "csp_report_only"),
+        (header::STRICT_TRANSPORT_SECURITY, "hsts"),
+    ];
+    if let Some(&(_, key)) = reserved.iter().find(|(reserved, _)| *reserved == name) {
+        let name = raw_name.to_string();
+        return Err(SecurityConfigError::ReservedHeader(name, key));
+    }
+    let value = raw_value.trim();
+    if value.is_empty() {
+        return Ok((name, None));
+    }
+    let value = HeaderValue::from_str(value)
+        .map_err(|_| SecurityConfigError::InvalidHeaderValue(raw_name.to_string()))?;
+    Ok((name, Some(value)))
+}
+
+fn trusted_origin(raw: &str) -> Result<Origin, SecurityConfigError> {
+    Origin::parse(raw).ok_or_else(|| SecurityConfigError::InvalidTrustedOrigin(raw.to_string()))
+}
+
+fn exempt_pattern(raw: &str) -> Result<PathPattern, SecurityConfigError> {
+    PathPattern::compile(raw).map_err(|e| SecurityConfigError::InvalidExempt(raw.to_string(), e))
+}
+
 fn hsts_value(setting: Option<&HstsSetting>, tls_enabled: bool) -> Option<String> {
     let default = || format!("max-age={}", default_hsts_max_age());
     match setting {

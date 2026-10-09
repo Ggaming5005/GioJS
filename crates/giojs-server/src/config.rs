@@ -66,6 +66,12 @@ pub enum ConfigError {
         pattern: String,
         source: crate::rules::RuleError,
     },
+    /// `location` is `path:line`; the message names the `[security]` key.
+    #[error("{location}: {source}")]
+    InvalidSecurity {
+        location: String,
+        source: crate::security::SecurityConfigError,
+    },
     #[error("invalid {name}={value:?}: {reason}")]
     InvalidEnv {
         name: &'static str,
@@ -1757,7 +1763,8 @@ impl GioConfig {
 
     /// Parse gio.toml's contents, reporting every problem in line order:
     /// each unknown section and key, each value of the wrong type or out of
-    /// range, rules that cannot be enforced and an inconsistent `[i18n]`.
+    /// range, rules that cannot be enforced, an inconsistent `[i18n]` and
+    /// each `[security]` entry startup would refuse.
     /// serde stops at its first error, so the key or value it names is
     /// blanked out of the text (line breaks kept, so every other key stays
     /// on its line) and the text parsed again, until it parses or fails in a
@@ -1854,6 +1861,12 @@ impl GioConfig {
                 raw,
                 file,
             ));
+            errors.extend(
+                security_problems(&config, doc, raw, file)
+                    .into_iter()
+                    .filter(|(key, _)| untouched(key) && untouched("server.tls.enabled"))
+                    .map(|(_, error)| error),
+            );
         }
         let port_in_file = doc
             .as_ref()
@@ -1975,6 +1988,9 @@ fn line_of_key(doc: &toml_edit::ImDocument<&str>, raw: &str, path: &[&str], inde
     }
     let span = match (table.get(last)?, index) {
         (toml_edit::Item::ArrayOfTables(array), Some(index)) => array.get(index)?.span(),
+        (toml_edit::Item::Value(toml_edit::Value::Array(array)), Some(index)) => {
+            array.get(index)?.span()
+        }
         (item, _) => table.key(last).and_then(|key| key.span()).or_else(|| item.span()),
     }?;
     Some(config_diagnostics::line_of(raw, span.start))
@@ -2000,6 +2016,40 @@ fn rule_problems(
                         location: location(file, line),
                         kind: problem.kind,
                         pattern: problem.pattern,
+                        source: problem.error,
+                    },
+                ),
+            )
+        })
+        .collect()
+}
+
+/// `[security]` entries that parsed but would be refused at startup
+/// (`security::problems`): every one, each with its dotted key
+/// (`security.csrf.exempt`) and its line.
+fn security_problems(
+    config: &GioConfig,
+    doc: &toml_edit::ImDocument<&str>,
+    raw: &str,
+    file: &str,
+) -> Vec<(String, (usize, ConfigError))> {
+    crate::security::problems(&config.security, config.server.tls.enabled)
+        .into_iter()
+        .map(|problem| {
+            let path: Vec<&str> = std::iter::once("security")
+                .chain(problem.key.iter().map(String::as_str))
+                .collect();
+            // An entry of an inline table or array may have no span of its
+            // own: then its key's line, or its table's.
+            let line = line_of_key(doc, raw, &path, problem.index)
+                .or_else(|| line_of_key(doc, raw, &path, None))
+                .or_else(|| line_of_key(doc, raw, &path[..2], None));
+            (
+                path.join("."),
+                (
+                    line.unwrap_or(0),
+                    ConfigError::InvalidSecurity {
+                        location: location(file, line),
                         source: problem.error,
                     },
                 ),

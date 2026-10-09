@@ -63,7 +63,7 @@ export async function POST(req: GioRequest) {
       <table>
         <thead><tr><th>The handler returns</th><th>The response</th></tr></thead>
         <tbody>
-          <tr><td>A <code>Response</code></td><td>Sent as it is: status, headers, body (a <code>ReadableStream</code> body streams). Without a <code>Content-Type</code> it gets <code>text/plain</code>.</td></tr>
+          <tr><td>A <code>Response</code></td><td>Sent as it is: status, headers, body (a <code>ReadableStream</code> body streams). Without a <code>Content-Type</code> it gets <code>text/plain</code>. A <code>Response</code> from <code>fetch()</code> (<code>return fetch(upstream)</code>) loses the upstream&apos;s <code>Content-Encoding</code> and <code>Content-Length</code>: <code>fetch()</code> already decoded the body, and GioJS compresses it again. HTML gets the deployment script injected, so its length is always the server&apos;s.</td></tr>
           <tr><td>A <code>GioEventStream</code></td><td>A <code>text/event-stream</code> connection, from any method (a browser&apos;s <code>EventSource</code> sends <code>GET</code>).</td></tr>
           <tr><td><a href="/docs/functions/redirect"><code>redirect()</code></a> (returned or thrown)</td><td>Its status (<code>303</code> by default) and headers, <code>Location</code> as written (a relative path works), no body.</td></tr>
           <tr><td><code>null</code> or <code>undefined</code></td><td><code>204</code> with no body.</td></tr>
@@ -234,7 +234,7 @@ export async function POST(req: GioRequest) {
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>Matched with pages by one precedence rule. A file that throws while it is imported answers <code>500</code>. <code>notFound()</code> answers a JSON <code>404</code>. <code>req.json()</code> requires a JSON content type (<code>415</code>), and a JSON body that does not parse is a <code>400</code> instead of a <code>500</code>. <code>redirect()</code> works in handlers. <code>RouteHandler</code> type. WebSocket handlers in dynamic folders.</> },
+        { version: 'v0.1.0-beta.8', changes: <>Matched with pages by one precedence rule. A file that throws while it is imported answers <code>500</code>. <code>notFound()</code> answers a JSON <code>404</code>. <code>req.json()</code> requires a JSON content type (<code>415</code>), and a JSON body that does not parse is a <code>400</code> instead of a <code>500</code>. <code>redirect()</code> works in handlers. <code>RouteHandler</code> type. WebSocket handlers in dynamic folders. <code>return fetch(upstream)</code> no longer forwards an encoding <code>fetch()</code> already decoded, and HTML with its own <code>Content-Length</code> is no longer cut short.</> },
         { version: 'v0.1.0-beta.5', changes: <>HTTP method handlers (<code>GET</code>, <code>POST</code>, <code>PUT</code>, <code>PATCH</code>, <code>DELETE</code>), <code>405</code> with <code>Allow</code>, SSE from <code>GET</code>.</> },
         { version: 'v0.1.0-beta.1', changes: <>Introduced for <code>wsHandler</code> exports; <code>route.ts</code> or <code>route.js</code>.</> },
       ]} />

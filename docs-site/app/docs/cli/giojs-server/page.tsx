@@ -91,7 +91,8 @@ giojs-server --check-config   # validate .env files + gio.toml, print JSON, exit
         </li>
         <li>
           parses <code>gio.toml</code> strictly (unknown keys are errors, with the line and
-          the closest valid key) and applies <code>GIO_HOST</code> / <code>GIO_PORT</code> /{' '}
+          the closest valid key; so is every invalid value, rule and <code>[security]</code>{' '}
+          entry, all listed together) and applies <code>GIO_HOST</code> / <code>GIO_PORT</code> /{' '}
           <code>PORT</code>;
         </li>
         <li>

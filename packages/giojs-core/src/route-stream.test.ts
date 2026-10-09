@@ -7,6 +7,9 @@
  */
 import { EventEmitter } from 'node:events';
 import { Buffer } from 'node:buffer';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { gzipSync } from 'node:zlib';
 import { describe, it, expect, vi } from 'vitest';
 import {
   renderRoute,
@@ -117,6 +120,52 @@ describe('route.ts Response: buffer or stream', () => {
     expect(isRouteStream(result)).toBe(false);
     expect((result as IPCResponse).body).toBe('hello');
     expect((result as IPCResponse).streaming).toBeUndefined();
+  });
+
+  it('a proxied fetch() Response drops the encoding fetch already decoded; an app-encoded body keeps it', async () => {
+    const text = 'proxied '.repeat(64);
+    const gzipped = gzipSync(text);
+    const upstream: Server = createServer((_req, res) => {
+      res.writeHead(200, {
+        'content-type': 'text/javascript',
+        'content-encoding': 'gzip',
+        'content-length': String(gzipped.length),
+        'x-upstream': '1',
+      });
+      res.end(gzipped);
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    try {
+      const url = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/chunk.js`;
+      for (const streaming of [false, true]) {
+        const result = await route(() => fetch(url, { headers: { 'accept-encoding': 'gzip' } }), { streaming });
+        let body: string;
+        let head: IPCResponse;
+        if (isRouteStream(result)) {
+          // The body may still be arriving: streamed like any other.
+          const socket = new FakeSocket();
+          await pumpRouteStream(socket, 'req-1', result, new StreamFlowGate(), new AbortController().signal);
+          body = Buffer.concat([...result.prelude, bodyOf(socket.frames())]).toString();
+          head = result.head;
+        } else {
+          body = (result as IPCResponse).body;
+          head = result as IPCResponse;
+        }
+        expect(body).toBe(text);
+        expect(head.headers['content-encoding']).toBeUndefined();
+        expect(head.headers['content-length']).toBeUndefined();
+        expect(head.headers['x-upstream']).toBe('1');
+      }
+    } finally {
+      await new Promise((resolve) => upstream.close(resolve));
+    }
+
+    // Bytes the app compressed itself are sent as they are, labeled.
+    const precompressed = await route(
+      () => new Response(gzipped, { headers: { 'content-encoding': 'gzip', 'content-type': 'text/plain' } }),
+    );
+    expect((precompressed as IPCResponse).headers['content-encoding']).toBe('gzip');
+    expect((precompressed as IPCResponse).bodyBase64).toBe(true);
   });
 
   it('keeps a stream that finishes without waiting buffered', async () => {

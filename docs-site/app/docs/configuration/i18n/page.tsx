@@ -60,7 +60,9 @@ default_locale = "en"`} />
         </li>
         <li>
           When the locale is not the default, the server writes it into <code>&lt;html lang&gt;</code>,
-          replacing the root layout&apos;s <code>lang</code>.
+          replacing the root layout&apos;s <code>lang</code>. HTML files in{' '}
+          <a href="/docs/file-conventions/public-folder"><code>public/</code></a> are served as
+          written, in every locale.
         </li>
         <li>
           <a href="/docs/components/locale-link"><code>&lt;LocaleLink&gt;</code></a> leaves{' '}
@@ -71,7 +73,10 @@ default_locale = "en"`} />
           Cached pages are stored per locale. While <code>detect_from</code> reads a header or the
           cookie, a page requested without a locale prefix is sent{' '}
           <code>Cache-Control: private, no-cache</code> without an ETag: one URL serves several
-          languages there, and shared caches key by URL. Prefixed URLs stay shareable.
+          languages there, and shared caches key by URL. Prefixed URLs stay shareable while{' '}
+          <code>&quot;path&quot;</code> comes first; when <code>detect_from</code> lists a header
+          or the cookie before it, the header can override a prefix, so prefixed URLs are{' '}
+          <code>private</code> too.
         </li>
       </ul>
       <p>No key in this section logs a warning. Startup logs the locales when i18n is on.</p>
@@ -124,7 +129,7 @@ detect_from = ["path", "cookie", "accept-language"]`} />
 
       <h2 id="version-history">Version history</h2>
       <VersionHistory entries={[
-        { version: 'v0.1.0-beta.8', changes: <>An unknown <code>detect_from</code> value, a <code>default_locale</code> outside a non-empty <code>locales</code>, and an empty or duplicate locale stop startup (they were ignored). Pages whose locale was negotiated from request headers are never <code>public</code> and get no ETag. <code>useLocale()</code> returns the request locale during server rendering too. <code>Accept-Language</code> is read by quality value and gives the locale as spelled in <code>locales</code> (an exact match was lowercased). <code>&lt;html lang&gt;</code> replaces the root layout&apos;s <code>lang</code> instead of adding a second one. <code>&lt;LocaleLink&gt;</code> defaults to <code>default_locale</code>.</> },
+        { version: 'v0.1.0-beta.8', changes: <>An unknown <code>detect_from</code> value, a <code>default_locale</code> outside a non-empty <code>locales</code>, and an empty or duplicate locale stop startup (they were ignored). Pages whose locale was negotiated from request headers are never <code>public</code> and get no ETag. <code>useLocale()</code> returns the request locale during server rendering too. <code>Accept-Language</code> is read by quality value and gives the locale as spelled in <code>locales</code> (an exact match was lowercased). <code>&lt;html lang&gt;</code> replaces the root layout&apos;s <code>lang</code> instead of adding a second one. <code>&lt;LocaleLink&gt;</code> defaults to <code>default_locale</code>. A prefixed URL is <code>private</code> when <code>detect_from</code> tries a header before <code>path</code>. <code>public/</code> HTML files keep their own <code>lang</code> (it was rewritten under the file&apos;s old length, cutting the body short).</> },
         { version: 'v0.1.0-beta.1', changes: <>Introduced with <code>locales</code>, <code>default_locale</code> and <code>detect_from</code>.</> },
       ]} />
     </>

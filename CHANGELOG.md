@@ -42,12 +42,13 @@ first.
   `trusted_proxies` one (it used to match nobody, so every scrape got `403`).
   `giojs-server --check-config` lists every problem in one run, in line
   order: each unknown key and section, each invalid value, each rule that
-  cannot be enforced and each `[i18n]` mistake, followed by what startup's
-  later checks find in the rest of the file. A rule table, or the `[i18n]`
-  locales, holding a misspelled or invalid key is checked once that key is
-  fixed. A required key that is missing, or whose value is invalid
-  (`path = 3`), ends the list there, and the last line says which checks did
-  not run. Startup prints the same list.
+  cannot be enforced, each `[i18n]` mistake and each `[security]` entry
+  startup refuses (a header, a CSP, a CSRF trusted origin or exempt path),
+  followed by what startup's later checks find in the rest of the file. A
+  rule table, or the `[i18n]` locales, holding a misspelled or invalid key is
+  checked once that key is fixed. A required key that is missing, or whose
+  value is invalid (`path = 3`), ends the list there, and the last line says
+  which checks did not run. Startup prints the same list.
 - **`gio.config.ts` is validated at boot:** unknown keys and plugins without a
   `name` are errors.
 - **The server binary refuses arguments it does not take.** `giojs-server`
@@ -472,8 +473,9 @@ first.
   and a weak `ETag` (one tag covers the page's gzip, br and uncompressed
   bytes), and a matching `If-None-Match` gets a `304` that keeps the page's
   `Vary`. `HEAD` shares the `GET`'s cache entry and `ETag`. Personal, streamed, PPR, error and guarded pages,
-  requests with an `Authorization` header and header-negotiated locales get
-  `private, no-cache`. A `Cache-Control` set by the app or a header rule
+  requests with an `Authorization` header and header-negotiated locales (a
+  URL without a locale prefix, or any URL when `[i18n] detect_from` lists
+  `cookie` or `accept-language` before `path`) get `private, no-cache`. A `Cache-Control` set by the app or a header rule
   always wins.
 - Renders that recovered from an error inside a Suspense boundary are not
   cached, nor is their PPR shell. A cached page whose background revalidation
@@ -516,8 +518,9 @@ first.
   restart of the same code keeps the ID and the disk cache. Before, only `gio build standalone` output changed the ID, so after
   a `gio start` deploy cached pages served for up to ten times their
   `revalidate` with broken stylesheet and chunk links. The ID also covers
-  `[images]`, the served `[[fonts]]` files and `[i18n]` (`locales` and
-  `default_locale`), and a
+  `[images]`, the served `[[fonts]]` files, `[i18n]` (`locales` and
+  `default_locale`) and `[css] enabled` and `critical_extraction` (the
+  critical CSS the server inlines into persisted pages), and a
   standalone build's `.gio/manifest.json` is now read from the project root
   instead of the working directory. A pinned `GIO_DEPLOYMENT_ID` still wins
   and should change with every deploy.
@@ -1238,6 +1241,29 @@ first.
   handlers, `gio.config.ts`, `middleware.ts`, tests, scripts) do not count:
   their bare `import './lib/db'` never pulls a module a page uses only in
   `getServerSideProps` into its bundle.
+- An HTML file in `public/` requested in a non-default locale (`/de/doc.html`,
+  or `Accept-Language: de`) got the locale's `lang` written into its
+  `<html>` under the file's original `Content-Length`: the body was cut short,
+  and when the replaced `lang` was longer (`lang="en-US"`) the connection
+  closed with no reply. Files in `public/` are now served as written, in
+  every locale.
+- A `route.ts` answering HTML with its own `Content-Length` was truncated:
+  the server injects its deployment script (and font links and critical CSS)
+  into the document but kept the app's length. HTML bodies the server
+  changes, cached pages included, now carry their real length.
+- A `route.ts` returning `fetch(upstream)` forwarded the upstream's
+  `Content-Encoding: gzip` (or `br`, `deflate`) with the body `fetch()` had
+  already decoded, so browsers failed with `ERR_CONTENT_DECODING_FAILED`. The
+  encoding and length of a body `fetch()` decoded are now dropped, and the
+  server compresses it again as usual. A `Response` the handler builds from
+  bytes it compressed itself keeps its `Content-Encoding`.
+- With `[i18n] detect_from` listing `accept-language` or `cookie` before
+  `path`, a locale-prefixed URL (`/de/page`) was answered from the header but
+  sent `public` with an `ETag`, so a CDN stored whichever language it saw
+  first. Such URLs are now `private, no-cache`, like unprefixed ones.
+- Turning `[css] critical_extraction` or `[css] enabled` off did not change
+  the deployment ID, so pages persisted with inlined critical CSS kept being
+  served from the disk cache until they expired.
 
 ### Known limitations
 

@@ -715,6 +715,45 @@ export function webHeadersToIpc(source: Headers): IpcHeaders {
   return { headers, setCookies: source.getSetCookie() };
 }
 
+/**
+ * The content codings Node's fetch (undici) decodes in every supported
+ * Node version. A Response built by the app keeps the bytes it was given,
+ * so an app-set Content-Encoding (a pre-compressed file) is the truth.
+ */
+const FETCH_DECODED_CODINGS = new Set(['gzip', 'x-gzip', 'deflate', 'br']);
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Whether `res` came from fetch() with a body fetch already decoded while
+ * its Content-Encoding header still names the coding - a route.ts that
+ * returns `fetch(upstream)`. undici decodes only when it knows every coding
+ * listed, and never a redirect's body (`redirect: 'manual'`).
+ */
+function fetchDecodedBody(res: Response): boolean {
+  if (res.type === 'default' || REDIRECT_STATUSES.has(res.status)) return false;
+  const codings = (res.headers.get('content-encoding') ?? '')
+    .split(',')
+    .map((coding) => coding.trim().toLowerCase())
+    .filter((coding) => coding !== '');
+  return codings.length > 0 && codings.every((coding) => FETCH_DECODED_CODINGS.has(coding));
+}
+
+/**
+ * A route.ts Response's headers for IPC. A proxied fetch() Response sends
+ * the decoded body, so it loses the encoding and length that described the
+ * upstream's encoded bytes: forwarded, clients failed to decode plain text
+ * as gzip (curl exit 61, ERR_CONTENT_DECODING_FAILED). Rust compresses it
+ * again as for any other body.
+ */
+function routeHeadersToIpc(res: Response): IpcHeaders {
+  const converted = webHeadersToIpc(res.headers);
+  if (fetchDecodedBody(res)) {
+    delete converted.headers['content-encoding'];
+    delete converted.headers['content-length'];
+  }
+  return converted;
+}
+
 /** Spread into an IPC response: omits the field when there are no cookies. */
 function setCookiesField(setCookies: string[]): { setCookies?: string[] } {
   return setCookies.length > 0 ? { setCookies } : {};
@@ -1714,7 +1753,7 @@ async function routeResponseToIpc(
   bodyStreaming: RouteBodyStreaming,
 ): Promise<IPCResponse | RouteStreamResult> {
   const base = { id: req.id, status: res.status, cacheable: false, cacheMaxAge: 0, routeHandler: true };
-  const { headers, setCookies } = webHeadersToIpc(res.headers);
+  const { headers, setCookies } = routeHeadersToIpc(res);
   headers['content-type'] ??= 'text/plain; charset=utf-8';
   const cookies = setCookiesField(setCookies);
   const eventStream = headers['content-type'].toLowerCase().startsWith('text/event-stream');
@@ -1851,7 +1890,7 @@ function routeRedirectResponse(req: IPCRequest, redirect: ActionRedirect): IPCRe
  */
 async function webResponseToIpc(req: IPCRequest, result: Response): Promise<IPCResponse> {
   const base = { id: req.id, cacheable: false, cacheMaxAge: 0, routeHandler: true };
-  const { headers, setCookies } = webHeadersToIpc(result.headers);
+  const { headers, setCookies } = routeHeadersToIpc(result);
   headers['content-type'] ??= 'text/plain; charset=utf-8';
   const cookies = setCookiesField(setCookies);
   // text() would lossily transcode binary payloads (images, pdfs) to
