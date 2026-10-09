@@ -46,23 +46,23 @@ importers:
     dependencies:
       '@gio.js/core':
         specifier: 0.1.0-beta.8
-        version: link:../giojs-core
+        version: 0.1.0-beta.8
     optionalDependencies:
       '@gio.js/server-darwin-arm64':
         specifier: 0.1.0-beta.8
-        version: link:../../platform/giojs-darwin-arm64
+        version: 0.1.0-beta.8
       '@gio.js/server-darwin-x64':
         specifier: 0.1.0-beta.8
-        version: link:../../platform/giojs-darwin-x64
+        version: 0.1.0-beta.8
       '@gio.js/server-linux-x64':
         specifier: 0.1.0-beta.8
-        version: link:../../platform/giojs-linux-x64
+        version: 0.1.0-beta.8
       '@gio.js/server-linux-x64-musl':
         specifier: 0.1.0-beta.8
-        version: link:../../platform/giojs-linux-x64-musl
+        version: 0.1.0-beta.8
       '@gio.js/server-win32-x64':
         specifier: 0.1.0-beta.8
-        version: link:../../platform/giojs-win32-x64
+        version: 0.1.0-beta.8
 
   packages/giojs-auth-example:
     dependencies:
@@ -77,8 +77,8 @@ importers:
         version: 5.9.3
     devDependencies:
       '@types/node':
-        specifier: ^25.8.0
-        version: 25.9.5
+        specifier: ^26.6.4
+        version: 26.6.4
       drizzle-orm:
         specifier: ^0.45.3
         version: 0.45.3
@@ -99,8 +99,8 @@ importers:
         version: 4.22.0
     devDependencies:
       '@types/node':
-        specifier: ^22.0.0
-        version: 22.19.19
+        specifier: ^26.6.4
+        version: 26.6.4
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.14
@@ -115,13 +115,13 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.1.9
-        version: 2.1.9(@types/node@22.19.19)(jsdom@25.0.1)
+        version: 2.1.9(@types/node@26.6.4)(jsdom@25.0.1)
 
   packages/giojs-react:
     devDependencies:
       '@types/node':
-        specifier: ^22.0.0
-        version: 22.19.19
+        specifier: ^26.6.4
+        version: 26.6.4
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.14
@@ -142,7 +142,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^2.1.9
-        version: 2.1.9(@types/node@22.19.19)(jsdom@25.0.1)
+        version: 2.1.9(@types/node@26.6.4)(jsdom@25.0.1)
 
   platform/giojs-darwin-arm64: {}
 
@@ -639,6 +639,36 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@gio.js/core@0.1.0-beta.8':
+    resolution: {integrity: sha512-nRuSRCgtl5x09GhlKP6S76b7ZhRRtNoldieAl2rNmzCCTXpqiieztwAFsUpO/tCfUXvQbh7hItkSnlxd1IbK5A==}
+
+  '@gio.js/server-darwin-arm64@0.1.0-beta.8':
+    resolution: {integrity: sha512-W/0lH4u2CcKDk8qb6Km26se5nJnp4ArGEV2NI3ar85FAyJ+15xi45Fm8Ih//DSwfknNr6P07vRNbboY9TEkWtA==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@gio.js/server-darwin-x64@0.1.0-beta.8':
+    resolution: {integrity: sha512-XHeGM4H57FMvR7iinFpcw+srJJLotzgoXed5nrvpFePKqFtLWVfC18MlkzqhT6RFBHxBrfjFMurP4Z3xLloTSw==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@gio.js/server-linux-x64-musl@0.1.0-beta.8':
+    resolution: {integrity: sha512-BpUlOA1Y7kWiX1mtn7IWT4u6dsItG5Ub4xIyJEI8hN8nGMovLnAm+DFdDCqzstt8p7Jd3fN4bHajTVS/Ng1jiw==}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  '@gio.js/server-linux-x64@0.1.0-beta.8':
+    resolution: {integrity: sha512-KL/T2U7W005Xe69UZVs9y7roQLRw5Ih9hMjv2qnToqpzW3SEzGaWBD10VNi4ewohQW5guVovavQdiPsYoAVZeQ==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@gio.js/server-win32-x64@0.1.0-beta.8':
+    resolution: {integrity: sha512-0MfJPU0VxOwSn28JVX1UVBnQ2yEfb5bvrQZiEWRqdp09P3IguqZZWsAhNB790zLNltRWrB1aUmgt/qJGnLLxBg==}
+    cpu: [x64]
+    os: [win32]
+
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
 
@@ -770,11 +800,8 @@ packages:
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
 
-  '@types/node@22.19.19':
-    resolution: {integrity: sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew==}
-
-  '@types/node@25.9.5':
-    resolution: {integrity: sha512-OScDchr2fwuUmWdf4kZ9h7PcJiYDVInhJizG/biAq3cAvqwYktuy/TYGGdZNMtNTFUP7rnb0NU4TUdm82kt4Rg==}
+  '@types/node@26.6.4':
+    resolution: {integrity: sha512-ldVPDCzj7fsaGZrLB0NuHuTvJcsNasysBAqMolr/cgxrLd1xbqxIr3XJiPnHHJUCxj5sNF1vnRj9aWnrVh5Jcg==}
 
   '@types/react-dom@19.2.3':
     resolution: {integrity: sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ==}
@@ -1225,11 +1252,8 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
-  undici-types@6.21.0:
-    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
-
-  undici-types@7.24.6:
-    resolution: {integrity: sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==}
+  undici-types@8.9.0:
+    resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
   vite-node@2.1.9:
     resolution: {integrity: sha512-AM9aQ/IPrW/6ENLQg3AGY4K1N2TGZdR5e4gu/MmmR2xR3Ll1+dib+nook92g4TV3PXVyeyxdWwtaCAiUL0hMxA==}
@@ -1592,6 +1616,28 @@ snapshots:
   '@esbuild/win32-x64@0.28.0':
     optional: true
 
+  '@gio.js/core@0.1.0-beta.8':
+    dependencies:
+      esbuild: 0.25.12
+      react: 19.2.6
+      react-dom: 19.2.6(react@19.2.6)
+      tsx: 4.22.0
+
+  '@gio.js/server-darwin-arm64@0.1.0-beta.8':
+    optional: true
+
+  '@gio.js/server-darwin-x64@0.1.0-beta.8':
+    optional: true
+
+  '@gio.js/server-linux-x64-musl@0.1.0-beta.8':
+    optional: true
+
+  '@gio.js/server-linux-x64@0.1.0-beta.8':
+    optional: true
+
+  '@gio.js/server-win32-x64@0.1.0-beta.8':
+    optional: true
+
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
   '@rollup/rollup-android-arm-eabi@4.62.2':
@@ -1671,13 +1717,9 @@ snapshots:
 
   '@types/estree@1.0.9': {}
 
-  '@types/node@22.19.19':
+  '@types/node@26.6.4':
     dependencies:
-      undici-types: 6.21.0
-
-  '@types/node@25.9.5':
-    dependencies:
-      undici-types: 7.24.6
+      undici-types: 8.9.0
 
   '@types/react-dom@19.2.3(@types/react@19.2.14)':
     dependencies:
@@ -1694,13 +1736,13 @@ snapshots:
       chai: 5.3.3
       tinyrainbow: 1.2.0
 
-  '@vitest/mocker@2.1.9(vite@5.4.21(@types/node@22.19.19))':
+  '@vitest/mocker@2.1.9(vite@5.4.21(@types/node@26.6.4))':
     dependencies:
       '@vitest/spy': 2.1.9
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 5.4.21(@types/node@22.19.19)
+      vite: 5.4.21(@types/node@26.6.4)
 
   '@vitest/pretty-format@2.1.9':
     dependencies:
@@ -2120,17 +2162,15 @@ snapshots:
 
   typescript@5.9.3: {}
 
-  undici-types@6.21.0: {}
+  undici-types@8.9.0: {}
 
-  undici-types@7.24.6: {}
-
-  vite-node@2.1.9(@types/node@22.19.19):
+  vite-node@2.1.9(@types/node@26.6.4):
     dependencies:
       cac: 6.7.14
       debug: 4.4.3
       es-module-lexer: 1.7.0
       pathe: 1.1.2
-      vite: 5.4.21(@types/node@22.19.19)
+      vite: 5.4.21(@types/node@26.6.4)
     transitivePeerDependencies:
       - '@types/node'
       - less
@@ -2142,19 +2182,19 @@ snapshots:
       - supports-color
       - terser
 
-  vite@5.4.21(@types/node@22.19.19):
+  vite@5.4.21(@types/node@26.6.4):
     dependencies:
       esbuild: 0.21.5
       postcss: 8.5.23
       rollup: 4.62.2
     optionalDependencies:
-      '@types/node': 22.19.19
+      '@types/node': 26.6.4
       fsevents: 2.3.3
 
-  vitest@2.1.9(@types/node@22.19.19)(jsdom@25.0.1):
+  vitest@2.1.9(@types/node@26.6.4)(jsdom@25.0.1):
     dependencies:
       '@vitest/expect': 2.1.9
-      '@vitest/mocker': 2.1.9(vite@5.4.21(@types/node@22.19.19))
+      '@vitest/mocker': 2.1.9(vite@5.4.21(@types/node@26.6.4))
       '@vitest/pretty-format': 2.1.9
       '@vitest/runner': 2.1.9
       '@vitest/snapshot': 2.1.9
@@ -2170,11 +2210,11 @@ snapshots:
       tinyexec: 0.3.2
       tinypool: 1.1.1
       tinyrainbow: 1.2.0
-      vite: 5.4.21(@types/node@22.19.19)
-      vite-node: 2.1.9(@types/node@22.19.19)
+      vite: 5.4.21(@types/node@26.6.4)
+      vite-node: 2.1.9(@types/node@26.6.4)
       why-is-node-running: 2.3.0
     optionalDependencies:
-      '@types/node': 22.19.19
+      '@types/node': 26.6.4
       jsdom: 25.0.1
     transitivePeerDependencies:
       - less
