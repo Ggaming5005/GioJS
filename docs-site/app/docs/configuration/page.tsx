@@ -322,8 +322,9 @@ giojs-server: configuration error: gio.toml:21: invalid \`server.port\`: invalid
           and local <code>[[fonts]]</code> files included - before the worker starts. Rules and{' '}
           <code>[i18n]</code> locales holding a misspelled or invalid key are checked once it
           is fixed (left out, it would only report fallout). A required key that is missing, or
-          whose value is invalid (<code>path = 3</code>), ends the report there, and its last line
-          says which checks did not run.
+          whose value is invalid (<code>path = 3</code>, or a <code>[[rate_limits]]</code>{' '}
+          <code>path</code> that is not a valid pattern), ends the report there, and its last
+          line says which checks did not run.
         </li>
       </ul>
       <p>

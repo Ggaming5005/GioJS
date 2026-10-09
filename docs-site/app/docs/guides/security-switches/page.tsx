@@ -68,8 +68,8 @@ export default function Page(): React.JSX.Element {
           on that you meant to turn off, or the reverse.
         </li>
       </ul>
-      <CodeBlock lang="bash" code={`# Print what startup would decide, without binding a port: errors, rules
-# startup would skip, and one warning per loosened protection.
+      <CodeBlock lang="bash" code={`# Print what startup would decide, without binding a port: errors (unknown keys,
+# invalid values, rules that cannot be enforced) and one warning per loosened protection.
 npx giojs-server --check-config`} />
       <p>
         The command loads the <code>.env</code> files and <code>gio.toml</code> exactly as

@@ -161,7 +161,7 @@ node standalone/run.mjs --check-config                 # a standalone build`} />
       <h3 id="report">Report</h3>
       <PropsTable kind="Field" rows={[
         { name: 'ok', type: 'boolean', description: 'Whether the server would start.' },
-        { name: 'errors', type: 'string[]', description: <>Every refusal, worded as startup prints it after <code>configuration error:</code>, in line order: every unknown key and section, every invalid value, rules that cannot be enforced, <code>[i18n]</code> mistakes, and the other checks startup makes. Rules (or <code>[i18n]</code> locales) holding a misspelled or invalid key are checked once it is fixed. A required key that is missing, or whose value is invalid (<code>path = 3</code>), ends the list there, and the last entry says which checks did not run.</> },
+        { name: 'errors', type: 'string[]', description: <>Every refusal, worded as startup prints it after <code>configuration error:</code>, in line order: every unknown key and section, every invalid value, rules that cannot be enforced, <code>[i18n]</code> mistakes, and the other checks startup makes. Rules (or <code>[i18n]</code> locales) holding a misspelled or invalid key are checked once it is fixed. A required key that is missing, or whose value is invalid (<code>path = 3</code>, or a <code>[[rate_limits]]</code> <code>path</code> that is not a valid pattern), ends the list there, and the last entry says which checks did not run.</> },
         { name: 'warnings', type: 'string[]', description: <>Protections the file turns off or loosens and ignored <code>[dev] allowed_hosts</code> entries - the same lines startup logs.</> },
         { name: 'mode', type: 'string', description: <><code>development</code> or <code>production</code>, from <code>NODE_ENV</code>.</> },
         { name: 'envFiles', type: 'string[]', description: <>The <code>.env</code> files loaded, by name, highest precedence first.</> },
@@ -296,7 +296,8 @@ node -e 'const r = require("./check.json"); if (r.warnings.length) { console.log
         <li>
           Exit codes: <code>0</code> after a graceful shutdown or a passing check,{' '}
           <code>1</code> for a configuration error, a failed check or a failed startup (a
-          worker that cannot boot included).
+          worker that cannot boot included), and <code>2</code> for any argument other than{' '}
+          <code>--check-config</code> (a usage error; nothing starts).
         </li>
       </ul>
 
