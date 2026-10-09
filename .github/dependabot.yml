@@ -1,0 +1,47 @@
+version: 2
+
+# Weekly, with minor/patch bumps grouped into one PR per ecosystem so routine
+# updates don't bury real changes. Major bumps (and security updates, which
+# Dependabot raises on its own schedule) still arrive as individual PRs.
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+
+  # The root pnpm workspace (pnpm-lock.yaml) covers packages/*, examples/* and
+  # platform/*. The package-lock.json files inside packages/giojs-* are stale
+  # leftovers nothing installs from (CI and release use pnpm), so they get no
+  # entry of their own - that would only produce PRs against dead lockfiles.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Our own packages move in lockstep via scripts/sync-versions.mjs.
+      - dependency-name: '@gio.js/*'
+      - dependency-name: create-giojs
+
+  # docs-site is outside the pnpm workspace and installs from its own
+  # package-lock.json.
+  - package-ecosystem: npm
+    directory: /docs-site
+    schedule:
+      interval: weekly
+    groups:
+      docs-site-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions-minor-patch:
+        update-types: [minor, patch]

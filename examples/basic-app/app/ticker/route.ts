@@ -1,5 +1,4 @@
-import { GioEventStream } from '../../../packages/giojs-core/src/sse.ts';
-import type { GioRequest } from '../../../packages/giojs-core/src/context.ts';
+import { GioEventStream, type GioRequest } from '@gio.js/core';
 
 export function GET(_req: GioRequest): GioEventStream {
   return new GioEventStream((stream) => {

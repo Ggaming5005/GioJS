@@ -6,12 +6,28 @@
  * HTTP method handlers (GET/POST/PUT/PATCH/DELETE) for API routes and SSE.
  */
 import { loadTsModule } from './load-ts.ts';
-import type { GioSocket } from './context.ts';
-import { HANDLER_METHODS } from './router.ts';
+import type { WsHandler } from './context.ts';
+import { HANDLER_METHODS, RouteLoadError } from './router.ts';
 import type { HandlerEntry, RouteFile, RouteHandlerFn } from './router.ts';
+import { matchIn } from './ssr.ts';
 import { logger } from './logger.ts';
+import { describeError } from './mode.ts';
 
-export type WsHandlerFn = (socket: GioSocket) => void;
+export type WsHandlerFn = WsHandler;
+
+/**
+ * Find the wsHandler for a connection path with the rules pages and route.ts
+ * handlers use (exact static match first, then the most specific of
+ * :param / *catchAll / *optional? patterns; route groups are already gone
+ * from the patterns), so app/chat/[room]/route.ts answers /chat/lobby.
+ */
+export function matchWsHandler(
+  path: string,
+  wsHandlers: Map<string, WsHandlerFn>,
+): { handler: WsHandlerFn; pattern: string; params: Record<string, string> } | null {
+  const match = matchIn(path, wsHandlers);
+  return match === null ? null : { handler: match.entry, pattern: match.pattern, params: match.params };
+}
 
 export interface RouteFileModule {
   wsHandler?: WsHandlerFn;
@@ -49,22 +65,51 @@ export function registerRouteModule(
   }
 }
 
+/**
+ * Register a route.ts that threw while it was imported, so its URL fails
+ * loudly instead of turning into a 404 - or being taken over by a sibling
+ * page or a broader route.ts:
+ *  - HTTP: every method, OPTIONS included, answers 500 (ssr.ts
+ *    runRouteHandler: a digest in production, the import error in dev);
+ *  - WebSocket: a connection is closed with 1011 and the error is logged
+ *    under a digest (ws-ipc.ts runWsHandler) - the module may have been
+ *    meant to export a wsHandler, so it is not a "no websocket handler" 4404.
+ * The file and the error are logged once here, and again per request or
+ * connection.
+ */
+export function registerFailedRouteModule(
+  importError: unknown,
+  filePath: string,
+  urlPattern: string,
+  wsHandlers: Map<string, WsHandlerFn>,
+  handlers: Map<string, HandlerEntry>,
+): void {
+  const failure = new RouteLoadError(filePath, importError);
+  logger.error('route file failed to load - its URL answers 500 until it is fixed', {
+    urlPattern,
+    filePath: failure.file,
+    ...describeError(importError),
+  });
+  handlers.set(urlPattern, { filePath, urlPattern, methods: new Map(), loadError: failure });
+  wsHandlers.set(urlPattern, () => {
+    throw failure;
+  });
+}
+
 export async function discoverRouteModules(routeFiles: RouteFile[]): Promise<RouteModules> {
   const wsHandlers = new Map<string, WsHandlerFn>();
   const handlers = new Map<string, HandlerEntry>();
 
   await Promise.all(
     routeFiles.map(async ({ filePath, urlPattern }) => {
+      let mod: RouteFileModule;
       try {
-        const mod = await loadTsModule<RouteFileModule>(filePath);
-        registerRouteModule(mod, filePath, urlPattern, wsHandlers, handlers);
+        mod = await loadTsModule<RouteFileModule>(filePath);
       } catch (loadError) {
-        logger.warn('route file failed to load, skipping its handlers', {
-          filePath,
-          urlPattern,
-          error: loadError instanceof Error ? loadError.message : String(loadError),
-        });
+        registerFailedRouteModule(loadError, filePath, urlPattern, wsHandlers, handlers);
+        return;
       }
+      registerRouteModule(mod, filePath, urlPattern, wsHandlers, handlers);
     }),
   );
 

@@ -4,18 +4,29 @@
 //! guards) executed in the Rust HTTP layer before routing and before any Node
 //! code. Rules come from gio.toml (static) and from the worker's READY frame
 //! (middleware.ts). Patterns share the routing conventions: literal segments,
-//! `:param` captures, `*rest` catch-all. Evaluation order per request:
-//! guards, then redirects, then rewrites - first match wins within each phase,
-//! and when two rule sets are merged the static (gio.toml) set is checked
-//! before the worker set inside every phase. Header rules stamp responses
-//! independently of the short-circuiting phases. All header names/values and
-//! redirect statuses are validated once at compile/load time (invalid entries
-//! are skipped with a warning), never at request time.
+//! `:param` captures, `*rest` catch-all (zero or more segments, so
+//! `/admin/*rest` also covers `/admin` itself). Callers match the canonical
+//! request path (path_hygiene.rs). Evaluation order per request:
+//! guards, then redirects, then rewrites. Every matching guard must admit the
+//! request (the first that refuses decides the redirect); among redirects and
+//! among rewrites the first match wins. When two rule sets are merged the
+//! static (gio.toml) set is checked before the worker set inside every phase.
+//! Header rules stamp responses independently of the short-circuiting phases.
+//!
+//! Patterns, targets, header names/values and redirect statuses are
+//! validated once at load time, never at request time, and a rule that fails
+//! is a load error (`RuleSet::problems`): gio.toml refuses to start, and a
+//! worker whose middleware.ts READY frame carries one is refused - a skipped
+//! rule would leave the path it was meant to protect open.
+
+use std::sync::Arc;
 
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use serde::Deserialize;
 use thiserror::Error;
-use tracing::warn;
+use tracing::{error, warn};
+
+use crate::session_token::{self, SessionKeys};
 
 #[derive(Debug, Error)]
 pub enum RuleError {
@@ -31,15 +42,46 @@ pub enum RuleError {
     InvalidHeaderName(String),
     #[error("invalid header value for '{0}'")]
     InvalidHeaderValue(String),
-    #[error("empty required field: {0}")]
-    EmptyField(&'static str),
+    #[error("names no requirement: set require_session = true or a non-empty require_cookie")]
+    NoGuardRequirement,
+    #[error(
+        "target {0:?} is another site (a browser reads a leading // or /\\ as one): \
+         redirect to another site from a route handler"
+    )]
+    ExternalTarget(String),
 }
 
-/// `[[redirects]]` in gio.toml / `redirects` in middleware.ts.
+/// A redirect or rewrite target, or a guard's redirect_to, must be a path on
+/// this site. `//evil.com` and `/\evil.com` start with `/` but are
+/// protocol-relative URLs to a browser (which also drops tabs and line
+/// breaks first), so as a `Location` they would send the visitor off-site.
+fn check_site_path(target: &str) -> Result<(), RuleError> {
+    let Some(rest) = target.strip_prefix('/') else {
+        return Err(RuleError::PatternNotAbsolute(target.to_string()));
+    };
+    match rest.trim_start_matches(['\t', '\n', '\r']).chars().next() {
+        Some('/' | '\\') => Err(RuleError::ExternalTarget(target.to_string())),
+        _ => Ok(()),
+    }
+}
+
+/// `[[redirects]]` in gio.toml / `redirects` in middleware.ts. Unknown keys
+/// are a parse error (a misspelled `status` must not silently mean 302);
+/// validateMiddlewareRules sends the READY frame only these keys.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[cfg_attr(
+    test,
+    schemars(description = "A redirect: a request matching from is answered with status and a \
+        Location built from to, a path on this site. An unknown key stops startup.")
+)]
 pub struct RedirectRule {
+    /// Pattern: literals, `:param`, `*rest` catch-all.
     pub from: String,
+    /// Target; may substitute the pattern's captures.
     pub to: String,
+    /// 301, 302, 307 or 308.
     #[serde(default = "default_redirect_status")]
     pub status: u16,
 }
@@ -50,6 +92,8 @@ fn default_redirect_status() -> u16 {
 
 /// `[[rewrites]]` in gio.toml / `rewrites` in middleware.ts.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct RewriteRule {
     pub from: String,
     pub to: String,
@@ -59,21 +103,84 @@ pub struct RewriteRule {
 /// mapping header names to values. middleware.ts sends the same shape as a
 /// JSON object (`headers: { "x-frame-options": "DENY" }`).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct HeaderRule {
     pub path: String,
     pub headers: std::collections::HashMap<String, String>,
 }
 
 /// `[[guards]]` in gio.toml (snake_case) / `guards` in middleware.ts
-/// (camelCase aliases). A request to a matching path without a non-empty
-/// cookie of the given name is redirected (302) and never reaches Node.
+/// (camelCase aliases). A request to a matching path without the credential
+/// is redirected (302) and never reaches Node. `require_cookie` alone asks
+/// for a non-empty cookie of that name. `require_session = true` asks for a
+/// valid session token (MAC and expiry, see session_token.rs) in the cookie
+/// `require_cookie` names, `gio_session` by default.
+///
+/// A broken guard must never leave its path open. Unknown keys are a parse
+/// error, so a misspelled `require_session` stops gio.toml from loading
+/// instead of being ignored (validateMiddlewareRules sends the READY frame
+/// only these keys). A guard that names no requirement is one of
+/// `RuleSet::problems`, so neither gio.toml nor middleware.ts loads it; were
+/// one compiled anyway, it would deny every request.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[cfg_attr(
+    test,
+    schemars(
+        description = "A gate on matching paths: a request without the credential is \
+        redirected (302) and never reaches Node. require_cookie alone asks for a non-empty \
+        cookie of that name; require_session = true asks for a valid, unexpired gio_session \
+        token (in the cookie require_cookie names). A guard that names neither stops startup.",
+        transform = guard_rule_schema_aliases
+    )
+)]
 pub struct GuardRule {
     pub path: String,
-    #[serde(alias = "requireCookie")]
+    #[serde(alias = "requireCookie", default)]
     pub require_cookie: String,
+    #[serde(alias = "requireSession", default)]
+    pub require_session: bool,
     #[serde(alias = "redirectTo")]
     pub redirect_to: String,
+}
+
+/// The camelCase spellings middleware.ts uses load from gio.toml too.
+#[cfg(test)]
+fn guard_rule_schema_aliases(schema: &mut schemars::Schema) {
+    crate::config::add_schema_field_aliases(
+        schema,
+        &[
+            ("require_cookie", "requireCookie"),
+            ("require_session", "requireSession"),
+            ("redirect_to", "redirectTo"),
+        ],
+    );
+}
+
+impl GuardRule {
+    /// The strict load-time check: the guard compiles and names a
+    /// requirement.
+    pub fn validate(&self) -> Result<(), RuleError> {
+        match CompiledGuard::compile(self)?.check {
+            GuardCheck::DenyAll => Err(RuleError::NoGuardRequirement),
+            GuardCheck::Cookie(_) | GuardCheck::Session(_) => Ok(()),
+        }
+    }
+}
+
+/// A rule that cannot be enforced as written, from `RuleSet::problems`.
+#[derive(Debug)]
+pub struct RuleProblem {
+    /// `guards`, `redirects`, `rewrites` or `headers`: the gio.toml table
+    /// and the middleware.ts key alike.
+    pub kind: &'static str,
+    /// The rule's position in its list.
+    pub index: usize,
+    /// The rule's pattern (`path`, or `from` for redirects and rewrites).
+    pub pattern: String,
+    pub error: RuleError,
 }
 
 /// The raw, wire/config-shaped bundle of all rule kinds. Deserializes from
@@ -136,18 +243,16 @@ impl Pattern {
 
     /// Match `path`, returning captured values in `capture_names` order.
     /// A `*rest` capture takes the entire remainder (slashes included) and
-    /// requires at least one segment. `None` allocates nothing for patterns
+    /// may be empty: `/admin/*rest` matches `/admin` too, the same way the
+    /// Node router's catch-all does - a guard on a section must not leave
+    /// the section's index page open. `None` allocates nothing for patterns
     /// without captures.
     fn match_path<'p>(&self, path: &'p str) -> Option<Vec<&'p str>> {
         let mut captures: Vec<&'p str> = Vec::new();
         let mut rest = path.trim_start_matches('/');
         for segment in &self.segments {
             if *segment == Segment::CatchAll {
-                let remainder = rest.trim_end_matches('/');
-                if remainder.is_empty() {
-                    return None;
-                }
-                captures.push(remainder);
+                captures.push(rest.trim_end_matches('/'));
                 return Some(captures);
             }
             let (head, tail) = match rest.find('/') {
@@ -176,6 +281,23 @@ impl Pattern {
     }
 }
 
+/// A rule path pattern used only for membership (no captures, no target),
+/// so other path-scoped settings - `[security.csrf] exempt` - share the
+/// rules' exact syntax and matching semantics.
+#[derive(Debug, Clone)]
+pub struct PathPattern(Pattern);
+
+impl PathPattern {
+    pub fn compile(raw: &str) -> Result<Self, RuleError> {
+        Pattern::compile(raw).map(PathPattern)
+    }
+
+    /// Whether the canonical request `path` matches.
+    pub fn matches(&self, path: &str) -> bool {
+        self.0.match_path(path).is_some()
+    }
+}
+
 #[derive(Debug, Clone)]
 enum TemplatePart {
     Literal(String),
@@ -191,9 +313,7 @@ struct Template {
 
 impl Template {
     fn compile(raw: &str, pattern: &Pattern) -> Result<Self, RuleError> {
-        if !raw.starts_with('/') {
-            return Err(RuleError::PatternNotAbsolute(raw.to_string()));
-        }
+        check_site_path(raw)?;
         let mut parts = Vec::new();
         for raw_segment in raw.split('/').filter(|s| !s.is_empty()) {
             let capture_name = raw_segment
@@ -214,14 +334,23 @@ impl Template {
         Ok(Template { parts })
     }
 
+    /// An empty capture (a catch-all that matched zero segments) contributes
+    /// no segment at all: `/old/*rest -> /new/*rest` sends `/old` to `/new`,
+    /// not `/new/`.
     fn expand(&self, captures: &[&str]) -> String {
         let mut target = String::new();
         for part in &self.parts {
-            target.push('/');
             match part {
-                TemplatePart::Literal(literal) => target.push_str(literal),
+                TemplatePart::Literal(literal) => {
+                    target.push('/');
+                    target.push_str(literal);
+                }
                 TemplatePart::Capture(index) => {
-                    target.push_str(captures.get(*index).copied().unwrap_or(""));
+                    let value = captures.get(*index).copied().unwrap_or("");
+                    if !value.is_empty() {
+                        target.push('/');
+                        target.push_str(value);
+                    }
                 }
             }
         }
@@ -270,24 +399,42 @@ impl CompiledRewrite {
     }
 }
 
+/// What a guard demands of the named cookie.
+#[derive(Debug)]
+enum GuardCheck {
+    /// Any non-empty value.
+    Cookie(String),
+    /// A session token signed with GIO_SESSION_SECRET and not yet expired.
+    Session(String),
+    /// Nothing passes: the guard names no requirement (fail closed).
+    DenyAll,
+}
+
 #[derive(Debug)]
 struct CompiledGuard {
     pattern: Pattern,
-    require_cookie: String,
+    check: GuardCheck,
     redirect_to: String,
 }
 
 impl CompiledGuard {
     fn compile(rule: &GuardRule) -> Result<Self, RuleError> {
-        if rule.require_cookie.is_empty() {
-            return Err(RuleError::EmptyField("require_cookie"));
-        }
-        if !rule.redirect_to.starts_with('/') {
-            return Err(RuleError::PatternNotAbsolute(rule.redirect_to.clone()));
-        }
+        let check = if rule.require_session {
+            let cookie = if rule.require_cookie.is_empty() {
+                session_token::DEFAULT_COOKIE_NAME
+            } else {
+                &rule.require_cookie
+            };
+            GuardCheck::Session(cookie.to_string())
+        } else if rule.require_cookie.is_empty() {
+            GuardCheck::DenyAll
+        } else {
+            GuardCheck::Cookie(rule.require_cookie.clone())
+        };
+        check_site_path(&rule.redirect_to)?;
         Ok(CompiledGuard {
             pattern: Pattern::compile(&rule.path)?,
-            require_cookie: rule.require_cookie.clone(),
+            check,
             redirect_to: rule.redirect_to.clone(),
         })
     }
@@ -338,17 +485,51 @@ pub struct RuleSet {
     redirects: Vec<CompiledRedirect>,
     rewrites: Vec<CompiledRewrite>,
     headers: Vec<CompiledHeaderRule>,
+    /// Verifies `require_session` guards; `None` makes them deny everything.
+    session_keys: Option<Arc<SessionKeys>>,
 }
 
 impl RuleSet {
-    /// Compile raw rules, skipping (with a warning) any entry that fails
-    /// validation. This is the load-time gate: nothing after this point can
-    /// fail or panic at request time.
+    /// Compile raw rules. Callers refuse rules with `problems` first, so
+    /// every entry compiles; one that does not is skipped with a warning (and
+    /// a guard without a requirement denies everything). Nothing after this
+    /// point can fail or panic at request time. Session guards verify with
+    /// the process-wide secrets from `session_token::init`.
     pub fn compile(raw: &MiddlewareRules) -> Self {
-        let mut compiled = RuleSet::default();
+        Self::compile_with_session_keys(raw, session_token::keys())
+    }
+
+    pub fn compile_with_session_keys(
+        raw: &MiddlewareRules,
+        session_keys: Option<Arc<SessionKeys>>,
+    ) -> Self {
+        let mut compiled = RuleSet {
+            session_keys,
+            ..RuleSet::default()
+        };
         for rule in &raw.guards {
             match CompiledGuard::compile(rule) {
-                Ok(guard) => compiled.guards.push(guard),
+                Ok(guard) => {
+                    // Fail closed, loudly: without a secret no session can be
+                    // verified, so the guard turns every request away.
+                    if matches!(guard.check, GuardCheck::Session(_))
+                        && compiled.session_keys.is_none()
+                    {
+                        error!(
+                            path = %rule.path,
+                            "require_session guard without a valid {} - it denies every request. Generate a secret with: {}",
+                            session_token::SECRET_ENV,
+                            session_token::SECRET_GENERATE_HINT
+                        );
+                    }
+                    if matches!(guard.check, GuardCheck::DenyAll) {
+                        error!(
+                            path = %rule.path,
+                            "guard names no valid requirement (require_session or require_cookie) - it denies every request until fixed"
+                        );
+                    }
+                    compiled.guards.push(guard);
+                }
                 Err(e) => warn!(path = %rule.path, error = %e, "invalid guard rule skipped"),
             }
         }
@@ -373,6 +554,50 @@ impl RuleSet {
         compiled
     }
 
+    /// Every rule `compile` could not enforce as written: one it cannot
+    /// compile (a relative or malformed pattern, an unknown capture in a
+    /// target, a bad status or header), and a guard that names no
+    /// requirement. Both rule sources refuse to load with any - gio.toml at
+    /// startup, middleware.ts when the worker reports its rules.
+    pub fn problems(raw: &MiddlewareRules) -> Vec<RuleProblem> {
+        fn collect<'r, T>(
+            kind: &'static str,
+            rules: &'r [T],
+            pattern: impl Fn(&T) -> &str + 'r,
+            check: impl Fn(&T) -> Result<(), RuleError> + 'r,
+        ) -> impl Iterator<Item = RuleProblem> + 'r {
+            rules.iter().enumerate().filter_map(move |(index, rule)| {
+                let error = check(rule).err()?;
+                Some(RuleProblem {
+                    kind,
+                    index,
+                    pattern: pattern(rule).to_string(),
+                    error,
+                })
+            })
+        }
+        let guards = collect("guards", &raw.guards, |r| &r.path, GuardRule::validate);
+        let redirects = collect(
+            "redirects",
+            &raw.redirects,
+            |r| &r.from,
+            |r| CompiledRedirect::compile(r).map(drop),
+        );
+        let rewrites = collect(
+            "rewrites",
+            &raw.rewrites,
+            |r| &r.from,
+            |r| CompiledRewrite::compile(r).map(drop),
+        );
+        let headers = collect(
+            "headers",
+            &raw.headers,
+            |r| &r.path,
+            |r| CompiledHeaderRule::compile(r).map(drop),
+        );
+        guards.chain(redirects).chain(rewrites).chain(headers).collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.guards.is_empty()
             && self.redirects.is_empty()
@@ -382,6 +607,15 @@ impl RuleSet {
 
     pub fn has_header_rules(&self) -> bool {
         !self.headers.is_empty()
+    }
+
+    /// Whether any guard covers `path`. For a request the guard phase let
+    /// through, that means a guard admitted it: the response is for
+    /// admitted visitors only, not for everyone who asks for the URL.
+    pub fn guards_path(&self, path: &str) -> bool {
+        self.guards
+            .iter()
+            .any(|guard| guard.pattern.match_path(path).is_some())
     }
 
     pub fn apply(&self, path: &str, cookie_header: Option<&str>) -> RuleOutcome {
@@ -402,9 +636,23 @@ impl RuleSet {
             if guard.pattern.match_path(path).is_none() {
                 continue;
             }
-            let authorized = cookie_header
-                .map(|cookies| cookie_has_value(cookies, &guard.require_cookie))
-                .unwrap_or(false);
+            let authorized = match &guard.check {
+                GuardCheck::Cookie(name) => cookie_header
+                    .map(|cookies| cookie_has_value(cookies, name))
+                    .unwrap_or(false),
+                GuardCheck::Session(name) => {
+                    match (
+                        &self.session_keys,
+                        cookie_header.and_then(|c| first_cookie_value(c, name)),
+                    ) {
+                        (Some(keys), Some(token)) => {
+                            keys.verify(name, token, session_token::now_unix())
+                        }
+                        _ => false,
+                    }
+                }
+                GuardCheck::DenyAll => false,
+            };
             if !authorized {
                 return Some(RuleOutcome::Redirect {
                     location: guard.redirect_to.clone(),
@@ -478,6 +726,23 @@ pub fn apply_merged(
     RuleOutcome::None
 }
 
+/// Only the guard phase, across both sets in the same order as
+/// `apply_merged`. For a second URL of the same resource - a public/ file
+/// answered at the site root is also `/public/...` - access control follows
+/// the resource, while redirects and rewrites stay about the URL that was
+/// requested: a `/public/*rest` -> `/*rest` redirect canonicalizing old URLs
+/// must not fire for (and loop on) its own target.
+pub fn check_guards_merged(
+    static_rules: &RuleSet,
+    worker_rules: &RuleSet,
+    path: &str,
+    cookie_header: Option<&str>,
+) -> Option<RuleOutcome> {
+    [static_rules, worker_rules]
+        .into_iter()
+        .find_map(|rules| rules.check_guards(path, cookie_header))
+}
+
 /// Append the original query string verbatim to a redirect/rewrite target.
 pub fn with_query(target: String, query: Option<&str>) -> String {
     match query {
@@ -494,6 +759,18 @@ fn cookie_has_value(cookie_header: &str, name: &str) -> bool {
         .any(|pair| match pair.trim().split_once('=') {
             Some((key, value)) => key.trim() == name && !value.trim().is_empty(),
             None => false,
+        })
+}
+
+/// The first value of cookie `name`, trimmed - the occurrence the Node
+/// worker's parseCookies (and so getSession) reads, so a guard and the page
+/// behind it judge the same token.
+fn first_cookie_value<'h>(cookie_header: &'h str, name: &str) -> Option<&'h str> {
+    cookie_header
+        .split(';')
+        .find_map(|pair| match pair.split_once('=') {
+            Some((key, value)) if key.trim() == name => Some(value.trim()),
+            _ => None,
         })
 }
 
@@ -530,8 +807,70 @@ mod tests {
         GuardRule {
             path: path.to_string(),
             require_cookie: cookie.to_string(),
+            require_session: false,
             redirect_to: redirect_to.to_string(),
         }
+    }
+
+    #[test]
+    fn problems_list_every_rule_that_would_not_be_enforced() {
+        let raw = MiddlewareRules {
+            redirects: vec![redirect("/old", "/new", 301), redirect("/a", "/b", 200)],
+            rewrites: vec![RewriteRule {
+                from: "no-slash".to_string(),
+                to: "/x".to_string(),
+            }],
+            headers: vec![HeaderRule {
+                path: "/*rest".to_string(),
+                headers: [("bad header".to_string(), "v".to_string())].into(),
+            }],
+            guards: vec![
+                guard("/admin", "session", "/login"),
+                guard("members/*rest", "session", "/login"),
+                guard("/a/*rest/c", "session", "/login"),
+                guard("/b", "", "/login"),
+            ],
+        };
+        let problems: Vec<String> = RuleSet::problems(&raw)
+            .iter()
+            .map(|p| format!("{}[{}] {}: {}", p.kind, p.index, p.pattern, p.error))
+            .collect();
+        assert_eq!(
+            problems,
+            [
+                "guards[1] members/*rest: pattern must start with '/': members/*rest",
+                "guards[2] /a/*rest/c: catch-all segment must be the last segment: /a/*rest/c",
+                "guards[3] /b: names no requirement: set require_session = true or a non-empty require_cookie",
+                "redirects[1] /a: redirect status must be 301, 302, 307, or 308 (got 200)",
+                "rewrites[0] no-slash: pattern must start with '/': no-slash",
+                "headers[0] /*rest: invalid header name: bad header",
+            ]
+        );
+        assert!(RuleSet::problems(&MiddlewareRules {
+            guards: vec![guard("/admin", "session", "/login")],
+            ..Default::default()
+        })
+        .is_empty());
+    }
+
+    #[test]
+    fn compile_skips_what_it_cannot_compile() {
+        let raw = MiddlewareRules {
+            redirects: vec![redirect("/old", "/new", 301), redirect("/a", "/b", 200)],
+            rewrites: vec![RewriteRule {
+                from: "no-slash".to_string(),
+                to: "/x".to_string(),
+            }],
+            headers: vec![HeaderRule {
+                path: "/*rest".to_string(),
+                headers: [("bad header".to_string(), "v".to_string())].into(),
+            }],
+            guards: vec![guard("/admin", "session", "/login")],
+        };
+        let compiled = RuleSet::compile(&raw);
+        assert_eq!(compiled.redirects.len(), 1);
+        assert!(compiled.rewrites.is_empty() && compiled.headers.is_empty());
+        assert_eq!(compiled.guards.len(), 1);
     }
 
     // ── pattern matching ─────────────────────────────────────────────────────
@@ -608,10 +947,61 @@ mod tests {
     }
 
     #[test]
-    fn catch_all_requires_at_least_one_segment() {
+    fn catch_all_matches_zero_segments() {
         let rules = rules_with_rewrite("/docs/*rest", "/guide/*rest");
-        assert_eq!(rules.apply("/docs", None), RuleOutcome::None);
-        assert_eq!(rules.apply("/docs/", None), RuleOutcome::None);
+        for path in ["/docs", "/docs/"] {
+            assert_eq!(
+                rules.apply(path, None),
+                RuleOutcome::Rewrite {
+                    new_path: "/guide".to_string()
+                },
+                "{path}"
+            );
+        }
+        assert_eq!(rules.apply("/docsx", None), RuleOutcome::None);
+        assert_eq!(rules.apply("/", None), RuleOutcome::None);
+    }
+
+    #[test]
+    fn empty_catch_all_drops_its_segment_from_redirect_targets() {
+        let rules = rules_with_redirect("/old/*rest", "/new/:rest", 301);
+        assert_eq!(
+            rules.apply("/old", None),
+            RuleOutcome::Redirect {
+                location: "/new".to_string(),
+                status: StatusCode::MOVED_PERMANENTLY
+            }
+        );
+        assert_eq!(
+            rules.apply("/old/a/b", None),
+            RuleOutcome::Redirect {
+                location: "/new/a/b".to_string(),
+                status: StatusCode::MOVED_PERMANENTLY
+            }
+        );
+        // A target that is nothing but the empty capture resolves to root.
+        let to_root = rules_with_redirect("/legacy/*rest", "/*rest", 302);
+        assert_eq!(
+            to_root.apply("/legacy", None),
+            RuleOutcome::Redirect {
+                location: "/".to_string(),
+                status: StatusCode::FOUND
+            }
+        );
+    }
+
+    #[test]
+    fn root_catch_all_covers_every_path_including_root() {
+        let rules = RuleSet::compile(&MiddlewareRules {
+            headers: vec![HeaderRule {
+                path: "/*rest".to_string(),
+                headers: [("x-frame-options".to_string(), "DENY".to_string())].into(),
+            }],
+            ..Default::default()
+        });
+        for path in ["/", "/about", "/a/b/c"] {
+            assert_eq!(rules.response_headers(path).len(), 1, "{path}");
+        }
     }
 
     #[test]
@@ -698,6 +1088,20 @@ mod tests {
     }
 
     #[test]
+    fn guards_path_tells_admitted_requests_from_open_ones() {
+        let rules = RuleSet::compile(&MiddlewareRules {
+            guards: vec![guard("/admin/*rest", "session", "/login")],
+            redirects: vec![redirect("/open", "/", 301)],
+            ..Default::default()
+        });
+        assert!(rules.guards_path("/admin/users/42"));
+        assert!(!rules.guards_path("/"));
+        // Only guards count: a redirect rule covers no visitor's access.
+        assert!(!rules.guards_path("/open"));
+        assert!(!RuleSet::default().guards_path("/admin/x"));
+    }
+
+    #[test]
     fn guard_treats_empty_cookie_value_as_absent() {
         let rules = RuleSet::compile(&MiddlewareRules {
             guards: vec![guard("/admin", "session", "/login")],
@@ -736,6 +1140,256 @@ mod tests {
             RuleOutcome::Redirect { .. }
         ));
         assert_eq!(rules.apply("/public-page", None), RuleOutcome::None);
+    }
+
+    #[test]
+    fn section_guard_also_covers_the_section_index() {
+        let rules = RuleSet::compile(&MiddlewareRules {
+            guards: vec![guard("/admin/*rest", "session", "/login")],
+            ..Default::default()
+        });
+        assert!(matches!(
+            rules.apply("/admin", None),
+            RuleOutcome::Redirect { .. }
+        ));
+        assert_eq!(rules.apply("/admin", Some("session=x")), RuleOutcome::None);
+        assert_eq!(rules.apply("/administrator", None), RuleOutcome::None);
+    }
+
+    // ── session guards ───────────────────────────────────────────────────────
+
+    const SECRET: &str = "rules-test-session-secret-0123456789abcdef";
+    const OTHER_SECRET: &str = "rules-test-session-secret-other-0123456789";
+
+    fn session_guard(path: &str, cookie: &str) -> GuardRule {
+        GuardRule {
+            path: path.to_string(),
+            require_cookie: cookie.to_string(),
+            require_session: true,
+            redirect_to: "/login".to_string(),
+        }
+    }
+
+    fn session_rules(guards: Vec<GuardRule>, secrets: Option<&str>) -> RuleSet {
+        let keys = secrets
+            .map(|raw| Arc::new(SessionKeys::from_secret_list(raw).expect("valid test secrets")));
+        RuleSet::compile_with_session_keys(
+            &MiddlewareRules {
+                guards,
+                ..Default::default()
+            },
+            keys,
+        )
+    }
+
+    fn token(secret: &str, cookie: &str, exp: u64) -> String {
+        session_token::sign_for_tests(secret, cookie, exp, "c2VhbGVkLWRhdGE")
+    }
+
+    fn future() -> u64 {
+        session_token::now_unix() + 3600
+    }
+
+    #[test]
+    fn session_guard_passes_only_a_valid_unexpired_token() {
+        let rules = session_rules(vec![session_guard("/admin/*rest", "")], Some(SECRET));
+        let valid = format!(
+            "a=1; gio_session={}",
+            token(SECRET, "gio_session", future())
+        );
+        assert_eq!(rules.apply("/admin/users", Some(&valid)), RuleOutcome::None);
+
+        let expired = format!(
+            "gio_session={}",
+            token(SECRET, "gio_session", 1_000_000_000)
+        );
+        let forged = format!(
+            "gio_session={}",
+            token(OTHER_SECRET, "gio_session", future())
+        );
+        let other_cookie = format!("gio_session={}", token(SECRET, "admin_session", future()));
+        for header in [
+            None,
+            Some("gio_session=valid"),
+            Some("gio_session="),
+            Some(expired.as_str()),
+            Some(forged.as_str()),
+            Some(other_cookie.as_str()),
+        ] {
+            assert_eq!(
+                rules.apply("/admin/users", header),
+                RuleOutcome::Redirect {
+                    location: "/login".to_string(),
+                    status: StatusCode::FOUND
+                },
+                "{header:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_guard_reads_the_first_cookie_occurrence_like_node() {
+        let rules = session_rules(vec![session_guard("/admin", "")], Some(SECRET));
+        let good = token(SECRET, "gio_session", future());
+        assert_eq!(
+            rules.apply(
+                "/admin",
+                Some(&format!("gio_session={good}; gio_session=junk"))
+            ),
+            RuleOutcome::None
+        );
+        assert!(matches!(
+            rules.apply(
+                "/admin",
+                Some(&format!("gio_session=junk; gio_session={good}"))
+            ),
+            RuleOutcome::Redirect { .. }
+        ));
+    }
+
+    #[test]
+    fn session_guard_cookie_name_is_overridable() {
+        let rules = session_rules(vec![session_guard("/staff", "staff_sess")], Some(SECRET));
+        let staff = format!("staff_sess={}", token(SECRET, "staff_sess", future()));
+        assert_eq!(rules.apply("/staff", Some(&staff)), RuleOutcome::None);
+        let default_cookie = format!("gio_session={}", token(SECRET, "gio_session", future()));
+        assert!(matches!(
+            rules.apply("/staff", Some(&default_cookie)),
+            RuleOutcome::Redirect { .. }
+        ));
+    }
+
+    #[test]
+    fn session_guard_accepts_rotated_secrets() {
+        let rotated = format!("{OTHER_SECRET},{SECRET}");
+        let rules = session_rules(vec![session_guard("/admin", "")], Some(&rotated));
+        let old = format!("gio_session={}", token(SECRET, "gio_session", future()));
+        assert_eq!(rules.apply("/admin", Some(&old)), RuleOutcome::None);
+    }
+
+    #[test]
+    fn session_guard_without_a_secret_fails_closed() {
+        let rules = session_rules(vec![session_guard("/admin", "")], None);
+        assert!(!rules.is_empty(), "the guard is kept, not skipped");
+        let cookie = format!("gio_session={}", token(SECRET, "gio_session", future()));
+        assert!(matches!(
+            rules.apply("/admin", Some(&cookie)),
+            RuleOutcome::Redirect { .. }
+        ));
+        assert_eq!(rules.apply("/public", None), RuleOutcome::None);
+    }
+
+    #[test]
+    fn guard_without_a_requirement_denies_everything() {
+        let no_requirement = GuardRule {
+            path: "/admin/*rest".to_string(),
+            require_cookie: String::new(),
+            require_session: false,
+            redirect_to: "/login".to_string(),
+        };
+        assert!(matches!(
+            no_requirement.validate(),
+            Err(RuleError::NoGuardRequirement)
+        ));
+        // Kept, not skipped: the path stays closed whatever the request carries.
+        let rules = session_rules(vec![no_requirement], Some(SECRET));
+        assert!(!rules.is_empty());
+        let session = format!("gio_session={}", token(SECRET, "gio_session", future()));
+        for cookies in [None, Some("session=x"), Some(session.as_str())] {
+            assert_eq!(
+                rules.apply("/admin/users", cookies),
+                RuleOutcome::Redirect {
+                    location: "/login".to_string(),
+                    status: StatusCode::FOUND,
+                },
+                "cookies: {cookies:?}"
+            );
+        }
+        assert_eq!(rules.apply("/public", None), RuleOutcome::None);
+    }
+
+    #[test]
+    fn guard_validate_accepts_both_kinds_and_rejects_bad_rules() {
+        assert!(guard("/admin", "session", "/login").validate().is_ok());
+        assert!(session_guard("/admin/*rest", "").validate().is_ok());
+        assert!(session_guard("/staff", "staff_sess").validate().is_ok());
+        assert!(matches!(
+            guard("admin", "session", "/login").validate(),
+            Err(RuleError::PatternNotAbsolute(_))
+        ));
+        assert!(matches!(
+            guard("/admin", "session", "login").validate(),
+            Err(RuleError::PatternNotAbsolute(_))
+        ));
+        assert!(matches!(
+            guard("/admin", "", "/login").validate(),
+            Err(RuleError::NoGuardRequirement)
+        ));
+    }
+
+    #[test]
+    fn targets_that_leave_the_site_are_rejected_at_load() {
+        // A browser reads each of these as a protocol-relative URL: as a
+        // guard's Location it would send the visitor to evil.com.
+        for target in ["//evil.com", "/\\evil.com", "/\t/evil.com", "///evil.com"] {
+            assert!(
+                matches!(
+                    guard("/admin", "session", target).validate(),
+                    Err(RuleError::ExternalTarget(_))
+                ),
+                "{target:?}"
+            );
+            let rules = MiddlewareRules {
+                redirects: vec![RedirectRule {
+                    from: "/old".to_string(),
+                    to: target.to_string(),
+                    status: 302,
+                }],
+                rewrites: vec![RewriteRule {
+                    from: "/a".to_string(),
+                    to: target.to_string(),
+                }],
+                ..MiddlewareRules::default()
+            };
+            let problems = RuleSet::problems(&rules);
+            assert_eq!(problems.len(), 2, "{target:?}: {problems:?}");
+            assert!(problems.iter().all(|p| matches!(p.error, RuleError::ExternalTarget(_))));
+        }
+        assert!(guard("/admin", "session", "/login?next=//x").validate().is_ok());
+        assert!(guard("/admin", "session", "/").validate().is_ok());
+    }
+
+    #[test]
+    fn misspelled_guard_keys_are_a_parse_error() {
+        // Ignoring the typo would leave /admin behind no requirement at all,
+        // or behind a cookie-presence check instead of a session check.
+        for typo in ["require_sesion", "require-session", "requireSesion"] {
+            let raw = format!(
+                "[[guards]]\npath = \"/admin/*rest\"\n{typo} = true\nredirect_to = \"/login\"\n"
+            );
+            assert!(
+                toml::from_str::<MiddlewareRules>(&raw).is_err(),
+                "{typo} must not parse"
+            );
+        }
+        let weakened = "[[guards]]\npath = \"/admin\"\nrequire_cookie = \"s\"\nrequire_sesion = true\nredirect_to = \"/\"\n";
+        assert!(toml::from_str::<MiddlewareRules>(weakened).is_err());
+    }
+
+    #[test]
+    fn session_guard_parses_from_gio_toml_and_the_ready_frame() {
+        let from_toml: MiddlewareRules = toml::from_str(
+            "[[guards]]\npath = \"/admin/*rest\"\nrequire_session = true\nredirect_to = \"/login\"\n",
+        )
+        .expect("toml guard");
+        assert!(from_toml.guards[0].require_session);
+        assert_eq!(from_toml.guards[0].require_cookie, "");
+        let from_json: MiddlewareRules = serde_json::from_str(
+            r#"{"guards":[{"path":"/a","requireSession":true,"requireCookie":"s","redirectTo":"/"}]}"#,
+        )
+        .expect("json guard");
+        assert!(from_json.guards[0].require_session);
+        assert_eq!(from_json.guards[0].require_cookie, "s");
     }
 
     // ── phase and rule ordering ──────────────────────────────────────────────
@@ -812,6 +1466,46 @@ mod tests {
                 location: "/from-worker-guard".to_string(),
                 status: StatusCode::FOUND
             }
+        );
+    }
+
+    #[test]
+    fn guard_only_evaluation_ignores_redirects_and_rewrites() {
+        let static_rules = RuleSet::compile(&MiddlewareRules {
+            redirects: vec![redirect("/public/*rest", "/*rest", 301)],
+            rewrites: vec![RewriteRule {
+                from: "/public/old/*rest".to_string(),
+                to: "/public/new/*rest".to_string(),
+            }],
+            ..Default::default()
+        });
+        let worker_rules = RuleSet::compile(&MiddlewareRules {
+            guards: vec![guard("/public/members/*rest", "session", "/login")],
+            ..Default::default()
+        });
+        assert_eq!(
+            check_guards_merged(&static_rules, &worker_rules, "/public/members/a.txt", None),
+            Some(RuleOutcome::Redirect {
+                location: "/login".to_string(),
+                status: StatusCode::FOUND
+            })
+        );
+        assert_eq!(
+            check_guards_merged(
+                &static_rules,
+                &worker_rules,
+                "/public/members/a.txt",
+                Some("session=abc")
+            ),
+            None
+        );
+        assert_eq!(
+            check_guards_merged(&static_rules, &worker_rules, "/public/old/a.txt", None),
+            None
+        );
+        assert_eq!(
+            check_guards_merged(&static_rules, &worker_rules, "/public/robots.txt", None),
+            None
         );
     }
 

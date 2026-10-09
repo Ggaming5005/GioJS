@@ -2,7 +2,8 @@
 /target/
 crates/*/target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is committed on purpose: release binaries must build from the
+# exact crate versions CI tested (`--locked`), not whatever resolves that day.
 
 # Node
 node_modules/
@@ -52,7 +53,9 @@ platform/*/bin/*
 /SPEC.md
 /SPEC2.md
 /OPEN_QUESTIONS.md
-tests/integration/.dev-fixture/
+# Fixture copies the integration suite makes while it runs (.dev-fixture,
+# .boot-fixture, .csp-fixture, ...).
+tests/integration/.*-fixture/
 
 # stray local probe file
 probe.tmp

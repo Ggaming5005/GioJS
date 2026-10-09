@@ -1,2 +1,9 @@
 [server]
 port = 3000
+
+# Verified in Rust before any Node code runs: the gio_session cookie must
+# carry a session signed with GIO_SESSION_SECRET that has not expired.
+[[guards]]
+path            = "/admin/*rest"
+require_session = true
+redirect_to     = "/login"

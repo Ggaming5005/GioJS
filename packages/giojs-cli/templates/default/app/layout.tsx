@@ -1,33 +1,27 @@
 import React from 'react';
-import Navbar from '@/components/layout/Navbar';
-import Footer from '@/components/layout/Footer';
+import type { LayoutProps, Metadata } from '@gio.js/core';
+// Global styles: bundled, hashed and linked in <head> by GioJS - no <link>
+// needed. Its fonts are self-hosted from public/fonts/ (see gio.toml).
+import './globals.css';
 
-interface RootLayoutProps {
-  children: React.ReactNode;
-}
+// The title and description of every page: a page's own `metadata` (or
+// generateMetadata) title fills the template, e.g. 'About | {{PROJECT_NAME}}'.
+export const metadata: Metadata = {
+  title: { default: "{{PROJECT_NAME}}", template: "%s | {{PROJECT_NAME}}" },
+  description: 'A GioJS application.',
+};
 
-export default function RootLayout({ children }: RootLayoutProps): React.JSX.Element {
+export default function RootLayout({ children }: LayoutProps): React.JSX.Element {
   return (
     <html lang="en">
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta name="description" content="A GioJS application." />
         <link rel="icon" href="/public/giojs-logo.svg" type="image/svg+xml" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;1,9..144,400;1,9..144,500&family=JetBrains+Mono:wght@400;500;600&display=swap"
-        />
-        <link rel="stylesheet" href="/public/styles/globals.css" />
-        <title>{{PROJECT_NAME}}</title>
       </head>
-      <body>
-        <Navbar />
-        <main>{children}</main>
-        <Footer />
-      </body>
+      {/* Server-only HTML: a GioLink here would be a plain link. The site's
+          navigation lives in app/(site)/layout, which hydrates. */}
+      <body>{children}</body>
     </html>
   );
 }

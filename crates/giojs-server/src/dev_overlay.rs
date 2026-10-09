@@ -6,10 +6,16 @@
 //! Parses the stack, fetches a codeframe for the topmost project frame from
 //! /_gio/devtools/codeframe, and renders file:line links that hit
 //! /_gio/devtools/open-in-editor. XSS-safe: all dynamic values go through
-//! textContent, never innerHTML.
+//! textContent, never innerHTML. With `[dev] devtools = false` those
+//! endpoints are not routed, so the overlay shows the message and stack
+//! only: no codeframe, no editor links, no live-reload stream.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
 (function(){
+  var DEVTOOLS = true;
   var OVERLAY_STYLES = 'position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.88);font-family:monospace;padding:2rem;';
   var CARD_STYLES = 'background:#1a0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:1.5rem 2rem;max-width:860px;width:100%;color:#fca5a5;box-shadow:0 0 40px rgba(239,68,68,0.2);overflow:auto;max-height:85vh;';
 
@@ -48,8 +54,11 @@ pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
       !/^https?:/.test(f.file);
   }
 
+  // The dev endpoints refuse cross-origin callers and open-in-editor takes
+  // POST only; mode 'same-origin' also fails fast rather than following a
+  // redirect to another origin.
   function openInEditor(file, line) {
-    fetch('/_gio/devtools/open-in-editor?file=' + encodeURIComponent(file) + '&line=' + encodeURIComponent(line), { method: 'POST' }).catch(function(){});
+    fetch('/_gio/devtools/open-in-editor?file=' + encodeURIComponent(file) + '&line=' + encodeURIComponent(line), { method: 'POST', mode: 'same-origin', credentials: 'same-origin' }).catch(function(){});
   }
 
   function fileLink(f) {
@@ -60,7 +69,7 @@ pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
   }
 
   function renderCodeframe(container, frame) {
-    fetch('/_gio/devtools/codeframe?file=' + encodeURIComponent(frame.file) + '&line=' + frame.line)
+    fetch('/_gio/devtools/codeframe?file=' + encodeURIComponent(frame.file) + '&line=' + frame.line, { mode: 'same-origin', credentials: 'same-origin' })
       .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(data) {
         if (!data || !data.lines || !data.lines.length) return;
@@ -102,14 +111,14 @@ pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
 
     var codeframeBox = el('div', '');
     card.appendChild(codeframeBox);
-    if (topProject) renderCodeframe(codeframeBox, topProject);
+    if (topProject && DEVTOOLS) renderCodeframe(codeframeBox, topProject);
 
     if (frames.length) {
       var list = el('div', 'border-top:1px solid #3f1010;margin-top:0.75rem;padding-top:0.75rem;font-size:0.72rem;color:#94a3b8;');
       frames.slice(0, 8).forEach(function(f) {
         var row = el('div', 'margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;');
         row.appendChild(el('span', '', 'at ' + (f.fn || '<anonymous>') + ' '));
-        if (isProjectFrame(f)) {
+        if (isProjectFrame(f) && DEVTOOLS) {
           row.appendChild(fileLink(f));
         } else {
           row.appendChild(el('span', 'color:#64748b;', f.file + ':' + f.line + ':' + f.col));
@@ -143,12 +152,47 @@ pub const DEV_OVERLAY_SCRIPT: &str = r#"<script id="__gio_dev_overlay_script">
 
   // Dev watch: the server broadcasts `reload` on the devtools stream after
   // restarting the worker for a source change.
-  try {
-    var es = new EventSource('/_gio/devtools/stream');
-    es.addEventListener('reload', function() { location.reload(); });
-  } catch (_) {}
+  if (DEVTOOLS) {
+    try {
+      var es = new EventSource('/_gio/devtools/stream');
+      es.addEventListener('reload', function() { location.reload(); });
+    } catch (_) {}
+  }
 })();
 </script>"#;
+
+/// Set by `disable_devtools`, once at startup before anything is served.
+static DEVTOOLS_DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// `[dev] devtools = false`: every overlay injected from now on leaves the
+/// /_gio/devtools* endpoints alone.
+pub fn disable_devtools() {
+    DEVTOOLS_DISABLED.store(true, Ordering::Relaxed);
+}
+
+/// `DEV_OVERLAY_SCRIPT` for `[dev] devtools = false`.
+fn script_without_devtools() -> String {
+    DEV_OVERLAY_SCRIPT.replacen("var DEVTOOLS = true;", "var DEVTOOLS = false;", 1)
+}
+
+/// The overlay script as injected: `DEV_OVERLAY_SCRIPT` (without its
+/// devtools features when they are off) with the CSP nonce placeholder on
+/// its tag when nonces are on, so the overlay keeps working under a strict
+/// `script-src`.
+pub fn overlay_script() -> &'static str {
+    static WITHOUT_DEVTOOLS: OnceLock<String> = OnceLock::new();
+    static NONCED: OnceLock<String> = OnceLock::new();
+    let script = if DEVTOOLS_DISABLED.load(Ordering::Relaxed) {
+        WITHOUT_DEVTOOLS.get_or_init(script_without_devtools).as_str()
+    } else {
+        DEV_OVERLAY_SCRIPT
+    };
+    let attr = crate::security::nonce_attr();
+    if attr.is_empty() {
+        return script;
+    }
+    NONCED.get_or_init(|| crate::security::with_nonce_attr(script, "<script", attr))
+}
 
 fn escape_html(raw: &str) -> String {
     raw.replace('&', "&amp;")
@@ -158,9 +202,9 @@ fn escape_html(raw: &str) -> String {
 
 /// Full HTML document for a failed render. Carries a `</body>` tag so the
 /// per-request dev injection can splice the overlay script in, and embeds
-/// message + stack as `window.__GIO_SSR_ERROR__` for it to pick up. The
-/// stack is only present in dev (ssr.ts strips it otherwise), and the
-/// overlay script consuming the payload is only injected in dev.
+/// message + stack as `window.__GIO_SSR_ERROR__` for it to pick up. Dev
+/// only: production responses use `production_error_page_html`, which never
+/// carries the message.
 pub fn error_page_html(status: u16, message: &str, stack: Option<&str>) -> String {
     let payload = serde_json::json!({ "message": message, "stack": stack });
     // \u003c-escaping keeps a "</script>" inside the payload from closing the tag early
@@ -168,14 +212,51 @@ pub fn error_page_html(status: u16, message: &str, stack: Option<&str>) -> Strin
     format!(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{status}</title></head>\
          <body><h1>{status}</h1><pre>{}</pre>\
-         <script>window.__GIO_SSR_ERROR__={payload_json};</script></body></html>",
-        escape_html(message)
+         <script{}>window.__GIO_SSR_ERROR__={payload_json};</script></body></html>",
+        escape_html(message),
+        crate::security::nonce_attr()
+    )
+}
+
+/// Production counterpart of `error_page_html`: the status, its reason
+/// phrase, and an error reference - never the worker's message or stack,
+/// which can carry file paths, queries, or secrets. The reference is the
+/// digest the failure was logged under, so a user report finds the log line.
+pub fn production_error_page_html(status: u16, digest: &str) -> String {
+    let reason = axum::http::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|s| s.canonical_reason())
+        .unwrap_or("Error");
+    format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{status} {reason}</title></head>\
+         <body><h1>{status}</h1><p>{reason}</p><p>Error reference: <code>{}</code></p></body></html>",
+        escape_html(digest)
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_error_page_shows_reason_and_digest_only() {
+        let html = production_error_page_html(500, "a1b2c3d4e5f6");
+        assert!(html.contains("<h1>500</h1>"));
+        assert!(html.contains("Internal Server Error"));
+        assert!(html.contains("<code>a1b2c3d4e5f6</code>"));
+        assert!(!html.contains("__GIO_SSR_ERROR__"));
+        assert!(!html.contains("<pre>"));
+        // Keeps the </body> anchor Rust's injection relies on.
+        assert!(html.contains("</body>"));
+        assert!(production_error_page_html(404, "x").contains("Not Found"));
+    }
+
+    #[test]
+    fn production_error_page_escapes_the_digest() {
+        let html = production_error_page_html(500, "<img>");
+        assert!(!html.contains("<img>"));
+        assert!(html.contains("&lt;img&gt;"));
+    }
 
     #[test]
     fn error_page_has_body_close_tag_for_overlay_injection() {
@@ -217,5 +298,31 @@ mod tests {
         assert!(DEV_OVERLAY_SCRIPT.contains("/_gio/devtools/open-in-editor"));
         assert!(DEV_OVERLAY_SCRIPT.contains("__GIO_SSR_ERROR__"));
         assert!(DEV_OVERLAY_SCRIPT.contains("node_modules"));
+    }
+
+    #[test]
+    fn without_devtools_the_overlay_calls_no_dev_endpoint() {
+        let script = script_without_devtools();
+        assert!(script.contains("var DEVTOOLS = false;"));
+        assert!(!script.contains("var DEVTOOLS = true;"));
+        // Every use of a /_gio/devtools endpoint sits behind the flag.
+        assert!(script.contains("if (topProject && DEVTOOLS) renderCodeframe("));
+        assert!(script.contains("if (isProjectFrame(f) && DEVTOOLS) {"));
+        assert!(script.contains(
+            "if (DEVTOOLS) {\n    try {\n      var es = new EventSource('/_gio/devtools/stream');"
+        ));
+        assert_eq!(script.matches("renderCodeframe(").count(), 2, "defined, called once");
+        assert_eq!(script.matches("fileLink(").count(), 3, "defined, used twice");
+        assert_eq!(script.matches("EventSource(").count(), 1);
+        assert!(DEV_OVERLAY_SCRIPT.contains("var DEVTOOLS = true;"));
+    }
+
+    #[test]
+    fn overlay_script_calls_dev_endpoints_same_origin_and_posts_to_editor() {
+        // The server routes open-in-editor for POST only (see dev_guard.rs).
+        assert!(DEV_OVERLAY_SCRIPT
+            .contains("{ method: 'POST', mode: 'same-origin', credentials: 'same-origin' }"));
+        assert!(DEV_OVERLAY_SCRIPT
+            .contains("frame.line, { mode: 'same-origin', credentials: 'same-origin' })"));
     }
 }

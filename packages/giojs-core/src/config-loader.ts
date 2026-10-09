@@ -3,17 +3,17 @@
  *
  * Loads gio.config.{ts,js} from the project root (one level above APP_DIR) via
  * tsImport. Returns an empty config object if no config file is present - the
- * config is optional, so absence (but not a parse error) is swallowed.
+ * config is optional, so absence (but not a parse error) is swallowed. A
+ * config that fails validateGioConfig (an unknown key, a malformed plugin)
+ * stops boot.
  */
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadTsModule } from './load-ts.ts';
-import type { GioNodePlugin } from './plugin.ts';
+import { validateGioConfig, type GioConfig } from './gio-config.ts';
 
-export interface GioConfig {
-  plugins?: GioNodePlugin[];
-}
+export type { GioConfig } from './gio-config.ts';
 
 const CONFIG_NAMES = ['gio.config.ts', 'gio.config.js'] as const;
 
@@ -26,8 +26,8 @@ export async function loadGioConfig(appDir: string): Promise<GioConfig> {
     } catch {
       continue; // not this extension - try the next
     }
-    const mod = await loadTsModule<{ default?: GioConfig }>(pathToFileURL(configPath).href);
-    return mod.default ?? {};
+    const mod = await loadTsModule<{ default?: unknown }>(pathToFileURL(configPath).href);
+    return validateGioConfig(mod.default, name);
   }
   return {};
 }

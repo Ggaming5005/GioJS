@@ -1,0 +1,23 @@
+# docker compose up --build  →  http://localhost:3000
+services:
+  app:
+    build: .
+    image: {{PROJECT_NAME}}
+    # No linux-arm64 server binary is published yet: on ARM hosts (Apple
+    # Silicon) the image runs under emulation.
+    platform: linux/amd64
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+    # Server secrets (GIO_SESSION_SECRET, API keys) - git- and docker-ignored.
+    env_file:
+      - path: .env.production.local
+        required: false
+    volumes:
+      # SQLite databases and uploads survive container rebuilds.
+      - app-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  app-data:

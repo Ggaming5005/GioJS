@@ -2,7 +2,7 @@
 //!
 //! Incremental HTML injector for streamed SSR bodies. Buffers bytes only
 //! until the first `</head>` (bounded by HEAD_SCAN_CAP), splices the head
-//! snippets (and an optional `lang` attribute after `<html`), then scans a
+//! snippets (and sets the `<html>` tag's `lang` when asked to), then scans a
 //! small carry-over tail for `</body>` to place an optional body-end snippet.
 //! Markers may span chunk boundaries. Everything operates on bytes: both
 //! markers are pure ASCII, and UTF-8 continuation bytes always have the high
@@ -156,21 +156,103 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Append `head`, splicing ` lang="…"` directly after `<html` when set
-/// (mirrors main.rs `inject_html_lang` for buffered bodies).
+/// Append `head`, setting the `<html>` tag's `lang` when one is given
+/// (see `extend_with_html_lang`; main.rs uses it for buffered bodies).
 fn extend_with_lang(out: &mut BytesMut, head: &[u8], lang: Option<&str>) {
-    let Some(lang) = lang else {
-        out.extend_from_slice(head);
+    match lang {
+        Some(lang) => extend_with_html_lang(out, head, lang),
+        None => out.extend_from_slice(head),
+    }
+}
+
+/// Append `html` with ` lang="…"` spliced directly after `<html`, and every
+/// `lang` attribute the document's own `<html>` tag carried removed: the
+/// root layout usually writes the default locale (`<html lang="en">`), and a
+/// second attribute would be ignored - browsers keep the first one. A
+/// document without an `<html>` tag is appended unchanged; one whose tag
+/// cannot be parsed (an unclosed quote) gets the new attribute only.
+pub fn extend_with_html_lang(out: &mut BytesMut, html: &[u8], lang: &str) {
+    let Some(pos) = find_html_tag(html) else {
+        out.extend_from_slice(html);
         return;
     };
-    match find(head, HTML_MARKER) {
-        Some(pos) => {
-            let insert_at = pos + HTML_MARKER.len();
-            out.extend_from_slice(&head[..insert_at]);
-            out.extend_from_slice(format!(" lang=\"{lang}\"").as_bytes());
-            out.extend_from_slice(&head[insert_at..]);
+    let attrs_start = pos + HTML_MARKER.len();
+    let removed = lang_attribute_spans(html, attrs_start).unwrap_or_default();
+    out.reserve(html.len() + lang.len() + 8);
+    out.extend_from_slice(&html[..attrs_start]);
+    out.extend_from_slice(format!(" lang=\"{lang}\"").as_bytes());
+    let mut copied = attrs_start;
+    for (from, to) in removed {
+        out.extend_from_slice(&html[copied..from]);
+        copied = to;
+    }
+    out.extend_from_slice(&html[copied..]);
+}
+
+/// The first `<html` that opens an html element (followed by whitespace,
+/// `>` or `/`), not a longer tag name such as `<htmlx`.
+fn find_html_tag(html: &[u8]) -> Option<usize> {
+    let mut from = 0;
+    while let Some(offset) = find(&html[from..], HTML_MARKER) {
+        let pos = from + offset;
+        match html.get(pos + HTML_MARKER.len()) {
+            Some(b) if b.is_ascii_whitespace() || *b == b'>' || *b == b'/' => return Some(pos),
+            None => return None,
+            Some(_) => from = pos + 1,
         }
-        None => out.extend_from_slice(head),
+    }
+    None
+}
+
+/// The byte ranges of the `lang` attributes (with their leading whitespace)
+/// in the start tag whose attributes begin at `start`, or None when the tag
+/// does not close.
+fn lang_attribute_spans(html: &[u8], start: usize) -> Option<Vec<(usize, usize)>> {
+    let mut spans = Vec::new();
+    let mut i = start;
+    loop {
+        let attr_start = i;
+        while html.get(i)?.is_ascii_whitespace() {
+            i += 1;
+        }
+        match html.get(i)? {
+            b'>' => return Some(spans),
+            // A self-closing slash, or a stray one between attributes.
+            b'/' => {
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        let name_start = i;
+        while !matches!(html.get(i)?, b'=' | b'>' | b'/') && !html[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let name = &html[name_start..i];
+        let mut j = i;
+        while html.get(j)?.is_ascii_whitespace() {
+            j += 1;
+        }
+        if html[j] == b'=' {
+            j += 1;
+            while html.get(j)?.is_ascii_whitespace() {
+                j += 1;
+            }
+            match html[j] {
+                quote @ (b'"' | b'\'') => {
+                    j += 1 + html[j + 1..].iter().position(|&b| b == quote)? + 1;
+                }
+                _ => {
+                    while !matches!(html.get(j)?, b'>') && !html[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                }
+            }
+            i = j;
+        }
+        if name.eq_ignore_ascii_case(b"lang") {
+            spans.push((attr_start, i));
+        }
     }
 }
 
@@ -266,6 +348,84 @@ mod tests {
         let mut injector = StreamInjector::new(String::new(), None, Some("fr".into()));
         let out = collect(&mut injector, &[b"<html><head></head><body></body></html>"]);
         assert_eq!(out, br#"<html lang="fr"><head></head><body></body></html>"#);
+    }
+
+    fn with_html_lang(html: &str, lang: &str) -> String {
+        let mut out = BytesMut::new();
+        extend_with_html_lang(&mut out, html.as_bytes(), lang);
+        String::from_utf8(out.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn lang_attribute_replaces_the_documents_own() {
+        let out = with_html_lang(
+            r#"<!DOCTYPE html><html lang="en"><head></head></html>"#,
+            "de",
+        );
+        assert_eq!(
+            out,
+            r#"<!DOCTYPE html><html lang="de"><head></head></html>"#
+        );
+        // Other attributes stay, in order; every spelling of lang goes.
+        let cases = [
+            (
+                r#"<html class="dark" lang="en" dir="ltr">"#,
+                r#"<html lang="de" class="dark" dir="ltr">"#,
+            ),
+            ("<html lang='en'>", r#"<html lang="de">"#),
+            ("<html LANG=en>", r#"<html lang="de">"#),
+            (
+                "<html lang = \"en\"\n data-x>",
+                "<html lang=\"de\"\n data-x>",
+            ),
+            (r#"<html lang="en" lang="fr">"#, r#"<html lang="de">"#),
+            (
+                r#"<html data-lang="x" xml:lang="en">"#,
+                r#"<html lang="de" data-lang="x" xml:lang="en">"#,
+            ),
+            (
+                r#"<html data-title="a > b" lang="en">"#,
+                r#"<html lang="de" data-title="a > b">"#,
+            ),
+            ("<html lang>", r#"<html lang="de">"#),
+            ("<html/>", r#"<html lang="de"/>"#),
+            ("<html>", r#"<html lang="de">"#),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(with_html_lang(input, "de"), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn lang_attribute_skips_lookalike_tags_and_malformed_ones() {
+        assert_eq!(
+            with_html_lang("<htmlx><html>", "de"),
+            r#"<htmlx><html lang="de">"#
+        );
+        assert_eq!(
+            with_html_lang("<body>no root</body>", "de"),
+            "<body>no root</body>"
+        );
+        // Unclosed quote: the tag cannot be parsed, so nothing is removed.
+        assert_eq!(
+            with_html_lang(r#"<html lang="en"#, "de"),
+            r#"<html lang="de" lang="en"#
+        );
+    }
+
+    #[test]
+    fn streamed_lang_attribute_replaces_the_documents_own() {
+        let html = r#"<!DOCTYPE html><html lang="en"><head></head><body>x</body></html>"#;
+        for split_at in 0..html.len() {
+            let mut injector = StreamInjector::new("H".into(), None, Some("de".into()));
+            let bytes = html.as_bytes();
+            let out = collect(&mut injector, &[&bytes[..split_at], &bytes[split_at..]]);
+            assert_eq!(
+                String::from_utf8(out).unwrap(),
+                r#"<!DOCTYPE html><html lang="de"><head>H</head><body>x</body></html>"#,
+                "split at byte {split_at}"
+            );
+        }
     }
 
     #[test]

@@ -23,6 +23,14 @@ const C = {
   gray: '\x1b[90m',
 };
 
+/** The user pressed Ctrl+C (or Escape) at a prompt. */
+export class CancelledError extends Error {
+  override name = 'CancelledError';
+  constructor() {
+    super('cancelled');
+  }
+}
+
 const POINTER = '❯';
 const RADIO_ON = '●';
 const RADIO_OFF = '○';
@@ -100,7 +108,7 @@ export async function select<T>(
       } else if ((key.ctrl && key.name === 'c') || key.name === 'escape') {
         cleanup();
         output.write('\n');
-        reject(new Error('cancelled'));
+        reject(new CancelledError());
       }
     }
 

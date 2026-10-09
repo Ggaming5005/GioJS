@@ -72,6 +72,7 @@ spec:
           # /_gio/health always returns 200 (cached and static content still
           # serves while the Node worker respawns); the JSON body's nodeReady
           # field reports SSR worker state if you need a stricter probe.
+          # Both probes need [health] enabled = true (the default).
           readinessProbe:
             httpGet:
               path: /_gio/health
@@ -85,6 +86,8 @@ spec:
               port: 3000
             initialDelaySeconds: 15
             periodSeconds: 30
+          # Sized for one render worker. With [server] workers = N, add
+          # roughly one worker's RSS per extra worker to the memory limit.
           resources:
             requests:
               memory: "128Mi"
@@ -139,6 +142,26 @@ spec:
         - example.com
       secretName: my-app-tls
 ```
+
+ingress-nginx keeps idle connections to each pod open for 60s (`upstream-keepalive-timeout`), but GioJS closes an idle HTTP/1.1 connection after `header_read_timeout_secs` (10s by default). Without a fix, the ingress sometimes reuses a connection just as the pod closes it, and that request gets a 502. Raise both GioJS deadlines above the ingress timeout in the `gio.toml` ConfigMap:
+
+```toml
+[server]
+header_read_timeout_secs = 65
+idle_timeout_secs = 65
+```
+
+Alternatively, set `upstream-keepalive-timeout: "5"` in the ingress-nginx controller ConfigMap. See [Behind a reverse proxy or load balancer](README.md#behind-a-reverse-proxy-or-load-balancer).
+
+Every request reaches the pod from the ingress controller, so trust it in the same ConfigMap - otherwise rate limits and `req.ip` see the controller instead of visitors. Use the pod CIDR the controller runs in (your cluster's may differ):
+
+```toml
+[server]
+trusted_proxies = ["10.244.0.0/16"]
+accept_request_id = false   # ingress-nginx reuses a client's own X-Request-ID
+```
+
+ingress-nginx sends `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and an `X-Request-ID`. That id is the client's own when the client sent one, so with `accept_request_id = false` GioJS generates every id instead; leave it on (the default) only if a client-chosen id is acceptable in your logs, in exchange for one id across the controller's and GioJS's logs. See [Client IPs, HTTPS and request IDs](README.md#client-ips-https-and-request-ids).
 
 ---
 

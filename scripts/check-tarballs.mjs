@@ -58,6 +58,9 @@ for (const rel of dirs) {
     const hasBinary = tarballFiles.has('bin/giojs-server') || tarballFiles.has('bin/giojs-server.exe');
     if (!hasBinary) required.add('bin/giojs-server');
   }
+  // Scaffolded gio.toml files point editors at
+  // ./node_modules/@gio.js/server/gio.schema.json.
+  if (pkg.name === '@gio.js/server') required.add('gio.schema.json');
 
   const missing = [...required].filter((p) => !tarballFiles.has(p));
   if (missing.length > 0) {

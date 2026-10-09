@@ -11,7 +11,14 @@ import { describe, it, expect, vi } from 'vitest';
 import type { GioSocket, WsOutbound } from './context.ts';
 import {
   GioSocketImpl,
+  HOLD_TIMEOUT_MS,
+  MAX_HELD_BYTES,
+  MAX_HELD_BYTES_TOTAL,
+  MAX_HELD_MESSAGES,
   MAX_WS_IPC_FRAME_BYTES,
+  WS_NO_HANDLER_CODE,
+  WS_REJECTED_CODE,
+  createWsDispatcher,
   createWsIpcServer,
   decodeBinaryPayload,
   encodeBinaryPayload,
@@ -21,6 +28,10 @@ import {
   wsAuthIsValid,
 } from './ws-ipc.ts';
 import { handshakeProof } from './ipc.ts';
+import { broadcast, MAX_ROOMS_PER_SOCKET, MAX_ROOM_NAME_BYTES, wsHub } from './ws-hub.ts';
+import { registerFailedRouteModule, type WsHandlerFn } from './ws-router.ts';
+import type { HandlerEntry } from './router.ts';
+import { logger } from './logger.ts';
 
 describe('isDroppableWsFrame', () => {
   it('marks payload frames droppable under backpressure', () => {
@@ -28,8 +39,9 @@ describe('isDroppableWsFrame', () => {
     expect(isDroppableWsFrame({ type: 'ws_broadcast', routeId: 'r1', data: 'x' })).toBe(true);
   });
 
-  it('never marks the ws_close control frame droppable', () => {
+  it('never marks the ws_close and ws_accept control frames droppable', () => {
     expect(isDroppableWsFrame({ type: 'ws_close', connId: 'c1', code: 1000, reason: '' })).toBe(false);
+    expect(isDroppableWsFrame({ type: 'ws_accept', connId: 'c1' })).toBe(false);
   });
 });
 
@@ -282,6 +294,35 @@ describe('validateWsInbound', () => {
     ).toBeNull();
   });
 
+  it('accepts the optional connection context of ws_connect', () => {
+    const msg = validateWsInbound({
+      type: 'ws_connect',
+      connId: 'c1',
+      routeId: '/chat/lobby',
+      addr: '203.0.113.9:0',
+      path: '/chat/lobby',
+      query: { token: 't' },
+      headers: { cookie: 'sid=1' },
+      ip: '203.0.113.9',
+      requestId: 'req-1',
+    });
+    expect(msg).toMatchObject({
+      path: '/chat/lobby',
+      query: { token: 't' },
+      headers: { cookie: 'sid=1' },
+      ip: '203.0.113.9',
+      requestId: 'req-1',
+    });
+  });
+
+  it('rejects a ws_connect whose connection context is mistyped', () => {
+    const base = { type: 'ws_connect', connId: 'c1', routeId: '/chat', addr: 'a' };
+    expect(validateWsInbound({ ...base, headers: { cookie: 1 } })).toBeNull();
+    expect(validateWsInbound({ ...base, query: 'a=1' })).toBeNull();
+    expect(validateWsInbound({ ...base, ip: 4 })).toBeNull();
+    expect(validateWsInbound({ ...base, requestId: null })).toBeNull();
+  });
+
   it('rejects ws_message with missing or mistyped fields', () => {
     expect(validateWsInbound({ type: 'ws_message', connId: 'c1', data: 'x' })).toBeNull();
     expect(
@@ -410,13 +451,18 @@ describe.skipIf(process.platform === 'win32')('createWsIpcServer over Unix socke
       await once(client, 'connect');
 
       let clientBuf = Buffer.alloc(0);
-      const outboundPromise = new Promise<WsOutbound>(resolve => {
+      const outboundFrames: WsOutbound[] = [];
+      // The accept, then the handler's reply.
+      const outboundPromise = new Promise<WsOutbound[]>(resolve => {
         client.on('data', (chunk: Buffer) => {
           clientBuf = Buffer.concat([clientBuf, chunk]);
-          if (clientBuf.length < 4) return;
-          const len = clientBuf.readUInt32BE(0);
-          if (clientBuf.length < 4 + len) return;
-          resolve(JSON.parse(clientBuf.subarray(4, 4 + len).toString('utf8')) as WsOutbound);
+          while (clientBuf.length >= 4) {
+            const len = clientBuf.readUInt32BE(0);
+            if (clientBuf.length < 4 + len) return;
+            outboundFrames.push(JSON.parse(clientBuf.subarray(4, 4 + len).toString('utf8')) as WsOutbound);
+            clientBuf = clientBuf.subarray(4 + len);
+            if (outboundFrames.length === 2) resolve(outboundFrames);
+          }
         });
       });
 
@@ -436,12 +482,15 @@ describe.skipIf(process.platform === 'win32')('createWsIpcServer over Unix socke
       const outbound = await outboundPromise;
       expect(received).toHaveLength(1);
       expect(received[0]).toEqual(inboundPayload);
-      expect(outbound).toEqual({
-        type: 'ws_send',
-        connId: 'c1',
-        data: Buffer.from([0x01, 0xff]).toString('base64'),
-        isBinary: true,
-      });
+      expect(outbound).toEqual([
+        { type: 'ws_accept', connId: 'c1' },
+        {
+          type: 'ws_send',
+          connId: 'c1',
+          data: Buffer.from([0x01, 0xff]).toString('base64'),
+          isBinary: true,
+        },
+      ]);
 
       client.destroy();
     } finally {
@@ -449,5 +498,464 @@ describe.skipIf(process.platform === 'win32')('createWsIpcServer over Unix socke
       delete process.env['GIO_WS_SOCKET_PATH'];
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Connection dispatcher: routing, context, accept/reject, rooms ──────────
+
+function connectFrame(connId: string, path: string, extra: Record<string, unknown> = {}) {
+  return { type: 'ws_connect' as const, connId, routeId: path, addr: '127.0.0.1:9', path, ...extra };
+}
+
+function harness(handlers: Record<string, WsHandlerFn>) {
+  const writes: WsOutbound[] = [];
+  const dispatcher = createWsDispatcher(new Map(Object.entries(handlers)), msg => writes.push(msg));
+  return { writes, dispatcher };
+}
+
+function messageFrame(connId: string, data: string) {
+  return { type: 'ws_message' as const, connId, data, isBinary: false };
+}
+
+const ACCEPT = (connId: string): WsOutbound => ({ type: 'ws_accept', connId });
+
+/** Let an async wsHandler settle. */
+const settle = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
+
+describe('ws dispatcher routing', () => {
+  it('matches dynamic segments and passes params', () => {
+    const seen: GioSocket[] = [];
+    const { dispatcher } = harness({ '/chat/:room': socket => void seen.push(socket) });
+    dispatcher.handle(connectFrame('c1', '/chat/lobby'));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.params).toEqual({ room: 'lobby' });
+    expect(seen[0]?.path).toBe('/chat/lobby');
+  });
+
+  it('prefers the most specific pattern, like pages do', () => {
+    const hits: string[] = [];
+    const { dispatcher } = harness({
+      '/chat/:room': () => void hits.push('param'),
+      '/chat/admin': () => void hits.push('static'),
+      '/chat/*rest': () => void hits.push('catch-all'),
+    });
+    dispatcher.handle(connectFrame('c1', '/chat/admin'));
+    dispatcher.handle(connectFrame('c2', '/chat/lobby'));
+    dispatcher.handle(connectFrame('c3', '/chat/a/b'));
+    expect(hits).toEqual(['static', 'param', 'catch-all']);
+  });
+
+  it('passes catch-all params with their slashes', () => {
+    let params: Record<string, string> = {};
+    const { dispatcher } = harness({ '/live/*topic': socket => void (params = socket.params) });
+    dispatcher.handle(connectFrame('c1', '/live/news/eu'));
+    expect(params).toEqual({ topic: 'news/eu' });
+  });
+
+  it('closes a connection no wsHandler matches with 4404', () => {
+    const { dispatcher, writes } = harness({ '/chat/:room': () => {} });
+    dispatcher.handle(connectFrame('c1', '/elsewhere'));
+    expect(writes).toEqual([
+      { type: 'ws_close', connId: 'c1', code: WS_NO_HANDLER_CODE, reason: 'no websocket handler' },
+    ]);
+  });
+
+  it('closes a connection to a route.ts that failed to import with 1011, not 4404, and logs it under a digest', () => {
+    const wsHandlers = new Map<string, WsHandlerFn>();
+    const handlers = new Map<string, HandlerEntry>();
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    try {
+      registerFailedRouteModule(new Error('REQ_VAR is not set'), '/app/chat/[room]/route.ts', '/chat/:room', wsHandlers, handlers);
+      // A broader wsHandler does not take the failed route's URLs over.
+      wsHandlers.set('/chat/*rest', () => {});
+      const writes: WsOutbound[] = [];
+      const dispatcher = createWsDispatcher(wsHandlers, msg => writes.push(msg));
+      dispatcher.handle(connectFrame('c1', '/chat/lobby'));
+      expect(writes).toHaveLength(1);
+      const close = writes[0] as { type: string; code: number; reason: string };
+      expect(close.type).toBe('ws_close');
+      expect(close.code).toBe(1011);
+      const digest = /^internal error \(digest ([0-9a-f]{12})\)$/.exec(close.reason)?.[1];
+      expect(digest).toBeDefined();
+      expect(close.reason).not.toContain('REQ_VAR');
+      const perConnection = errorSpy.mock.calls.at(-1);
+      expect(perConnection?.[0]).toBe('route file failed to load');
+      expect(perConnection?.[1]).toMatchObject({
+        path: '/chat/lobby',
+        connId: 'c1',
+        digest,
+        filePath: '/app/chat/[room]/route.ts',
+        error: 'REQ_VAR is not set',
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('falls back to routeId when an older server sends no path', () => {
+    const seen: GioSocket[] = [];
+    const { dispatcher } = harness({ '/chat/:room': socket => void seen.push(socket) });
+    dispatcher.handle({ type: 'ws_connect', connId: 'c1', routeId: '/chat/x', addr: 'a' });
+    expect(seen[0]?.params).toEqual({ room: 'x' });
+    expect(seen[0]?.headers).toEqual({});
+    expect(seen[0]?.cookies).toEqual({});
+  });
+});
+
+describe('ws connection context', () => {
+  it('exposes query, headers, parsed cookies, ip and requestId', () => {
+    let socket: GioSocket | undefined;
+    const { dispatcher } = harness({ '/chat/:room': s => void (socket = s) });
+    dispatcher.handle(
+      connectFrame('c1', '/chat/lobby', {
+        query: { token: 'abc' },
+        headers: { cookie: 'gio_session=tok; theme=dark', 'user-agent': 'UA' },
+        ip: '203.0.113.9',
+        requestId: 'req-7',
+      }),
+    );
+    expect(socket?.query).toEqual({ token: 'abc' });
+    expect(socket?.headers['user-agent']).toBe('UA');
+    expect(socket?.cookies).toEqual({ gio_session: 'tok', theme: 'dark' });
+    expect(socket?.ip).toBe('203.0.113.9');
+    expect(socket?.requestId).toBe('req-7');
+  });
+});
+
+describe('ws accept/reject contract', () => {
+  it('returning false closes with 4401 and never delivers messages', () => {
+    const onMessage = vi.fn();
+    const { dispatcher, writes } = harness({
+      '/ws': socket => {
+        socket.on('message', onMessage);
+        return false;
+      },
+    });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    dispatcher.handle({ type: 'ws_message', connId: 'c1', data: 'hi', isBinary: false });
+    expect(writes).toEqual([
+      { type: 'ws_close', connId: 'c1', code: WS_REJECTED_CODE, reason: 'unauthorized' },
+    ]);
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('an async handler holds messages until it accepts, then delivers them in order', async () => {
+    const received: Array<string | Buffer> = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => (release = resolve));
+    const { dispatcher } = harness({
+      '/ws': async socket => {
+        await gate; // e.g. a session lookup
+        socket.on('message', data => received.push(data));
+      },
+    });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    dispatcher.handle({ type: 'ws_message', connId: 'c1', data: 'one', isBinary: false });
+    dispatcher.handle({ type: 'ws_message', connId: 'c1', data: 'two', isBinary: false });
+    await settle();
+    expect(received).toEqual([]);
+    release();
+    await settle();
+    expect(received).toEqual(['one', 'two']);
+    dispatcher.handle({ type: 'ws_message', connId: 'c1', data: 'three', isBinary: false });
+    expect(received).toEqual(['one', 'two', 'three']);
+  });
+
+  it('an async handler resolving false rejects and drops what it held', async () => {
+    const onMessage = vi.fn();
+    const lookup = async (): Promise<string | undefined> => undefined; // finds nobody
+    const { dispatcher, writes } = harness({
+      '/ws': async socket => {
+        const userId = await lookup();
+        if (userId === undefined) return false;
+        socket.on('message', onMessage);
+        return true;
+      },
+    });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    dispatcher.handle(messageFrame('c1', 'early'));
+    await settle();
+    expect(writes).toEqual([
+      { type: 'ws_close', connId: 'c1', code: WS_REJECTED_CODE, reason: 'unauthorized' },
+    ]);
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('an async handler can await its first message (token auth)', async () => {
+    // Browsers cannot set headers on a WebSocket, so the first message often
+    // carries the credential. The handler waits on it inside its own promise:
+    // holding messages until that promise settles would deadlock.
+    const after: string[] = [];
+    const { dispatcher, writes } = harness({
+      '/live': async socket => {
+        const token = await new Promise<string>(resolve =>
+          socket.on('message', data => resolve(String(data))),
+        );
+        if (token !== 'good') return false;
+        socket.send('welcome');
+        socket.on('message', data => after.push(String(data)));
+        return true;
+      },
+    });
+    dispatcher.handle(connectFrame('c1', '/live'));
+    dispatcher.handle(messageFrame('c1', 'good'));
+    await settle();
+    expect(writes).toEqual([
+      { type: 'ws_send', connId: 'c1', data: 'welcome', isBinary: false },
+      ACCEPT('c1'),
+    ]);
+    dispatcher.handle(messageFrame('c1', 'hello'));
+    expect(after).toEqual(['hello']);
+
+    dispatcher.handle(connectFrame('c2', '/live'));
+    dispatcher.handle(messageFrame('c2', 'forged'));
+    await settle();
+    expect(writes.at(-1)).toEqual({
+      type: 'ws_close',
+      connId: 'c2',
+      code: WS_REJECTED_CODE,
+      reason: 'unauthorized',
+    });
+  });
+
+  it('messages held before the first listener reach it in order, while the handler still decides', async () => {
+    const received: Array<string | Buffer> = [];
+    let listen: () => void = () => {};
+    let decide: () => void = () => {};
+    const listening = new Promise<void>(resolve => (listen = resolve));
+    const decided = new Promise<void>(resolve => (decide = resolve));
+    const { dispatcher, writes } = harness({
+      '/ws': async socket => {
+        await listening;
+        socket.on('message', data => received.push(data));
+        await decided;
+      },
+    });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    dispatcher.handle(messageFrame('c1', 'one'));
+    dispatcher.handle(messageFrame('c1', 'two'));
+    await settle();
+    expect(received).toEqual([]);
+    listen();
+    await settle();
+    expect(received).toEqual(['one', 'two']);
+    dispatcher.handle(messageFrame('c1', 'three'));
+    expect(received).toEqual(['one', 'two', 'three']);
+    expect(writes).toEqual([]); // still deciding: not accepted yet
+    decide();
+    await settle();
+    expect(writes).toEqual([ACCEPT('c1')]);
+  });
+
+  it('socket.close() with a custom code rejects too', () => {
+    const { dispatcher, writes } = harness({
+      '/ws': socket => socket.close(4403, 'forbidden'),
+    });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    expect(writes).toEqual([{ type: 'ws_close', connId: 'c1', code: 4403, reason: 'forbidden' }]);
+  });
+
+  it('a throwing or rejecting handler closes with 1011', async () => {
+    const { dispatcher, writes } = harness({
+      '/sync': () => {
+        throw new Error('bug');
+      },
+      '/async': async () => {
+        throw new Error('bug');
+      },
+    });
+    dispatcher.handle(connectFrame('c1', '/sync'));
+    dispatcher.handle(connectFrame('c2', '/async'));
+    await settle();
+    expect(writes).toEqual([
+      { type: 'ws_close', connId: 'c1', code: 1011, reason: 'internal error' },
+      { type: 'ws_close', connId: 'c2', code: 1011, reason: 'internal error' },
+    ]);
+  });
+
+  it('a flood before an async handler accepts closes the connection with 1008', () => {
+    const { dispatcher, writes } = harness({ '/ws': () => new Promise<void>(() => {}) });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    for (let i = 0; i <= MAX_HELD_MESSAGES; i++) {
+      dispatcher.handle({ type: 'ws_message', connId: 'c1', data: String(i), isBinary: false });
+    }
+    expect(writes.at(-1)).toMatchObject({ type: 'ws_close', connId: 'c1', code: 1008 });
+  });
+
+  it('held messages are bounded by bytes per socket, not only by count', () => {
+    const { dispatcher, writes } = harness({ '/ws': () => new Promise<void>(() => {}) });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    dispatcher.handle(messageFrame('c1', 'x'.repeat(MAX_HELD_BYTES)));
+    expect(writes).toEqual([]);
+    dispatcher.handle(messageFrame('c1', 'x'));
+    expect(writes).toEqual([
+      {
+        type: 'ws_close',
+        connId: 'c1',
+        code: 1008,
+        reason: 'too many messages before the connection was accepted',
+      },
+    ]);
+
+    dispatcher.handle(connectFrame('c2', '/ws'));
+    dispatcher.handle({
+      type: 'ws_message',
+      connId: 'c2',
+      data: encodeBinaryPayload(Buffer.alloc(MAX_HELD_BYTES + 1)),
+      isBinary: true,
+    });
+    expect(writes.at(-1)).toMatchObject({ type: 'ws_close', connId: 'c2', code: 1008 });
+  });
+
+  it('held messages are bounded across all sockets, and a closed socket frees its share', () => {
+    const { dispatcher, writes } = harness({ '/ws': () => new Promise<void>(() => {}) });
+    const full = 'x'.repeat(MAX_HELD_BYTES);
+    const sockets = MAX_HELD_BYTES_TOTAL / MAX_HELD_BYTES;
+    for (let i = 0; i < sockets; i++) {
+      dispatcher.handle(connectFrame(`c${i}`, '/ws'));
+      dispatcher.handle(messageFrame(`c${i}`, full));
+    }
+    expect(writes).toEqual([]);
+    dispatcher.handle(connectFrame('over', '/ws'));
+    dispatcher.handle(messageFrame('over', 'x'));
+    expect(writes).toEqual([
+      expect.objectContaining({ type: 'ws_close', connId: 'over', code: 1008 }),
+    ]);
+
+    dispatcher.handle({ type: 'ws_disconnect', connId: 'c0', code: 1001, reason: '' });
+    dispatcher.handle(connectFrame('next', '/ws'));
+    dispatcher.handle(messageFrame('next', full));
+    expect(writes).toHaveLength(1);
+  });
+
+  it('a handler that neither listens nor settles stops holding after HOLD_TIMEOUT_MS', async () => {
+    vi.useFakeTimers();
+    try {
+      const received: string[] = [];
+      let listen: () => void = () => {};
+      const listening = new Promise<void>(resolve => (listen = resolve));
+      const { dispatcher, writes } = harness({
+        // e.g. a feed loop that runs for the connection's lifetime
+        '/ws': async socket => {
+          await listening;
+          socket.on('message', data => received.push(String(data)));
+          await new Promise<void>(() => {});
+        },
+      });
+      dispatcher.handle(connectFrame('c1', '/ws'));
+      dispatcher.handle(messageFrame('c1', 'early'));
+      await vi.advanceTimersByTimeAsync(HOLD_TIMEOUT_MS);
+      // Dropped, not held forever: a client of such a handler is not closed
+      // for sending more than the hold allows.
+      for (let i = 0; i <= MAX_HELD_MESSAGES; i++) dispatcher.handle(messageFrame('c1', String(i)));
+      expect(writes).toEqual([]);
+      listen();
+      await vi.advanceTimersByTimeAsync(0);
+      dispatcher.handle(messageFrame('c1', 'late'));
+      expect(received).toEqual(['late']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('accepting sends ws_accept once; rejecting, closing or no handler never does', async () => {
+    let accepted: GioSocket | undefined;
+    const { dispatcher, writes } = harness({
+      '/sync': s => void (accepted = s),
+      '/async': async () => true,
+      '/deny': () => false,
+      '/close': s => s.close(4403, 'forbidden'),
+    });
+    dispatcher.handle(connectFrame('c1', '/sync'));
+    dispatcher.handle(connectFrame('c2', '/async'));
+    dispatcher.handle(connectFrame('c3', '/deny'));
+    dispatcher.handle(connectFrame('c4', '/close'));
+    dispatcher.handle(connectFrame('c5', '/nowhere'));
+    await settle();
+    accepted?.close();
+    expect(writes.filter(w => w.type === 'ws_accept')).toEqual([ACCEPT('c1'), ACCEPT('c2')]);
+  });
+
+  it('nothing is sent after close', () => {
+    let socket: GioSocket | undefined;
+    const { dispatcher, writes } = harness({ '/ws': s => void (socket = s) });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    socket?.close();
+    socket?.send('late');
+    socket?.close();
+    expect(writes).toEqual([ACCEPT('c1'), { type: 'ws_close', connId: 'c1', code: 1000, reason: '' }]);
+  });
+});
+
+describe('ws rooms', () => {
+  it('join and leave send control frames once per change', () => {
+    let socket: GioSocket | undefined;
+    const { dispatcher, writes } = harness({ '/ws': s => void (socket = s) });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    socket?.join('lobby');
+    socket?.join('lobby');
+    expect([...(socket?.rooms ?? [])]).toEqual(['lobby']);
+    socket?.leave('lobby');
+    socket?.leave('lobby');
+    expect(writes).toEqual([
+      ACCEPT('c1'),
+      { type: 'ws_join', connId: 'c1', room: 'lobby' },
+      { type: 'ws_leave', connId: 'c1', room: 'lobby' },
+    ]);
+    expect(socket?.rooms.size).toBe(0);
+  });
+
+  it('bounds room names and memberships per socket', () => {
+    const socket = new GioSocketImpl('c1', '/ws', () => {});
+    expect(() => socket.join('')).toThrow(TypeError);
+    expect(() => socket.join('x'.repeat(MAX_ROOM_NAME_BYTES + 1))).toThrow(RangeError);
+    for (let i = 0; i < MAX_ROOMS_PER_SOCKET; i++) socket.join(`room-${i}`);
+    expect(() => socket.join('one-too-many')).toThrow(RangeError);
+    socket.join('room-0'); // already a member: not a new membership
+  });
+
+  it('memberships end with the connection', () => {
+    let socket: GioSocket | undefined;
+    const { dispatcher } = harness({ '/ws': s => void (socket = s) });
+    dispatcher.handle(connectFrame('c1', '/ws'));
+    socket?.join('a');
+    dispatcher.handle({ type: 'ws_disconnect', connId: 'c1', code: 1001, reason: '' });
+    expect(socket?.rooms.size).toBe(0);
+    expect(dispatcher.size).toBe(0);
+  });
+
+  it('broadcast(room) frames text and binary payloads and honors except', () => {
+    const writes: WsOutbound[] = [];
+    const hub = wsHub();
+    const previous = hub.write;
+    hub.write = msg => writes.push(msg);
+    try {
+      expect(broadcast('lobby', 'hello')).toBe(true);
+      expect(broadcast('lobby', new Uint8Array([0xff, 0x00]), { except: 'c1' })).toBe(true);
+      expect(() => broadcast('', 'x')).toThrow(TypeError);
+    } finally {
+      hub.write = previous;
+    }
+    expect(writes).toEqual([
+      { type: 'ws_room_broadcast', room: 'lobby', data: 'hello', isBinary: false },
+      { type: 'ws_room_broadcast', room: 'lobby', data: '/wA=', isBinary: true, except: 'c1' },
+    ]);
+  });
+
+  it('broadcast(room) reports false while no WebSocket server is connected', () => {
+    const hub = wsHub();
+    const previous = hub.write;
+    hub.write = null;
+    try {
+      expect(broadcast('lobby', 'hello')).toBe(false);
+    } finally {
+      hub.write = previous;
+    }
+  });
+
+  it('room broadcasts are droppable payload frames; join/leave never are', () => {
+    expect(isDroppableWsFrame({ type: 'ws_room_broadcast', room: 'r', data: '', isBinary: false })).toBe(true);
+    expect(isDroppableWsFrame({ type: 'ws_join', connId: 'c', room: 'r' })).toBe(false);
+    expect(isDroppableWsFrame({ type: 'ws_leave', connId: 'c', room: 'r' })).toBe(false);
   });
 });

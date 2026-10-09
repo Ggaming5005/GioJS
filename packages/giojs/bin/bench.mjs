@@ -7,9 +7,13 @@
  * excluded from all stats. `--suite` runs several paths sequentially and
  * prints an aligned table. The X-Gio-Cache header of the LAST response per
  * target is printed so hit-vs-miss benchmarks are self-labeling.
+ *
+ * Exit codes follow `gio`: 0 success, 1 the run failed (no request
+ * succeeded), 2 usage error.
  */
 import http from 'node:http';
 import https from 'node:https';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 const DEFAULT_CONNECTIONS = 32;
@@ -17,6 +21,7 @@ const DEFAULT_DURATION_SECONDS = 10;
 const DEFAULT_WARMUP_SECONDS = 2;
 const DEFAULT_BASE_URL = 'http://localhost:3000';
 const MAX_CONSECUTIVE_ERRORS = 3;
+const USAGE_ERROR = 2;
 
 export function percentile(sortedLatencies, fraction) {
   if (sortedLatencies.length === 0) return 0;
@@ -50,6 +55,16 @@ export function formatBytesPerSecond(bytesPerSecond) {
   return `${value.toFixed(2)} ${units[unitIndex]}`;
 }
 
+/** Whether `text` is an absolute http(s) URL. */
+function isHttpUrl(text) {
+  try {
+    const { protocol } = new URL(text);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export function parseBenchArgs(argv) {
   const options = {
     connections: DEFAULT_CONNECTIONS,
@@ -58,32 +73,55 @@ export function parseBenchArgs(argv) {
     base: DEFAULT_BASE_URL,
     suite: null,
     url: null,
+    help: false,
   };
   const numericFlags = { '--connections': 'connections', '--duration': 'duration', '--warmup': 'warmup' };
+  const valueFlags = new Set([...Object.keys(numericFlags), '--suite', '--base']);
 
   for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (argument in numericFlags) {
-      const parsed = Number(argv[index + 1]);
-      if (!Number.isFinite(parsed) || parsed < 0 || (argument !== '--warmup' && parsed <= 0)) {
-        return { ok: false, error: `${argument} requires a positive number, got: ${argv[index + 1] ?? '(nothing)'}` };
+    let argument = argv[index];
+    // `--flag=value` as well as `--flag value`, like every other gio command.
+    let inline;
+    const equals = argument.startsWith('--') ? argument.indexOf('=') : -1;
+    if (equals !== -1 && valueFlags.has(argument.slice(0, equals))) {
+      inline = argument.slice(equals + 1);
+      argument = argument.slice(0, equals);
+    }
+    const takeValue = () => {
+      if (inline !== undefined) return inline;
+      index += 1;
+      return argv[index];
+    };
+    // --help wins only over arguments that parse: `--help --bogus` is
+    // still a usage error, as with every other gio command.
+    if (argument === '--help' || argument === '-h') {
+      options.help = true;
+    } else if (argument in numericFlags) {
+      const raw = takeValue();
+      const parsed = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+      if (argument === '--connections') {
+        if (!Number.isInteger(parsed) || parsed <= 0) {
+          return { ok: false, error: `--connections requires a positive whole number, got: ${raw ?? '(nothing)'}` };
+        }
+      } else if (!Number.isFinite(parsed) || parsed < 0 || (argument !== '--warmup' && parsed <= 0)) {
+        const kind = argument === '--warmup' ? 'a number of seconds (0 or more)' : 'a positive number of seconds';
+        return { ok: false, error: `${argument} requires ${kind}, got: ${raw ?? '(nothing)'}` };
       }
       options[numericFlags[argument]] = parsed;
-      index += 1;
     } else if (argument === '--suite') {
-      const list = argv[index + 1];
+      const list = takeValue();
       if (!list || list.startsWith('--')) {
         return { ok: false, error: '--suite requires a comma-separated list of paths, e.g. --suite /,/public/logo.svg' };
       }
       options.suite = list.split(',').map((path) => path.trim()).filter((path) => path.length > 0);
       if (options.suite.length === 0) return { ok: false, error: '--suite list is empty' };
-      index += 1;
     } else if (argument === '--base') {
-      const base = argv[index + 1];
-      if (!base) return { ok: false, error: '--base requires a URL' };
+      const base = takeValue();
+      if (!base || !isHttpUrl(base)) {
+        return { ok: false, error: `--base requires an http(s) URL such as http://localhost:3000, got: ${base || '(nothing)'}` };
+      }
       options.base = base.replace(/\/$/, '');
-      index += 1;
-    } else if (argument.startsWith('--')) {
+    } else if (argument.startsWith('-')) {
       return { ok: false, error: `unknown flag: ${argument}` };
     } else if (options.url === null) {
       options.url = argument;
@@ -92,6 +130,7 @@ export function parseBenchArgs(argv) {
     }
   }
 
+  if (options.help) return { ok: true, value: options };
   if (options.suite === null && options.url === null) {
     return { ok: false, error: 'usage: gio bench <url> [--connections 32] [--duration 10] [--warmup 2]\n       gio bench --suite /,/other [--base http://localhost:3000]' };
   }
@@ -100,6 +139,8 @@ export function parseBenchArgs(argv) {
   }
   if (options.url !== null && options.url.startsWith('/')) {
     options.url = `${options.base}${options.url}`;
+  } else if (options.url !== null && !isHttpUrl(options.url)) {
+    return { ok: false, error: `expected a path (/posts/1) or an http(s) URL, got: ${options.url}` };
   }
   return { ok: true, value: options };
 }
@@ -210,10 +251,15 @@ function printSingleResult(result, options) {
 async function main() {
   const parsed = parseBenchArgs(process.argv.slice(2));
   if (!parsed.ok) {
-    console.error(`gio bench: ${parsed.error}`);
-    process.exit(1);
+    console.error(`gio bench: ${parsed.error}\nRun \`gio bench --help\` for usage.`);
+    process.exit(USAGE_ERROR);
   }
   const options = parsed.value;
+  if (options.help) {
+    const { commandHelp } = createRequire(import.meta.url)('./lib/commands.js');
+    console.log(commandHelp('bench'));
+    return;
+  }
 
   if (options.suite === null) {
     const result = await runLoad(options.url, options);

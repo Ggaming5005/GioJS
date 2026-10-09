@@ -6,15 +6,14 @@
   "scripts": {
     "dev": "cross-env NODE_ENV=development giojs-server",
     "build": "node -e \"console.log('GioJS server apps have no build step: routes and client bundles are built at server startup.')\"",
-    "start": "giojs-server"
+    "start": "cross-env NODE_ENV=production giojs-server"
   },
   "dependencies": {
-    "@gio.js/server": "^0.1.0-beta.7",
-    "@gio.js/react": "^0.1.0-beta.7",
+    "@gio.js/server": "^0.1.0-beta.8",
+    "@gio.js/core": "^0.1.0-beta.8",
+    "@gio.js/react": "^0.1.0-beta.8",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
-  },
-  "devDependencies": {
+    "react-dom": "^19.0.0",
     "cross-env": "^7.0.3"
   }
 }

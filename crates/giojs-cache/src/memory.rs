@@ -31,9 +31,14 @@ impl MemoryLayer {
         guard.get(key).cloned()
     }
 
-    pub(crate) fn put(&self, key: String, entry: CacheEntry) {
+    /// Insert or replace `key`. Returns the key the LRU evicted to make room,
+    /// if any (never `key` itself - replacing an entry evicts nothing).
+    pub(crate) fn put(&self, key: String, entry: CacheEntry) -> Option<String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.put(key, entry);
+        match guard.push(key.clone(), entry) {
+            Some((evicted, _)) if evicted != key => Some(evicted),
+            _ => None,
+        }
     }
 
     pub(crate) fn remove(&self, key: &str) {
@@ -73,6 +78,8 @@ mod tests {
             composed: false,
             tags: Vec::new(),
             ppr_shell: false,
+            route: None,
+            etag: None,
         }
     }
 
@@ -97,10 +104,21 @@ mod tests {
         layer.put("b".to_string(), make_entry("b"));
         // Access "a" so "b" becomes the LRU
         layer.get("a");
-        // Insert "c" - should evict "b"
-        layer.put("c".to_string(), make_entry("c"));
+        // Insert "c" - should evict "b", and say so
+        assert_eq!(
+            layer.put("c".to_string(), make_entry("c")),
+            Some("b".to_string())
+        );
         assert!(layer.get("a").is_some());
         assert!(layer.get("b").is_none());
         assert!(layer.get("c").is_some());
+    }
+
+    #[test]
+    fn replacing_an_entry_reports_no_eviction() {
+        let layer = MemoryLayer::new(NonZeroUsize::new(1).unwrap());
+        assert_eq!(layer.put("a".to_string(), make_entry("a1")), None);
+        assert_eq!(layer.put("a".to_string(), make_entry("a2")), None);
+        assert_eq!(layer.get("a").unwrap().html, Bytes::from("a2"));
     }
 }

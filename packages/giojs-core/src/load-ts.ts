@@ -10,8 +10,13 @@
  * the hooks are already global and the extra registration is a no-op pass.
  * tsx itself is imported lazily so standalone bundles (which never call
  * loadTsModule) can mark it external and run without node_modules.
+ * The `.css` import hooks (css-hooks.ts) register right after tsx's, with
+ * the hook API tsx used: synchronous `module.registerHooks()` on newer Node
+ * (24.11.1+ for tsx 4.22), else `module.register()` - the two do not mix.
  */
+import { fileURLToPath } from 'node:url';
 import { logger } from './logger.ts';
+import { hookApiOf, registerCssHooks } from './css-hooks.ts';
 
 let hooksReady: Promise<void> | null = null;
 
@@ -19,7 +24,9 @@ function ensureTransformHooks(): Promise<void> {
   if (hooksReady === null) {
     hooksReady = import('tsx/esm/api')
       .then(({ register }) => {
-        register();
+        const api = hookApiOf(() => register());
+        // Last registered runs first: .css never reaches tsx's hooks.
+        registerCssHooks(api);
       })
       .catch((registerError: unknown) => {
         // Environments with their own TS pipeline (vitest) may refuse a second
@@ -32,7 +39,19 @@ function ensureTransformHooks(): Promise<void> {
   return hooksReady;
 }
 
+/**
+ * vitest's module runner takes a file: URL without percent-decoding it, so
+ * app/posts/[id]/page.tsx (`%5Bid%5D`) - or any path with a space - "does
+ * not exist" there; it resolves plain paths. Node's own loader keeps the
+ * URL (a Windows drive path is no valid import specifier).
+ */
+function importSpecifier(fileUrl: string): string {
+  return process.env.VITEST !== undefined && fileUrl.startsWith('file:')
+    ? fileURLToPath(fileUrl)
+    : fileUrl;
+}
+
 export async function loadTsModule<T>(fileUrl: string): Promise<T> {
   await ensureTransformHooks();
-  return import(fileUrl) as Promise<T>;
+  return import(importSpecifier(fileUrl)) as Promise<T>;
 }

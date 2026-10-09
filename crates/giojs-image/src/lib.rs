@@ -10,7 +10,7 @@ pub mod processor;
 
 use bytes::{Bytes, BytesMut};
 use cache::ImageCache;
-use processor::{process_image, ImageParams, OutputFormat};
+use processor::{process_image_with_limits, DecodeLimits, ImageParams, OutputFormat};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -20,7 +20,9 @@ use url::Url;
 
 const DEFAULT_MAX_REMOTE_BYTES: u64 = 20 * 1024 * 1024;
 const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default whole-download deadline for a remote source (gio.toml `[images]
+/// remote_timeout_secs`).
+pub const DEFAULT_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct RemotePattern {
@@ -104,35 +106,78 @@ pub struct ImageHandler {
     public_dir: PathBuf,
     /// None only if TLS backend init fails; remote fetches then error per-request.
     http_client: Option<reqwest::Client>,
+    /// 0 = unlimited.
     max_remote_bytes: u64,
+    /// Modern formats negotiated from Accept, in preference order.
+    formats: Vec<OutputFormat>,
+    decode_limits: DecodeLimits,
+}
+
+/// The client remote sources are fetched with; `timeout` bounds a whole
+/// download (None: no deadline past the connect timeout).
+fn remote_client(timeout: Option<Duration>) -> Option<reqwest::Client> {
+    // Redirects are refused so an allowlisted host cannot bounce fetches to internal IPs.
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(REMOTE_CONNECT_TIMEOUT);
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    match builder.build() {
+        Ok(client) => Some(client),
+        Err(e) => {
+            warn!(error = %e, "image HTTP client init failed; remote sources disabled");
+            None
+        }
+    }
+}
+
+/// Whether a remote source of `len` bytes is over the `max` cap; 0 is
+/// unlimited.
+fn over_remote_cap(len: u64, max: u64) -> bool {
+    max > 0 && len > max
 }
 
 impl ImageHandler {
     pub fn new(config: ImageConfig, disk_dir: PathBuf, public_dir: PathBuf) -> Self {
         let cache = ImageCache::new(200 * 1024 * 1024, disk_dir);
-        // Redirects are refused so an allowlisted host cannot bounce fetches to internal IPs.
-        let http_client = match reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(REMOTE_CONNECT_TIMEOUT)
-            .timeout(REMOTE_REQUEST_TIMEOUT)
-            .build()
-        {
-            Ok(client) => Some(client),
-            Err(e) => {
-                warn!(error = %e, "image HTTP client init failed; remote sources disabled");
-                None
-            }
-        };
         Self {
             config,
             cache,
             public_dir,
-            http_client,
+            http_client: remote_client(Some(DEFAULT_REMOTE_TIMEOUT)),
             max_remote_bytes: DEFAULT_MAX_REMOTE_BYTES,
+            formats: OutputFormat::MODERN.to_vec(),
+            decode_limits: DecodeLimits::default(),
         }
     }
 
-    /// Override the remote download size cap (bytes). Builder-style, for startup wiring.
+    /// Override the whole-download deadline for remote sources; None
+    /// removes it. Builder-style, for startup wiring.
+    pub fn with_remote_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.http_client = remote_client(timeout);
+        self
+    }
+
+    /// Override the decoder's bounds. Builder-style, for startup wiring.
+    pub fn with_decode_limits(mut self, decode_limits: DecodeLimits) -> Self {
+        self.decode_limits = decode_limits;
+        self
+    }
+
+    /// Restrict and order the modern formats (gio.toml `[images] formats`).
+    /// AVIF and WebP only: JPEG/PNG are always available. Builder-style, for
+    /// startup wiring.
+    pub fn with_formats(mut self, formats: Vec<OutputFormat>) -> Self {
+        self.formats = formats
+            .into_iter()
+            .filter(|format| OutputFormat::MODERN.contains(format))
+            .collect();
+        self
+    }
+
+    /// Override the remote download size cap (bytes; 0 = unlimited).
+    /// Builder-style, for startup wiring.
     pub fn with_max_remote_bytes(mut self, max_remote_bytes: u64) -> Self {
         self.max_remote_bytes = max_remote_bytes;
         self
@@ -162,9 +207,17 @@ impl ImageHandler {
             }
             other => other,
         };
-        let forced_format = query.f.as_deref().and_then(OutputFormat::parse);
-        let format =
-            forced_format.unwrap_or_else(|| OutputFormat::from_accept(accept.unwrap_or("")));
+        // `f=` cannot pick a format the config left out (AVIF is left out
+        // to save encode CPU); it falls back to negotiation instead.
+        let forced_format = query
+            .f
+            .as_deref()
+            .and_then(OutputFormat::parse)
+            .filter(|format| {
+                !OutputFormat::MODERN.contains(format) || self.formats.contains(format)
+            });
+        let format = forced_format
+            .unwrap_or_else(|| OutputFormat::negotiate(accept.unwrap_or(""), &self.formats));
 
         let key = ImageCache::cache_key(src, width, quality, format.extension());
         if let Some(cached) = self.cache.get(&key, format.extension()).await {
@@ -177,10 +230,13 @@ impl ImageHandler {
             quality,
             format,
         };
-        let result = tokio::task::spawn_blocking(move || process_image(source_bytes, &params))
-            .await
-            .map_err(|_| ImageError::ProcessFailed("spawn_blocking join error".into()))?
-            .map_err(|e| ImageError::ProcessFailed(e.to_string()))?;
+        let decode_limits = self.decode_limits;
+        let result = tokio::task::spawn_blocking(move || {
+            process_image_with_limits(source_bytes, &params, decode_limits)
+        })
+        .await
+        .map_err(|_| ImageError::ProcessFailed("spawn_blocking join error".into()))?
+        .map_err(|e| ImageError::ProcessFailed(e.to_string()))?;
 
         self.cache
             .put(&key, format.extension(), result.data.clone())
@@ -226,7 +282,7 @@ impl ImageHandler {
         }
         // Content-Length lets us bail early, but the streamed count is authoritative.
         if let Some(declared_len) = response.content_length() {
-            if declared_len > self.max_remote_bytes {
+            if over_remote_cap(declared_len, self.max_remote_bytes) {
                 return Err(ImageError::TooLarge(self.max_remote_bytes));
             }
         }
@@ -236,7 +292,8 @@ impl ImageHandler {
             .await
             .map_err(|e| ImageError::FetchFailed(e.to_string()))?
         {
-            if (body.len() as u64).saturating_add(chunk.len() as u64) > self.max_remote_bytes {
+            let len = (body.len() as u64).saturating_add(chunk.len() as u64);
+            if over_remote_cap(len, self.max_remote_bytes) {
                 return Err(ImageError::TooLarge(self.max_remote_bytes));
             }
             body.extend_from_slice(&chunk);
@@ -277,8 +334,33 @@ impl ImageHandler {
         Ok(parsed)
     }
 
+    /// The public/ file a local `src` reads, as its path below public/
+    /// (`/members/photo.png`, decoded, symlinks resolved) - the root URL the
+    /// server also answers it at. `None` for a remote `src` or one that
+    /// names no file inside public/. The server holds the file to the
+    /// guards for its URLs before it lets the optimizer read it.
+    pub fn local_file_path(&self, src: &str) -> Option<String> {
+        if src.starts_with("http://") || src.starts_with("https://") {
+            return None;
+        }
+        let file = self.validate_local_path(src).ok()?;
+        let root = self.public_dir.canonicalize().ok()?;
+        let relative = file.strip_prefix(&root).ok()?;
+        let mut path = String::new();
+        for component in relative.components() {
+            path.push('/');
+            path.push_str(component.as_os_str().to_str()?);
+        }
+        Some(path)
+    }
+
+    /// A local `src` is the URL the server serves the file at: public/ is
+    /// served at the site root and under /public/*, so `/hero.png` and
+    /// `/public/hero.png` both name public/hero.png.
     fn validate_local_path(&self, src: &str) -> Result<PathBuf, ImageError> {
-        let requested = self.public_dir.join(src.trim_start_matches('/'));
+        let relative = src.trim_start_matches('/');
+        let relative = relative.strip_prefix("public/").unwrap_or(relative);
+        let requested = self.public_dir.join(relative);
         let canonical = requested.canonicalize().map_err(|_| ImageError::NotFound)?;
         let root = self
             .public_dir
@@ -483,6 +565,116 @@ mod tests {
             err,
             ImageError::PathTraversal | ImageError::NotFound
         ));
+    }
+
+    #[test]
+    fn local_sources_resolve_like_the_public_urls_they_are_served_at() {
+        let public =
+            std::env::temp_dir().join(format!("gio_test_public_alias_{}", std::process::id()));
+        std::fs::create_dir_all(public.join("public")).unwrap();
+        std::fs::write(public.join("hero.png"), b"png").unwrap();
+        std::fs::write(public.join("public").join("nested.png"), b"png").unwrap();
+        let handler = ImageHandler::new(
+            ImageConfig::default(),
+            std::env::temp_dir().join("gio_test_image_cache"),
+            public.clone(),
+        );
+        let root = public.canonicalize().unwrap();
+        let resolve = |src: &str| handler.validate_local_path(src);
+        assert_eq!(resolve("/hero.png").unwrap(), root.join("hero.png"));
+        assert_eq!(resolve("/public/hero.png").unwrap(), root.join("hero.png"));
+        // /public/public/x is public/public/x, as the server serves it.
+        assert_eq!(
+            resolve("/public/public/nested.png").unwrap(),
+            root.join("public").join("nested.png")
+        );
+        assert!(matches!(
+            resolve("/public/../../etc/passwd"),
+            Err(ImageError::NotFound | ImageError::PathTraversal)
+        ));
+        let _ = std::fs::remove_dir_all(&public);
+    }
+
+    #[test]
+    fn local_file_path_names_the_file_below_public() {
+        let public =
+            std::env::temp_dir().join(format!("gio_test_local_file_{}", std::process::id()));
+        std::fs::create_dir_all(public.join("members")).unwrap();
+        std::fs::write(public.join("members").join("photo.png"), b"png").unwrap();
+        let handler = ImageHandler::new(
+            ImageConfig::default(),
+            std::env::temp_dir().join("gio_test_image_cache"),
+            public.clone(),
+        );
+        for src in [
+            "/members/photo.png",
+            "/public/members/photo.png",
+            "members/photo.png",
+            "//members//photo.png",
+            "/members/./photo.png",
+            "/members/../members/photo.png",
+        ] {
+            assert_eq!(
+                handler.local_file_path(src).as_deref(),
+                Some("/members/photo.png"),
+                "{src}"
+            );
+        }
+        assert_eq!(handler.local_file_path("/missing.png"), None);
+        assert_eq!(
+            handler.local_file_path("https://cdn.example/members/photo.png"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&public);
+    }
+
+    #[tokio::test]
+    async fn configured_formats_bound_negotiation_and_the_f_parameter() {
+        let base = std::env::temp_dir().join(format!("gio_image_formats_{}", std::process::id()));
+        let public = base.join("public");
+        std::fs::create_dir_all(&public).unwrap();
+        std::fs::create_dir_all(base.join("cache")).unwrap();
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgb8(4, 4)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(public.join("dot.png"), png).unwrap();
+        let handler = ImageHandler::new(ImageConfig::default(), base.join("cache"), public)
+            .with_formats(vec![OutputFormat::WebP]);
+        let query = |f: Option<&str>| ImageQuery {
+            src: Some("/dot.png".into()),
+            w: None,
+            q: None,
+            f: f.map(str::to_string),
+        };
+        let accept = Some("image/avif,image/webp,*/*");
+        let (_, format, _) = handler.handle(query(None), accept).await.unwrap();
+        assert_eq!(format, OutputFormat::WebP, "AVIF is not configured");
+        let (_, format, _) = handler.handle(query(Some("avif")), accept).await.unwrap();
+        assert_eq!(
+            format,
+            OutputFormat::WebP,
+            "f= cannot force a left-out format"
+        );
+        let (_, format, _) = handler.handle(query(Some("png")), accept).await.unwrap();
+        assert_eq!(format, OutputFormat::Png, "JPEG/PNG stay available");
+
+        let jpeg_only = ImageHandler::new(
+            ImageConfig::default(),
+            base.join("cache"),
+            base.join("public"),
+        )
+        .with_formats(Vec::new());
+        let (_, format, _) = jpeg_only.handle(query(None), accept).await.unwrap();
+        assert_eq!(format, OutputFormat::Jpeg);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn zero_max_remote_bytes_is_unlimited() {
+        assert!(!over_remote_cap(u64::MAX, 0));
+        assert!(!over_remote_cap(20, 20));
+        assert!(over_remote_cap(21, 20));
     }
 
     #[test]

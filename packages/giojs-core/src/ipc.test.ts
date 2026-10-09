@@ -76,6 +76,28 @@ describe('validateIPCRequest', () => {
     expect(validateIPCRequest({ ...validFrame(), skipShell: 'yes' })).toBeNull();
   });
 
+  it('carries the optional client identity fields, absent when not sent', () => {
+    const plain = validateIPCRequest(validFrame());
+    for (const key of ['ip', 'scheme', 'host', 'requestId']) {
+      expect(plain).not.toHaveProperty(key);
+    }
+    const identified = validateIPCRequest({
+      ...validFrame(),
+      ip: '2001:db8::1',
+      scheme: 'https',
+      host: 'app.example',
+      requestId: 'rid-1',
+    });
+    expect(identified).toMatchObject({
+      ip: '2001:db8::1',
+      scheme: 'https',
+      host: 'app.example',
+      requestId: 'rid-1',
+    });
+    expect(validateIPCRequest({ ...validFrame(), ip: 42 })).toBeNull();
+    expect(validateIPCRequest({ ...validFrame(), requestId: null })).toBeNull();
+  });
+
   it.each(['id', 'method', 'path', 'params', 'query', 'headers'])(
     'rejects a frame missing required field %s',
     (field) => {
@@ -171,6 +193,46 @@ describe('makeFrameHandler frame reassembly', () => {
     });
     handler(encodeFrame(Buffer.from('12345')));
     expect(frames).toEqual(['12345']);
+  });
+
+  it('reassembles frames fed one byte at a time, including an empty frame', () => {
+    const frames: string[] = [];
+    const handler = makeFrameHandler(data => frames.push(data.toString('utf8')));
+    const wire = Buffer.concat([
+      encodeFrame(Buffer.from('one')),
+      encodeFrame(Buffer.alloc(0)),
+      encodeFrame(Buffer.from('three')),
+    ]);
+    for (let i = 0; i < wire.length; i++) handler(wire.subarray(i, i + 1));
+    expect(frames).toEqual(['one', '', 'three']);
+  });
+
+  it('delivers a frame whose last chunk also starts the next one', () => {
+    const frames: string[] = [];
+    const handler = makeFrameHandler(data => frames.push(data.toString('utf8')));
+    const wire = Buffer.concat([encodeFrame(Buffer.from('first-frame')), encodeFrame(Buffer.from('second'))]);
+    handler(wire.subarray(0, 9));
+    handler(wire.subarray(9, 17));
+    expect(frames).toEqual(['first-frame']);
+    handler(wire.subarray(17));
+    expect(frames).toEqual(['first-frame', 'second']);
+  });
+
+  it('reads a near-cap frame in socket-sized chunks in linear time', () => {
+    // Re-concatenating on every chunk took ~15 s for 60 MB, past the Rust
+    // side's 10 s IPC write timeout (the worker connection was dropped).
+    const payload = Buffer.alloc(60 * 1024 * 1024, 0x61);
+    payload.writeUInt32BE(0xdeadbeef, payload.length - 4);
+    const wire = encodeFrame(payload);
+    const frames: Buffer[] = [];
+    const handler = makeFrameHandler(data => frames.push(data));
+    const started = performance.now();
+    for (let i = 0; i < wire.length; i += 64 * 1024) handler(wire.subarray(i, i + 64 * 1024));
+    const elapsed = performance.now() - started;
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.length).toBe(payload.length);
+    expect(frames[0]!.readUInt32BE(payload.length - 4)).toBe(0xdeadbeef);
+    expect(elapsed).toBeLessThan(3_000);
   });
 
   it('defaults the cap to MAX_IPC_MESSAGE_SIZE', () => {
@@ -405,6 +467,26 @@ describe('pumpRenderStream PPR shell boundary', () => {
     expect(frames[frames.length - 1]?.['type']).toBe('chunk_end');
   });
 
+  it("'mark' withholds shell_end when keepShell() says no, asked at the boundary", async () => {
+    const asked: string[] = [];
+    const sink = makeStreamSink();
+    const stream = suspenseLikeStream('<div>shell</div>', '<div>hole</div>');
+    await pumpRenderStream(sink, 'r1', {
+      ...renderResult(stream, 'PRE', 'SUF', 'mark'),
+      keepShell: shell => {
+        asked.push(shell);
+        return false;
+      },
+    });
+    const frames = sink.frames();
+    // Asked once, with exactly the bytes Rust would have stored.
+    expect(asked).toEqual(['PRE<div>shell</div>']);
+    expect(frames.some(f => f['type'] === 'shell_end')).toBe(false);
+    // The visitor still gets the whole page.
+    const body = frames.filter(f => f['type'] === 'chunk').map(f => f['data']).join('');
+    expect(body).toBe('PRE<div>shell</div><div>hole</div>SUF');
+  });
+
   it("'mark' still emits shell_end when the whole page flushes with the shell", async () => {
     const sink = makeStreamSink();
     const encoder = new TextEncoder();
@@ -414,6 +496,48 @@ describe('pumpRenderStream PPR shell boundary', () => {
     const types = frames.map(f => f['type']);
     expect(types).toContain('shell_end');
     expect(types.indexOf('shell_end')).toBeLessThan(types.indexOf('chunk_end'));
+  });
+
+  const ENVELOPE = '<script id="__gio_props" type="application/json">{"props":{"who":"alice"}}</script>';
+
+  it("'mark' writes the deferred envelope after shell_end, outside the cached shell", async () => {
+    const sink = makeStreamSink();
+    const stream = suspenseLikeStream('<div>shell</div>', '<div>hole</div>');
+    await pumpRenderStream(sink, 'r1', {
+      ...renderResult(stream, 'PRE', 'SUF', 'mark'),
+      envelope: ENVELOPE,
+    });
+    const frames = sink.frames();
+    const boundary = frames.findIndex(f => f['type'] === 'shell_end');
+    const shell = frames.slice(0, boundary).map(f => f['data']).join('');
+    expect(shell).toBe('PRE<div>shell</div>');
+    expect(frames[boundary + 1]).toEqual({ type: 'chunk', id: 'r1', data: ENVELOPE });
+    const body = frames.filter(f => f['type'] === 'chunk').map(f => f['data']).join('');
+    expect(body).toBe(`PRE<div>shell</div>${ENVELOPE}<div>hole</div>SUF`);
+  });
+
+  it("'discard' forwards the deferred envelope first, at the same document position", async () => {
+    const sink = makeStreamSink();
+    const stream = suspenseLikeStream('<div>shell</div>', '<div>hole</div>');
+    await pumpRenderStream(sink, 'r1', {
+      ...renderResult(stream, 'PRE', 'SUF', 'discard'),
+      envelope: ENVELOPE,
+    });
+    const body = sink.frames().filter(f => f['type'] === 'chunk').map(f => f['data']).join('');
+    expect(body).toBe(`${ENVELOPE}<div>hole</div>SUF`);
+  });
+
+  it('writes the deferred envelope after shell_end when the whole page flushes with the shell', async () => {
+    const sink = makeStreamSink();
+    const stream = byteStream([new TextEncoder().encode('<div>all-shell</div>')]);
+    await pumpRenderStream(sink, 'r1', {
+      ...renderResult(stream, '', 'SUF', 'mark'),
+      envelope: ENVELOPE,
+    });
+    const frames = sink.frames();
+    const boundary = frames.findIndex(f => f['type'] === 'shell_end');
+    expect(frames.slice(0, boundary).map(f => f['data']).join('')).toBe('<div>all-shell</div>');
+    expect(frames[boundary + 1]?.['data']).toBe(ENVELOPE);
   });
 
   it('plain streams never emit shell_end', async () => {

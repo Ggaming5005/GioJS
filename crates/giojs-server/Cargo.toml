@@ -2,6 +2,9 @@
 name    = "giojs-server"
 version = "0.1.0-beta.1"
 edition = "2021"
+rust-version.workspace = true
+license = "MIT"
+publish = false
 
 [[bin]]
 name = "giojs-server"
@@ -28,13 +31,19 @@ uuid.workspace               = true
 tokio-util.workspace         = true
 bytes.workspace              = true
 toml.workspace               = true
+# Span-preserving TOML document (already in the tree via toml): maps a
+# gio.toml error's byte span back to the key path it belongs to.
+toml_edit       = { version = "0.22", default-features = false, features = ["parse"] }
 thiserror.workspace          = true
 dashmap.workspace            = true
 anyhow.workspace             = true
 sha2.workspace               = true
+hmac.workspace               = true
+hkdf.workspace               = true
 hyper.workspace              = true
 hyper-util.workspace         = true
 tokio-stream.workspace       = true
+dotenvy.workspace            = true
 rustls          = "0.23"
 rustls-pemfile  = "2"
 tokio-rustls    = "0.26"
@@ -44,6 +53,9 @@ notify          = "6"
 # Paused-clock testing for the streaming idle-gap timeout.
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+# Renders packages/giojs/gio.schema.json from the config types (test-only:
+# the derive is cfg(test), nothing ships in the binary).
+schemars = "1"
 
 # Job Object with KILL_ON_JOB_CLOSE so a hard-killed server cannot orphan the
 # Node worker (kill_on_drop alone misses TerminateProcess on the parent).

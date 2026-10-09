@@ -1,7 +1,58 @@
 #!/usr/bin/env node
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { fileURLToPath } from 'url';
+import { parseArgs, UsageError, USAGE } from './args.js';
 import { create } from './create.js';
+import { CancelledError } from './select.js';
 
-create(process.argv.slice(2)).catch((err: unknown) => {
+function version(): string {
+  // dist/index.js -> the package's own package.json
+  const pkgPath = join(fileURLToPath(import.meta.url), '..', '..', 'package.json');
+  return (JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string }).version;
+}
+
+async function main(rawArgv: string[]): Promise<void> {
+  // pnpm, yarn and bun pass on the npm-style `--` separator:
+  // `pnpm create giojs -- migrate ./app` reaches us as ['--', 'migrate', ...]
+  // (and `-- add tailwind` as ['--', 'add', ...]).
+  const argv = rawArgv[0] === '--' ? rawArgv.slice(1) : rawArgv;
+  if (argv[0] === 'migrate') {
+    // Loaded on demand: the migration pulls in the TypeScript compiler,
+    // which scaffolding never needs.
+    const { runMigrate } = await import('./migrate-command.js');
+    process.exitCode = await runMigrate(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'add') {
+    // `create-giojs add <feature...>`, also run by `gio add`: starter feature
+    // overlays for an existing project.
+    const { runAdd } = await import('./overlays/add.js');
+    process.exitCode = await runAdd(argv.slice(1));
+    return;
+  }
+  const args = parseArgs(argv);
+  if (args.help) {
+    console.log(USAGE);
+    return;
+  }
+  if (args.version) {
+    console.log(version());
+    return;
+  }
+  await create(args);
+}
+
+main(process.argv.slice(2)).catch((err: unknown) => {
+  if (err instanceof CancelledError) {
+    // Every question comes before the first write: nothing to clean up.
+    console.error('\nCancelled - nothing was written.');
+    process.exit(130);
+  }
+  if (err instanceof UsageError) {
+    console.error(`Error: ${err.message}`);
+    process.exit(2);
+  }
   console.error(err instanceof Error ? err.message : String(err));
   process.exit(1);
 });

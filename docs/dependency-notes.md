@@ -20,6 +20,10 @@ cargo +nightly udeps --all-targets
 
 Known workspace dependencies and their current locked versions are in `Cargo.lock`.
 
+### Minimum Rust version
+
+`rust-version` under `[workspace.package]` in the root `Cargo.toml` (1.89) is the oldest toolchain that builds the committed `Cargo.lock`, and every crate inherits it. A dependency bump can raise it: if a locked crate starts needing a newer rustc, CI's `msrv` job fails. In the same PR, raise `rust-version`; the docs never restate the number - building the server from source (`docs/deployment/docker.md`, the Known Limitations page) points at `cargo build --release --locked` with the `rust-version` from `Cargo.toml`. `node scripts/check-msrv.mjs` checks that `rust-version` and `Cargo.lock` agree, and that any `FROM rust:<tag>` image in the docs is at least the MSRV - there is none today (the Docker recipe builds from prebuilt binaries with `gio build standalone`), so a from-source Dockerfile added later is checked too.
+
 ## npm packages
 
 `npm outdated` returned no output - all packages are at their specified versions.
@@ -37,4 +41,4 @@ Known workspace dependencies and their current locked versions are in `Cargo.loc
 
 - Upgrade `axum` to 0.8 when stable and update handler signatures
 - Evaluate `lightningcss` stable release once available
-- Consider `cargo-deny` for license and advisory auditing in CI
+- ~~Consider `cargo-deny` for license and advisory auditing in CI~~ - done: `deny.toml` runs in CI and gates releases

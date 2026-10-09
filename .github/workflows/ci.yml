@@ -5,13 +5,15 @@ on:
     branches: [main]
   pull_request:
 
+# Third-party actions are pinned to full commit SHAs (tags can be moved);
+# Dependabot keeps the SHA and the trailing version comment in sync.
 jobs:
   version-lockstep:
     name: Version lockstep check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
       - run: node scripts/sync-versions.mjs --check
@@ -24,23 +26,81 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
-      - run: cargo clippy --workspace -- -D warnings
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --locked -- -D warnings
+
+  # The minimum Rust version (rust-version in Cargo.toml) is what the
+  # from-source Dockerfile in docs/deployment/docker.md builds with. Build the
+  # workspace on exactly that toolchain, so a dependency bump that needs a
+  # newer rustc fails here instead of in someone's docker build.
+  msrv:
+    name: Rust MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+      - name: Read rust-version
+        id: msrv
+        run: |
+          msrv=$(node scripts/check-msrv.mjs --print)
+          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: node scripts/check-msrv.mjs
+      - run: cargo check --workspace --all-targets --locked
+
+  # Supply-chain policy from deny.toml. bans/licenses/sources only change when
+  # a PR changes dependencies, so they always block. Advisories can go red on
+  # any day a new RUSTSEC entry lands for a crate already in Cargo.lock, which
+  # says nothing about the PR under test - on pull requests they annotate
+  # instead of failing; pushes to main (and every release tag) still enforce.
+  # An unmaintained-crate notice is a warning everywhere but the weekly
+  # audit.yml run (see deny.toml).
+  cargo-deny:
+    name: cargo-deny (${{ matrix.checks }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        checks:
+          - advisories
+          - bans licenses sources
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        # On the step, not the job: a failed job with job-level
+        # continue-on-error still shows a red check on the PR. This way the
+        # job stays green and the annotation below carries the failure.
+        continue-on-error: ${{ matrix.checks == 'advisories' && github.event_name == 'pull_request' }}
+        with:
+          command: check ${{ matrix.checks }}
+          arguments: --all-features --locked
+          command-arguments: --warn unmaintained
+      - name: Annotate advisories
+        if: steps.deny.outcome == 'failure'
+        run: |
+          echo "::warning title=cargo-deny advisories::a crate in Cargo.lock has a RUSTSEC advisory - see this job's log; it fails CI on main and blocks the next release"
 
   node:
     name: Node tests + typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 9
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: pnpm
@@ -55,6 +115,76 @@ jobs:
         run: |
           npx tsc --noEmit
           npx vitest run
+      # create-giojs runs its tests as TypeScript (node --test *.ts), which
+      # needs Node 22's type stripping. They include the scaffold typecheck:
+      # both templates against the packages' built declarations.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: create-giojs tests
+        working-directory: packages/giojs-cli
+        run: npm test
+      # The gio CLI (node:test): help, dev/start plumbing against a fake
+      # server binary, routes/typegen, doctor, cache explain, bench helpers.
+      - name: gio CLI tests
+        working-directory: packages/giojs
+        run: npm test
+
+  # The docs site (docs-site/AGENTS.md): it runs the framework from source,
+  # so it needs the workspace install as well as its own (TypeScript, tsx).
+  # The export fails on a heading without an id or a repeated id.
+  docs:
+    name: Docs site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install docs-site dependencies
+        working-directory: docs-site
+        run: npm ci
+      - name: Typecheck
+        working-directory: docs-site
+        run: npm run typecheck
+      - name: Links and nav
+        working-directory: docs-site
+        run: npm run check-links
+      # Before the tests: export.test.mjs checks the exported site (search
+      # anchors, share cards) and skips itself when out/ is missing.
+      - name: Static build
+        working-directory: docs-site
+        run: npm run export
+      - name: Tests
+        working-directory: docs-site
+        run: npm test
+
+  # Same reasoning as cargo-deny advisories: a fresh advisory in a transitive
+  # npm dependency must not turn every unrelated PR red, so this reports as a
+  # warning annotation. audit.yml runs it weekly as a hard failure.
+  npm-audit:
+    name: pnpm audit (production deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+      - name: pnpm audit --prod --audit-level=high
+        continue-on-error: true
+        run: |
+          if ! pnpm audit --prod --audit-level=high; then
+            echo "::warning title=pnpm audit::high/critical advisories in production dependencies - see this job's log"
+            exit 1
+          fi
 
   # The real Rust↔Node pair: render, body forwarding, render isolation,
   # cache hits, kill-the-worker recovery, orphan-free shutdown.
@@ -66,16 +196,61 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 9
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: cargo build -p giojs-server
+      - run: cargo build -p giojs-server --locked
+      - run: node tests/integration/run.mjs
+
+  # From Node 24.11.1, tsx loads TypeScript through the synchronous
+  # module.registerHooks() instead of module.register(), and the worker's
+  # .css import hooks must follow it (giojs-core/src/css-hooks.ts): with the
+  # two mixed, every page answered 500. The jobs above run Node 20 and 22,
+  # so the Node suites and the integration suite run on Node 24 here, the
+  # boot tests (testing kit, scaffolded starters) against the server built
+  # first.
+  node-24:
+    name: Node 24 (Node tests + integration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: cargo build -p giojs-server --locked
+      - name: giojs-core tests + typecheck
+        working-directory: packages/giojs-core
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+      - name: giojs-react tests + typecheck
+        working-directory: packages/giojs-react
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+      - name: create-giojs tests
+        working-directory: packages/giojs-cli
+        run: npm test
+      - name: gio CLI tests
+        working-directory: packages/giojs
+        run: npm test
       - run: node tests/integration/run.mjs

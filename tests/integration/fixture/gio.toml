@@ -5,8 +5,87 @@ name = "integration-fixture"
 host  = "127.0.0.1"
 port  = 39517
 http2 = false
+# Tiny connection deadlines keep the slowloris / slow-body tests fast.
+header_read_timeout_secs  = 2
+request_body_timeout_secs = 2
+# The harness plays the reverse proxy: its X-Forwarded-* / X-Request-Id
+# headers count. Requests without them still resolve to 127.0.0.1.
+trusted_proxies = ["127.0.0.1"]
+
+# Allowlists the forwarded client, never the local proxy itself.
+[metrics]
+ip_allowlist = ["198.51.100.0/24"]
+
+[[rate_limits]]
+path           = "/api/proxied-limit"
+per_ip         = 1
+window_seconds = 3600
+burst          = 0
+
+# Not the defaults: <GioImage> must render exactly these widths (any other
+# width is a 400 from /_gio/image).
+[images]
+allowed_widths = [96, 48, 640]
+quality        = 70
 
 [[redirects]]
 from   = "/moved"
 to     = "/cached"
 status = 301
+
+# Exact-path rule the integration tests try to dodge with path spellings.
+[[rate_limits]]
+path           = "/api/limited"
+per_ip         = 2
+window_seconds = 3600
+burst          = 0
+
+# Rules written for a public/ file's /public/... URL also cover the root URL
+# it is served at; redirects stay about the URL that was requested.
+[[guards]]
+path           = "/public/members/*rest"
+require_cookie = "session"
+redirect_to    = "/login"
+
+# Session guards verify the gio_session token's MAC and expiry in Rust.
+[[guards]]
+path            = "/api/me"
+require_session = true
+redirect_to     = "/login"
+
+# A cached page behind a guard: GioJS caches it (the guard runs first), but
+# a CDN never may - it would skip the guard.
+[[guards]]
+path           = "/guarded-cached"
+require_cookie = "session"
+redirect_to    = "/login"
+
+[[headers]]
+path = "/public/members/*rest"
+[headers.headers]
+x-robots-tag = "noindex"
+
+[[redirects]]
+from   = "/public/moved-root/*rest"
+to     = "/moved-root/*rest"
+status = 301
+
+[[rate_limits]]
+path           = "/public/limited/*"
+per_ip         = 2
+window_seconds = 3600
+burst          = 0
+
+# A header rule overrides a [security] default header for its paths, and an
+# empty value removes the default there.
+[[headers]]
+path = "/cached"
+[headers.headers]
+x-frame-options = "DENY"
+referrer-policy = ""
+
+# Cross-site request protection is on by default; a trusted second origin
+# and an exempt webhook path for the CSRF tests.
+[security.csrf]
+trusted_origins = ["https://admin.fixture.test"]
+exempt          = ["/api/webhooks/*rest"]

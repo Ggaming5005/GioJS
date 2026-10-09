@@ -9,20 +9,31 @@ import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { Buffer } from 'node:buffer';
-import type { IPCRequest, IPCOutbound, IPCError } from './context.ts';
+import { Buffer, isUtf8 } from 'node:buffer';
+import type { IPCRequest, IPCOutbound, IPCError, ChunkMsg } from './context.ts';
 import type { RouteModule, LayoutEntry } from './router.ts';
 import {
   renderRoute,
+  resolveRoutePattern,
+  routeChunkBytes,
   type RenderExtras,
+  type RouteStreamResult,
   type SseRouteResult,
   type StreamRenderResult,
 } from './ssr.ts';
-import type { SseStream } from './sse.ts';
+import { runEventStream, type SseRun } from './sse.ts';
 import type { WsHandlerFn } from './ws-router.ts';
 import type { NodePluginRegistry } from './plugin.ts';
-import type { MiddlewareRules } from './middleware.ts';
-import { logger } from './logger.ts';
+import type { WireMiddlewareRules } from './middleware.ts';
+import { logger, withRequestLogContext } from './logger.ts';
+import { deploymentBuildHash } from './build-manifest.ts';
+import { emptyStyleManifest } from './style-manifest.ts';
+import { createErrorDigest, describeError, isDevMode } from './mode.ts';
+import {
+  attachRevalidationChannel,
+  enableRevalidation,
+  settleRevalidateAck,
+} from './revalidate.ts';
 
 const IS_WINDOWS = process.platform === 'win32';
 // Rust resolves a per-instance path (unique pipe name on Windows) and passes
@@ -59,6 +70,13 @@ export const MAX_BUFFERED_FRAME_BYTES = 8 * 1024 * 1024;
 const DROP_WARN_INTERVAL_MS = 5_000;
 
 /**
+ * Largest chunk frame payload of a streamed route.ts body, before encoding.
+ * Bigger chunks are split, so a handler enqueueing one huge buffer never
+ * builds a frame anywhere near MAX_IPC_MESSAGE_SIZE.
+ */
+export const ROUTE_CHUNK_BYTES = 64 * 1024;
+
+/**
  * Derived handshake proof: sha256(`${token}:${role}`) hex. Each direction
  * sends a role-specific derivation ("ready" from Node, "ack"/"ws" from Rust)
  * instead of the raw token, so a fake endpoint that captures one proof cannot
@@ -76,7 +94,8 @@ export function createIPCServer(
   registry?: NodePluginRegistry,
   clientScripts?: Map<string, string>,
   extras?: RenderExtras,
-  middleware?: MiddlewareRules,
+  middleware?: WireMiddlewareRules,
+  serverSourceHash?: string,
 ): net.Server {
   const routeList = [...routes.keys()].map(pattern => ({
     pattern,
@@ -85,6 +104,15 @@ export function createIPCServer(
 
   // Live IPC serving opts into streaming; static export never comes through here.
   const renderExtras: RenderExtras = { ...extras, streaming: true };
+  // revalidateTag()/revalidatePath() now reach a server (once Rust connects).
+  enableRevalidation();
+  const buildHash = deploymentBuildHash(
+    {
+      clientScripts: clientScripts ?? new Map(),
+      stylesheets: extras?.stylesheets ?? emptyStyleManifest(),
+    },
+    serverSourceHash,
+  );
 
   const server = net.createServer(socket => {
     logger.info('rust connected', { pipe: PIPE_PATH });
@@ -99,11 +127,18 @@ export function createIPCServer(
       // Older servers ignore unknown READY fields, so shipping middleware
       // rules here needs no protocol bump.
       middleware: middleware ?? {},
+      // The client build this worker serves plus, from the builder, the
+      // app's server sources (build-manifest.ts deploymentBuildHash): the
+      // server derives the deployment ID from the builder's. Additive
+      // within v3 too.
+      buildHash,
     });
 
     let ackReceived = false;
-    const activeSseCleanups = new Map<string, () => void>();
+    let detachRevalidation: (() => void) | null = null;
+    const activeSseStreams = new Map<string, SseRun>();
     const activeRenders = new Map<string, AbortController>();
+    const streamFlows = new Map<string, StreamFlowGate>();
     const writeDroppableFrame = makeDroppableFrameWriter(socket);
 
     async function processFrame(data: Buffer): Promise<void> {
@@ -127,6 +162,9 @@ export function createIPCServer(
             return;
           }
           ackReceived = true;
+          // Purge requests ride this connection only after the handshake:
+          // an unauthenticated peer must never see them.
+          detachRevalidation = attachRevalidationChannel(frame => writeFrame(socket, frame));
           logger.info('ack received, ready to serve requests');
         }
         return;
@@ -138,17 +176,35 @@ export function createIPCServer(
         return;
       }
 
+      // Rust confirmed (or refused) a revalidateTag/revalidatePath purge.
+      if (msg['type'] === 'revalidate_ack') {
+        settleRevalidateAck(msg);
+        return;
+      }
+
       // Browser disconnected from SSE - run cleanup
       if (msg['type'] === 'sse_close') {
         if (typeof msg['id'] !== 'string') {
           logger.warn('sse_close frame missing string id');
           return;
         }
-        const cleanup = activeSseCleanups.get(msg['id']);
-        if (cleanup !== undefined) {
-          cleanup();
-          activeSseCleanups.delete(msg['id']);
+        activeSseStreams.get(msg['id'])?.disconnect();
+        activeSseStreams.delete(msg['id']);
+        return;
+      }
+
+      // Rust holds too much of a streamed route body (slow client): pause or
+      // resume its producer.
+      if (msg['type'] === 'flow') {
+        if (
+          typeof msg['id'] !== 'string' ||
+          typeof msg['pause'] !== 'boolean' ||
+          typeof msg['seq'] !== 'number'
+        ) {
+          logger.warn('malformed flow frame');
+          return;
         }
+        streamFlows.get(msg['id'])?.apply(msg['pause'], msg['seq']);
         return;
       }
 
@@ -159,10 +215,10 @@ export function createIPCServer(
           logger.warn('cancel frame missing string id');
           return;
         }
-        const sseCleanup = activeSseCleanups.get(msg['id']);
-        if (sseCleanup !== undefined) {
-          sseCleanup();
-          activeSseCleanups.delete(msg['id']);
+        const sse = activeSseStreams.get(msg['id']);
+        if (sse !== undefined) {
+          sse.disconnect();
+          activeSseStreams.delete(msg['id']);
           return;
         }
         activeRenders.get(msg['id'])?.abort();
@@ -183,37 +239,82 @@ export function createIPCServer(
         return;
       }
 
-      try {
-        await handleRequest(req);
-      } catch (requestError) {
-        logger.error('request handling failed', {
-          id: req.id,
-          path: req.path,
-          error: requestError instanceof Error ? requestError.message : String(requestError),
-        });
-        writeFrame(socket, {
-          id: req.id,
-          error: true,
-          code: 'INTERNAL',
-          message: requestError instanceof Error ? requestError.message : String(requestError),
-        } satisfies IPCError);
-      }
+      // Every line logged while handling the request (render, handlers,
+      // stream pumping, SSE callbacks) carries its id.
+      const logContext = req.requestId !== undefined ? { requestId: req.requestId } : undefined;
+      // Rust's metrics label, stamped on whatever answers: the route of the
+      // path as requested, until renderRoute reports the path it routes by
+      // (a plugin onRequest hook may have rewritten it).
+      const label: RouteLabel = {
+        route: resolveRoutePattern(
+          req.path,
+          routes,
+          renderExtras.handlers,
+          renderExtras.metadataRoutes,
+        ),
+      };
+      await withRequestLogContext(logContext, async () => {
+        try {
+          await handleRequest(req, label);
+        } catch (requestError) {
+          const digest = createErrorDigest();
+          logger.error('request handling failed', {
+            id: req.id,
+            path: req.path,
+            digest,
+            ...describeError(requestError),
+          });
+          writeFrame(socket, withRoute({
+            id: req.id,
+            error: true,
+            code: 'INTERNAL',
+            message: isDevMode()
+              ? requestError instanceof Error ? requestError.message : String(requestError)
+              : 'Internal Server Error',
+            digest,
+            ...logContext,
+          } satisfies IPCError, label.route));
+        }
+      });
     }
 
-    async function handleRequest(req: IPCRequest): Promise<void> {
+    async function handleRequest(req: IPCRequest, label: RouteLabel): Promise<void> {
       const abort = new AbortController();
       activeRenders.set(req.id, abort);
       let routeResult;
       try {
-        routeResult = await renderRoute(req, routes, layouts, registry, abort.signal, clientScripts, renderExtras);
+        routeResult = await renderRoute(req, routes, layouts, registry, abort.signal, clientScripts, {
+          ...renderExtras,
+          onRouted: routed => {
+            label.route = resolveRoutePattern(
+              routed.path,
+              routes,
+              renderExtras.handlers,
+              renderExtras.metadataRoutes,
+            );
+          },
+        });
 
         if (isStreamRenderResult(routeResult)) {
           // Head first: Rust registers the chunk stream under this id before
           // any chunk frame can arrive (frames are processed in order). The
           // abort entry stays registered while pumping so a cancel frame
           // mid-stream aborts the React render and stops the pump.
-          writeFrame(socket, routeResult.head);
+          writeFrame(socket, withRoute(routeResult.head, label.route));
           await pumpRenderStream(socket, req.id, routeResult);
+          return;
+        }
+        if (isRouteStreamResult(routeResult)) {
+          // Same ordering as a render stream; the abort entry doubles as the
+          // client-disconnect signal that cancels the body's reader.
+          writeFrame(socket, withRoute(routeResult.head, label.route));
+          const gate = new StreamFlowGate();
+          streamFlows.set(req.id, gate);
+          try {
+            await pumpRouteStream(socket, req.id, routeResult, gate, abort.signal);
+          } finally {
+            streamFlows.delete(req.id);
+          }
           return;
         }
       } finally {
@@ -221,12 +322,12 @@ export function createIPCServer(
       }
 
       if (!isSseResult(routeResult)) {
-        writeFrame(socket, routeResult);
+        writeFrame(socket, withRoute(routeResult, label.route));
         return;
       }
 
       // Send initial SSE response so Rust switches to streaming mode
-      writeFrame(socket, {
+      writeFrame(socket, withRoute({
         id: req.id,
         status: 200,
         headers: {
@@ -237,31 +338,49 @@ export function createIPCServer(
         body: '',
         cacheable: false,
         cacheMaxAge: 0,
-      } satisfies IPCOutbound);
+      } satisfies IPCOutbound, label.route));
 
-      const sseStream: SseStream = {
-        send(data: unknown, event?: string, id?: string): void {
-          writeDroppableFrame({ type: 'sse_chunk', id: req.id, data: formatSseEvent(data, event, id) });
+      // An async handler settles after this returns; its callbacks still log
+      // under the request id (the log context follows promise callbacks).
+      const sse = runEventStream(
+        routeResult.stream,
+        {
+          send(data: unknown, event?: string, id?: string): void {
+            writeDroppableFrame({ type: 'sse_chunk', id: req.id, data: formatSseEvent(data, event, id) });
+          },
+          close(): void {
+            writeFrame(socket, { type: 'sse_done', id: req.id });
+            activeSseStreams.delete(req.id);
+          },
         },
-        close(): void {
-          writeFrame(socket, { type: 'sse_done', id: req.id });
-          activeSseCleanups.delete(req.id);
+        {
+          onError(handlerError: unknown): void {
+            // Headers already sent - terminate the stream instead of erroring
+            logger.error('sse handler threw', {
+              id: req.id,
+              path: req.path,
+              error: handlerError instanceof Error ? handlerError.message : String(handlerError),
+            });
+            writeFrame(socket, { type: 'sse_done', id: req.id });
+            activeSseStreams.delete(req.id);
+          },
+          onCleanupError(cause: unknown): void {
+            logger.error('sse cleanup threw', {
+              id: req.id,
+              path: req.path,
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          },
+          onInvalidCleanup(value: unknown): void {
+            logger.warn('GioEventStream handler returned something other than a cleanup function - ignored', {
+              id: req.id,
+              path: req.path,
+              returned: typeof value,
+            });
+          },
         },
-      };
-
-      try {
-        const cleanup = routeResult.stream.handler(sseStream);
-        activeSseCleanups.set(req.id, cleanup);
-      } catch (handlerError) {
-        // Headers already sent - terminate the stream instead of erroring
-        logger.error('sse handler threw', {
-          id: req.id,
-          path: req.path,
-          error: handlerError instanceof Error ? handlerError.message : String(handlerError),
-        });
-        writeFrame(socket, { type: 'sse_done', id: req.id });
-        activeSseCleanups.delete(req.id);
-      }
+      );
+      if (!sse.done) activeSseStreams.set(req.id, sse);
     }
 
     const handler = makeFrameHandler(
@@ -290,17 +409,15 @@ export function createIPCServer(
     });
     socket.on('close', () => {
       logger.info('rust disconnected');
-      // Run all pending SSE cleanups on disconnect. These are user-supplied
-      // callbacks running inside a net 'close' listener - a throw here would
-      // be an uncaught exception that kills the whole worker.
-      for (const cleanup of activeSseCleanups.values()) {
-        try {
-          cleanup();
-        } catch (cause) {
-          logger.error('sse cleanup threw on disconnect', { error: String(cause) });
-        }
-      }
-      activeSseCleanups.clear();
+      detachRevalidation?.();
+      // Nobody reads these renders and streams any more: stop their work
+      // (a streamed route body would otherwise wait on its producer forever).
+      for (const abort of activeRenders.values()) abort.abort();
+      // Run all pending SSE cleanups on disconnect (runEventStream catches
+      // a throwing one: inside a net 'close' listener it would kill the
+      // whole worker).
+      for (const sse of activeSseStreams.values()) sse.disconnect();
+      activeSseStreams.clear();
     });
   });
 
@@ -336,7 +453,29 @@ export function createIPCServer(
   return server;
 }
 
-type RouteResult = IPCOutbound | SseRouteResult | StreamRenderResult;
+type RouteResult = IPCOutbound | SseRouteResult | StreamRenderResult | RouteStreamResult;
+
+/** One request's metrics route label, updated once renderRoute has routed. */
+interface RouteLabel {
+  route: string | null;
+}
+
+/**
+ * `frame` with the optional `route` field (the matched pattern) set, or
+ * unchanged when no route matched - Rust then labels the request
+ * `unmatched`. Stamped on the frame after plugins ran, so no hook can spoof
+ * the label; resolved from the path routing went by (see
+ * RenderExtras.onRouted).
+ */
+export function withRoute<T extends IPCOutbound>(frame: T, route: string | null): T {
+  const stamped: T = { ...frame };
+  if (route === null) {
+    delete stamped.route;
+  } else {
+    stamped.route = route;
+  }
+  return stamped;
+}
 
 function isSseResult(result: RouteResult): result is SseRouteResult {
   return 'type' in result && result.type === 'sse';
@@ -344,6 +483,145 @@ function isSseResult(result: RouteResult): result is SseRouteResult {
 
 function isStreamRenderResult(result: RouteResult): result is StreamRenderResult {
   return 'type' in result && result.type === 'stream';
+}
+
+function isRouteStreamResult(result: RouteResult): result is RouteStreamResult {
+  return 'type' in result && result.type === 'route-stream';
+}
+
+/**
+ * Pause/resume state of one streamed route body, driven by Rust's `flow`
+ * frames. `seq` grows per stream, so a pause overtaken by a later resume is
+ * ignored.
+ */
+export class StreamFlowGate {
+  private paused = false;
+  private seq = 0;
+  private waiters: Array<() => void> = [];
+
+  apply(pause: boolean, seq: number): void {
+    if (seq <= this.seq) return;
+    this.seq = seq;
+    this.paused = pause;
+    if (!pause) this.release();
+  }
+
+  /** Wake every waiter (resume, or the stream is being torn down). */
+  release(): void {
+    const waiters = this.waiters;
+    this.waiters = [];
+    for (const wake of waiters) wake();
+  }
+
+  /** Null while flowing; otherwise resolves on resume (or release). */
+  ready(): Promise<void> | null {
+    return this.paused ? new Promise(resolve => this.waiters.push(resolve)) : null;
+  }
+}
+
+/** Socket subset the route-body pump needs (drain/close waits included). */
+export interface RouteStreamSink extends StreamFrameSink {
+  once(event: 'drain' | 'close', listener: () => void): unknown;
+  removeListener(event: 'drain' | 'close', listener: () => void): unknown;
+}
+
+function drained(socket: RouteStreamSink): Promise<void> {
+  return new Promise(resolve => {
+    const done = (): void => {
+      socket.removeListener('drain', done);
+      socket.removeListener('close', done);
+      resolve();
+    };
+    socket.once('drain', done);
+    socket.once('close', done);
+  });
+}
+
+/** One chunk frame: UTF-8 text when the bytes are valid UTF-8, else base64. */
+export function routeChunkFrame(reqId: string, bytes: Uint8Array): ChunkMsg {
+  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // A multi-byte character split across chunks makes both halves invalid
+  // UTF-8; they then cross as base64, so the bytes stay exact either way.
+  return isUtf8(buf)
+    ? { type: 'chunk', id: reqId, data: buf.toString('utf8') }
+    : { type: 'chunk', id: reqId, data: buf.toString('base64'), bodyBase64: true };
+}
+
+/**
+ * Pump a streamed route.ts body as chunk frames, then chunk_end. Unlike a
+ * page render, nothing bounds a route body - a download, an endless event
+ * stream - so the pump has backpressure on both legs: it waits while Rust
+ * holds too much of this body (flow frames: the client is slow) and while
+ * the IPC socket's own buffer is full. `signal` aborts when Rust cancels
+ * (the client went away) or disconnects; the body's reader is cancelled,
+ * which runs the ReadableStream's cancel() so the handler can stop.
+ */
+export async function pumpRouteStream(
+  socket: RouteStreamSink,
+  reqId: string,
+  result: RouteStreamResult,
+  gate: StreamFlowGate,
+  signal: AbortSignal,
+): Promise<void> {
+  const reader = result.rest?.reader;
+  const stop = (): void => {
+    gate.release();
+    reader?.cancel().catch(() => undefined);
+  };
+  const aborted = new Promise<void>(resolve => {
+    if (signal.aborted) resolve();
+    else signal.addEventListener('abort', () => resolve(), { once: true });
+  });
+  signal.addEventListener('abort', stop, { once: true });
+
+  const send = async (bytes: Uint8Array): Promise<boolean> => {
+    for (let offset = 0; offset < bytes.byteLength; offset += ROUTE_CHUNK_BYTES) {
+      const paused = gate.ready();
+      if (paused !== null) await Promise.race([paused, aborted]);
+      if (!signal.aborted && socket.writableLength > MAX_BUFFERED_FRAME_BYTES) {
+        await Promise.race([drained(socket), aborted]);
+      }
+      if (signal.aborted || socket.destroyed) return false;
+      writeFrame(socket, routeChunkFrame(reqId, bytes.subarray(offset, offset + ROUTE_CHUNK_BYTES)));
+    }
+    return true;
+  };
+
+  try {
+    if (signal.aborted) {
+      stop();
+      return;
+    }
+    for (const chunk of result.prelude) {
+      if (!(await send(chunk))) return stop();
+    }
+    if (reader !== undefined) {
+      let pending = result.rest?.pending ?? reader.read();
+      while (true) {
+        const { done, value } = await pending;
+        // A cancelled reader resolves done: the client is gone, so no end frame.
+        if (signal.aborted) return;
+        if (done) break;
+        if (!(await send(routeChunkBytes(value)))) return stop();
+        pending = reader.read();
+      }
+    }
+    if (socket.destroyed) return;
+    writeFrame(socket, { type: 'chunk_end', id: reqId });
+  } catch (streamError) {
+    // The body errored mid-stream: headers already went out, so the only
+    // possible signal is ending the body early.
+    logger.error('route handler stream failed mid-stream', {
+      id: reqId,
+      error: streamError instanceof Error ? streamError.message : String(streamError),
+    });
+    stop();
+    if (!socket.destroyed) {
+      writeFrame(socket, { type: 'chunk_end', id: reqId, aborted: true });
+    }
+  } finally {
+    signal.removeEventListener('abort', stop);
+  }
 }
 
 /** Socket subset needed by the render-stream pump (testable without a pipe). */
@@ -369,11 +647,14 @@ function shellFlushTick(): Promise<typeof SHELL_FLUSHED> {
  *
  * PPR: React resolves renderToReadableStream at shell-ready and flushes the
  * complete shell on the first pull, so everything readable before a macrotask
- * tick is the shell. shellBoundary 'mark' emits a shell_end frame there;
+ * tick is the shell. shellBoundary 'mark' emits a shell_end frame there
+ * (unless keepShell(shell) says the shell must not be stored);
  * 'discard' drops everything before it (prefix included) and forwards only
  * the hole chunks. Both passes detect the boundary identically, so a cached
  * shell and a later holes render concatenate without gaps or overlaps as long
- * as the shell renders deterministically (the PPR contract).
+ * as the shell renders deterministically (the PPR contract). A deferred
+ * hydration envelope goes out right after the boundary in both passes, so it
+ * is never part of the cached shell yet sits at the same document position.
  */
 export async function pumpRenderStream(
   socket: StreamFrameSink,
@@ -384,6 +665,18 @@ export async function pumpRenderStream(
   const reader = render.stream.getReader();
   const boundary = render.shellBoundary;
   let inShell = boundary !== undefined;
+  // The shell text keepShell judges: only collected when it is asked.
+  let shell = '';
+  const collectShell = boundary === 'mark' && render.keepShell !== undefined;
+  const leaveShell = (): void => {
+    inShell = false;
+    if (boundary === 'mark' && (render.keepShell?.(shell) ?? true)) {
+      writeFrame(socket, { type: 'shell_end', id: reqId });
+    }
+    if (render.envelope !== undefined) {
+      writeFrame(socket, { type: 'chunk', id: reqId, data: render.envelope });
+    }
+  };
   try {
     if (socket.destroyed) {
       await reader.cancel();
@@ -391,16 +684,14 @@ export async function pumpRenderStream(
     }
     if (render.prefix !== '' && boundary !== 'discard') {
       writeFrame(socket, { type: 'chunk', id: reqId, data: render.prefix });
+      if (collectShell) shell += render.prefix;
     }
     let pending = reader.read();
     while (true) {
       if (inShell) {
         const raced = await Promise.race([pending, shellFlushTick()]);
         if (raced === SHELL_FLUSHED) {
-          inShell = false;
-          if (boundary === 'mark') {
-            writeFrame(socket, { type: 'shell_end', id: reqId });
-          }
+          leaveShell();
         }
       }
       const { done, value } = await pending;
@@ -411,14 +702,15 @@ export async function pumpRenderStream(
         return;
       }
       const data = decoder.decode(value, { stream: true });
+      if (inShell && collectShell) shell += data;
       if (data !== '' && !(inShell && boundary === 'discard')) {
         writeFrame(socket, { type: 'chunk', id: reqId, data });
       }
     }
     // A page whose whole output flushed with the shell still marks the
     // boundary, so Rust stores the shell (its holes render is just empty).
-    if (inShell && boundary === 'mark') {
-      writeFrame(socket, { type: 'shell_end', id: reqId });
+    if (inShell) {
+      leaveShell();
     }
     const closing = decoder.decode() + render.suffix;
     if (closing !== '') {
@@ -465,6 +757,15 @@ export function validateIPCRequest(msg: Record<string, unknown>): IPCRequest | n
   const skipShell = msg['skipShell'];
   if (skipShell !== undefined && typeof skipShell !== 'boolean') return null;
 
+  // Client identity fields are optional (older servers omit them).
+  const client: Pick<IPCRequest, 'ip' | 'scheme' | 'host' | 'requestId'> = {};
+  for (const key of ['ip', 'scheme', 'host', 'requestId'] as const) {
+    const value = msg[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string') return null;
+    client[key] = value;
+  }
+
   return {
     id: msg['id'],
     method: msg['method'],
@@ -477,6 +778,7 @@ export function validateIPCRequest(msg: Record<string, unknown>): IPCRequest | n
     deploymentId: typeof msg['deploymentId'] === 'string' ? msg['deploymentId'] : '',
     locale: typeof msg['locale'] === 'string' ? msg['locale'] : '',
     skipShell: skipShell ?? false,
+    ...client,
   };
 }
 
@@ -544,31 +846,49 @@ export interface FrameHandlerOptions {
  * whenever a complete length-prefixed frame arrives. A declared frame length
  * above `maxFrameBytes` triggers `onOversize` and disables the handler - the
  * stream is unrecoverable at that point and the caller must drop the socket.
+ *
+ * Chunks are queued and joined once per completed frame, so reading a frame
+ * is linear in its size: re-concatenating the buffer on every chunk made a
+ * 50 MB request body take longer than the server's 10 s IPC write timeout.
  */
 export function makeFrameHandler(
   onFrame: (data: Buffer) => void,
   options?: FrameHandlerOptions,
 ): (chunk: Buffer) => void {
   const maxFrameBytes = options?.maxFrameBytes ?? MAX_IPC_MESSAGE_SIZE;
-  let buf = Buffer.alloc(0);
+  let chunks: Buffer[] = [];
+  let queued = 0;
+  // Declared length of the frame being received, once its header is in.
+  let frameLen = -1;
   let poisoned = false;
 
   return function handler(chunk: Buffer) {
     if (poisoned) return;
-    buf = Buffer.concat([buf, chunk]);
+    chunks.push(chunk);
+    queued += chunk.length;
 
-    while (buf.length >= 4) {
-      const len = buf.readUInt32BE(0);
-      if (len > maxFrameBytes) {
-        poisoned = true;
-        buf = Buffer.alloc(0);
-        options?.onOversize?.(len);
-        return;
+    for (;;) {
+      if (frameLen < 0) {
+        if (queued < 4) return;
+        if (chunks[0]!.length < 4) chunks = [Buffer.concat(chunks, queued)];
+        const len = chunks[0]!.readUInt32BE(0);
+        if (len > maxFrameBytes) {
+          poisoned = true;
+          chunks = [];
+          queued = 0;
+          options?.onOversize?.(len);
+          return;
+        }
+        frameLen = len;
       }
-      if (buf.length < 4 + len) break;
-      const frame = buf.subarray(4, 4 + len);
-      buf = buf.subarray(4 + len);
-      onFrame(Buffer.from(frame));
+      if (queued < 4 + frameLen) return;
+      const all = chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks, queued);
+      const frame = Buffer.from(all.subarray(4, 4 + frameLen));
+      const rest = all.subarray(4 + frameLen);
+      chunks = rest.length > 0 ? [rest] : [];
+      queued = rest.length;
+      frameLen = -1;
+      onFrame(frame);
     }
   };
 }

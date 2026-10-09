@@ -17,13 +17,27 @@
 //! passes. The HOLES render runs with the requester's own cookies - a shared
 //! shell with personalized holes is the point.
 
+mod client_identity;
 mod config;
+mod config_check;
+mod config_diagnostics;
+mod conn;
+mod css_assets;
 mod dev_codeframe;
+mod dev_guard;
 mod dev_overlay;
+mod dev_watch;
 mod devtools;
+mod env_files;
 mod ipc;
+mod logging;
 mod metrics;
+mod path_hygiene;
+mod public_files;
+mod revalidate;
 mod rules;
+mod security;
+mod session_token;
 mod stream_inject;
 mod ws;
 mod ws_ipc;
@@ -31,7 +45,6 @@ mod ws_registry;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -43,17 +56,16 @@ use axum::{
     http::{header, HeaderName, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
-use giojs_cache::{CacheConfig, CacheEntry, CacheStatus, PageCache, SingleFlight};
+use giojs_cache::{CacheConfig, CacheEntry, CacheStatus, FillTicket, PageCache, SingleFlight};
 use giojs_plugin::{PluginRegistry, PluginStartupCtx};
-use giojs_prefetch::{PrefetchBudgets, PrefetchConfig};
+use giojs_prefetch::PrefetchBudgets;
 use giojs_ratelimit::{RateLimitResult, RateLimitRule, RateLimiter};
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder as AutoConnBuilder;
+use hyper_util::rt::TokioIo;
 use ipc::{IpcClient, IpcRequest, IpcSendResult, RenderFrame};
 use std::convert::Infallible;
 use std::future::Future;
@@ -66,13 +78,10 @@ use tower_http::compression::predicate::{DefaultPredicate, Predicate, SizeAbove}
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 use uuid::Uuid;
-use ws_ipc::WsIpcClient;
+use ws_ipc::WsIpcPool;
 use ws_registry::WsRegistry;
-
-/// Upper bound on the on-disk page cache. Oldest entries are evicted past this.
-const DEFAULT_DISK_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Cap on buffered PPR shell bytes while waiting for shell_end. Past it the
 /// capture is abandoned (the page still streams, it just is not cached).
@@ -89,6 +98,11 @@ struct RenderedPage {
     /// True when `body` already has all head snippets injected (put-time
     /// composition), so response building must not inject again.
     composed: bool,
+    max_age_secs: u64,
+    /// Matched route pattern, the metrics label.
+    route: Option<String>,
+    /// The stored entry's ETag (same bytes as `body`).
+    etag: String,
 }
 
 /// Result of a coalesced render. `Page` is a shareable cached response.
@@ -107,9 +121,11 @@ enum CoalescedRender {
 /// itself cacheable - i.e. its content is the same for every visitor. Sharing
 /// anything else leaks the leader's cookie-derived HTML across users. A
 /// non-empty `vary` also disqualifies: the cache key cannot express varied
-/// dimensions yet, so such responses stay per-request.
+/// dimensions yet, so such responses stay per-request. So does setting a
+/// cookie (e.g. from a plugin on a cacheable page): followers would receive
+/// the leader's Set-Cookie, and the cached copy could never replay it.
 fn render_is_shareable(resp: &ipc::IpcResponse) -> bool {
-    resp.cacheable && resp.cache_max_age > 0 && resp.vary.is_empty()
+    resp.cacheable && resp.cache_max_age > 0 && resp.vary.is_empty() && !sets_cookies(resp)
 }
 
 /// One cache, one owner, one header: X-Gio-Cache says which tier answered
@@ -129,9 +145,234 @@ fn entry_age_secs(entry: &CacheEntry) -> u64 {
         .as_secs()
 }
 
-/// Stamps `X-Gio-Cache: static` on responses the dynamic pipeline never saw
-/// (public/ assets, chunks, fonts). Internal /_gio endpoints and protocol
-/// upgrades stay unstamped.
+/// How browsers and CDNs may cache a page response the pipeline built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageCachePolicy {
+    /// A shareable cached render, `age_secs` into its `max_age_secs` life.
+    /// Stale entries keep serving (while one refresh runs) until they are
+    /// `swr_multiplier` times `max_age_secs` old (`[cache] swr_multiplier`).
+    Shared {
+        max_age_secs: u64,
+        age_secs: u64,
+        swr_multiplier: u64,
+    },
+    /// Personal or uncacheable - and every PPR response: its holes are
+    /// rendered with the visitor's cookies.
+    Private,
+}
+
+/// The Cache-Control value for `policy`. A shared page is CDN-fresh for what
+/// is left of its revalidate window, CDN-servable stale (while it refreshes)
+/// for what is left of the SWR window, and always revalidated by browsers
+/// (max-age=0). Without an SWR window (`swr_multiplier = 0`) there is no
+/// stale-while-revalidate directive. Personal pages are `private, no-cache`
+/// - never `no-store`, which would disable the back/forward cache.
+fn page_cache_control(policy: PageCachePolicy) -> String {
+    match policy {
+        PageCachePolicy::Shared {
+            max_age_secs,
+            age_secs,
+            swr_multiplier: 0,
+        } => {
+            let fresh = max_age_secs.saturating_sub(age_secs);
+            format!("public, max-age=0, s-maxage={fresh}")
+        }
+        PageCachePolicy::Shared {
+            max_age_secs,
+            age_secs,
+            swr_multiplier,
+        } => {
+            let fresh = max_age_secs.saturating_sub(age_secs);
+            let swr_end = max_age_secs.saturating_mul(swr_multiplier);
+            let swr = swr_end.saturating_sub(age_secs.max(max_age_secs));
+            format!("public, max-age=0, s-maxage={fresh}, stale-while-revalidate={swr}")
+        }
+        PageCachePolicy::Private => "private, no-cache".to_string(),
+    }
+}
+
+/// Set Cache-Control on an HTML page response unless the app set its own:
+/// route handlers, getServerSideProps headers and header rules always win.
+fn apply_page_cache_control(resp: &mut Response, policy: PageCachePolicy) {
+    set_page_cache_control(resp, policy, security::nonce_placeholder().is_some());
+}
+
+/// `apply_page_cache_control` with the CSP-nonce setting passed in. Nonced
+/// HTML is unique to its response (body and CSP header): a shared cache
+/// replaying one would hand every visitor the same nonce, so with nonces on
+/// no page is ever `public` - and gets no ETag either (`etag_allowed`).
+fn set_page_cache_control(resp: &mut Response, policy: PageCachePolicy, csp_nonces: bool) {
+    let policy = if csp_nonces {
+        PageCachePolicy::Private
+    } else {
+        policy
+    };
+    let is_html = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/html"));
+    if !is_html || resp.headers().contains_key(header::CACHE_CONTROL) {
+        return;
+    }
+    if let Ok(value) = HeaderValue::from_str(&page_cache_control(policy)) {
+        resp.headers_mut()
+            .insert(header::CACHE_CONTROL, value.clone());
+        resp.extensions_mut().insert(FrameworkCacheControl(value));
+    }
+}
+
+/// Response extension: the Cache-Control value `apply_page_cache_control`
+/// set, so `make_framework_cache_control_private` can tell it from one the
+/// app or a header rule put there.
+#[derive(Debug, Clone)]
+struct FrameworkCacheControl(HeaderValue);
+
+/// Turn the pipeline's own Cache-Control private (a URL that serves several
+/// audiences, see `shared_cache_audience`). Only while the header still
+/// holds the value the pipeline set: one the app set is never touched, and
+/// a [[headers]] rule stamped later still wins.
+fn make_framework_cache_control_private(resp: &mut Response) {
+    let ours = resp
+        .extensions()
+        .get::<FrameworkCacheControl>()
+        .is_some_and(|set| resp.headers().get(header::CACHE_CONTROL) == Some(&set.0));
+    if ours {
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-cache"),
+        );
+    }
+}
+
+/// Request-extension marker from i18n_middleware: the locale came from
+/// request headers (Accept-Language / cookie), not the URL, so one URL
+/// serves different pages to different visitors. Shared caches key by URL
+/// (many ignore Vary), so such pages are never `public` and get no ETag.
+#[derive(Debug, Clone, Copy)]
+struct HeaderNegotiatedLocale;
+
+/// Request-extension marker from rules_middleware: a guard covers the
+/// requested path and admitted this visitor. The page is for admitted
+/// visitors only, but a shared cache keys by URL and never runs the guard:
+/// a CDN storing it would serve it to everyone the guard turns away. Such
+/// pages are never `public` and get no ETag.
+#[derive(Debug, Clone, Copy)]
+struct GuardAdmitted;
+
+/// Whether shared caches may reuse a page answered to `req`. The pipeline's
+/// `public` Cache-Control and its ETags stand for one body per URL, the
+/// same for every visitor - not so when the URL serves several audiences: a
+/// locale negotiated from request headers, a guard that admitted this
+/// visitor, or an Authorization header (RFC 9111 section 3.5: `public` and
+/// `s-maxage` let a shared cache hand a response to an authorized request
+/// to anyone).
+fn shared_cache_audience(req: &Request) -> bool {
+    req.extensions().get::<HeaderNegotiatedLocale>().is_none()
+        && req.extensions().get::<GuardAdmitted>().is_none()
+        && !req.headers().contains_key(header::AUTHORIZATION)
+}
+
+/// Whether a page answer may carry its ETag (and so turn into a 304):
+/// `[cache] etag` is on, the URL serves one audience (`shared_cache_audience`)
+/// and no CSP nonces make every body unique.
+fn page_etags_allowed(etag_switch: bool, shared_audience: bool, csp_nonces: bool) -> bool {
+    etag_switch && shared_audience && !csp_nonces
+}
+
+/// If-None-Match evaluation (RFC 9110 weak comparison, as the header
+/// requires): `*`, or any listed tag equal to `etag` ignoring `W/`.
+fn if_none_match_hits(if_none_match: &str, etag: &str) -> bool {
+    let opaque = |tag: &str| tag.trim().trim_start_matches("W/").to_string();
+    if_none_match.trim() == "*"
+        || if_none_match
+            .split(',')
+            .any(|candidate| opaque(candidate) == opaque(etag))
+}
+
+/// Whether a cached body's ETag - the hash of the stored bytes - stands for
+/// what is served. Uncomposed HTML (dev mode, or a composition that failed)
+/// gets critical CSS from the live CSS cache, font links and scripts
+/// injected on every request, so unchanged stored bytes can still serve a
+/// different page: a 304 would keep the browser on stale inlined CSS after
+/// a stylesheet edit. Dev mode also splices its overlay into composed
+/// entries, so it sends no page ETags at all.
+fn stored_body_is_served(
+    composed: bool,
+    headers: &HashMap<String, String>,
+    dev_mode: bool,
+) -> bool {
+    !dev_mode && (composed || !is_html_content_type(headers))
+}
+
+/// Stamp a cache hit's ETag, and turn the response into a 304 - the same
+/// headers, no body - when the client already holds that version. Returns
+/// true for a 304.
+///
+/// The tag goes out weak (`W/"..."`): it hashes the stored, uncompressed
+/// page, and CompressionLayer then serves gzip, br and identity bytes under
+/// it. A strong validator must differ per content coding (RFC 9110 8.8.1),
+/// so a shared cache could otherwise revalidate or range-combine the wrong
+/// variant. If-None-Match uses weak comparison, so 304s are unaffected.
+fn apply_entry_etag(
+    resp: &mut Response,
+    etag: Option<&str>,
+    if_none_match: Option<&HeaderValue>,
+) -> bool {
+    // Conditional requests only apply to what would otherwise be a 200.
+    if resp.status() != StatusCode::OK {
+        return false;
+    }
+    let Some(value) = etag.and_then(|etag| HeaderValue::from_str(&weak_etag(etag)).ok()) else {
+        return false;
+    };
+    let not_modified = if_none_match
+        .and_then(|v| v.to_str().ok())
+        .zip(etag)
+        .is_some_and(|(candidates, etag)| if_none_match_hits(candidates, etag));
+    resp.headers_mut().insert(header::ETAG, value);
+    if not_modified {
+        // CompressionLayer marks only the bodies it compresses, and a 304
+        // has none: it carries the Vary its 200 would (RFC 9110 15.4.5).
+        let varies_by_encoding = compressed_by_layer(resp);
+        *resp.status_mut() = StatusCode::NOT_MODIFIED;
+        *resp.body_mut() = axum::body::Body::empty();
+        resp.headers_mut().remove(header::CONTENT_LENGTH);
+        if varies_by_encoding && !varies_by(resp.headers(), header::ACCEPT_ENCODING.as_str()) {
+            resp.headers_mut()
+                .append(header::VARY, HeaderValue::from_static("accept-encoding"));
+        }
+    }
+    not_modified
+}
+
+/// `etag` as a weak validator (unchanged if it already is one).
+fn weak_etag(etag: &str) -> String {
+    if etag.starts_with("W/") {
+        etag.to_string()
+    } else {
+        format!("W/{etag}")
+    }
+}
+
+/// Whether the Vary headers already name `field` (or are `*`).
+fn varies_by(headers: &axum::http::HeaderMap, field: &str) -> bool {
+    headers
+        .get_all(header::VARY)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .any(|listed| listed == "*" || listed.eq_ignore_ascii_case(field))
+}
+
+/// Stamps `X-Gio-Cache: bypass` on app-path responses nothing else labeled:
+/// the server's own refusals (a rate-limit 429, a skew 409, a guard or a
+/// prefetch refusal) never reached the page cache. `static` is stamped only
+/// where a file is served (`stamp_static_file`), never by default: it also
+/// exempts a body from CSP nonce substitution. Internal /_gio endpoints and
+/// protocol upgrades stay unstamped, except where the server refused the
+/// request itself (`server_refusal` and the rate-limit 429 label their own).
 async fn cache_status_stamp_middleware(req: Request, next: Next) -> Response {
     let internal = req.uri().path().starts_with("/_gio/");
     let mut resp = next.run(req).await;
@@ -139,7 +380,51 @@ async fn cache_status_stamp_middleware(req: Request, next: Next) -> Response {
         && resp.status() != StatusCode::SWITCHING_PROTOCOLS
         && !resp.headers().contains_key("x-gio-cache")
     {
-        insert_cache_status_header(&mut resp, "static");
+        insert_cache_status_header(&mut resp, "bypass");
+    }
+    resp
+}
+
+/// `X-Gio-Cache: static` for a response a static file layer answered:
+/// public/ files, build assets, the startup CSS and self-hosted fonts (304s
+/// and 404s from those layers included).
+fn stamp_static_file(mut resp: Response) -> Response {
+    insert_cache_status_header(&mut resp, "static");
+    resp
+}
+
+/// `stamp_static_file` as a layer, for the ServeDir mounts.
+fn static_file_stamp_layer() -> SetResponseHeaderLayer<HeaderValue> {
+    SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("x-gio-cache"),
+        HeaderValue::from_static("static"),
+    )
+}
+
+/// A `Content-Length` for every body whose size is known (buffered pages,
+/// cache hits, small route bodies, /_gio/health). hyper derives it from the
+/// body's size hint, but CompressionLayer wraps every body - also the ones
+/// it leaves uncompressed - in a type that drops the hint, so they went out
+/// chunked. A header survives the wrapper; a body the layer does compress
+/// loses it there, as it must. Streams have no exact size and stay chunked.
+async fn exact_length_middleware(req: Request, next: Next) -> Response {
+    use axum::body::HttpBody as _;
+    // A HEAD answer may carry a GET's length or none; hyper decides.
+    let head = req.method() == axum::http::Method::HEAD;
+    let mut resp = next.run(req).await;
+    let status = resp.status();
+    if head
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+        || resp.headers().contains_key(header::CONTENT_LENGTH)
+        || resp.headers().contains_key(header::TRANSFER_ENCODING)
+    {
+        return resp;
+    }
+    if let Some(length) = resp.body().size_hint().exact() {
+        resp.headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
     }
     resp
 }
@@ -165,12 +450,65 @@ fn cacheable_response_headers(headers: &HashMap<String, String>) -> HashMap<Stri
     headers
         .iter()
         .filter(|(name, _)| {
-            !NONCACHEABLE_RESPONSE_HEADERS
-                .iter()
-                .any(|blocked| name.eq_ignore_ascii_case(blocked))
+            !is_hop_by_hop(name)
+                && !NONCACHEABLE_RESPONSE_HEADERS
+                    .iter()
+                    .any(|blocked| name.eq_ignore_ascii_case(blocked))
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
+}
+
+/// True when a worker response sets any cookie, through `setCookies` or a
+/// lone `set-cookie` entry in the single-valued headers map.
+fn sets_cookies(resp: &ipc::IpcResponse) -> bool {
+    !resp.set_cookies.is_empty()
+        || resp
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("set-cookie"))
+}
+
+/// Emit the worker's `setCookies` as one Set-Cookie header each (call after
+/// the headers map is copied in). A value already present - a worker that
+/// also put it in the headers map - is not emitted twice; invalid values
+/// (CR/LF) are dropped with a warning rather than failing the response.
+fn append_set_cookies(headers: &mut axum::http::HeaderMap, set_cookies: &[String]) {
+    for cookie in set_cookies {
+        let Ok(value) = HeaderValue::from_str(cookie) else {
+            warn!("dropping invalid set-cookie value from the worker");
+            continue;
+        };
+        append_set_cookie_once(headers, value);
+    }
+}
+
+/// Add one Set-Cookie header unless an identical value is already present.
+fn append_set_cookie_once(headers: &mut axum::http::HeaderMap, value: HeaderValue) {
+    if !headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .any(|v| v == value)
+    {
+        headers.append(header::SET_COOKIE, value);
+    }
+}
+
+/// Stamp header-rule headers (gio.toml / middleware.ts) onto a response. A
+/// rule replaces the response's own value for ordinary headers, but
+/// Set-Cookie is additive: cookies are independent, and replacing would
+/// silently drop every cookie the page or route handler set.
+fn stamp_rule_headers(
+    headers: &mut axum::http::HeaderMap,
+    rule_headers: impl IntoIterator<Item = (HeaderName, HeaderValue)>,
+) {
+    for (name, value) in rule_headers {
+        if name == header::SET_COOKIE {
+            append_set_cookie_once(headers, value);
+        } else {
+            headers.insert(name, value);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -180,17 +518,29 @@ struct AppState {
     coalesce: Arc<SingleFlight<CoalescedRender>>,
     revalidating: Arc<dashmap::DashSet<String>>,
     prefetch: Arc<PrefetchBudgets>,
+    /// `[prefetch] enabled`: false answers every prefetch 429.
+    prefetch_enabled: bool,
     font_snippets: Arc<Vec<String>>,
     image: Arc<giojs_image::ImageHandler>,
-    css_cache: Arc<DashMap<String, Bytes>>,
+    css_cache: Arc<css_assets::CssCache>,
     css_config: config::CssConfig,
+    /// `[cache]`: page ETags and the stale window (the switches the cache
+    /// itself does not hold).
+    cache_config: config::CacheConfig,
     http2: bool,
     tls_enabled: bool,
+    /// `[server] max_body_bytes`, with 0 resolved to the IPC frame cap.
     max_body_bytes: usize,
+    request_body_timeout: Option<Duration>,
+    /// `[server] skew_protection`: answer another deployment's client
+    /// navigations with 409 and a hard reload.
+    skew_protection: bool,
+    /// `[health] details`: report more than status and worker readiness.
+    health_details: bool,
     metrics: Arc<metrics::Metrics>,
     metrics_config: config::MetricsConfig,
     dev_mode: bool,
-    ws_ipc: Option<Arc<WsIpcClient>>,
+    ws_ipc: Option<Arc<WsIpcPool>>,
     ws_registry: Arc<WsRegistry>,
     ws_config: config::WebsocketConfig,
     rate_limiter: Option<Arc<RateLimiter>>,
@@ -200,15 +550,88 @@ struct AppState {
     i18n: Option<Arc<config::I18nConfig>>,
     devtools: Arc<devtools::DevtoolsState>,
     project_root: Arc<PathBuf>,
+    /// public/ files answered at the site root (see public_files.rs).
+    public_files: Arc<public_files::PublicFiles>,
+    /// gio.toml [security], compiled (see security.rs).
+    security: Arc<security::SecurityPolicy>,
+    /// Written into every cache entry's deployment-id slot and required on
+    /// lookup: the deployment id, plus the CSP nonce placeholder's
+    /// fingerprint when nonces are on (see `security::cache_epoch`).
+    cache_epoch: Arc<str>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
-        .init();
+fn main() -> anyhow::Result<()> {
+    // An argument the binary does not take is a usage error (exit 2, as for
+    // `gio`), never ignored: `giojs-server --version` must not start a server.
+    let check_config = match config_check::requested(std::env::args_os().skip(1)) {
+        Ok(check_config) => check_config,
+        Err(arg) => {
+            eprintln!(
+                "giojs-server: unexpected argument \"{}\": the server takes no arguments except {} \
+                 (gio.toml and environment variables configure it; `gio --version` prints versions)\n\
+                 See https://giojs.com/docs/cli/giojs-server",
+                arg.to_string_lossy(),
+                config_check::FLAG,
+            );
+            std::process::exit(2);
+        }
+    };
+    // .env files load before the tokio runtime exists: mutating the process
+    // environment is only sound while no other thread can be reading it. A
+    // file that exists but cannot be parsed is a config error, like gio.toml.
+    let loaded = env_files::load_for_startup();
+    if check_config {
+        std::process::exit(config_check::run(loaded.as_ref()));
+    }
+    let env_files = match loaded {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("giojs-server: configuration error: {error}");
+            std::process::exit(1);
+        }
+    };
+    let result = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(env_files));
+    // A startup failure is a message for the person starting the server,
+    // never a debug dump with a backtrace (which RUST_BACKTRACE would add).
+    if let Err(error) = result {
+        eprintln!("giojs-server: {error:#}");
+        std::process::exit(1);
+    }
+    Ok(())
+}
 
+async fn run(env_files: env_files::LoadedEnvFiles) -> anyhow::Result<()> {
+    // Before logging starts: gio.toml's [logging] picks the log format.
+    // Loading never logs through tracing (a bad file exits via eprintln), so
+    // nothing is lost by running it first.
     let cfg = config::GioConfig::load();
+    if let Some(warning) = logging::init(cfg.logging.format) {
+        warn!("{warning}");
+    }
+    if let Some(source) = env_files.disabled_by {
+        info!("not loading .env files: {source} turns them off");
+    } else if !env_files.files.is_empty() {
+        info!(
+            mode = env_files.mode.as_str(),
+            files = %env_files.files.join(", "),
+            "loaded .env files"
+        );
+    }
+    if !env_files.skipped.is_empty() {
+        warn!(
+            files = %env_files.skipped.join(", "),
+            "skipped .env candidates that are not regular files"
+        );
+    }
+    if env_files.ignored_node_env {
+        warn!(
+            "NODE_ENV in .env files is ignored - set it in the environment that starts the server"
+        );
+    }
+
     let bind_addr: SocketAddr = cfg.bind_addr().parse()?;
     let project_root = config::GioConfig::project_root();
 
@@ -218,44 +641,83 @@ async fn main() -> anyhow::Result<()> {
     let ws_config = cfg.websocket.clone();
 
     let ipc_paths = ipc::IpcPaths::resolve();
-    let ipc_token = ipc::generate_token();
 
-    info!("Starting Node SSR worker: {node_script}");
-    let ipc = IpcClient::start(&node_script, &ipc_paths, &ipc_token).await?;
+    // The one runtime-mode decision: the worker is spawned with the matching
+    // NODE_ENV, so Rust and Node can never disagree about dev vs production.
+    let dev_mode = std::env::var("NODE_ENV").as_deref() == Ok("development");
+    // Before the worker spawns (it may receive the dev secret) and before
+    // any rule set compiles (require_session guards verify with it).
+    session_token::init(dev_mode);
+    // <GioImage> must only emit srcset widths /_gio/image accepts. Settings
+    // the HTML depends on are listed in config::WORKER_RENDER_SETTINGS_ENV,
+    // which hashes them into the derived deployment ID: changing them drops
+    // persisted pages.
+    let worker_env = vec![
+        (
+            config::WORKER_IMAGE_CONFIG_ENV.to_string(),
+            cfg.images.worker_json(),
+        ),
+        // [css] minify reaches the worker's esbuild stylesheet build too.
+        (
+            config::WORKER_CSS_CONFIG_ENV.to_string(),
+            cfg.css.worker_json(),
+        ),
+        // <LocaleLink> leaves [i18n] default_locale unprefixed.
+        (
+            config::WORKER_I18N_CONFIG_ENV.to_string(),
+            cfg.i18n.worker_json(),
+        ),
+    ];
 
-    let cache_dir = std::env::var("GIO_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| project_root.join(".gio/cache/pages"));
-    tokio::fs::create_dir_all(&cache_dir).await?;
-
-    let cache = Arc::new(PageCache::new(CacheConfig {
-        memory_max_entries: NonZeroUsize::new(1000).expect("non-zero"),
-        disk_dir: cache_dir,
-        swr_multiplier: 10,
-        disk_max_bytes: DEFAULT_DISK_CACHE_MAX_BYTES,
-    }));
-
-    let cache_for_eviction = cache.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            cache_for_eviction.evict_disk().await;
+    // Every refusal that depends on more than gio.toml's syntax, before
+    // anything is created or spawned. Shared with --check-config, so the
+    // check and startup cannot disagree.
+    let startup_env = config_check::StartupEnv::from_process();
+    let config_check::Validated {
+        cache_dir,
+        security,
+        revalidate_token,
+        tls_acceptor,
+    } = match config_check::validate(&cfg, &startup_env) {
+        Ok(validated) => validated,
+        Err(errors) => {
+            for error in errors {
+                eprintln!("giojs-server: configuration error: {error}");
+            }
+            std::process::exit(1);
         }
-    });
+    };
+    ipc::set_render_timeout(cfg.server.render_timeout());
+    // Protections gio.toml turns off or loosens: allowed, never silent, and
+    // logged once, in the words --check-config reports them with.
+    for warning in config_check::protections_off_warnings(&cfg) {
+        warn!("{warning}");
+    }
+    let config_check::StartupEnv {
+        app_dir,
+        public_dir,
+        ..
+    } = startup_env;
+    // Only the disk tier writes under the page cache directory: memory-only
+    // (or no) caching creates nothing there, so it runs on a read-only
+    // filesystem.
+    let page_cache_on_disk = cfg.cache.enabled && cfg.cache.disk_enabled;
+    if page_cache_on_disk {
+        let source = if std::env::var_os("GIO_CACHE_DIR").is_some_and(|dir| !dir.is_empty()) {
+            "GIO_CACHE_DIR"
+        } else {
+            "[cache] disk_path"
+        };
+        create_dir_for(&cache_dir, &format!("the page cache directory ({source})")).await?;
+    }
 
-    let prefetch = Arc::new(PrefetchBudgets::new(PrefetchConfig::default()));
-    let prefetch_for_eviction = prefetch.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            prefetch_for_eviction.evict_idle(60);
-        }
-    });
-
+    // Fonts before the worker spawns: a font that cannot be fetched or
+    // copied fails startup before the build starts (validate already refused
+    // missing local files), and the served names feed the deployment ID.
     let fonts_dir = std::env::var("GIO_FONTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/fonts"));
-    tokio::fs::create_dir_all(&fonts_dir).await?;
+    create_dir_for(&fonts_dir, "the fonts directory (GIO_FONTS_DIR)").await?;
 
     let font_entries: Vec<giojs_font::FontEntry> = cfg
         .fonts
@@ -268,32 +730,158 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect();
 
-    if !font_entries.is_empty() {
-        giojs_font::download_fonts(&font_entries, &fonts_dir).await?;
-        let css = giojs_font::generate_css(&font_entries);
+    // The name each font is served under (local fonts carry a content hash).
+    let font_files = if font_entries.is_empty() {
+        Vec::new()
+    } else {
+        let files = giojs_font::download_fonts(&font_entries, &fonts_dir, &public_dir).await?;
+        let css = giojs_font::generate_css(&font_entries, &files);
         tokio::fs::write(fonts_dir.join("fonts.css"), css).await?;
+        files
+    };
+
+    let font_snippets = font_head_snippets(&cfg.fonts, &font_files);
+
+    // Everything the deployment ID covers besides the build the worker is
+    // about to produce: the worker's render settings, and what the server
+    // composes into cached pages itself (`composed_page_settings`; the
+    // deployment script's locales are in GIO_I18N_CONFIG).
+    let default_locale = if cfg.i18n.locales.is_empty() {
+        "en".to_string()
+    } else {
+        cfg.i18n.default_locale.clone()
+    };
+    install_deployment_script_locales(&cfg.i18n.locales);
+    let deployment = ipc::DeploymentInputs::from_process(
+        &project_root,
+        &worker_env,
+        composed_page_settings(&font_snippets, default_locale, &cfg.css),
+    );
+
+    // Before the worker spawns: it renders with the nonce placeholder.
+    let nonce_placeholder = security.uses_nonces().then(|| {
+        // A subdirectory: the cache's eviction and dev clearing only touch
+        // the entry files at the top level. The worker needs it at spawn,
+        // before its build completes the deployment ID, so it is keyed by
+        // everything else the ID covers (GIO_DEPLOYMENT_ID when pinned, a
+        // standalone build's manifest, the render settings). The cache epoch
+        // below still includes the build, so a code change drops every page.
+        // Without the disk tier no stored page outlives the process, so the
+        // placeholder need not either (and nothing is written).
+        if page_cache_on_disk {
+            security::load_or_create_nonce_placeholder(
+                &cache_dir.join("meta"),
+                &deployment.before_build(),
+            )
+        } else {
+            security::process_nonce_placeholder()
+        }
+    });
+    let security = match &nonce_placeholder {
+        Some(placeholder) => {
+            security::install_nonce_placeholder(placeholder);
+            security.with_nonce_placeholder(placeholder)
+        }
+        None => security,
+    };
+    info!(
+        default_headers = ?security.default_header_names(),
+        csp = security.has_csp(),
+        csp_report_only = security.has_csp_report_only(),
+        csp_nonces = nonce_placeholder.is_some(),
+        csrf = security.csrf().enabled(),
+        csrf_trusted_origins = security.csrf().trusted_origin_count(),
+        csrf_exempt = security.csrf().exempt_count(),
+        websocket_origin_check = security.websocket_origin_check(),
+        "security policy"
+    );
+    let security = Arc::new(security);
+
+    let workers = render_worker_count(
+        cfg.server.workers,
+        std::thread::available_parallelism().ok().map(usize::from),
+        dev_mode,
+    );
+    info!(workers, "Starting Node SSR worker: {node_script}");
+    let ipc = loop {
+        let error = match IpcClient::start(
+            &node_script,
+            &ipc_paths,
+            dev_mode,
+            worker_env.clone(),
+            workers,
+            &deployment,
+        )
+        .await
+        {
+            Ok(ipc) => break ipc,
+            Err(error) => error,
+        };
+        // Production refuses to start: the server must never serve with
+        // the app's rules or routes half-loaded. Dev shows the worker's own
+        // error and tries again once a file changes.
+        if !(dev_mode && cfg.dev.watch && error.is::<ipc::WorkerBootError>()) {
+            return Err(error);
+        }
+        eprintln!("giojs-server: {error:#}");
+        eprintln!("giojs-server: waiting for a file change to start the worker again");
+        wait_for_source_change(&project_root, &app_dir, &public_dir, &cache_dir, &cfg.dev).await?;
+    };
+    let cache_epoch: Arc<str> =
+        security::cache_epoch(ipc.deployment_id(), nonce_placeholder.as_deref()).into();
+
+    let cache = Arc::new(PageCache::new(CacheConfig {
+        enabled: cfg.cache.enabled,
+        memory_max_entries: cfg.cache.memory_max_entries,
+        disk_enabled: cfg.cache.disk_enabled,
+        disk_dir: cache_dir.clone(),
+        swr_multiplier: cfg.cache.swr_multiplier,
+        disk_max_bytes: cfg.cache.disk_max_bytes,
+    }));
+    if !cfg.cache.enabled {
+        info!("page cache disabled ([cache] enabled = false): every request renders");
+    } else if !cfg.cache.disk_enabled {
+        info!("page cache is memory only ([cache] disk_enabled = false)");
     }
 
-    let font_snippets: Vec<String> = font_entries
-        .iter()
-        .map(|e| format!(
-            r#"<link rel="preload" href="/_gio/fonts/{}" as="font" type="font/woff2" crossorigin>"#,
-            giojs_font::font_filename(e)
-        ))
-        .chain(if font_entries.is_empty() {
-            None
-        } else {
-            Some(r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string())
-        })
-        .collect();
+    // Index what a previous run left on disk so tag and path purges reach
+    // it. In the background: lookups stay correct while it runs.
+    let cache_for_index = cache.clone();
+    let epoch_for_index = cache_epoch.clone();
+    tokio::spawn(async move {
+        cache_for_index.index_disk(&epoch_for_index).await;
+    });
+
+    let cache_for_eviction = cache.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            cache_for_eviction.evict_disk().await;
+        }
+    });
+
+    let prefetch = Arc::new(PrefetchBudgets::new(cfg.prefetch.budgets()));
+    let prefetch_for_eviction = prefetch.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            prefetch_for_eviction.evict_idle(60);
+        }
+    });
 
     let image_cache_dir = std::env::var("GIO_IMAGE_CACHE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/cache/images"));
-    tokio::fs::create_dir_all(&image_cache_dir).await?;
+    if cfg.images.enabled {
+        create_dir_for(
+            &image_cache_dir,
+            "the image cache directory (GIO_IMAGE_CACHE_DIR)",
+        )
+        .await?;
+    } else {
+        info!("image optimizer disabled ([images] enabled = false): /_gio/image is not routed");
+    }
 
-    let public_dir =
-        PathBuf::from(std::env::var("GIO_PUBLIC_DIR").unwrap_or_else(|_| "public".into()));
     let image_config = giojs_image::ImageConfig {
         allowed_widths: cfg.images.allowed_widths.clone(),
         quality: cfg.images.quality,
@@ -311,15 +899,36 @@ async fn main() -> anyhow::Result<()> {
     let image_handler = Arc::new(
         giojs_image::ImageHandler::new(image_config, image_cache_dir, public_dir.clone())
             .with_disk_max_bytes(cfg.images.disk_max_bytes)
-            .with_max_remote_bytes(cfg.images.max_remote_bytes),
+            .with_formats(cfg.images.negotiated_formats())
+            .with_max_remote_bytes(cfg.images.max_remote_bytes)
+            .with_remote_timeout(cfg.images.remote_timeout())
+            .with_decode_limits(cfg.images.decode_limits()),
     );
 
     let http2 = cfg.server.http2;
     let tls_enabled = cfg.server.tls.enabled;
-    let dev_mode = std::env::var("NODE_ENV").as_deref() == Ok("development");
 
-    let app_dir = std::env::var("GIO_APP_DIR").unwrap_or_else(|_| "app".to_string());
-    let css_cache: Arc<DashMap<String, Bytes>> = Arc::new(DashMap::new());
+    let proxy_trust = Arc::new(client_identity::ProxyTrust {
+        trusted: cfg.server.trusted_proxies.clone(),
+        headers: cfg.server.proxy_headers,
+        tls: tls_enabled,
+        accept_request_id: cfg.server.accept_request_id,
+    });
+    if !proxy_trust.trusted.is_empty() {
+        let entries: Vec<String> = proxy_trust
+            .trusted
+            .entries()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        info!(
+            trusted_proxies = %entries.join(", "),
+            proxy_headers = proxy_trust.headers.as_str(),
+            "client IPs are read from forwarding headers sent by trusted proxies"
+        );
+    }
+
+    let css_cache: Arc<css_assets::CssCache> = Arc::new(DashMap::new());
     if cfg.css.enabled {
         load_css_cache(&css_cache, &app_dir, !dev_mode && cfg.css.minify).await;
     }
@@ -328,12 +937,10 @@ async fn main() -> anyhow::Result<()> {
     let ws_registry = Arc::new(WsRegistry::new());
     let ws_registry_for_shutdown = ws_registry.clone();
     let ws_ipc_client = if ws_config.enabled {
-        match WsIpcClient::connect(ws_registry.clone(), ipc_paths.ws.clone(), ipc_token.clone())
-            .await
-        {
-            Ok(client) => {
+        match WsIpcPool::connect(ws_registry.clone(), ipc.ws_endpoints()).await {
+            Ok(pool) => {
                 info!("WS IPC connected");
-                Some(Arc::new(client))
+                Some(Arc::new(pool))
             }
             Err(e) => {
                 warn!(error = %e, "WS IPC connect failed - WebSocket disabled");
@@ -356,15 +963,19 @@ async fn main() -> anyhow::Result<()> {
                 window_seconds: e.window_seconds,
                 burst: e.burst,
                 key_header: e.key_header.clone(),
+                max_keys_per_client: e.max_keys_per_client,
             })
             .collect();
         info!("Rate limiting enabled: {} rule(s)", rules.len());
-        let rl = Arc::new(RateLimiter::new(rules));
+        let rl = Arc::new(RateLimiter::with_max_buckets(
+            rules,
+            cfg.server.rate_limit_max_buckets,
+        ));
         let rl_evict = rl.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                rl_evict.evict_idle(300);
+                rl_evict.sweep();
             }
         });
         Some(rl)
@@ -404,19 +1015,42 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics_config = cfg.metrics.clone();
 
+    let public_files = Arc::new(public_files::PublicFiles::load(public_dir.clone()));
+    if public_files.len() > 0 {
+        info!(
+            files = public_files.len(),
+            dir = %public_dir.display(),
+            "public/ files indexed for root serving"
+        );
+    }
+    for (url, module) in public_files.shadowed_metadata_routes(std::path::Path::new(&app_dir)) {
+        warn!(
+            url,
+            module = %module.display(),
+            "public/ file shadows the app's metadata route - the public file is served and the module never runs; delete one"
+        );
+    }
+
+    let ipc = Arc::new(ipc);
+    let ipc_for_shutdown = ipc.clone();
     let state = AppState {
-        ipc: Arc::new(ipc),
+        ipc,
         cache,
         coalesce: Arc::new(SingleFlight::new()),
         revalidating: Arc::new(dashmap::DashSet::new()),
         prefetch,
+        prefetch_enabled: cfg.prefetch.enabled,
         font_snippets: Arc::new(font_snippets),
         image: image_handler,
         css_cache,
         css_config,
+        cache_config: cfg.cache.clone(),
         http2,
         tls_enabled,
-        max_body_bytes: cfg.server.max_body_bytes,
+        max_body_bytes: cfg.server.body_limit(),
+        request_body_timeout: cfg.server.request_body_timeout(),
+        skew_protection: cfg.server.skew_protection,
+        health_details: cfg.health.details,
         metrics: Arc::new(metrics::Metrics::new()),
         metrics_config,
         dev_mode,
@@ -428,17 +1062,41 @@ async fn main() -> anyhow::Result<()> {
         i18n,
         devtools: devtools_state,
         project_root: Arc::new(project_root.clone()),
+        public_files,
+        security: security.clone(),
+        cache_epoch,
     };
 
-    if !dev_mode
-        && state.metrics_config.token.is_empty()
-        && state.metrics_config.ip_allowlist.is_empty()
-    {
-        warn!("/_gio/metrics is unauthenticated - set [metrics] token or ip_allowlist in gio.toml");
+    spawn_worker_revalidations(state.clone());
+
+    if metrics_loopback_only(&state.metrics_config) {
+        // With no trusted proxy, a reverse proxy on this machine connects
+        // from 127.0.0.1 for every client it forwards.
+        let behind_local_proxy = if cfg.server.trusted_proxies.is_empty() {
+            " - behind a reverse proxy on this machine, list it in [server] trusted_proxies: \
+             requests it forwards with X-Forwarded-For, Forwarded or X-Real-IP get a 403, and \
+             without those headers every client it forwards looks local and is answered"
+        } else {
+            ""
+        };
+        info!(
+            "/_gio/metrics answers loopback clients only - set [metrics] token or ip_allowlist \
+             in gio.toml to scrape it from elsewhere{behind_local_proxy}"
+        );
     }
 
     if dev_mode {
-        spawn_dev_watcher(state.clone(), app_dir.clone(), project_root.clone());
+        if cfg.dev.watch {
+            spawn_dev_watcher(
+                state.clone(),
+                app_dir.clone(),
+                project_root.clone(),
+                &cache_dir,
+                cfg.dev.watch_ignore.clone(),
+            );
+        } else {
+            info!("[dev] watch = false: source changes do not restart the worker");
+        }
 
         let dt_mem = state.devtools.clone();
         tokio::spawn(async move {
@@ -476,49 +1134,145 @@ async fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| project_root.join(".gio/build/static"));
 
-    let immutable_header = HeaderValue::from_static("public, max-age=31536000, immutable");
+    // Requests these serve never reach the dynamic pipeline, which records
+    // everything else; each gets a fixed metrics `route` label instead.
+    let static_metrics = FixedRouteMetrics {
+        metrics: state.metrics.clone(),
+        route: metrics::ROUTE_STATIC,
+        cache: "static",
+    };
+    let internal_metrics = FixedRouteMetrics {
+        metrics: state.metrics.clone(),
+        route: metrics::ROUTE_INTERNAL,
+        cache: "bypass",
+    };
+
     let static_service = ServiceBuilder::new()
+        .layer(axum::middleware::from_fn_with_state(
+            static_metrics.clone(),
+            fixed_route_metrics_middleware,
+        ))
+        .layer(static_file_stamp_layer())
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
-            immutable_header.clone(),
+            HeaderValue::from_static(css_assets::IMMUTABLE_CACHE_CONTROL),
         ))
         .service(ServeDir::new(static_dir));
 
     let font_service = ServiceBuilder::new()
-        .layer(SetResponseHeaderLayer::if_not_present(
-            header::CACHE_CONTROL,
-            immutable_header,
+        .layer(axum::middleware::from_fn_with_state(
+            internal_metrics.clone(),
+            fixed_route_metrics_middleware,
         ))
+        .layer(static_file_stamp_layer())
+        .layer(axum::middleware::from_fn(font_cache_control_middleware))
         .service(ServeDir::new(fonts_dir));
 
-    let compression = CompressionLayer::new().compress_when(
-        DefaultPredicate::new()
-            .and(SizeAbove::new(1024))
-            .and(NotImagePredicate),
-    );
+    let public_service = ServiceBuilder::new()
+        .layer(axum::middleware::from_fn_with_state(
+            static_metrics,
+            fixed_route_metrics_middleware,
+        ))
+        .layer(static_file_stamp_layer())
+        .service(ServeDir::new(public_dir));
+
+    install_compression_config(cfg.compression);
+    let compression = compression_layer(cfg.compression);
 
     let mut app = Router::new()
-        .route("/_gio/health", get(health_handler))
-        .route("/_gio/metrics", get(metrics_handler))
-        .route("/_gio/image", get(image_handler_route));
+        .route("/_gio/metrics", get(metrics_handler));
+    // `[health] enabled = false`: an unrouted /_gio path, so a 404.
+    if cfg.health.enabled {
+        app = app.route("/_gio/health", get(health_handler));
+    }
+    // Unrouted while off: /_gio/image then answers 404 like any unknown
+    // /_gio path.
+    if cfg.images.enabled {
+        app = app.route("/_gio/image", get(image_handler_route));
+    }
+    // Without a token the route does not exist: /_gio/revalidate is then an
+    // unrouted /_gio path and answers 404 like any other.
+    if let Some(token) = revalidate_token {
+        info!("on-demand revalidation endpoint enabled: POST /_gio/revalidate");
+        let endpoint = Arc::new(revalidate::Endpoint {
+            token,
+            failures: revalidate::AuthFailures::default(),
+        });
+        app = app.route(
+            "/_gio/revalidate",
+            post(revalidate_handler).layer(axum::Extension(endpoint)),
+        );
+    }
+    // Every /_gio route registered so far (the revalidation endpoint
+    // included) records under the fixed `internal` metrics label.
+    app = app.route_layer(axum::middleware::from_fn_with_state(
+        internal_metrics,
+        fixed_route_metrics_middleware,
+    ));
 
-    if dev_mode {
-        app = app
+    let dev_hosts = dev_mode.then(|| {
+        Arc::new(dev_guard::DevHostPolicy::new(
+            &cfg.server.host,
+            &cfg.dev.allowed_hosts,
+        ))
+    });
+    if let Some(dev_hosts) = &dev_hosts {
+        for warning in config_check::invalid_allowed_hosts_warnings(&cfg) {
+            warn!("{warning}");
+        }
+        // With "*", protections_off_warnings has already said what it costs.
+        if !dev_hosts.allows_any_host() {
+            if !dev_hosts.allowed_hosts().is_empty() {
+                info!(allowed_hosts = ?dev_hosts.allowed_hosts(), "dev endpoints also answer to [dev] allowed_hosts");
+            } else if cfg.dev.devtools && dev_guard::binds_all_interfaces(&cfg.server.host) {
+                warn!(
+                    "dev server is bound to {} - /_gio/devtools endpoints (error overlay \
+                     codeframes, open-in-editor, live reload) only answer this machine on \
+                     localhost hosts; add other hostnames or IPs you browse from to [dev] \
+                     allowed_hosts in gio.toml",
+                    cfg.server.host
+                );
+            }
+        }
+        if !cfg.dev.devtools {
+            info!("[dev] devtools = false: /_gio/devtools* is not routed (404) and the error overlay shows no codeframes, editor links or live reload");
+            dev_overlay::disable_devtools();
+        }
+    }
+    if let Some(dev_hosts) = dev_hosts.as_ref().filter(|_| cfg.dev.devtools) {
+        // route_layer: the guard runs only for matched dev routes, before
+        // method routing, so a trusted GET to open-in-editor still gets 405.
+        let dev_routes = Router::new()
             .route("/_gio/devtools", get(devtools_handler))
             .route("/_gio/devtools/state", get(devtools_state_handler))
             .route("/_gio/devtools/stream", get(devtools_stream_handler))
             .route("/_gio/devtools/codeframe", get(devtools_codeframe_handler))
+            // POST-only: a GET is triggerable cross-site by a bare <img src>.
             .route(
                 "/_gio/devtools/open-in-editor",
-                get(devtools_open_editor_handler).post(devtools_open_editor_handler),
-            );
+                post(devtools_open_editor_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                dev_hosts.clone(),
+                dev_endpoint_guard,
+            ));
+        app = app.merge(dev_routes);
     }
 
-    let app = app
-        .nest_service("/public", ServeDir::new(public_dir))
+    let mut app = app
+        .nest_service(public_files::PUBLIC_URL_PREFIX, public_service)
         .nest_service("/_next/static", static_service)
         .nest_service("/_gio/fonts", font_service)
-        .fallback(dynamic_handler)
+        .fallback(root_fallback_handler);
+    if let Some(dev_hosts) = dev_hosts {
+        // Innermost, so it swaps the handler's body before any response
+        // transform (i18n, compression) touches it.
+        app = app.layer(axum::middleware::from_fn_with_state(
+            dev_hosts,
+            dev_error_detail_guard,
+        ));
+    }
+    let app = app
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             prefetch_budget_middleware,
@@ -530,6 +1284,12 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rules_middleware,
+        ))
+        // CSRF before rules, routing, and any body read; inside rate
+        // limiting, so a flood of forged requests still burns budget.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            cross_site_request_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -543,7 +1303,21 @@ async fn main() -> anyhow::Result<()> {
             state.clone(),
             i18n_middleware,
         ))
+        // Outside i18n so locale detection, rate limits and rules all see
+        // the same escape-normalized path (see path_hygiene.rs).
+        .layer(axum::middleware::from_fn(path_hygiene_middleware))
         .layer(axum::middleware::from_fn(cache_status_stamp_middleware))
+        // Security headers and CSP nonce substitution see every response
+        // (path rejections, rule redirects and cache hits included) after
+        // all other layers set theirs - a header already present wins - and
+        // rewrite bodies before compression does.
+        .layer(axum::middleware::from_fn_with_state(
+            security,
+            security::security_headers_middleware,
+        ))
+        // Right inside compression, whose body wrapper hides the size of a
+        // body it leaves uncompressed.
+        .layer(axum::middleware::from_fn(exact_length_middleware))
         // Compression is added last so it is the outermost response transform:
         // it must run after i18n injects <html lang>, otherwise it compresses
         // the body first and the lang injection silently no-ops.
@@ -553,18 +1327,35 @@ async fn main() -> anyhow::Result<()> {
     // Plugin routes and middleware are applied post-with_state (both operate on Router<()>).
     let app = plugin_registry.merge_routes(app);
     let app = plugin_registry.apply_middleware(app);
+    // Outermost of all, plugin middleware included: every layer below sees
+    // the resolved client, and every response - plugin short-circuits,
+    // 400s from path hygiene, 429s - carries the request id.
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        proxy_trust,
+        client_identity_middleware,
+    ));
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
 
-    let tls_acceptor = if cfg.server.tls.enabled {
-        Some(load_tls_acceptor(&cfg.server.tls)?)
-    } else {
-        None
-    };
-
-    info!(http2 = %http2, tls = %tls_enabled, "GioJS listening on {bind_addr}");
-    serve_connections(listener, app, http2, tls_acceptor).await?;
+    info!(http2 = %http2, tls = %tls_enabled, port_from = cfg.port_source, "GioJS listening on {bind_addr}");
+    let conn_settings = conn::ConnSettings::from_config(&cfg.server);
+    let streams_for_shutdown = ipc_for_shutdown.clone();
+    serve_connections(listener, app, conn_settings, tls_acceptor, async move {
+        shutdown_signal().await;
+        // An open event stream (SSE, or a route.ts text/event-stream body)
+        // never ends on its own: end them now, or one dashboard tab holds
+        // the drain to its timeout. Requests, page renders and other
+        // route.ts bodies (downloads) still drain: ending one of those
+        // cleanly would pass a short file off as complete. One that
+        // outlives the drain is cut with its connection (no final chunk),
+        // which the client sees as a failed transfer.
+        streams_for_shutdown.end_endless_streams();
+    })
+    .await?;
     ws_registry_for_shutdown.close_all();
+    // Connections are drained: let every worker exit on its own (plugin
+    // shutdown hooks included) before the process does.
+    ipc_for_shutdown.shutdown().await;
     if let Err(e) = plugin_registry.shutdown_all() {
         error!(error = %e, "plugin shutdown error");
     }
@@ -572,19 +1363,146 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve who sent the request (see client_identity.rs) once, for rate
+/// limits, prefetch budgets, the metrics allowlist and the worker, and give
+/// it its request id: on the tracing span every log line of the request is
+/// emitted in, on the request header the worker sees (never a client's
+/// spoofed one), and as X-Request-Id on the response.
+async fn client_identity_middleware(
+    State(trust): State<Arc<client_identity::ProxyTrust>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    // First of all, so plugins, guards and the worker all read one Cookie.
+    join_cookie_fields(req.headers_mut());
+    let Some(ConnectInfo(peer)) = req.extensions().get::<ConnectInfo<SocketAddr>>().copied() else {
+        return next.run(req).await;
+    };
+    let client = client_identity::resolve(
+        peer,
+        req.headers(),
+        req.uri().authority().map(|a| a.as_str()),
+        &trust,
+    );
+    // Validated ids are header-safe; generated ones are UUIDs.
+    let request_id = HeaderValue::from_str(&client.request_id).ok();
+    if let Some(value) = &request_id {
+        req.headers_mut()
+            .insert(client_identity::REQUEST_ID_HEADER, value.clone());
+    }
+    let span = request_span(&client.request_id);
+    req.extensions_mut().insert(client);
+    let mut resp = next.run(req).instrument(span).await;
+    if let Some(value) = request_id {
+        resp.headers_mut()
+            .insert(client_identity::REQUEST_ID_HEADER, value);
+    }
+    resp
+}
+
+/// The span every log line of one request is emitted in. ERROR level, the
+/// most severe there is, so no RUST_LOG filter disables it while letting
+/// any of the request's own lines through: an event inside a disabled span
+/// loses its fields, and at RUST_LOG=warn an INFO span would strip the id
+/// from exactly the warn/error lines it is there for.
+fn request_span(request_id: &str) -> tracing::Span {
+    tracing::error_span!("request", request_id = %request_id)
+}
+
+/// Labels for requests served outside the dynamic pipeline (see
+/// `fixed_route_metrics_middleware`).
+#[derive(Clone)]
+struct FixedRouteMetrics {
+    metrics: Arc<metrics::Metrics>,
+    route: &'static str,
+    cache: &'static str,
+}
+
+/// Record a request under a fixed `route` / `cache` label: static files
+/// (`static`) and the server's own /_gio endpoints (`internal`).
+async fn fixed_route_metrics_middleware(
+    State(labels): State<FixedRouteMetrics>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let start = std::time::Instant::now();
+    let method = req.method().clone();
+    let resp = next.run(req).await;
+    labels.metrics.record_request(
+        method.as_str(),
+        resp.status().as_u16(),
+        labels.cache,
+        labels.route,
+        start.elapsed().as_nanos() as u64,
+    );
+    resp
+}
+
+/// fonts.css is regenerated from gio.toml at every start under a fixed URL,
+/// so it revalidates; the .woff2 files keep immutable caching. Chosen by
+/// request path so 304s carry the same policy as the 200s they refresh.
+async fn font_cache_control_middleware(req: Request, next: Next) -> Response {
+    let cache_control = css_assets::font_cache_control(req.uri().path());
+    let mut resp = next.run(req).await;
+    resp.headers_mut()
+        .entry(header::CACHE_CONTROL)
+        .or_insert(cache_control);
+    resp
+}
+
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let (cache_entries, _) = state.cache.stats();
-    axum::Json(serde_json::json!({
-        "status": "ok",
-        "http2": state.http2,
-        "tls": state.tls_enabled,
-        "deploymentId": state.ipc.deployment_id(),
-        // False during worker respawn windows; cached/static content still
-        // serves, so this stays a 200 - readiness probes read the field.
-        "nodeReady": state.ipc.worker_ready(),
-        "cacheEntries": cache_entries,
-        "uptimeSecs": state.devtools.uptime_secs(),
+    let workers = state.ipc.worker_statuses();
+    axum::Json(health_body(&HealthFacts {
+        details: state.health_details,
+        http2: state.http2,
+        tls: state.tls_enabled,
+        deployment_id: state.ipc.deployment_id(),
+        workers_configured: workers.len(),
+        workers_ready: workers.iter().filter(|w| w.ready).count(),
+        cache_entries: state.cache.stats().0,
+        uptime_secs: state.devtools.uptime_secs(),
     }))
+}
+
+/// What `/_gio/health` knows about the server.
+struct HealthFacts<'a> {
+    /// `[health] details`.
+    details: bool,
+    http2: bool,
+    tls: bool,
+    deployment_id: &'a str,
+    workers_configured: usize,
+    workers_ready: usize,
+    cache_entries: usize,
+    uptime_secs: u64,
+}
+
+/// The `/_gio/health` body. `[health] details = false` keeps what a probe
+/// needs and drops the deployment id and the worker topology.
+fn health_body(facts: &HealthFacts) -> serde_json::Value {
+    // False only while every worker is respawning; cached/static content
+    // still serves, so this stays a 200 - readiness probes read the field.
+    let node_ready = facts.workers_ready > 0;
+    if !facts.details {
+        return serde_json::json!({ "status": "ok", "nodeReady": node_ready });
+    }
+    serde_json::json!({
+        "status": "ok",
+        "http2": facts.http2,
+        "tls": facts.tls,
+        "deploymentId": facts.deployment_id,
+        "nodeReady": node_ready,
+        "workers": { "configured": facts.workers_configured, "ready": facts.workers_ready },
+        "cacheEntries": facts.cache_entries,
+        "uptimeSecs": facts.uptime_secs,
+    })
+}
+
+/// Whether `/_gio/metrics` answers loopback clients only: it exists (with
+/// `[metrics]` absent or `enabled = false` it answers 404) and neither a
+/// token nor an allowlist says who else may scrape it.
+fn metrics_loopback_only(config: &config::MetricsConfig) -> bool {
+    config.enabled && config.token.is_empty() && config.ip_allowlist.is_empty()
 }
 
 async fn metrics_handler(
@@ -592,17 +1510,51 @@ async fn metrics_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> Response {
-    if !state.metrics_config.enabled {
-        return StatusCode::NOT_FOUND.into_response();
+    if let Some(refusal) = metrics_refusal(&state.metrics_config, &req, addr) {
+        return refusal.into_response();
     }
-    if !state.metrics_config.ip_allowlist.is_empty() {
-        let ip = addr.ip().to_string();
-        if !state.metrics_config.ip_allowlist.iter().any(|a| a == &ip) {
-            return StatusCode::FORBIDDEN.into_response();
+    let (cache_entries, cache_size_bytes) = state.cache.stats();
+    let worker_metrics = metrics::format_worker_metrics(&state.ipc.worker_statuses());
+    let body = state
+        .metrics
+        .format_prometheus(cache_entries, cache_size_bytes, read_proc_rss())
+        + &worker_metrics;
+    axum::response::Response::builder()
+        .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Why `/_gio/metrics` refuses this request, if it does: 404 when it is
+/// off, 403 for a client outside `ip_allowlist` (or, with neither an
+/// allowlist nor a token, any client but this machine), 401 without the
+/// token.
+fn metrics_refusal(
+    config: &config::MetricsConfig,
+    req: &Request,
+    addr: SocketAddr,
+) -> Option<StatusCode> {
+    if !config.enabled {
+        return Some(StatusCode::NOT_FOUND);
+    }
+    // The client behind trusted proxies: allowlisting 127.0.0.1 must not
+    // admit everything a local reverse proxy forwards. A client the proxy's
+    // forwarding header could not name is refused outright.
+    let client = client_identity::access_ip(req, addr);
+    if !config.ip_allowlist.is_empty() {
+        if !client.is_some_and(|ip| config.ip_allowlist.contains(ip)) {
+            return Some(StatusCode::FORBIDDEN);
         }
+    } else if metrics_loopback_only(config)
+        && (!client.is_some_and(|ip| ip.to_canonical().is_loopback())
+            // Relayed by a proxy on this machine that trusted_proxies does
+            // not list: the loopback peer stands for a client nobody named.
+            || client_identity::forwarded_by_untrusted_peer(req))
+    {
+        return Some(StatusCode::FORBIDDEN);
     }
-    if !state.metrics_config.token.is_empty() {
-        let expected = format!("Bearer {}", state.metrics_config.token);
+    if !config.token.is_empty() {
+        let expected = format!("Bearer {}", config.token);
         let authorized = req
             .headers()
             .get(header::AUTHORIZATION)
@@ -610,17 +1562,146 @@ async fn metrics_handler(
             .map(|v| constant_time_eq(v.as_bytes(), expected.as_bytes()))
             .unwrap_or(false);
         if !authorized {
-            return StatusCode::UNAUTHORIZED.into_response();
+            return Some(StatusCode::UNAUTHORIZED);
         }
     }
-    let (cache_entries, cache_size_bytes) = state.cache.stats();
-    let body = state
-        .metrics
-        .format_prometheus(cache_entries, cache_size_bytes, read_proc_rss());
-    axum::response::Response::builder()
-        .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
-        .body(axum::body::Body::from(body))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    None
+}
+
+fn i18n_locales(state: &AppState) -> &[String] {
+    state
+        .i18n
+        .as_ref()
+        .map_or(&[], |cfg| cfg.locales.as_slice())
+}
+
+/// `POST /_gio/revalidate` (routed only when a token is configured): purge
+/// cached pages by tag or path for external systems such as CMS webhooks.
+/// Bearer-authenticated; a client past its failed-attempt budget is refused
+/// before its token is even compared.
+async fn revalidate_handler(
+    State(state): State<AppState>,
+    axum::Extension(endpoint): axum::Extension<Arc<revalidate::Endpoint>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    let ip = client_identity::client_ip(&req, addr);
+    let now = std::time::Instant::now();
+    if let Some(retry_after) = endpoint.failures.blocked(ip, now) {
+        let mut resp = revalidate_json(
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({ "error": "too many failed attempts" }),
+        );
+        if let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().max(1).to_string()) {
+            resp.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        return resp;
+    }
+    let authorization = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    if !revalidate::token_matches(authorization, &endpoint.token) {
+        warn!(ip = %ip, "revalidation request with a missing or wrong token");
+        if !endpoint.failures.record(ip, now) {
+            return revalidate_json(
+                StatusCode::TOO_MANY_REQUESTS,
+                serde_json::json!({ "error": "too many failed attempts" }),
+            );
+        }
+        let mut resp = revalidate_json(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({ "error": "unauthorized" }),
+        );
+        resp.headers_mut()
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        return resp;
+    }
+
+    let read = axum::body::to_bytes(req.into_body(), revalidate::MAX_BODY_BYTES);
+    let body = match state.request_body_timeout {
+        Some(limit) => match tokio::time::timeout(limit, read).await {
+            Ok(result) => result,
+            Err(_) => {
+                return revalidate_json(
+                    StatusCode::REQUEST_TIMEOUT,
+                    serde_json::json!({ "error": "request body timed out" }),
+                )
+            }
+        },
+        None => read.await,
+    };
+    let Ok(body) = body else {
+        return revalidate_json(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            serde_json::json!({ "error": "request body too large" }),
+        );
+    };
+    let request = match serde_json::from_slice::<revalidate::RevalidateRequest>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return revalidate_json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": format!(
+                        "expected a JSON body {{ \"tags\"?: string[], \"paths\"?: string[], \"prefix\"?: boolean }}: {error}"
+                    ),
+                }),
+            )
+        }
+    };
+    let targets = match revalidate::Targets::validate(request, i18n_locales(&state)) {
+        Ok(targets) => targets,
+        Err(error) => {
+            return revalidate_json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "error": error.to_string() }),
+            )
+        }
+    };
+    let purged = targets.apply(&state.cache).await;
+    info!(source = "endpoint", ip = %ip, targets = %revalidate::summary(&targets), purged, "cache revalidated");
+    revalidate_json(
+        StatusCode::OK,
+        serde_json::json!({ "ok": true, "purged": purged }),
+    )
+}
+
+fn revalidate_json(status: StatusCode, body: serde_json::Value) -> Response {
+    let mut resp = (status, axum::Json(body)).into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
+}
+
+/// Execute the worker's `revalidateTag` / `revalidatePath` purges in order,
+/// acking each, so an awaited call returns only once its purge happened.
+fn spawn_worker_revalidations(state: AppState) {
+    let Some(mut requests) = state.ipc.take_revalidations() else {
+        return;
+    };
+    tokio::spawn(async move {
+        while let Some(revalidation) = requests.recv().await {
+            let outcome = match revalidate::Targets::validate(
+                revalidation.request,
+                i18n_locales(&state),
+            ) {
+                Ok(targets) => {
+                    let purged = targets.apply(&state.cache).await;
+                    info!(source = "worker", targets = %revalidate::summary(&targets), purged, "cache revalidated");
+                    Ok(purged)
+                }
+                Err(error) => {
+                    warn!(source = "worker", %error, "revalidation refused");
+                    Err(error.to_string())
+                }
+            };
+            state
+                .ipc
+                .send_revalidate_ack(revalidation.worker, &revalidation.id, outcome)
+                .await;
+        }
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -647,13 +1728,35 @@ async fn version_skew_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    if let Some(resp) = check_version_skew(&req, state.ipc.deployment_id()) {
+    if let Some(resp) = check_version_skew(&req, state.ipc.deployment_id(), state.skew_protection)
+    {
         return resp;
     }
     next.run(req).await
 }
 
-fn check_version_skew(req: &Request, server_id: &str) -> Option<Response> {
+/// Marks a refusal the server answers before any handler sees the request
+/// body - a rate-limit 429, a 413 over `max_body_bytes` - so the client can
+/// tell it from the same status returned by a page action or route.ts that
+/// already ran: `<GioForm>` re-sends only a submission refused this way.
+const REFUSED_UNREAD_HEADER: &str = "x-gio-refused";
+
+/// The 413 for a request body over `max_body_bytes`, read before any handler.
+fn payload_too_large() -> Response {
+    let mut resp = (StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large").into_response();
+    resp.headers_mut().insert(
+        HeaderName::from_static(REFUSED_UNREAD_HEADER),
+        HeaderValue::from_static("unread"),
+    );
+    resp
+}
+
+/// The 409 hard-reload for a client from another deployment, unless
+/// `[server] skew_protection = false` says to ignore its x-deployment-id.
+fn check_version_skew(req: &Request, server_id: &str, protection: bool) -> Option<Response> {
+    if !protection {
+        return None;
+    }
     // Only the GioJS client runtime sends x-deployment-id (soft navigations
     // and prefetches), so its presence IS the navigate signal. fetch() cannot
     // set sec-fetch-mode: navigate - gating on it made skew detection dead.
@@ -670,12 +1773,21 @@ fn check_version_skew(req: &Request, server_id: &str) -> Option<Response> {
         path = %req.uri().path(),
         "version skew detected"
     );
-    let mut resp = StatusCode::CONFLICT.into_response();
+    let mut resp = server_refusal(StatusCode::CONFLICT);
     resp.headers_mut().insert(
         HeaderName::from_static("x-gio-action"),
         HeaderValue::from_static("hard-reload"),
     );
     Some(resp)
+}
+
+/// A refusal the server answers itself, labeled `X-Gio-Cache: bypass` here
+/// rather than by cache_status_stamp_middleware, which skips /_gio paths:
+/// a prefetch, a skewed client or a rate limit can be refused there too.
+fn server_refusal(status: StatusCode) -> Response {
+    let mut resp = status.into_response();
+    insert_cache_status_header(&mut resp, "bypass");
+    resp
 }
 
 async fn prefetch_budget_middleware(
@@ -687,15 +1799,120 @@ async fn prefetch_budget_middleware(
     if !is_prefetch(&req) {
         return next.run(req).await;
     }
-    let ip = addr.ip();
-    if !state.prefetch.try_acquire(ip) {
-        warn!(ip = %ip, path = %req.uri().path(), "prefetch budget exceeded");
-        state.metrics.record_prefetch_rejected();
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    let ip = client_identity::client_ip(&req, addr);
+    let _slot = match admit_prefetch(state.prefetch_enabled, &state.prefetch, ip) {
+        PrefetchAdmission::Admitted(slot) => slot,
+        PrefetchAdmission::Disabled => {
+            state.metrics.record_prefetch_rejected();
+            return server_refusal(StatusCode::TOO_MANY_REQUESTS);
+        }
+        PrefetchAdmission::OverBudget => {
+            warn!(ip = %ip, path = %req.uri().path(), "prefetch budget exceeded");
+            state.metrics.record_prefetch_rejected();
+            return server_refusal(StatusCode::TOO_MANY_REQUESTS);
+        }
+    };
+    next.run(req).await
+}
+
+/// What happens to one prefetch request. Both refusals are a 429 the
+/// client reads as "not prefetched"; only an exceeded budget is logged.
+enum PrefetchAdmission {
+    Admitted(PrefetchSlot),
+    /// `[prefetch] enabled = false`: refused before anything renders.
+    Disabled,
+    OverBudget,
+}
+
+fn admit_prefetch(
+    enabled: bool,
+    budgets: &Arc<PrefetchBudgets>,
+    ip: std::net::IpAddr,
+) -> PrefetchAdmission {
+    if !enabled {
+        return PrefetchAdmission::Disabled;
     }
-    let resp = next.run(req).await;
-    state.prefetch.release(ip);
-    resp
+    match PrefetchSlot::acquire(budgets, ip) {
+        Some(slot) => PrefetchAdmission::Admitted(slot),
+        None => PrefetchAdmission::OverBudget,
+    }
+}
+
+/// One in-flight prefetch, released when dropped: when the response is
+/// ready, and also when the client disconnects (or resets the HTTP/2
+/// stream) first and the request future is dropped mid-await. A slot freed
+/// only after the await would leak there, and a handful of cancelled
+/// prefetches would 429 every later prefetch from that client.
+struct PrefetchSlot {
+    budgets: Arc<PrefetchBudgets>,
+    ip: std::net::IpAddr,
+}
+
+impl PrefetchSlot {
+    fn acquire(budgets: &Arc<PrefetchBudgets>, ip: std::net::IpAddr) -> Option<Self> {
+        budgets.try_acquire(ip).then(|| Self {
+            budgets: Arc::clone(budgets),
+            ip,
+        })
+    }
+}
+
+impl Drop for PrefetchSlot {
+    fn drop(&mut self) {
+        self.budgets.release(self.ip);
+    }
+}
+
+/// True when the router dispatched this request to one of Rust's own `/_gio`
+/// endpoints. Registered routes carry a `MatchedPath` (dev-only routes exist
+/// only in dev, so they match only there); the nested font service carries
+/// none but owns its whole prefix. Anything else under `/_gio` fell through
+/// to the fallback and gets no internal-endpoint exemptions. These layers
+/// run after routing, so the router's verdict is already final here.
+fn is_internal_endpoint(req: &Request) -> bool {
+    if let Some(matched) = req.extensions().get::<axum::extract::MatchedPath>() {
+        return matched.as_str().starts_with("/_gio/");
+    }
+    let path = req.uri().path();
+    path == "/_gio/fonts" || path.starts_with("/_gio/fonts/")
+}
+
+/// Outermost path gate (see path_hygiene.rs), ahead of i18n, rate limits and
+/// rules. Dot segments, malformed escapes, raw backslashes and escaped
+/// separators under the public/ mount are refused, the `/_gio`
+/// namespace answers 404 for anything that is not a real internal endpoint
+/// (so `/_gio/x` can never render an app page under a top-level dynamic
+/// segment, nor reach the cache or Node), and unreserved percent-escapes are
+/// decoded in the forwarded URI so every later matcher and the Node router
+/// agree on one spelling. The forwarded path is a fixed point of the escape
+/// normalization, so the later matchers' own `canonical` calls decode nothing
+/// further.
+async fn path_hygiene_middleware(mut req: Request, next: Next) -> Response {
+    let checked = path_hygiene::canonical(req.uri().path()).and_then(|canonical| {
+        match path_hygiene::file_mount_rejection(&canonical) {
+            Some(rejection) => Err(rejection),
+            None => Ok(path_hygiene::is_gio_namespace(&canonical)),
+        }
+    });
+    let in_gio_namespace = match checked {
+        Ok(in_gio_namespace) => in_gio_namespace,
+        Err(rejection) => {
+            warn!(path = %req.uri().path(), ?rejection, "request path rejected");
+            let mut resp = (StatusCode::BAD_REQUEST, "400 Bad Request").into_response();
+            insert_cache_status_header(&mut resp, "bypass");
+            return resp;
+        }
+    };
+    if in_gio_namespace && !is_internal_endpoint(&req) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // Cannot fail: canonical() above already ran the same normalization.
+    if let Ok(std::borrow::Cow::Owned(normalized)) =
+        path_hygiene::normalize_escapes(req.uri().path())
+    {
+        rewrite_request_uri(&mut req, normalized);
+    }
+    next.run(req).await
 }
 
 async fn rate_limit_middleware(
@@ -704,12 +1921,11 @@ async fn rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    let path = req.uri().path().to_string();
-
-    // Internal GioJS routes are never rate-limited - except the image
+    // Rust's own endpoints are never rate-limited - except the image
     // optimizer, the most CPU-expensive endpoint in the system, which
-    // honors operator [[rate_limits]] rules like any app route.
-    if path.starts_with("/_gio/") && path != "/_gio/image" {
+    // honors operator [[rate_limits]] rules like any app route. Unrouted
+    // /_gio paths are not exempt (path_hygiene_middleware 404s them anyway).
+    if is_internal_endpoint(&req) && req.uri().path() != "/_gio/image" {
         return next.run(req).await;
     }
 
@@ -717,7 +1933,17 @@ async fn rate_limit_middleware(
         return next.run(req).await;
     };
 
-    let ip = addr.ip();
+    // Limits match the canonical path, so `/api/login/`, `//api/login` and
+    // `/api/%6Cogin` share the `/api/login` bucket the Node router would
+    // dispatch them to.
+    let path = match path_hygiene::canonical(req.uri().path()) {
+        Ok(canonical) => canonical.into_owned(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    // Behind trusted proxies this is the forwarded client, so visitors no
+    // longer share the proxy's bucket (IPv6 is still keyed by its /64).
+    let ip = client_identity::client_ip(&req, addr);
     let headers: HashMap<String, String> = req
         .headers()
         .iter()
@@ -730,7 +1956,13 @@ async fn rate_limit_middleware(
 
     state.metrics.record_ratelimit_checked(&path);
 
-    match rl.check(&path, ip, &headers) {
+    // A root-served public/ file is also /public/...: budgets written for
+    // that URL hold for the root alias, charged once per rule.
+    let result = match root_public_alias(&state, &req) {
+        Some(alias) => rl.check_paths(&[path.as_str(), alias.as_str()], ip, &headers),
+        None => rl.check(&path, ip, &headers),
+    };
+    match result {
         RateLimitResult::Allowed { remaining, limit } => {
             let mut resp = next.run(req).await;
             if limit > 0 {
@@ -753,27 +1985,106 @@ async fn rate_limit_middleware(
                 .metrics
                 .record_ratelimit_rejected(&path, &rule_pattern);
             warn!(ip = %ip, path = %path, rule = %rule_pattern, "rate limit exceeded");
+            // Labeled here like server_refusal: /_gio/image is rate-limited too.
             Response::builder()
                 .status(StatusCode::TOO_MANY_REQUESTS)
+                .header("x-gio-cache", "bypass")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("retry-after", retry_after_secs.to_string())
                 .header("x-ratelimit-limit", limit.to_string())
                 .header("x-ratelimit-remaining", "0")
+                .header(REFUSED_UNREAD_HEADER, "unread")
                 .body(axum::body::Body::from(r#"{"error":"rate limit exceeded"}"#))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
     }
 }
 
+/// Cross-site request protection (see security.rs): unsafe methods and
+/// WebSocket upgrades to app paths must come from this site, a trusted
+/// origin, or a client that is not a browser page. Decided on headers alone,
+/// before rules, routing, or any body read. Rust's own `/_gio` endpoints
+/// keep their own checks; `[security.csrf] exempt` matches the canonical
+/// path like every other rule. `[security.csrf] enabled` and
+/// `[security.websocket] check_origin` switch the two checks separately.
+async fn cross_site_request_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    match cross_site_rejection(&state.security, &req) {
+        Some(resp) => resp,
+        None => next.run(req).await,
+    }
+}
+
+/// The 403 `cross_site_request_middleware` answers `req` with, or None to
+/// let it through.
+fn cross_site_rejection(security: &security::SecurityPolicy, req: &Request) -> Option<Response> {
+    let csrf = security.csrf();
+    let websocket = ws::is_upgrade_request(req.headers());
+    if !security.checks_cross_site(req.method(), websocket) || is_internal_endpoint(req) {
+        return None;
+    }
+    let path = match path_hygiene::canonical(req.uri().path()) {
+        Ok(canonical) => canonical.into_owned(),
+        Err(_) => return Some(StatusCode::BAD_REQUEST.into_response()),
+    };
+    if csrf.is_exempt(&path) {
+        return None;
+    }
+    let headers = req.headers();
+    // A present but non-UTF-8 header is not absent: it must not pass as
+    // "no Origin" (which is allowed).
+    let header_str = |name: &str| {
+        headers
+            .get(name)
+            .map(|value| value.to_str().unwrap_or("<invalid>"))
+    };
+    // The host the client addressed: a trusted proxy's X-Forwarded-Host /
+    // Forwarded host= when it rewrote Host, else Host (or :authority).
+    let authority = client_identity::effective_host(req);
+    let verdict = csrf.check(
+        header_str("sec-fetch-site"),
+        header_str(header::ORIGIN.as_str()),
+        authority.as_deref(),
+    );
+    let Err(rejection) = verdict else {
+        return None;
+    };
+    let what = if security::is_unsafe_method(req.method()) {
+        req.method().to_string()
+    } else {
+        "WebSocket upgrade".to_string()
+    };
+    // Each distinct origin is reported once; a page looping forged requests
+    // must not flood the log.
+    if csrf.should_warn(&rejection) {
+        warn!(method = %req.method(), path = %path, ?rejection, "cross-site request blocked (repeats from this origin are logged at debug level)");
+    } else {
+        debug!(method = %req.method(), path = %path, ?rejection, "cross-site request blocked");
+    }
+    Some(security::cross_site_rejection_response(&rejection, &what))
+}
+
 /// Declarative middleware rules (gio.toml + worker middleware.ts), executed
 /// in Rust before routing so no request can bypass them. Order per request:
 /// guards, redirects, rewrites - static rules before worker rules in each
-/// phase (see rules.rs). Redirects short-circuit with the original query
-/// preserved; rewrites mutate the request URI in place so routing and the
-/// cache key both see the rewritten path. Header rules match the requested
-/// (pre-rewrite) path and are stamped on the response. `/_gio/*` is exempt.
+/// phase (see rules.rs). Every phase matches the canonical path (see
+/// path_hygiene.rs), so slash and percent-encoding variants cannot slip past
+/// a rule. Redirects short-circuit with the original query preserved;
+/// rewrites mutate the request URI in place so the cache key and Node both
+/// see the rewritten path. Header rules match the requested (pre-rewrite)
+/// path and are stamped on every response, rule redirects included. Rust's
+/// own `/_gio` endpoints are exempt.
+///
+/// A public/ file answered at the site root is the same resource as its
+/// `/public/...` URL: when the requested path's own rules let it through,
+/// guards for that URL run too, and its header rules are stamped (the
+/// requested path's win on a conflicting name). Redirects and rewrites only
+/// ever match the requested URL.
 async fn rules_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
-    if req.uri().path().starts_with("/_gio/") {
+    if is_internal_endpoint(&req) {
         return next.run(req).await;
     }
     let worker_rules = state.ipc.worker_rules();
@@ -781,26 +2092,42 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
     if static_rules.is_empty() && worker_rules.is_empty() {
         return next.run(req).await;
     }
+    let mut public_alias = root_public_alias(&state, &req);
 
+    let path = match path_hygiene::canonical(req.uri().path()) {
+        Ok(canonical) => canonical.into_owned(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
     let outcome = {
-        let path = req.uri().path();
         let cookie_header = req
             .headers()
             .get(header::COOKIE)
             .and_then(|value| value.to_str().ok());
-        if worker_rules.is_empty() {
-            static_rules.apply(path, cookie_header)
+        let outcome = if worker_rules.is_empty() {
+            static_rules.apply(&path, cookie_header)
         } else if static_rules.is_empty() {
-            worker_rules.apply(path, cookie_header)
+            worker_rules.apply(&path, cookie_header)
         } else {
-            rules::apply_merged(static_rules, &worker_rules, path, cookie_header)
+            rules::apply_merged(static_rules, &worker_rules, &path, cookie_header)
+        };
+        match (outcome, public_alias.as_deref()) {
+            (rules::RuleOutcome::None, Some(alias)) => {
+                rules::check_guards_merged(static_rules, &worker_rules, alias, cookie_header)
+                    .unwrap_or(rules::RuleOutcome::None)
+            }
+            (outcome, _) => outcome,
         }
     };
+    // Collected before a rewrite replaces the URI, and before the redirect
+    // short-circuit: security headers (frame options, HSTS, CSP) configured
+    // for a path must cover its redirect responses too.
+    let rule_headers = rule_response_headers(static_rules, &worker_rules, &path);
 
     match outcome {
         rules::RuleOutcome::Redirect { location, status } => {
             let location = rules::with_query(location, req.uri().query());
-            if let Some(resp) = rule_redirect_response(&location, status) {
+            if let Some(mut resp) = rule_redirect_response(&location, status) {
+                stamp_rule_headers(resp.headers_mut(), rule_headers);
                 info!(
                     method = %req.method(),
                     path = %req.uri().path(),
@@ -813,29 +2140,56 @@ async fn rules_middleware(State(state): State<AppState>, mut req: Request, next:
             }
             warn!(location = %location, "rule redirect target is not a valid Location header - rule skipped");
         }
-        rules::RuleOutcome::Rewrite { new_path } => rewrite_request_uri(&mut req, new_path),
+        rules::RuleOutcome::Rewrite { new_path } => {
+            // Routed elsewhere: the public/ file is not what gets served.
+            public_alias = None;
+            rewrite_request_uri(&mut req, new_path);
+        }
         rules::RuleOutcome::None => {}
     }
-
-    // Header rules match the path the client requested, captured before the
-    // rewrite (if any) replaced the URI. Allocates only when header rules exist.
-    let stamped_path = if static_rules.has_header_rules() || worker_rules.has_header_rules() {
-        Some(req.uri().path().to_string())
-    } else {
-        None
-    };
-    let mut resp = next.run(req).await;
-    if let Some(path) = stamped_path {
-        for (name, value) in state
-            .static_rules
-            .response_headers(&path)
-            .into_iter()
-            .chain(worker_rules.response_headers(&path))
-        {
-            resp.headers_mut().insert(name, value);
-        }
+    // Past the guard phase, a guard covering the URL admitted this visitor:
+    // shared caches must not replay the page to anyone else.
+    let guarded = |path: &str| static_rules.guards_path(path) || worker_rules.guards_path(path);
+    if guarded(&path) || public_alias.as_deref().is_some_and(guarded) {
+        req.extensions_mut().insert(GuardAdmitted);
     }
+
+    let mut resp = next.run(req).await;
+    // The alias's rules first, so the requested path's override them.
+    if let Some(alias) = public_alias.as_deref() {
+        stamp_rule_headers(
+            resp.headers_mut(),
+            rule_response_headers(static_rules, &worker_rules, alias),
+        );
+    }
+    stamp_rule_headers(resp.headers_mut(), rule_headers);
     resp
+}
+
+/// Headers from every matching header rule, static set first. Allocates
+/// nothing when no header rules exist.
+fn rule_response_headers(
+    static_rules: &rules::RuleSet,
+    worker_rules: &rules::RuleSet,
+    path: &str,
+) -> Vec<(HeaderName, HeaderValue)> {
+    if !static_rules.has_header_rules() && !worker_rules.has_header_rules() {
+        return Vec::new();
+    }
+    let mut collected = static_rules.response_headers(path);
+    collected.extend(worker_rules.response_headers(path));
+    collected
+}
+
+/// The `/public/...` URL of the public/ file `root_fallback_handler` answers
+/// this request with, if any. Errs on the side of rule coverage: a GET that
+/// the router ends up handing elsewhere (a WebSocket upgrade, a file deleted
+/// since indexing) is only held to the rules of a file at its path.
+fn root_public_alias(state: &AppState, req: &Request) -> Option<String> {
+    if req.method() != axum::http::Method::GET && req.method() != axum::http::Method::HEAD {
+        return None;
+    }
+    state.public_files.public_url(req.uri().path())
 }
 
 /// Build the redirect response for a rule match. Returns `None` when the
@@ -898,6 +2252,12 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
     }
 
     parts.extensions.insert(locale.clone());
+    // Request headers took part in picking the locale (default included):
+    // no locale prefix decided first, either because the URL has none or
+    // because detect_from tries a header ahead of "path".
+    if result.header_dependent {
+        parts.extensions.insert(HeaderNegotiatedLocale);
+    }
     let req = Request::from_parts(parts, body);
     let mut response = next.run(req).await;
 
@@ -911,11 +2271,22 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
         // Streamed bodies must not be buffered here; their lang attribute is
         // spliced by the StreamInjector instead.
         let is_streamed = response.extensions().get::<StreamedBody>().is_some();
-        if is_html && !is_streamed {
-            let (resp_parts, resp_body) = response.into_parts();
+        // A 304 has no body to inject into, and must not gain one.
+        let not_modified = response.status() == StatusCode::NOT_MODIFIED;
+        // A public/ file is served as written: one body per file, under its
+        // own Content-Length, validators and public caching.
+        let static_file = response
+            .headers()
+            .get("x-gio-cache")
+            .is_some_and(|v| v.as_bytes() == b"static");
+        if is_html && !is_streamed && !not_modified && !static_file {
+            let (mut resp_parts, resp_body) = response.into_parts();
             match axum::body::to_bytes(resp_body, 16 * 1024 * 1024).await {
                 Ok(bytes) => {
                     let modified = inject_html_lang(bytes, &locale);
+                    // The body changed size: exact_length_middleware sets
+                    // the new length.
+                    resp_parts.headers.remove(header::CONTENT_LENGTH);
                     response = Response::from_parts(resp_parts, axum::body::Body::from(modified));
                 }
                 Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -926,30 +2297,111 @@ async fn i18n_middleware(State(state): State<AppState>, req: Request, next: Next
     response
 }
 
-fn inject_html_lang(html: Bytes, locale: &str) -> Bytes {
-    let needle = b"<html";
-    let Some(pos) = html.windows(needle.len()).position(|w| w == needle) else {
-        return html;
-    };
-    let attr = format!(" lang=\"{}\"", locale);
-    let mut out = BytesMut::with_capacity(html.len() + attr.len());
-    out.extend_from_slice(&html[..pos + needle.len()]);
-    out.extend_from_slice(attr.as_bytes());
-    out.extend_from_slice(&html[pos + needle.len()..]);
-    Bytes::from(out)
+/// What the server composes into cached pages itself, as deployment-ID
+/// inputs: the font links, the deployment script's default locale (see
+/// `deployment_script`), and whether critical CSS from the path-served
+/// stylesheets is inlined (`[css] enabled` and `critical_extraction`).
+/// Changing one starts a new cache epoch, so persisted pages composed under
+/// the old setting are not served as hits.
+fn composed_page_settings(
+    font_snippets: &[String],
+    default_locale: String,
+    css: &config::CssConfig,
+) -> Vec<(String, String)> {
+    vec![
+        ("fonts".to_string(), font_snippets.join("\n")),
+        ("i18n.default_locale".to_string(), default_locale),
+        ("css.enabled".to_string(), css.enabled.to_string()),
+        (
+            "css.critical_extraction".to_string(),
+            css.critical_extraction.to_string(),
+        ),
+    ]
 }
 
+/// Set the buffered document's `<html lang>` to the request locale,
+/// replacing the root layout's own (see `stream_inject::extend_with_html_lang`).
+fn inject_html_lang(html: Bytes, locale: &str) -> Bytes {
+    let mut out = BytesMut::with_capacity(html.len() + locale.len() + 8);
+    stream_inject::extend_with_html_lang(&mut out, &html, locale);
+    out.freeze()
+}
+
+/// Router fallback. Files in public/ answer at the site root (/favicon.ico,
+/// /robots.txt, /.well-known/...) ahead of the page cache and the worker, so
+/// a public file shadows a page at the same path - the Next.js precedence.
+/// Being a fallback, it sits behind the rate-limit and rules middleware,
+/// which also apply the guards, header rules, and budgets written for the
+/// file's /public/... URL (see `root_public_alias`). Membership is an
+/// in-memory index lookup, not a stat.
+async fn root_fallback_handler(
+    ws_upgrade: Option<WebSocketUpgrade>,
+    State(state): State<AppState>,
+    connect_info: ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    if ws_upgrade.is_none()
+        && (req.method() == axum::http::Method::GET || req.method() == axum::http::Method::HEAD)
+        && state.public_files.contains(req.uri().path())
+    {
+        let start = std::time::Instant::now();
+        if let Some(resp) = state.public_files.serve(&req).await {
+            let resp = stamp_static_file(resp);
+            state.metrics.record_request(
+                req.method().as_str(),
+                resp.status().as_u16(),
+                "static",
+                metrics::ROUTE_STATIC,
+                start.elapsed().as_nanos() as u64,
+            );
+            return resp;
+        }
+    }
+    // Decided once for the whole pipeline: the ETags it sends (inside), and
+    // its own Cache-Control (here, so every response path is covered).
+    let shared_audience = shared_cache_audience(&req);
+    let mut resp =
+        dynamic_handler(ws_upgrade, State(state), connect_info, req, shared_audience).await;
+    if !shared_audience {
+        make_framework_cache_control_private(&mut resp);
+    }
+    resp
+}
+
+/// The page pipeline. `shared_audience` (see `shared_cache_audience`) says
+/// whether a cached page may carry its ETag.
 async fn dynamic_handler(
     ws_upgrade: Option<WebSocketUpgrade>,
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
+    shared_audience: bool,
 ) -> Response {
     let start = std::time::Instant::now();
     let encoding = negotiate_encoding(&req);
     let prefetch_status = if is_prefetch(&req) { "allowed" } else { "n/a" };
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
+    let client = req
+        .extensions()
+        .get::<client_identity::ClientInfo>()
+        .map(ipc::IpcClientFields::from)
+        .unwrap_or_default();
+    // A hit's ETag must stand for one body under this URL, for everyone:
+    // not for a URL with several audiences, and not with CSP nonces (unique
+    // per body). `[cache] etag = false` sends none at all.
+    let etag_allowed = page_etags_allowed(
+        state.cache_config.etag,
+        shared_audience,
+        security::nonce_placeholder().is_some(),
+    );
+    let if_none_match = req.headers().get(header::IF_NONE_MATCH).cloned();
+    // Nothing under /_gio belongs to the app. path_hygiene_middleware already
+    // 404s unrouted /_gio requests; this also covers paths that only land in
+    // the namespace after a locale prefix is stripped or a rule rewrites.
+    if path_hygiene::is_gio_namespace(&path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let locale = req
         .extensions()
         .get::<String>()
@@ -971,12 +2423,23 @@ async fn dynamic_handler(
     // ── WebSocket upgrade ────────────────────────────────────────────────────
     if let Some(ws) = ws_upgrade {
         if let Some(ws_ipc) = &state.ws_ipc {
+            let client_addr = req
+                .extensions()
+                .get::<client_identity::ClientInfo>()
+                .map_or(addr, client_identity::ClientInfo::addr);
+            let info = ws_ipc::WsConnectInfo {
+                query: parse_query(req.uri().query().unwrap_or_default()),
+                headers: ws_ipc::forwarded_ws_headers(req.headers()),
+                ip: client.ip,
+                request_id: client.request_id,
+                route_id: path,
+            };
             return ws::handle_ws_upgrade(
                 ws,
-                ws_ipc.clone(),
+                ws_ipc.pick(),
                 state.ws_registry.clone(),
-                path,
-                addr,
+                info,
+                client_addr,
                 state.ws_config.max_connections,
                 state.ws_config.ping_interval_secs,
             )
@@ -987,12 +2450,16 @@ async fn dynamic_handler(
 
     // Serve pre-transformed CSS directly from startup cache
     if path.ends_with(".css") {
-        if let Some(css_bytes) = state.css_cache.get(&path) {
-            return Response::builder()
-                .header(header::CONTENT_TYPE, "text/css; charset=utf-8")
-                .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-                .body(axum::body::Body::from(css_bytes.clone()))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        if let Some(css) = state.css_cache.get(&path) {
+            let resp = stamp_static_file(css_assets::css_response(&css, req.headers()));
+            state.metrics.record_request(
+                &method,
+                resp.status().as_u16(),
+                "static",
+                metrics::ROUTE_STATIC,
+                start.elapsed().as_nanos() as u64,
+            );
+            return resp;
         }
     }
 
@@ -1005,7 +2472,7 @@ async fn dynamic_handler(
     } else {
         path.clone()
     };
-    let cache_key = PageCache::build_key(&method, &keyed_path, &query_str);
+    let cache_key = PageCache::build_key(cache_key_method(&method), &keyed_path, &query_str);
     let deployment_id = state.ipc.deployment_id().to_string();
     let font_snippets: Vec<&str> = state.font_snippets.iter().map(|s| s.as_str()).collect();
 
@@ -1015,12 +2482,17 @@ async fn dynamic_handler(
     if method != "GET" && method != "HEAD" {
         let query = parse_query(&query_str);
         let headers = extract_headers(&req);
-        let (body, body_base64) = match read_request_body(req.into_body(), state.max_body_bytes)
-            .await
+        let (body, body_base64) = match read_request_body(
+            req.into_body(),
+            state.max_body_bytes,
+            state.request_body_timeout,
+        )
+        .await
         {
             BodyReadOutcome::Read(body, body_base64) => (body, body_base64),
-            BodyReadOutcome::TooLarge => {
-                return (StatusCode::PAYLOAD_TOO_LARGE, "413 Payload Too Large").into_response();
+            BodyReadOutcome::TooLarge => return payload_too_large(),
+            BodyReadOutcome::TimedOut => {
+                return (StatusCode::REQUEST_TIMEOUT, "408 Request Timeout").into_response();
             }
         };
         if dev_mode {
@@ -1038,6 +2510,7 @@ async fn dynamic_handler(
             headers,
             body,
             body_base64,
+            client,
             &deployment_id,
             &locale,
             &default_locale,
@@ -1050,7 +2523,15 @@ async fn dynamic_handler(
     }
 
     // ── Cache lookup ──────────────────────────────────────────────────────────
-    match state.cache.get(&cache_key, &deployment_id).await {
+    // A PPR hit's reload script asks for the whole page (see
+    // ppr_holes_fallback): its shell entry counts as a miss.
+    let ppr_bypass = ppr_bypass_requested(req.headers());
+    let cached = state
+        .cache
+        .get(&cache_key, &state.cache_epoch)
+        .await
+        .filter(|(entry, _)| !(ppr_bypass && entry.ppr_shell));
+    match cached {
         // PPR shell entries never serve alone: the shell goes out instantly
         // and a skipShell render (with this requester's cookies) streams the
         // holes behind it. Stale shells follow SWR like any other entry.
@@ -1097,10 +2578,17 @@ async fn dynamic_handler(
             );
         }
         Some((entry, CacheStatus::Hit)) => {
-            let status = entry.status;
-            let ttl_secs = entry.max_age_secs.saturating_sub(entry_age_secs(&entry));
-            let duration_ms = start.elapsed().as_millis() as u64;
-            info!(method = %method, path = %path, status = %status, cache = "hit", encoding = %encoding, prefetch = %prefetch_status, "request completed");
+            let age_secs = entry_age_secs(&entry);
+            let ttl_secs = entry.max_age_secs.saturating_sub(age_secs);
+            let policy = PageCachePolicy::Shared {
+                max_age_secs: entry.max_age_secs,
+                age_secs,
+                swr_multiplier: state.cache_config.swr_multiplier,
+            };
+            let route = entry.route.clone();
+            let etag = entry.etag.clone().filter(|_| {
+                etag_allowed && stored_body_is_served(entry.composed, &entry.headers, dev_mode)
+            });
             let mut resp = build_response_from_entry(
                 entry,
                 &deployment_id,
@@ -1112,9 +2600,18 @@ async fn dynamic_handler(
             )
             .await;
             insert_cache_status_header(&mut resp, &format!("hit; ttl={ttl_secs}"));
-            state
-                .metrics
-                .record_request(&method, status, "hit", start.elapsed().as_nanos() as u64);
+            apply_page_cache_control(&mut resp, policy);
+            apply_entry_etag(&mut resp, etag.as_deref(), if_none_match.as_ref());
+            let status = resp.status().as_u16();
+            let duration_ms = start.elapsed().as_millis() as u64;
+            info!(method = %method, path = %path, status = %status, cache = "hit", encoding = %encoding, prefetch = %prefetch_status, "request completed");
+            state.metrics.record_request(
+                &method,
+                status,
+                "hit",
+                metrics::route_label(route.as_deref()),
+                start.elapsed().as_nanos() as u64,
+            );
             record_devtools(
                 &state,
                 &method,
@@ -1129,16 +2626,22 @@ async fn dynamic_handler(
             return resp;
         }
         Some((entry, CacheStatus::Stale)) => {
-            let status = entry.status;
             let age_secs = entry_age_secs(&entry);
-            let duration_ms = start.elapsed().as_millis() as u64;
+            let policy = PageCachePolicy::Shared {
+                max_age_secs: entry.max_age_secs,
+                age_secs,
+                swr_multiplier: state.cache_config.swr_multiplier,
+            };
+            let route = entry.route.clone();
+            let etag = entry.etag.clone().filter(|_| {
+                etag_allowed && stored_body_is_served(entry.composed, &entry.headers, dev_mode)
+            });
             spawn_revalidation(
                 state.clone(),
                 cache_key.clone(),
                 build_ipc_request(&method, &path, &query_str, &req, &deployment_id, &locale),
                 default_locale.clone(),
             );
-            info!(method = %method, path = %path, status = %status, cache = "stale", encoding = %encoding, prefetch = %prefetch_status, "request completed");
             let mut resp = build_response_from_entry(
                 entry,
                 &deployment_id,
@@ -1150,10 +2653,16 @@ async fn dynamic_handler(
             )
             .await;
             insert_cache_status_header(&mut resp, &format!("stale; age={age_secs}; revalidating"));
+            apply_page_cache_control(&mut resp, policy);
+            apply_entry_etag(&mut resp, etag.as_deref(), if_none_match.as_ref());
+            let status = resp.status().as_u16();
+            let duration_ms = start.elapsed().as_millis() as u64;
+            info!(method = %method, path = %path, status = %status, cache = "stale", encoding = %encoding, prefetch = %prefetch_status, "request completed");
             state.metrics.record_request(
                 &method,
                 status,
                 "stale",
+                metrics::route_label(route.as_deref()),
                 start.elapsed().as_nanos() as u64,
             );
             record_devtools(
@@ -1191,10 +2700,15 @@ async fn dynamic_handler(
     // the leader serves it directly instead of rendering a second time.
     let leader_slot: Arc<tokio::sync::Mutex<Option<IpcSendResult>>> =
         Arc::new(tokio::sync::Mutex::new(None));
+    // Taken before the render: if a revalidation purges this page while it
+    // renders, the result is served but not cached (it may predate the purge).
+    // It is part of the coalesce key too, so a request that missed after a
+    // purge never joins a render that started before it.
+    let fill_ticket = state.cache.fill_ticket();
 
     let coalesced = {
         let coalesce = state.coalesce.clone();
-        let coalesce_key = build_coalesce_key(&cache_key, &headers);
+        let coalesce_key = build_coalesce_key(&cache_key, &headers, fill_ticket);
         let state_c = state.clone();
         let cache_key_c = cache_key.clone();
         let method_c = method.clone();
@@ -1204,6 +2718,10 @@ async fn dynamic_handler(
         let default_locale_c = default_locale.clone();
         let query_c = query.clone();
         let headers_c = headers.clone();
+        // A shared render carries the leader's identity; one that reads it
+        // (ctx.ip, ctx.host, ctx.scheme) is personal and never shared, so
+        // followers re-render.
+        let client_c = client.clone();
         let slot_c = leader_slot.clone();
         coalesce
             .run(&coalesce_key, move || {
@@ -1216,6 +2734,7 @@ async fn dynamic_handler(
                 let default_locale = default_locale_c.clone();
                 let query = query_c.clone();
                 let headers = headers_c.clone();
+                let client = client_c.clone();
                 let slot = slot_c.clone();
                 async move {
                     let ipc_req = IpcRequest {
@@ -1230,13 +2749,15 @@ async fn dynamic_handler(
                         deployment_id: deployment_id.clone(),
                         locale,
                         skip_shell: false,
+                        client,
                     };
                     let ipc_start = std::time::Instant::now();
                     match state.ipc.send_request(ipc_req).await {
                         Ok(IpcSendResult::Response(resp)) => {
-                            state
-                                .metrics
-                                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+                            state.metrics.record_ipc_latency(
+                                metrics::route_label(resp.route.as_deref()),
+                                ipc_start.elapsed().as_nanos() as u64,
+                            );
                             if state.dev_mode {
                                 state.devtools.update_route_mode(
                                     &path,
@@ -1255,26 +2776,30 @@ async fn dynamic_handler(
                                 &default_locale,
                             )
                             .await;
+                            let etag = giojs_cache::entry_etag(&body);
                             let entry = CacheEntry {
                                 html: body.clone(),
                                 status: resp.status,
                                 headers: cacheable_response_headers(&resp.headers),
                                 created_at: std::time::SystemTime::now(),
                                 max_age_secs: resp.cache_max_age,
-                                deployment_id: deployment_id.clone(),
+                                deployment_id: state.cache_epoch.to_string(),
                                 composed,
-                                tags: resp.cache_tags.clone(),
+                                tags: revalidate::entry_tags(&path, &resp.cache_tags),
                                 ppr_shell: false,
+                                route: resp.route.clone(),
+                                etag: Some(etag.clone()),
                             };
-                            if let Err(e) = state.cache.put(&cache_key, entry).await {
-                                warn!(path = %path, error = %e, "cache write failed");
-                            }
+                            store_fill(&state.cache, &cache_key, entry, fill_ticket, &path).await;
                             CoalescedRender::Page(Arc::new(RenderedPage {
                                 status: resp.status,
                                 headers: resp.headers,
                                 body,
                                 cacheable: resp.cacheable,
                                 composed,
+                                max_age_secs: resp.cache_max_age,
+                                route: resp.route,
+                                etag,
                             }))
                         }
                         // Streams are per-connection (SSE and streaming SSR
@@ -1284,16 +2809,18 @@ async fn dynamic_handler(
                             stream @ (IpcSendResult::SseStream { .. }
                             | IpcSendResult::RenderStream { .. }),
                         ) => {
-                            state
-                                .metrics
-                                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+                            state.metrics.record_ipc_latency(
+                                metrics::route_label(stream.route()),
+                                ipc_start.elapsed().as_nanos() as u64,
+                            );
                             *slot.lock().await = Some(stream);
                             CoalescedRender::Private
                         }
                         Err(e) => {
-                            state
-                                .metrics
-                                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+                            state.metrics.record_ipc_latency(
+                                metrics::ROUTE_UNMATCHED,
+                                ipc_start.elapsed().as_nanos() as u64,
+                            );
                             error!(path = %path, error = %e, "IPC error");
                             // ipc.rs bails with a plain string on timeout (the tokio
                             // Elapsed is discarded), so the message is the only signal.
@@ -1309,10 +2836,6 @@ async fn dynamic_handler(
 
     match coalesced {
         CoalescedRender::Page(page) => {
-            let status_code =
-                StatusCode::from_u16(page.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let duration_ms = start.elapsed().as_millis() as u64;
-            info!(method = %method, path = %path, status = %status_code.as_u16(), cache = "miss", encoding = %encoding, prefetch = %prefetch_status, "request completed");
             let mut resp_out = build_html_response(
                 page.status,
                 &page.headers,
@@ -1326,11 +2849,39 @@ async fn dynamic_handler(
                 &state.css_config,
                 dev_mode,
             );
-            insert_cache_status_header(&mut resp_out, "miss; stored");
+            // `[cache] enabled = false` stored nothing: a shareable page
+            // nobody will hit again here, still public for CDNs.
+            insert_cache_status_header(
+                &mut resp_out,
+                if state.cache.is_enabled() {
+                    "miss; stored"
+                } else {
+                    "bypass"
+                },
+            );
+            apply_page_cache_control(
+                &mut resp_out,
+                PageCachePolicy::Shared {
+                    max_age_secs: page.max_age_secs,
+                    age_secs: 0,
+                    swr_multiplier: state.cache_config.swr_multiplier,
+                },
+            );
+            let etag_servable =
+                etag_allowed && stored_body_is_served(page.composed, &page.headers, dev_mode);
+            apply_entry_etag(
+                &mut resp_out,
+                etag_servable.then_some(page.etag.as_str()),
+                if_none_match.as_ref(),
+            );
+            let status_code = resp_out.status();
+            let duration_ms = start.elapsed().as_millis() as u64;
+            info!(method = %method, path = %path, status = %status_code.as_u16(), cache = "miss", encoding = %encoding, prefetch = %prefetch_status, "request completed");
             state.metrics.record_request(
                 &method,
                 status_code.as_u16(),
                 "miss",
+                metrics::route_label(page.route.as_deref()),
                 start.elapsed().as_nanos() as u64,
             );
             record_devtools(
@@ -1358,6 +2909,7 @@ async fn dynamic_handler(
                     respond_from_render(
                         &state,
                         &cache_key,
+                        fill_ticket,
                         &method,
                         &path,
                         resp,
@@ -1383,6 +2935,7 @@ async fn dynamic_handler(
                     &deployment_id,
                     &default_locale,
                     &cache_key,
+                    fill_ticket,
                     encoding,
                     &locale,
                     start,
@@ -1398,6 +2951,7 @@ async fn dynamic_handler(
                         headers,
                         None,
                         false,
+                        client,
                         &deployment_id,
                         &locale,
                         &default_locale,
@@ -1419,12 +2973,26 @@ async fn dynamic_handler(
 enum BodyReadOutcome {
     Read(Option<String>, bool),
     TooLarge,
+    TimedOut,
 }
 
 /// Buffer the request body up to `limit` bytes and encode it for the JSON
-/// IPC frame.
-async fn read_request_body(body: axum::body::Body, limit: usize) -> BodyReadOutcome {
-    let bytes = match axum::body::to_bytes(body, limit).await {
+/// IPC frame. `timeout` bounds the whole read: the size cap alone lets a
+/// client trickle a body byte by byte and hold the request open forever.
+async fn read_request_body(
+    body: axum::body::Body,
+    limit: usize,
+    timeout: Option<Duration>,
+) -> BodyReadOutcome {
+    let read = axum::body::to_bytes(body, limit);
+    let result = match timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, read).await {
+            Ok(result) => result,
+            Err(_) => return BodyReadOutcome::TimedOut,
+        },
+        None => read.await,
+    };
+    let bytes = match result {
         Ok(bytes) => bytes,
         // to_bytes fails on the length limit; a mid-read client abort also
         // lands here, but that connection is gone anyway.
@@ -1441,10 +3009,40 @@ async fn read_request_body(body: axum::body::Body, limit: usize) -> BodyReadOutc
     }
 }
 
+/// `create_dir_all` whose error names the directory and the setting that
+/// placed it: a bare "No such file or directory" at startup says neither.
+async fn create_dir_for(dir: &std::path::Path, what: &str) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(dir).await.map_err(|error| {
+        anyhow::anyhow!("cannot create {what} {}: {error}", dir.display())
+    })
+}
+
+/// The method a page's cache key is built from. HEAD answers with GET's
+/// headers (RFC 9110 9.3.2) and the worker renders it as a GET, so it shares
+/// GET's entry: one render, one ETag, and a validator taken from a HEAD
+/// revalidates the GET (and the reverse).
+fn cache_key_method(method: &str) -> &str {
+    if method == "HEAD" {
+        "GET"
+    } else {
+        method
+    }
+}
+
 /// Coalesce key = cache key + hash of the caller's credential headers, so
 /// concurrent requests only share a render when their cookies/authorization
 /// match. Belt-and-braces on top of the cacheable-only sharing rule.
-fn build_coalesce_key(cache_key: &str, headers: &HashMap<String, String>) -> String {
+///
+/// It also carries the fill ticket: renders only coalesce when no
+/// invalidation happened between their misses. Otherwise a request that
+/// arrives after `revalidateTag()` returned would be handed the in-flight
+/// render that read the old data - `put_fresh` refuses to cache it, but it
+/// would still be served.
+fn build_coalesce_key(
+    cache_key: &str,
+    headers: &HashMap<String, String>,
+    fill_ticket: FillTicket,
+) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(headers.get("cookie").map(String::as_str).unwrap_or(""));
@@ -1459,10 +3057,11 @@ fn build_coalesce_key(cache_key: &str, headers: &HashMap<String, String>) -> Str
     let mut key = String::with_capacity(cache_key.len() + 1 + 16);
     key.push_str(cache_key);
     key.push(':');
+    use std::fmt::Write;
     for byte in digest.iter().take(8) {
-        use std::fmt::Write;
         let _ = write!(key, "{byte:02x}");
     }
+    let _ = write!(key, ":{}", fill_ticket.sequence());
     key
 }
 
@@ -1479,6 +3078,7 @@ async fn render_uncoalesced(
     headers: HashMap<String, String>,
     body: Option<String>,
     body_base64: bool,
+    client: ipc::IpcClientFields,
     deployment_id: &str,
     locale: &str,
     default_locale: &str,
@@ -1499,16 +3099,20 @@ async fn render_uncoalesced(
         deployment_id: deployment_id.to_string(),
         locale: locale.to_string(),
         skip_shell: false,
+        client,
     };
+    let fill_ticket = state.cache.fill_ticket();
     let ipc_start = std::time::Instant::now();
     match state.ipc.send_request(ipc_req).await {
         Ok(IpcSendResult::Response(resp)) => {
-            state
-                .metrics
-                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+            state.metrics.record_ipc_latency(
+                metrics::route_label(resp.route.as_deref()),
+                ipc_start.elapsed().as_nanos() as u64,
+            );
             respond_from_render(
                 state,
                 cache_key,
+                fill_ticket,
                 method,
                 path,
                 resp,
@@ -1523,17 +3127,19 @@ async fn render_uncoalesced(
             .await
         }
         Ok(IpcSendResult::SseStream { response, body_rx }) => {
-            state
-                .metrics
-                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+            state.metrics.record_ipc_latency(
+                metrics::route_label(response.route.as_deref()),
+                ipc_start.elapsed().as_nanos() as u64,
+            );
             respond_sse(
                 state, method, path, response, body_rx, encoding, locale, start,
             )
         }
         Ok(IpcSendResult::RenderStream { response, body_rx }) => {
-            state
-                .metrics
-                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+            state.metrics.record_ipc_latency(
+                metrics::route_label(response.route.as_deref()),
+                ipc_start.elapsed().as_nanos() as u64,
+            );
             respond_stream(
                 state,
                 method,
@@ -1543,15 +3149,23 @@ async fn render_uncoalesced(
                 deployment_id,
                 default_locale,
                 cache_key,
+                fill_ticket,
                 encoding,
                 locale,
                 start,
             )
         }
         Err(e) => {
-            state
-                .metrics
-                .record_ipc_latency(ipc_start.elapsed().as_nanos() as u64);
+            // A body within max_body_bytes whose frame the worker cannot take
+            // (base64 / JSON escaping grew it): the client's to shrink.
+            if let Some(too_large) = e.downcast_ref::<ipc::RequestTooLarge>() {
+                warn!(path = %path, frame_bytes = too_large.frame_bytes, "request body too large to forward to the worker - answered 413");
+                return respond_request_too_large(state, method, path, encoding, locale, start);
+            }
+            state.metrics.record_ipc_latency(
+                metrics::ROUTE_UNMATCHED,
+                ipc_start.elapsed().as_nanos() as u64,
+            );
             error!(path = %path, error = %e, "IPC error");
             // ipc.rs bails with a plain string on timeout (the tokio Elapsed is
             // discarded), so downcast_ref is impossible - the message is the only signal.
@@ -1568,6 +3182,7 @@ async fn render_uncoalesced(
 async fn respond_from_render(
     state: &AppState,
     cache_key: &str,
+    fill_ticket: FillTicket,
     method: &str,
     path: &str,
     resp: ipc::IpcResponse,
@@ -1579,7 +3194,10 @@ async fn respond_from_render(
     locale: &str,
     start: std::time::Instant,
 ) -> Response {
-    let will_cache = render_is_shareable(&resp) && matches!(method, "GET" | "HEAD");
+    let shareable = render_is_shareable(&resp) && matches!(method, "GET" | "HEAD");
+    // `[cache] enabled = false`: a shareable page keeps its public
+    // Cache-Control (CDNs may still cache it) but is not stored here.
+    let will_cache = shareable && state.cache.is_enabled();
     let (body, composed) = if will_cache {
         compose_for_cache(
             state,
@@ -1599,14 +3217,14 @@ async fn respond_from_render(
             headers: cacheable_response_headers(&resp.headers),
             created_at: std::time::SystemTime::now(),
             max_age_secs: resp.cache_max_age,
-            deployment_id: deployment_id.to_string(),
+            deployment_id: state.cache_epoch.to_string(),
             composed,
-            tags: resp.cache_tags.clone(),
+            tags: revalidate::entry_tags(path, &resp.cache_tags),
             ppr_shell: false,
+            route: resp.route.clone(),
+            etag: None,
         };
-        if let Err(e) = state.cache.put(cache_key, entry).await {
-            warn!(path = %path, error = %e, "cache write failed");
-        }
+        store_fill(&state.cache, cache_key, entry, fill_ticket, path).await;
     }
     if state.dev_mode {
         state.devtools.update_route_mode(
@@ -1631,14 +3249,34 @@ async fn respond_from_render(
         &state.css_config,
         state.dev_mode,
     );
+    if state.dev_mode && resp.worker_error {
+        resp_out.extensions_mut().insert(WorkerErrorPage);
+    }
+    append_set_cookies(resp_out.headers_mut(), &resp.set_cookies);
     insert_cache_status_header(
         &mut resp_out,
         if will_cache { "miss; stored" } else { "bypass" },
     );
+    // Route handlers own their caching: no default, even for HTML.
+    if !resp.route_handler {
+        apply_page_cache_control(
+            &mut resp_out,
+            if shareable {
+                PageCachePolicy::Shared {
+                    max_age_secs: resp.cache_max_age,
+                    age_secs: 0,
+                    swr_multiplier: state.cache_config.swr_multiplier,
+                }
+            } else {
+                PageCachePolicy::Private
+            },
+        );
+    }
     state.metrics.record_request(
         method,
         status_code.as_u16(),
         "miss",
+        metrics::route_label(resp.route.as_deref()),
         start.elapsed().as_nanos() as u64,
     );
     record_devtools(
@@ -1687,28 +3325,113 @@ fn respond_sse(
         req_id,
         ipc,
     };
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header("x-gio-cache", "bypass")
-        .header("connection", "keep-alive");
-    for (k, v) in &response.headers {
-        if k != "content-type" {
-            if let Ok(val) = HeaderValue::from_str(v) {
-                builder = builder.header(k.as_str(), val);
-            }
+    let mut resp = Response::new(axum::body::Body::from_stream(stream));
+    *resp.headers_mut() = sse_response_headers(&response.headers);
+    append_set_cookies(resp.headers_mut(), &response.set_cookies);
+    resp
+}
+
+/// Connection-specific headers: they describe one hop, not the response,
+/// and HTTP/2 forbids them outright. The connection layer owns keep-alive
+/// and framing, so a worker's copy is never forwarded - on any page, route
+/// or event-stream response (`is_hop_by_hop`).
+const HOP_BY_HOP_HEADERS: [&str; 7] = [
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+/// True for a header name (any case) in `HOP_BY_HOP_HEADERS`. Without this
+/// filter an app's `Keep-Alive: timeout=99` replaced the server's own idle
+/// hint over HTTP/1.1 while the server still closed after its own timeout.
+fn is_hop_by_hop(name: &str) -> bool {
+    HOP_BY_HOP_HEADERS
+        .iter()
+        .any(|hop| name.eq_ignore_ascii_case(hop))
+}
+
+/// The head of an SSE response: the event-stream type and `no-cache` once
+/// each, then the worker's head - which repeats both - without them and
+/// without hop-by-hop headers.
+fn sse_response_headers(worker_headers: &HashMap<String, String>) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(
+        HeaderName::from_static("x-gio-cache"),
+        HeaderValue::from_static("bypass"),
+    );
+    for (name, value) in worker_headers {
+        let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) else {
+            continue;
+        };
+        if name == header::CONTENT_TYPE
+            || name == header::CACHE_CONTROL
+            || is_hop_by_hop(name.as_str())
+        {
+            continue;
         }
+        headers.append(name, value);
     }
-    builder
-        .body(axum::body::Body::from_stream(stream))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    headers
 }
 
 /// Response-extension marker: the body is a live SSR chunk stream. Downstream
 /// body-buffering transforms (i18n lang injection) must skip it.
 #[derive(Debug, Clone, Copy)]
 struct StreamedBody;
+
+/// `[i18n] locales` as a JS array literal for the deployment script, or
+/// empty when i18n is off. Installed once at startup; a process global
+/// (like the CSP nonce placeholder) because every page composer writes the
+/// deployment script, most of them far from any state.
+static DEPLOYMENT_SCRIPT_LOCALES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn install_deployment_script_locales(locales: &[String]) {
+    let _ = DEPLOYMENT_SCRIPT_LOCALES.set(deployment_script_locales(locales));
+}
+
+fn deployment_script_locales(locales: &[String]) -> String {
+    if locales.is_empty() {
+        return String::new();
+    }
+    let items: Vec<String> = locales.iter().map(|l| script_json_string(l)).collect();
+    format!("[{}]", items.join(","))
+}
+
+/// The inline script handing the deployment id, the default locale and the
+/// configured locales to the client (`<LocaleLink>` outside a GioJS-rendered
+/// tree reads the locales). Carries the CSP nonce placeholder when nonces
+/// are on (substituted per response, see security.rs).
+fn deployment_script(deployment_id: &str, default_locale: &str) -> String {
+    deployment_script_with(
+        deployment_id,
+        default_locale,
+        DEPLOYMENT_SCRIPT_LOCALES.get().map_or("", String::as_str),
+    )
+}
+
+fn deployment_script_with(deployment_id: &str, default_locale: &str, locales: &str) -> String {
+    let locales = if locales.is_empty() {
+        String::new()
+    } else {
+        format!("window.__GIO_LOCALES__={locales};")
+    };
+    format!(
+        r#"<script{}>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";{locales}</script>"#,
+        security::nonce_attr()
+    )
+}
 
 /// Head snippets spliced into streamed HTML (font preloads + deployment
 /// script). Shared by live stream injection and PPR shell composition so a
@@ -1719,9 +3442,7 @@ fn stream_head_snippets(state: &AppState, deployment_id: &str, default_locale: &
     for snippet in state.font_snippets.iter() {
         head_snippets.push_str(snippet);
     }
-    head_snippets.push_str(&format!(
-        r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
-    ));
+    head_snippets.push_str(&deployment_script(deployment_id, default_locale));
     head_snippets
 }
 
@@ -1754,6 +3475,7 @@ fn respond_stream(
     deployment_id: &str,
     default_locale: &str,
     cache_key: &str,
+    fill_ticket: FillTicket,
     encoding: &str,
     locale: &str,
     start: std::time::Instant,
@@ -1766,6 +3488,7 @@ fn respond_stream(
         method,
         status_code.as_u16(),
         "stream",
+        metrics::route_label(response.route.as_deref()),
         start.elapsed().as_nanos() as u64,
     );
     record_devtools(
@@ -1788,18 +3511,21 @@ fn respond_stream(
 
     let is_html = is_html_content_type(&response.headers);
     let lang = stream_lang(state, locale);
-    let injector = if is_html {
+    let injector = if injects_into_stream(&response) {
         let head_snippets = stream_head_snippets(state, deployment_id, default_locale);
         let body_snippet = state
             .dev_mode
-            .then(|| dev_overlay::DEV_OVERLAY_SCRIPT.to_string());
+            .then(|| dev_overlay::overlay_script().to_string());
         stream_inject::StreamInjector::new(head_snippets, body_snippet, lang.clone())
     } else {
         stream_inject::StreamInjector::passthrough()
     };
 
-    let capture_shell =
-        response.ppr_shell && is_html && method == "GET" && render_is_shareable(&response);
+    let capture_shell = response.ppr_shell
+        && is_html
+        && method == "GET"
+        && render_is_shareable(&response)
+        && state.cache.is_enabled();
     let shell_capture = capture_shell.then(|| PprShellCapture {
         raw: BytesMut::new(),
         overflowed: false,
@@ -1809,10 +3535,12 @@ fn respond_stream(
         status: response.status,
         headers: cacheable_response_headers(&response.headers),
         max_age_secs: response.cache_max_age,
-        deployment_id: deployment_id.to_string(),
-        tags: response.cache_tags.clone(),
+        deployment_id: state.cache_epoch.to_string(),
+        tags: revalidate::entry_tags(path, &response.cache_tags),
+        fill_ticket,
         head_snippets: stream_head_snippets(state, deployment_id, default_locale),
         lang,
+        route: response.route.clone(),
     });
 
     let stream = RenderBodyStream {
@@ -1820,16 +3548,28 @@ fn respond_stream(
         req_id: response.id.clone(),
         ipc: state.ipc.clone(),
         injector,
-        idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
+        idle: ipc::render_timeout()
+            .filter(|_| has_render_idle_gap(&response))
+            .map(IdleDeadline::new),
         done: false,
         shell_capture,
+        span: tracing::Span::current(),
     };
 
     let mut builder = Response::builder().status(status_code);
+    if is_event_stream_content_type(&response.headers)
+        && !response
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("cache-control"))
+    {
+        // Like respond_sse: no proxy or browser cache may hold an event stream.
+        builder = builder.header(header::CACHE_CONTROL, "no-cache");
+    }
     for (name, value) in &response.headers {
         // A streamed body has no known length; a stale content-length would
         // corrupt framing.
-        if name.eq_ignore_ascii_case("content-length") {
+        if name.eq_ignore_ascii_case("content-length") || is_hop_by_hop(name) {
             continue;
         }
         if let Ok(header_value) = HeaderValue::from_str(value) {
@@ -1839,6 +3579,7 @@ fn respond_stream(
     let mut resp = builder
         .body(axum::body::Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    append_set_cookies(resp.headers_mut(), &response.set_cookies);
     insert_cache_status_header(
         &mut resp,
         if capture_shell {
@@ -1847,6 +3588,12 @@ fn respond_stream(
             "bypass"
         },
     );
+    // Streamed renders are never stored whole: personal, or a PPR page
+    // whose holes are personal. A streamed route.ts body owns its caching
+    // like a buffered one does.
+    if !response.route_handler {
+        apply_page_cache_control(&mut resp, PageCachePolicy::Private);
+    }
     resp.extensions_mut().insert(StreamedBody);
     resp
 }
@@ -1883,6 +3630,8 @@ async fn put_ppr_shell_entry(
     max_age_secs: u64,
     deployment_id: String,
     tags: Vec<String>,
+    route: Option<String>,
+    fill_ticket: FillTicket,
 ) {
     let html = compose_ppr_shell(raw_shell, head_snippets, lang);
     let entry = CacheEntry {
@@ -1895,9 +3644,31 @@ async fn put_ppr_shell_entry(
         composed: true,
         tags,
         ppr_shell: true,
+        route,
+        etag: None,
     };
-    if let Err(e) = cache.put(cache_key, entry).await {
-        warn!(path = %path, error = %e, "PPR shell cache write failed");
+    store_fill(cache, cache_key, entry, fill_ticket, path).await;
+}
+
+/// Store a fill rendered after `fill_ticket` was taken - unless a
+/// revalidation purged the page meanwhile: its content may predate the
+/// purge, and the next request renders it again instead.
+async fn store_fill(
+    cache: &PageCache,
+    cache_key: &str,
+    entry: CacheEntry,
+    fill_ticket: FillTicket,
+    path: &str,
+) {
+    if !cache.is_enabled() {
+        return;
+    }
+    match cache.put_fresh(cache_key, entry, fill_ticket).await {
+        Ok(true) => {}
+        Ok(false) => {
+            debug!(path = %path, "page was revalidated while rendering - result not cached")
+        }
+        Err(e) => warn!(path = %path, error = %e, "cache write failed"),
     }
 }
 
@@ -1914,8 +3685,10 @@ struct PprShellCapture {
     max_age_secs: u64,
     deployment_id: String,
     tags: Vec<String>,
+    fill_ticket: FillTicket,
     head_snippets: String,
     lang: Option<String>,
+    route: Option<String>,
 }
 
 impl PprShellCapture {
@@ -1947,26 +3720,60 @@ impl PprShellCapture {
             max_age_secs,
             deployment_id,
             tags,
+            fill_ticket,
             head_snippets,
             lang,
+            route,
             ..
         } = self;
-        tokio::spawn(async move {
-            put_ppr_shell_entry(
-                &cache,
-                &cache_key,
-                &path,
-                raw.freeze(),
-                head_snippets,
-                lang,
-                status,
-                headers,
-                max_age_secs,
-                deployment_id,
-                tags,
-            )
-            .await;
-        });
+        tokio::spawn(
+            async move {
+                put_ppr_shell_entry(
+                    &cache,
+                    &cache_key,
+                    &path,
+                    raw.freeze(),
+                    head_snippets,
+                    lang,
+                    status,
+                    headers,
+                    max_age_secs,
+                    deployment_id,
+                    tags,
+                    route,
+                    fill_ticket,
+                )
+                .await;
+            }
+            .instrument(tracing::Span::current()),
+        );
+    }
+}
+
+/// The idle-gap deadline of a streamed body: `period` (`[server]
+/// render_timeout_secs`) after the last frame.
+struct IdleDeadline {
+    period: Duration,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl IdleDeadline {
+    fn new(period: Duration) -> Self {
+        Self {
+            period,
+            sleep: Box::pin(tokio::time::sleep(period)),
+        }
+    }
+
+    /// A frame arrived: the gap starts over.
+    fn reset(&mut self) {
+        self.sleep
+            .as_mut()
+            .reset(tokio::time::Instant::now() + self.period);
+    }
+
+    fn poll_elapsed(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        self.sleep.as_mut().poll(cx)
     }
 }
 
@@ -1979,11 +3786,16 @@ struct RenderBodyStream {
     req_id: String,
     ipc: Arc<IpcClient>,
     injector: stream_inject::StreamInjector,
-    idle: Pin<Box<tokio::time::Sleep>>,
+    /// Idle-gap deadline, reset per frame; None for route.ts bodies and
+    /// with `[server] render_timeout_secs = 0`.
+    idle: Option<IdleDeadline>,
     done: bool,
     /// Set on PPR miss renders; a stream ending without shell_end drops the
     /// capture unstored, so an aborted render can never cache a torn shell.
     shell_capture: Option<PprShellCapture>,
+    /// The request's span: hyper polls the body after the handler returned,
+    /// outside it, and lines logged here must still name their request.
+    span: tracing::Span,
 }
 
 impl Drop for RenderBodyStream {
@@ -2004,12 +3816,13 @@ impl Stream for RenderBodyStream {
         if this.done {
             return Poll::Ready(None);
         }
+        let _entered = this.span.clone().entered();
         loop {
             match this.inner.poll_recv(cx) {
                 Poll::Ready(Some(RenderFrame::Chunk(bytes))) => {
-                    this.idle
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    if let Some(idle) = this.idle.as_mut() {
+                        idle.reset();
+                    }
                     if let Some(capture) = this.shell_capture.as_mut() {
                         capture.absorb(&bytes);
                     }
@@ -2019,9 +3832,9 @@ impl Stream for RenderBodyStream {
                     }
                 }
                 Poll::Ready(Some(RenderFrame::ShellEnd)) => {
-                    this.idle
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + ipc::IPC_RESPONSE_TIMEOUT);
+                    if let Some(idle) = this.idle.as_mut() {
+                        idle.reset();
+                    }
                     if let Some(capture) = this.shell_capture.take() {
                         capture.store();
                     }
@@ -2034,7 +3847,11 @@ impl Stream for RenderBodyStream {
                     };
                 }
                 Poll::Pending => {
-                    if this.idle.as_mut().poll(cx).is_ready() {
+                    if this
+                        .idle
+                        .as_mut()
+                        .is_some_and(|idle| idle.poll_elapsed(cx).is_ready())
+                    {
                         warn!(id = %this.req_id, "streaming render idle-gap timeout - truncating body");
                         this.done = true;
                         this.ipc.send_render_close(&this.req_id);
@@ -2079,6 +3896,7 @@ fn respond_ppr_hit(
         method,
         status_code.as_u16(),
         metrics_tier,
+        metrics::route_label(entry.route.as_deref()),
         start.elapsed().as_nanos() as u64,
     );
     record_devtools(
@@ -2094,12 +3912,11 @@ fn respond_ppr_hit(
     );
 
     let (hole_tx, hole_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
-    tokio::spawn(feed_ppr_holes(
-        state.ipc.clone(),
-        holes_req,
-        hole_tx,
-        path.to_string(),
-    ));
+    // In the request's span: the holes render outlives this handler.
+    tokio::spawn(
+        feed_ppr_holes(state.ipc.clone(), holes_req, hole_tx, path.to_string())
+            .instrument(tracing::Span::current()),
+    );
 
     let stream = PprHitBodyStream {
         shell: Some(entry.html),
@@ -2120,6 +3937,7 @@ fn respond_ppr_hit(
         .body(axum::body::Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     insert_cache_status_header(&mut resp, cache_label);
+    apply_page_cache_control(&mut resp, PageCachePolicy::Private);
     resp.extensions_mut().insert(StreamedBody);
     resp
 }
@@ -2134,11 +3952,19 @@ async fn feed_ppr_holes(
     path: String,
 ) {
     match ipc.send_request(holes_req).await {
+        Ok(IpcSendResult::RenderStream { response, .. })
+            if !(200..300).contains(&response.status) =>
+        {
+            // A streamed answer with a non-2xx status cannot be holes either.
+            ipc.send_render_close(&response.id);
+            warn!(path = %path, status = response.status, "PPR holes render answered without holes - the page redirects or reloads to the real answer");
+            let _ = tx.send(ppr_holes_fallback(&response));
+        }
         Ok(IpcSendResult::RenderStream {
             response,
             mut body_rx,
         }) => loop {
-            match tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT, body_rx.recv()).await {
+            match ipc::within(ipc::render_timeout(), body_rx.recv()).await {
                 Ok(Some(RenderFrame::Chunk(bytes))) => {
                     if tx.send(bytes).is_err() {
                         // Client went away mid-holes: stop the render.
@@ -2155,8 +3981,13 @@ async fn feed_ppr_holes(
                 }
             }
         },
-        Ok(IpcSendResult::Response(_)) => {
-            warn!(path = %path, "PPR holes render came back buffered - body ends after the shell");
+        Ok(IpcSendResult::Response(response)) => {
+            // getServerSideProps answered this visitor with something other
+            // than holes - a redirect(), notFound(), an error page. The
+            // shell's 200 is already out, so the page itself has to take
+            // the visitor there.
+            warn!(path = %path, status = response.status, "PPR holes render answered without holes - the page redirects or reloads to the real answer");
+            let _ = tx.send(ppr_holes_fallback(&response));
         }
         Ok(IpcSendResult::SseStream { response, .. }) => {
             ipc.send_sse_close(&response.id);
@@ -2166,6 +3997,116 @@ async fn feed_ppr_holes(
             warn!(path = %path, error = %e, "PPR holes render failed - body ends after the shell");
         }
     }
+}
+
+/// The cookie a PPR hit's reload script sets so the reloaded request skips
+/// the cached shell and renders whole - its real status, Location and
+/// cookies included. Short-lived, and harmless if a visitor sets it by hand:
+/// it only costs them the shell's head start.
+const PPR_BYPASS_COOKIE: &str = "__gio_ppr_bypass";
+
+/// Whether the request carries `PPR_BYPASS_COOKIE` (see `ppr_holes_fallback`).
+fn ppr_bypass_requested(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .any(|pair| {
+            pair.split_once('=')
+                .is_some_and(|(name, _)| name.trim() == PPR_BYPASS_COOKIE)
+        })
+}
+
+/// What a PPR hit's body ends with when the holes render answered with
+/// something other than holes: a redirect() from getServerSideProps, a
+/// notFound(), an error page. The cached shell's 200 and headers are already
+/// sent, so the document is finished with a script that takes the visitor to
+/// the real answer:
+///
+/// - a redirect whose Location a browser would follow from a header too
+///   (http(s) or relative) and that sets no cookies: `location.replace` to
+///   it, with a `<meta refresh>` for visitors without JavaScript;
+/// - anything else (404, 5xx, a redirect setting cookies or with another
+///   scheme): a reload carrying `PPR_BYPASS_COOKIE`, which renders the page
+///   whole - status, Location and Set-Cookie as the non-PPR path sends them.
+///   It cannot loop: the bypassed request never serves the shell, and the
+///   script reloads only once the cookie took and at most once per URL in
+///   ten seconds.
+fn ppr_holes_fallback(response: &ipc::IpcResponse) -> Bytes {
+    let nonce_attr = security::nonce_attr();
+    let sets_cookies = !response.set_cookies.is_empty()
+        || response
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("set-cookie"));
+    let location = response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+        .map(|(_, value)| value.as_str())
+        .filter(|location| {
+            (300..400).contains(&response.status)
+                && !sets_cookies
+                && script_followable_location(location)
+        });
+    let html = match location {
+        Some(location) => format!(
+            "<script{nonce_attr}>location.replace({})</script>\
+             <noscript><meta http-equiv=\"refresh\" content=\"0;url={}\"></noscript>\
+             </body></html>",
+            script_json_string(location),
+            escape_html_attr(location),
+        ),
+        None => format!(
+            "<script{nonce_attr}>(function(){{\
+             var c=\"{PPR_BYPASS_COOKIE}=1\";\
+             document.cookie=c+\"; path=/; max-age=10; samesite=lax\";\
+             if(document.cookie.indexOf(c)<0)return;\
+             try{{var s=sessionStorage,k=\"{PPR_BYPASS_COOKIE}:\"+location.pathname+location.search,t=+s.getItem(k)||0;\
+             if(Date.now()-t<10000)return;s.setItem(k,String(Date.now()))}}catch(e){{}}\
+             location.reload()}})()</script></body></html>"
+        ),
+    };
+    Bytes::from(html)
+}
+
+/// Whether a redirect's Location may be followed by script: what a browser
+/// follows from a Location header - an http(s) URL (any origin, as the
+/// header would be) or a relative reference - and never another scheme
+/// (`javascript:` would run instead of navigating).
+fn script_followable_location(location: &str) -> bool {
+    if location.is_empty() || location.chars().any(char::is_control) {
+        return false;
+    }
+    match location.find([':', '/', '?', '#']) {
+        Some(i) if location.as_bytes()[i] == b':' => {
+            let scheme = &location[..i];
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        }
+        _ => true,
+    }
+}
+
+/// `value` as a JS string literal safe inside an inline `<script>`.
+fn script_json_string(value: &str) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+/// `value` escaped for a double-quoted HTML attribute.
+fn escape_html_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Body of a PPR cache hit: the cached shell first, then hole chunks fed by
@@ -2192,6 +4133,41 @@ impl Stream for PprHitBodyStream {
     }
 }
 
+/// The 413 for a request whose IPC frame the worker could not take, recorded
+/// like any other answer to a request that went for the worker (metrics, the
+/// devtools log and its in-flight count).
+fn respond_request_too_large(
+    state: &AppState,
+    method: &str,
+    path: &str,
+    encoding: &str,
+    locale: &str,
+    start: std::time::Instant,
+) -> Response {
+    let status = StatusCode::PAYLOAD_TOO_LARGE;
+    state.metrics.record_request(
+        method,
+        status.as_u16(),
+        "bypass",
+        metrics::ROUTE_UNMATCHED,
+        start.elapsed().as_nanos() as u64,
+    );
+    record_devtools(
+        state,
+        method,
+        path,
+        status.as_u16(),
+        "bypass",
+        encoding,
+        locale,
+        start.elapsed().as_millis() as u64,
+        true,
+    );
+    let mut resp = payload_too_large();
+    insert_cache_status_header(&mut resp, "bypass");
+    resp
+}
+
 /// Build the error response for a failed IPC render and record it.
 fn respond_ipc_error(
     state: &AppState,
@@ -2204,9 +4180,13 @@ fn respond_ipc_error(
 ) -> Response {
     let status = if timeout { 504u16 } else { 500u16 };
     let duration_ms = start.elapsed().as_millis() as u64;
-    state
-        .metrics
-        .record_request(method, status, "error", start.elapsed().as_nanos() as u64);
+    state.metrics.record_request(
+        method,
+        status,
+        "error",
+        metrics::ROUTE_UNMATCHED,
+        start.elapsed().as_nanos() as u64,
+    );
     record_devtools(
         state,
         method,
@@ -2228,7 +4208,7 @@ fn respond_ipc_error(
         let body = inject_before(
             Bytes::from(page),
             b"</body>",
-            &[dev_overlay::DEV_OVERLAY_SCRIPT],
+            &[dev_overlay::overlay_script()],
         );
         Response::builder()
             .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
@@ -2245,6 +4225,7 @@ fn respond_ipc_error(
             .into_response()
     };
     insert_cache_status_header(&mut resp, "bypass");
+    apply_page_cache_control(&mut resp, PageCachePolicy::Private);
     resp
 }
 
@@ -2274,7 +4255,67 @@ impl Stream for SseBodyStream {
     }
 }
 
-// ── Image compression predicate ──────────────────────────────────────────────
+// ── Compression predicate ────────────────────────────────────────────────────
+
+/// gio.toml `[compression]`, installed once at startup before the router is
+/// built. A process global (like the CSP nonce placeholder) because the 304
+/// path - `compressed_by_layer`, far from any state - must agree with the
+/// layer about which responses it compresses.
+static COMPRESSION_CONFIG: std::sync::OnceLock<config::CompressionConfig> =
+    std::sync::OnceLock::new();
+
+fn install_compression_config(compression: config::CompressionConfig) {
+    let _ = COMPRESSION_CONFIG.set(compression);
+    if !compression.enabled {
+        info!("response compression disabled ([compression] enabled = false)");
+    }
+}
+
+fn compression_config() -> config::CompressionConfig {
+    COMPRESSION_CONFIG.get().copied().unwrap_or_default()
+}
+
+/// The response CompressionLayer, as `[compression]` configures it.
+fn compression_layer(
+    compression: config::CompressionConfig,
+) -> CompressionLayer<CompressionPredicate> {
+    CompressionLayer::new()
+        .br(compression.prefer_brotli)
+        .compress_when(CompressionPredicate(compression))
+}
+
+/// Which responses CompressionLayer compresses - and marks with
+/// `Vary: accept-encoding`, whatever encoding the client asked for.
+fn compression_predicate() -> impl Predicate {
+    CompressionPredicate(compression_config())
+}
+
+/// tower-http's defaults (no gRPC, SSE or images), above `min_size_bytes`,
+/// and nothing at all when `[compression]` is disabled - not even the Vary
+/// header, since no response then varies by encoding.
+#[derive(Clone, Copy)]
+struct CompressionPredicate(config::CompressionConfig);
+
+impl Predicate for CompressionPredicate {
+    fn should_compress<B>(&self, response: &axum::http::Response<B>) -> bool
+    where
+        B: axum::body::HttpBody,
+    {
+        self.0.enabled
+            && DefaultPredicate::new()
+                .and(SizeAbove::new(self.0.min_size_bytes))
+                .and(NotImagePredicate)
+                .should_compress(response)
+    }
+}
+
+/// CompressionLayer's own checks, then the predicate: whether the layer
+/// compresses `resp` (so a 304 built from it must carry the same Vary).
+fn compressed_by_layer(resp: &Response) -> bool {
+    !resp.headers().contains_key(header::CONTENT_ENCODING)
+        && !resp.headers().contains_key(header::CONTENT_RANGE)
+        && compression_predicate().should_compress(resp)
+}
 
 #[derive(Clone, Copy)]
 struct NotImagePredicate;
@@ -2297,6 +4338,19 @@ async fn image_handler_route(
     axum::extract::Query(query): axum::extract::Query<giojs_image::ImageQuery>,
     req_headers: axum::http::HeaderMap,
 ) -> Response {
+    let access = match query.src.as_deref() {
+        Some(src) => image_source_access(
+            &state.image,
+            &state.static_rules,
+            &state.ipc.worker_rules(),
+            src,
+            &req_headers,
+        ),
+        None => ImageSourceAccess::Open,
+    };
+    if access == ImageSourceAccess::Denied {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let accept = req_headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -2304,10 +4358,17 @@ async fn image_handler_route(
     match state.image.handle(query, accept.as_deref()).await {
         Ok((data, format, cache_hit)) => {
             state.metrics.record_image_processed(format.extension());
+            // A guarded file is for the visitors its guard admits: a shared
+            // cache keys by URL and would hand it to everyone.
+            let cache_control = if access == ImageSourceAccess::Admitted {
+                "private, no-cache"
+            } else {
+                "public, max-age=31536000, immutable"
+            };
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, format.content_type())
-                .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+                .header(header::CACHE_CONTROL, cache_control)
                 .header("vary", "Accept")
                 .header("x-gio-cache", if cache_hit { "HIT" } else { "MISS" })
                 .body(axum::body::Body::from(data))
@@ -2332,65 +4393,152 @@ async fn image_handler_route(
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+/// What the guards say about the public/ file a local image `src` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageSourceAccess {
+    /// No guard covers it (or `src` is remote, or names no file).
+    Open,
+    /// A guard covers it and admitted this visitor.
+    Admitted,
+    /// A guard covers it and would turn this visitor away.
+    Denied,
+}
 
-/// Dev watch: on app-source changes, clear the page cache, re-transform CSS,
-/// restart the Node worker (fresh module cache, route discovery, and client
-/// bundles), and tell connected browsers to reload over the devtools SSE
-/// stream once the IPC connection is restored. Dev mode only.
-fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
-    use notify::Watcher;
-
-    let (fs_tx, mut fs_rx) = tokio::sync::mpsc::channel::<()>(16);
-    let mut watcher =
-        match notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
-            if let Ok(event) = result {
-                if watch_event_is_relevant(&event) {
-                    let _ = fs_tx.blocking_send(());
-                }
-            }
-        }) {
-            Ok(watcher) => watcher,
-            Err(e) => {
-                warn!(error = %e, "dev watch unavailable");
-                return;
-            }
-        };
-    if let Err(e) = watcher.watch(
-        std::path::Path::new(&app_dir),
-        notify::RecursiveMode::Recursive,
-    ) {
-        warn!(error = %e, app_dir = %app_dir, "dev watch: cannot watch app dir");
-        return;
+/// `/_gio/image` is exempt from `rules_middleware`, yet a local `src` reads
+/// a public/ file that also answers at `/x` and `/public/x` - URLs guards
+/// may cover. The optimizer is a third URL for the same file, so it is held
+/// to the guards of both: those of the file it actually reads (symlinks
+/// resolved) and those of the path `src` spells.
+fn image_source_access(
+    image: &giojs_image::ImageHandler,
+    static_rules: &rules::RuleSet,
+    worker_rules: &rules::RuleSet,
+    src: &str,
+    headers: &axum::http::HeaderMap,
+) -> ImageSourceAccess {
+    if static_rules.is_empty() && worker_rules.is_empty() {
+        return ImageSourceAccess::Open;
     }
-    for config_name in [
-        "gio.toml",
-        "gio.config.ts",
-        "gio.config.js",
-        "middleware.ts",
-        "middleware.js",
-    ] {
-        let config_path = project_root.join(config_name);
-        if config_path.exists() {
-            let _ = watcher.watch(&config_path, notify::RecursiveMode::NonRecursive);
+    // Remote, or no such file: the optimizer reads nothing from public/.
+    let Some(file) = image.local_file_path(src) else {
+        return ImageSourceAccess::Open;
+    };
+    let spelled = src.trim_start_matches('/');
+    let spelled = format!("/{}", spelled.strip_prefix("public/").unwrap_or(spelled));
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok());
+    let mut access = ImageSourceAccess::Open;
+    for (path, is_file) in [(file.as_str(), true), (spelled.as_str(), false)] {
+        let root_url = encode_url_path(path);
+        let public_url = format!("{}{root_url}", public_files::PUBLIC_URL_PREFIX);
+        for url in [root_url, public_url] {
+            let canonical = match path_hygiene::canonical(&url) {
+                Ok(canonical) => canonical.into_owned(),
+                // The file's own URL always canonicalizes; if it ever did
+                // not, no guard could be checked: refuse.
+                Err(_) if is_file => return ImageSourceAccess::Denied,
+                // A spelling with `..` or the like: the file's URL covers it.
+                Err(_) => continue,
+            };
+            if rules::check_guards_merged(static_rules, worker_rules, &canonical, cookie_header)
+                .is_some()
+            {
+                return ImageSourceAccess::Denied;
+            }
+            if static_rules.guards_path(&canonical) || worker_rules.guards_path(&canonical) {
+                access = ImageSourceAccess::Admitted;
+            }
         }
     }
+    access
+}
+
+/// Percent-encode a decoded URL path as a browser sends it: everything but
+/// `/`, unreserved characters and the sub-delims RFC 3986 allows in a path.
+fn encode_url_path(path: &str) -> String {
+    const PATH_SAFE: &[u8] = b"/-._~!$&'()*+,;=:@";
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || PATH_SAFE.contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Dev watch: on source changes anywhere in the project (app/, components/,
+/// lib/, config files - dev_watch.rs decides what counts), clear the page
+/// cache, re-transform CSS, restart the Node worker (fresh module cache,
+/// route discovery, and client bundles), and tell connected browsers to
+/// reload over the devtools SSE stream once the IPC connection is restored.
+/// public/-only changes refresh the root-serving index and reload browsers
+/// without a restart - nothing the worker holds depends on them. Dev only.
+/// The page cache's own files in `page_cache_dir` are never a change (every
+/// cached render writes one). The image cache needs no such rule: it only
+/// writes image files, which never count outside app/.
+fn spawn_dev_watcher(
+    state: AppState,
+    app_dir: String,
+    project_root: PathBuf,
+    page_cache_dir: &std::path::Path,
+    watch_ignore: dev_watch::WatchIgnore,
+) {
+    // Classification is prefix-based and event paths come back absolute (on
+    // macOS through /private), so compare against canonical paths.
+    let root = match std::fs::canonicalize(&project_root) {
+        Ok(root) => root,
+        Err(e) => {
+            warn!(error = %e, root = %project_root.display(), "dev watch: cannot resolve project root");
+            return;
+        }
+    };
+    let app_path = dev_watch::resolve_dir(std::path::Path::new(&app_dir));
+    let public_dir = dev_watch::resolve_dir(state.public_files.root());
+    let page_cache_dir = Some(dev_watch::resolve_dir(page_cache_dir));
+    let ignores = !watch_ignore.is_empty();
+    let watch = match dev_watch::DevWatch::start(
+        root.clone(),
+        app_path,
+        public_dir,
+        page_cache_dir,
+        watch_ignore,
+    ) {
+        Ok(watch) => watch,
+        Err(e) => {
+            warn!(error = %e, root = %root.display(), "dev watch unavailable");
+            return;
+        }
+    };
 
     tokio::spawn(async move {
-        // The watcher stops when dropped; it lives as long as this task.
-        let _keep_watching = watcher;
-        info!(app_dir = %app_dir, "dev watch active");
+        // The watch stops when dropped; it lives as long as this task.
+        let watch = watch;
+        info!(root = %root.display(), app_dir = %app_dir, watch_ignore = ignores, "dev watch active");
         loop {
-            if fs_rx.recv().await.is_none() {
-                return;
-            }
-            // Debounce bursts - editors emit several events per save.
-            loop {
-                match tokio::time::timeout(Duration::from_millis(300), fs_rx.recv()).await {
-                    Ok(Some(())) => continue,
-                    Ok(None) => return,
-                    Err(_) => break,
+            // Changes made while a batch is processed (a worker restart can
+            // take seconds) are kept and form the next batch.
+            let batch = watch.changes().next_batch(Duration::from_millis(300)).await;
+            if batch.public {
+                let public_files = state.public_files.clone();
+                match tokio::task::spawn_blocking(move || public_files.refresh()).await {
+                    Ok(files) => info!(files, "dev watch: public/ index refreshed"),
+                    Err(e) => warn!(error = %e, "dev watch: public/ index refresh failed"),
                 }
+            }
+            if !batch.source {
+                if batch.public {
+                    let _ = state
+                        .devtools
+                        .log_tx
+                        .send("event: reload\ndata: {}\n\n".to_string());
+                    info!("dev watch: public/ changed - browsers reloading");
+                }
+                continue;
             }
             info!("dev watch: change detected - restarting worker, clearing caches");
             state.cache.clear().await;
@@ -2412,6 +4560,30 @@ fn spawn_dev_watcher(state: AppState, app_dir: String, project_root: PathBuf) {
     });
 }
 
+/// Dev, before the server is up: resolve once a source change happens (the
+/// same changes that restart a running worker), so a worker that failed to
+/// boot is started again once the file is fixed. Nothing is served while it
+/// waits - no port is bound yet.
+async fn wait_for_source_change(
+    project_root: &std::path::Path,
+    app_dir: &str,
+    public_dir: &std::path::Path,
+    page_cache_dir: &std::path::Path,
+    dev: &config::DevConfig,
+) -> anyhow::Result<()> {
+    let root = std::fs::canonicalize(project_root)?;
+    let watch = dev_watch::DevWatch::start(
+        root,
+        dev_watch::resolve_dir(std::path::Path::new(app_dir)),
+        dev_watch::resolve_dir(public_dir),
+        Some(dev_watch::resolve_dir(page_cache_dir)),
+        dev.watch_ignore.clone(),
+    )?;
+    while !watch.changes().next_batch(Duration::from_millis(300)).await.source {}
+    info!("dev watch: change detected - starting the worker again");
+    Ok(())
+}
+
 /// Dev watch: wait for the worker restart to complete, then clear the cache
 /// a second time. A render in flight on the old worker can land during the
 /// kill window, and the deployment id never changes across dev restarts, so
@@ -2430,22 +4602,13 @@ async fn await_restart_then_reclear(
     }
 }
 
-fn watch_event_is_relevant(event: &notify::Event) -> bool {
-    if matches!(event.kind, notify::EventKind::Access(_)) {
-        return false;
-    }
-    // Build outputs under .gio/ change as a *result* of restarts; reacting to
-    // them would loop forever.
-    event.paths.iter().any(|path| {
-        let text = path.to_string_lossy();
-        !text.contains("/.gio/") && !text.contains("\\.gio\\") && !text.contains("node_modules")
-    })
-}
-
 /// Transform every `.css` under `app_dir` into `css_cache` (URL-keyed).
 /// Runs at startup and again on dev-watch changes; existing entries are
-/// replaced so deleted files also disappear.
-async fn load_css_cache(css_cache: &DashMap<String, Bytes>, app_dir: &str, minify: bool) {
+/// replaced so deleted files also disappear. CSS Modules are left out: their
+/// class names only exist in the worker's import pipeline (route stylesheets
+/// under `/_next/static/css/`), and a path-served copy hashed differently by
+/// lightningcss could never match the HTML.
+async fn load_css_cache(css_cache: &css_assets::CssCache, app_dir: &str, minify: bool) {
     let transformer = giojs_css::CssTransformer { minify };
     let css_files = scan_css_files(std::path::PathBuf::from(app_dir)).await;
     let app_path = std::path::Path::new(app_dir);
@@ -2465,7 +4628,7 @@ async fn load_css_cache(css_cache: &DashMap<String, Bytes>, app_dir: &str, minif
         match transformer.transform(&source, css_path.to_str().unwrap_or("")) {
             Ok(result) => {
                 info!(path = %url_key, "CSS transformed");
-                css_cache.insert(url_key, Bytes::from(result.code));
+                css_cache.insert(url_key, css_assets::CssAsset::new(Bytes::from(result.code)));
             }
             Err(e) => warn!(path = %url_key, error = %e, "CSS transform failed"),
         }
@@ -2488,7 +4651,7 @@ async fn scan_css_files(root: std::path::PathBuf) -> Vec<PathBuf> {
             let path = entry.path();
             if file_type.is_dir() {
                 dirs.push(path);
-            } else if file_type.is_file() && path.extension().is_some_and(|e| e == "css") {
+            } else if file_type.is_file() && is_path_served_css(&path) {
                 result.push(path);
             }
         }
@@ -2496,22 +4659,76 @@ async fn scan_css_files(root: std::path::PathBuf) -> Vec<PathBuf> {
     result
 }
 
+/// A stylesheet served by path from app/: any `.css` except a CSS Module.
+fn is_path_served_css(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|e| e == "css")
+        && !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".module.css"))
+}
+
+/// `href` attribute of a worker-built route stylesheet link (css-build.ts).
+const ROUTE_STYLESHEET_HREF: &str = "href=\"/_next/static/css/";
+
+/// Whether a `<link>` tag in `html` points at a route stylesheet. Only tags
+/// count: page text that merely mentions the path (a post about CSS) is
+/// escaped by React, so it never holds a raw `<link`. Tags anywhere count -
+/// pages without a root layout get their links at the top of `<body>`.
+fn links_route_stylesheet(html: &str) -> bool {
+    let mut rest = html;
+    while let Some(start) = rest.find("<link") {
+        let tag = &rest[start..];
+        let end = tag.find('>').unwrap_or(tag.len());
+        if tag[..end].contains(ROUTE_STYLESHEET_HREF) {
+            return true;
+        }
+        rest = &tag[end..];
+    }
+    false
+}
+
 /// Extract critical CSS for `html` using the pre-transformed `/globals.css` from the cache.
 /// Returns a ready-to-inject HTML snippet, or `None` if extraction produces nothing useful.
-fn extract_critical_snippet(html: &Bytes, css_cache: &DashMap<String, Bytes>) -> Option<String> {
+///
+/// Pages that link imported route stylesheets get none: their CSS - often
+/// app/globals.css itself, imported by the root layout - already loads, and
+/// the snippet would load globals.css a second time after the route's own
+/// rules, letting it override them.
+fn extract_critical_snippet(html: &Bytes, css_cache: &css_assets::CssCache) -> Option<String> {
     let html_str = std::str::from_utf8(html).ok()?;
+    if links_route_stylesheet(html_str) {
+        return None;
+    }
     let css_entry = css_cache.get("/globals.css")?;
-    let css_str = std::str::from_utf8(&css_entry).ok()?;
+    let css_str = std::str::from_utf8(&css_entry.code).ok()?;
     let result = giojs_css::extract_critical(html_str, css_str).ok()?;
     if result.critical.is_empty() {
         return None;
     }
-    Some(format!(
-        "<style>{}</style>\
-         <link rel=\"stylesheet\" href=\"/globals.css\" media=\"print\" onload=\"this.media='all'\">\
-         <noscript><link rel=\"stylesheet\" href=\"/globals.css\"></noscript>",
-        result.critical
+    Some(critical_css_snippet(
+        &result.critical,
+        security::nonce_attr(),
     ))
+}
+
+/// Critical CSS inline, the full stylesheet loaded without blocking render.
+/// Under CSP nonces the `onload` attribute trick is blocked (inline event
+/// handlers cannot carry a nonce), so a nonced script flips the media instead.
+fn critical_css_snippet(critical: &str, nonce_attr: &str) -> String {
+    if nonce_attr.is_empty() {
+        return format!(
+            "<style>{critical}</style>\
+             <link rel=\"stylesheet\" href=\"/globals.css\" media=\"print\" onload=\"this.media='all'\">\
+             <noscript><link rel=\"stylesheet\" href=\"/globals.css\"></noscript>"
+        );
+    }
+    format!(
+        "<style{nonce_attr}>{critical}</style>\
+         <link rel=\"stylesheet\" href=\"/globals.css\" media=\"print\">\
+         <script{nonce_attr}>(function(l){{if(l.sheet){{l.media='all'}}else{{l.addEventListener('load',function(){{l.media='all'}})}}}})(document.currentScript.previousElementSibling)</script>\
+         <noscript><link rel=\"stylesheet\" href=\"/globals.css\"></noscript>"
+    )
 }
 
 /// Byte-scan for `needle` and splice `snippets` immediately before it.
@@ -2533,7 +4750,7 @@ fn inject_before(html: Bytes, needle: &[u8], snippets: &[&str]) -> Bytes {
 fn inject_into_html(html: Bytes, snippets: &[&str], dev_mode: bool) -> Bytes {
     let html = inject_before(html, b"</head>", snippets);
     if dev_mode {
-        inject_before(html, b"</body>", &[dev_overlay::DEV_OVERLAY_SCRIPT])
+        inject_before(html, b"</body>", &[dev_overlay::overlay_script()])
     } else {
         html
     }
@@ -2560,12 +4777,10 @@ fn compose_final_html(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[String],
-    css_cache: &DashMap<String, Bytes>,
+    css_cache: &css_assets::CssCache,
     critical_extraction: bool,
 ) -> Bytes {
-    let script = format!(
-        r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
-    );
+    let script = deployment_script(deployment_id, default_locale);
     let critical_snippet = if critical_extraction {
         extract_critical_snippet(&html, css_cache)
     } else {
@@ -2633,24 +4848,61 @@ fn is_html_content_type(headers: &std::collections::HashMap<String, String>) -> 
         .unwrap_or(false)
 }
 
+/// Whether a streamed body gets the idle-gap cutoff. It guards page renders
+/// (a stalled React stream is a hung render). route.ts bodies - flagged
+/// `routeStream` by the worker, HTML or not - are paced by their handler: an
+/// event stream waiting for events, an LLM thinking before its first token.
+/// They end when the handler or the client says so.
+fn has_render_idle_gap(response: &ipc::IpcResponse) -> bool {
+    !response.route_stream && is_html_content_type(&response.headers)
+}
+
+/// Whether a streamed body gets the head snippets (fonts, deployment script,
+/// dev overlay) spliced in: page renders only. A route.ts body is the
+/// handler's own, and may have no `</head>` at all (htmx fragments, LLM
+/// tokens, a progress page) - the injector's head scan would hold all of it
+/// back until the stream ended.
+fn injects_into_stream(response: &ipc::IpcResponse) -> bool {
+    is_html_content_type(&response.headers) && !response.route_handler && !response.route_stream
+}
+
+fn is_event_stream_content_type(headers: &std::collections::HashMap<String, String>) -> bool {
+    headers
+        .get("content-type")
+        .is_some_and(|ct| ct.starts_with("text/event-stream"))
+}
+
+/// Whether `Purpose` or `Sec-Purpose` names a prefetch. Both are lists
+/// whose items may carry parameters: browsers send
+/// `Sec-Purpose: prefetch;prerender` for speculation-rules prerenders and
+/// `prefetch;anonymous-client-ip` for private prefetches.
 fn is_prefetch(req: &Request) -> bool {
-    req.headers()
-        .get("purpose")
-        .or_else(|| req.headers().get("sec-purpose"))
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "prefetch")
-        .unwrap_or(false)
+    ["purpose", "sec-purpose"].into_iter().any(|name| {
+        req.headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|item| {
+                let token = item.split(';').next().unwrap_or_default().trim();
+                token.eq_ignore_ascii_case("prefetch")
+            })
+    })
 }
 
 /// Inspect Accept-Encoding and return the best encoding the CompressionLayer will apply.
 /// This is used only for logging - the actual negotiation happens in tower-http.
 fn negotiate_encoding(req: &Request) -> &'static str {
+    let compression = compression_config();
+    if !compression.enabled {
+        return "identity";
+    }
     let accept = req
         .headers()
         .get(header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if accept.contains("br") {
+    if compression.prefer_brotli && accept.contains("br") {
         "br"
     } else if accept.contains("gzip") {
         "gzip"
@@ -2664,7 +4916,7 @@ async fn build_response_from_entry(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[&str],
-    css_cache: &Arc<DashMap<String, Bytes>>,
+    css_cache: &Arc<css_assets::CssCache>,
     css_config: &config::CssConfig,
     dev_mode: bool,
 ) -> Response {
@@ -2674,7 +4926,7 @@ async fn build_response_from_entry(
         // Snippets were baked at put time; the dev overlay is per-process and
         // never baked, so splice it in when a prod-written entry is read in dev.
         if dev_mode {
-            inject_before(entry.html, b"</body>", &[dev_overlay::DEV_OVERLAY_SCRIPT])
+            inject_before(entry.html, b"</body>", &[dev_overlay::overlay_script()])
         } else {
             entry.html
         }
@@ -2712,6 +4964,12 @@ async fn build_response_from_entry(
     let status = StatusCode::from_u16(entry.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder().status(status);
     for (k, v) in &entry.headers {
+        // The stored body is whole and buffered: exact_length_middleware
+        // states its length. A stored Content-Length is the render's, from
+        // before composition or injection grew the HTML.
+        if k.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
         if let Ok(val) = HeaderValue::from_str(v) {
             builder = builder.header(k.as_str(), val);
         }
@@ -2728,13 +4986,11 @@ fn compose_uncomposed_entry(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[String],
-    css_cache: &DashMap<String, Bytes>,
+    css_cache: &css_assets::CssCache,
     critical_extraction: bool,
     dev_mode: bool,
 ) -> Bytes {
-    let script = format!(
-        r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
-    );
+    let script = deployment_script(deployment_id, default_locale);
     let critical_snippet = if critical_extraction {
         extract_critical_snippet(&html, css_cache)
     } else {
@@ -2766,16 +5022,15 @@ fn build_html_response(
     deployment_id: &str,
     default_locale: &str,
     font_snippets: &[&str],
-    css_cache: &DashMap<String, Bytes>,
+    css_cache: &css_assets::CssCache,
     css_config: &config::CssConfig,
     dev_mode: bool,
 ) -> Response {
-    let body_bytes = if composed || !is_html_content_type(headers) {
+    let html = is_html_content_type(headers);
+    let body_bytes = if composed || !html {
         body
     } else {
-        let script = format!(
-            r#"<script>window.__GIO_DEPLOYMENT_ID__="{deployment_id}";window.__GIO_DEFAULT_LOCALE__="{default_locale}";</script>"#
-        );
+        let script = deployment_script(deployment_id, default_locale);
         let critical_snippet = if css_config.critical_extraction && cacheable {
             extract_critical_snippet(&body, css_cache)
         } else {
@@ -2792,6 +5047,11 @@ fn build_html_response(
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder().status(status);
     for (k, v) in headers {
+        // Composition or the injection here made an HTML body longer than
+        // the length the app stated; exact_length_middleware sets the real one.
+        if is_hop_by_hop(k) || (html && k.eq_ignore_ascii_case("content-length")) {
+            continue;
+        }
         if let Ok(val) = HeaderValue::from_str(v) {
             builder = builder.header(k.as_str(), val);
         }
@@ -2821,6 +5081,11 @@ fn build_ipc_request(
         deployment_id: deployment_id.to_string(),
         locale: locale.to_string(),
         skip_shell: false,
+        client: req
+            .extensions()
+            .get::<client_identity::ClientInfo>()
+            .map(ipc::IpcClientFields::from)
+            .unwrap_or_default(),
     }
 }
 
@@ -2875,15 +5140,139 @@ fn url_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The request headers for the worker (and the coalescing key), one entry
+/// per name. A repeated header is joined, not reduced to one of its fields:
+/// `cookie` fields with `"; "` (HTTP/2 cookie crumbs, RFC 9113 section
+/// 8.2.3), every other name with `", "` (RFC 9110 section 5.3).
 fn extract_headers(req: &Request) -> HashMap<String, String> {
+    let mut headers: HashMap<String, String> = HashMap::new();
+    for (name, value) in req.headers() {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        match headers.entry(name.as_str().to_string()) {
+            std::collections::hash_map::Entry::Occupied(mut joined) => {
+                let joined = joined.get_mut();
+                joined.push_str(if name == header::COOKIE { "; " } else { ", " });
+                joined.push_str(value);
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(value.to_string());
+            }
+        }
+    }
+    headers
+}
+
+/// Join every `cookie` field into one, in wire order. Over HTTP/2 browsers
+/// send each cookie as its own field (RFC 9113 section 8.2.3) and hyper
+/// keeps them apart, while guards read the first field and parsers read one:
+/// without this, a visitor with two cookies loses one of them to each.
+fn join_cookie_fields(headers: &mut axum::http::HeaderMap) {
+    let mut fields = headers.get_all(header::COOKIE).iter();
+    let (Some(first), Some(_)) = (fields.next(), fields.next()) else {
+        return;
+    };
+    let mut joined = first.as_bytes().to_vec();
+    for field in headers.get_all(header::COOKIE).iter().skip(1) {
+        joined.extend_from_slice(b"; ");
+        joined.extend_from_slice(field.as_bytes());
+    }
+    // Joined valid field values are a valid field value.
+    if let Ok(value) = HeaderValue::from_bytes(&joined) {
+        headers.insert(header::COOKIE, value);
+    }
+}
+
+/// The host a request was sent to: the Host header, or the HTTP/2
+/// :authority when there is none.
+fn request_host(req: &Request) -> Option<String> {
     req.headers()
-        .iter()
-        .filter_map(|(k, v)| {
-            v.to_str()
-                .ok()
-                .map(|s| (k.as_str().to_lowercase(), s.to_string()))
-        })
-        .collect()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().authority().map(|a| a.as_str().to_string()))
+}
+
+/// The connection's remote address (not a forwarded client address): the dev
+/// guard trusts localhost-style hosts only on a loopback connection.
+fn connection_peer_ip(req: &Request) -> Option<std::net::IpAddr> {
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip())
+}
+
+/// Host / Origin / Sec-Fetch-Site vetting for every /_gio/devtools* route
+/// (see dev_guard.rs): defeats DNS rebinding and cross-site requests, and
+/// forged localhost Host headers from other machines.
+async fn dev_endpoint_guard(
+    State(policy): State<Arc<dev_guard::DevHostPolicy>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let headers = req.headers();
+    let header_str = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let host = request_host(&req);
+    let verdict = policy.check_from(
+        dev_guard::DevEndpointKind::for_path(req.uri().path()),
+        host.as_deref(),
+        header_str(header::ORIGIN.as_str()),
+        header_str("sec-fetch-site"),
+        connection_peer_ip(&req),
+    );
+    match verdict {
+        Ok(()) => next.run(req).await,
+        Err(rejection) => {
+            // /_gio/* skips rate limiting, so any open page could loop
+            // requests here: warn once per distinct rejection, then debug.
+            if policy.should_warn(&rejection) {
+                warn!(path = %req.uri().path(), ?rejection, "dev endpoint request blocked (repeats are logged at debug level)");
+            } else {
+                debug!(path = %req.uri().path(), ?rejection, "dev endpoint request blocked");
+            }
+            Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .header(header::CACHE_CONTROL, "no-store")
+                .body(axum::body::Body::from(rejection.message()))
+                .unwrap_or_else(|_| StatusCode::FORBIDDEN.into_response())
+        }
+    }
+}
+
+/// Response extension marking a worker error page (see
+/// `IpcResponse::worker_error`); set in dev mode only.
+#[derive(Clone, Copy)]
+struct WorkerErrorPage;
+
+/// Dev mode: a render error page embeds the error message and stack (file
+/// paths, source excerpts from build errors). Pages carry no Host check, so
+/// a DNS-rebinding site could read them same-origin; a request whose Host is
+/// not trusted (or a localhost Host from another machine) gets a page
+/// without the details instead.
+async fn dev_error_detail_guard(
+    State(policy): State<Arc<dev_guard::DevHostPolicy>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let host = request_host(&req);
+    let peer = connection_peer_ip(&req);
+    let resp = next.run(req).await;
+    if resp.extensions().get::<WorkerErrorPage>().is_none()
+        || host.is_some_and(|h| policy.is_trusted_host_from(&h, peer))
+    {
+        return resp;
+    }
+    let (mut parts, _) = resp.into_parts();
+    parts.extensions.remove::<WorkerErrorPage>();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    let page =
+        dev_overlay::error_page_html(parts.status.as_u16(), dev_guard::HIDDEN_ERROR_DETAILS, None);
+    Response::from_parts(parts, axum::body::Body::from(page))
 }
 
 async fn devtools_handler(State(state): State<AppState>) -> Response {
@@ -2934,7 +5323,8 @@ async fn devtools_stream_handler(State(state): State<AppState>) -> Response {
         .status(200)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
-        .header("connection", "keep-alive")
+        // No Connection header: the connection layer owns keep-alive
+        // (HOP_BY_HOP_HEADERS), and HTTP/2 forbids it.
         .body(axum::body::Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -3125,8 +5515,17 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
     // every visitor.
     req.headers.remove("cookie");
     req.headers.remove("authorization");
+    // Same for the client IP (ctx.ip marks a render personal). The request
+    // id stays, tying the refresh's worker logs to the request that
+    // triggered it.
+    req.client.ip = None;
     let locale = req.locale.clone();
     let req_path = req.path.clone();
+    // The refresh runs in the triggering request's span (its worker logs
+    // carry that request id too), so every line it logs names the request.
+    let span = tracing::Span::current();
+    // Before the render: a purge landing mid-refresh must win over it.
+    let fill_ticket = state.cache.fill_ticket();
     tokio::spawn(async move {
         match state.ipc.send_request(req).await {
             Ok(IpcSendResult::Response(resp)) if render_is_shareable(&resp) => {
@@ -3145,14 +5544,23 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                     headers: cacheable_response_headers(&resp.headers),
                     created_at: std::time::SystemTime::now(),
                     max_age_secs: resp.cache_max_age,
-                    deployment_id,
+                    deployment_id: state.cache_epoch.to_string(),
                     composed,
-                    tags: resp.cache_tags,
+                    tags: revalidate::entry_tags(&req_path, &resp.cache_tags),
                     ppr_shell: false,
+                    route: resp.route,
+                    etag: None,
                 };
-                if let Err(e) = state.cache.put(&key, entry).await {
-                    warn!(key = %key, error = %e, "background revalidation cache write failed");
-                }
+                store_fill(&state.cache, &key, entry, fill_ticket, &req_path).await;
+            }
+            // The page is gone (notFound() or `{ notFound: true }` - 404s are
+            // never cacheable). This render was the anonymous variant, so the
+            // 404 is everyone's answer: evict the entry instead of serving the
+            // deleted page for the rest of the SWR window - the next request
+            // renders, and gets, the 404.
+            Ok(IpcSendResult::Response(resp)) if resp.status == StatusCode::NOT_FOUND.as_u16() => {
+                state.cache.remove(&key).await;
+                info!(key = %key, "background revalidation answered 404 - cached page evicted");
             }
             // PPR pages refresh in ppr streaming mode: collect the raw shell
             // up to shell_end, stop the holes render, and store the shell
@@ -3176,8 +5584,10 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                             response.status,
                             cacheable_response_headers(&response.headers),
                             response.cache_max_age,
-                            deployment_id,
-                            response.cache_tags,
+                            state.cache_epoch.to_string(),
+                            revalidate::entry_tags(&req_path, &response.cache_tags),
+                            response.route,
+                            fill_ticket,
                         )
                         .await;
                     }
@@ -3186,8 +5596,10 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
                     }
                 }
             }
-            // A non-ppr stream during revalidation is unexpected; make sure
-            // Node stops rendering into a receiver nobody reads.
+            // A non-ppr stream during revalidation (a PPR page whose shell
+            // must not be stored this time, e.g. it recovered from an error)
+            // has nothing to cache; make sure Node stops rendering into a
+            // receiver nobody reads.
             Ok(IpcSendResult::RenderStream { response, .. }) => {
                 state.ipc.send_render_close(&response.id);
             }
@@ -3195,7 +5607,7 @@ fn spawn_revalidation(state: AppState, key: String, mut req: IpcRequest, default
             Err(e) => warn!(key = %key, error = %e, "background revalidation IPC error"),
         }
         state.revalidating.remove(&key);
-    });
+    }.instrument(span));
 }
 
 /// Drain a PPR revalidation stream up to shell_end, returning the raw shell
@@ -3206,7 +5618,7 @@ async fn collect_ppr_shell(
 ) -> Option<Bytes> {
     let mut raw = BytesMut::new();
     loop {
-        match tokio::time::timeout(ipc::IPC_RESPONSE_TIMEOUT, body_rx.recv()).await {
+        match ipc::within(ipc::render_timeout(), body_rx.recv()).await {
             Ok(Some(RenderFrame::Chunk(bytes))) => {
                 if raw.len() + bytes.len() > MAX_PPR_SHELL_BYTES {
                     return None;
@@ -3218,6 +5630,45 @@ async fn collect_ppr_shell(
             Err(_) => return None,
         }
     }
+}
+
+/// The head links for the served fonts (`files`, one per `[[fonts]]`
+/// entry): a preload per font whose entry keeps `preload = true`, then the
+/// @font-face stylesheet.
+fn font_head_snippets(fonts: &[config::FontEntry], files: &[String]) -> Vec<String> {
+    fonts
+        .iter()
+        .zip(files)
+        .filter(|(font, _)| font.preload)
+        .map(|(_, file)| {
+            format!(
+                r#"<link rel="preload" href="/_gio/fonts/{file}" as="font" type="font/woff2" crossorigin>"#
+            )
+        })
+        .chain(
+            (!fonts.is_empty())
+                .then(|| r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string()),
+        )
+        .collect()
+}
+
+/// How many Node workers render: `[server] workers`, except that dev mode
+/// always runs one. Dev restarts rebuild the client bundles on every edit,
+/// and the builder is the only worker that may write them.
+fn render_worker_count(
+    setting: config::WorkersSetting,
+    available_cores: Option<usize>,
+    dev_mode: bool,
+) -> usize {
+    let configured = setting.resolve(available_cores);
+    if dev_mode && configured > 1 {
+        info!(
+            configured,
+            "dev mode runs a single Node worker ([server] workers applies in production)"
+        );
+        return 1;
+    }
+    configured
 }
 
 async fn shutdown_signal() {
@@ -3247,12 +5698,101 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+        _ = launcher_gone() => {}
     }
+}
+
+/// With GIO_EXIT_ON_STDIN_EOF=1, resolves when stdin reads EOF: the launcher
+/// that spawned this server (`gio`, a standalone run.mjs) holds a stdin pipe
+/// open and never writes, so EOF means it died - SIGKILL included, which no
+/// signal handler sees - and the server shuts down gracefully instead of
+/// lingering on the port. Never resolves otherwise, or when stdin is not a
+/// pipe (a terminal or /dev/null says nothing about a launcher).
+async fn launcher_gone() {
+    if std::env::var(ipc::EXIT_ON_STDIN_EOF_ENV).as_deref() != Ok("1") || !stdin_is_pipe() {
+        return std::future::pending().await;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // A plain thread, not tokio's stdin: its blocking read cannot be
+    // cancelled and would hold up runtime shutdown.
+    let spawned = std::thread::Builder::new()
+        .name("gio-stdin-watch".into())
+        .spawn(move || {
+            read_until_eof(std::io::stdin().lock());
+            let _ = tx.send(());
+        });
+    if let Err(e) = spawned {
+        warn!(error = %e, "cannot watch stdin - launcher-exit detection disabled");
+        return std::future::pending().await;
+    }
+    if rx.await.is_ok() {
+        warn!("stdin closed: the launcher exited - shutting down");
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Drain `reader` until EOF or a read error (a broken pipe is EOF too).
+fn read_until_eof(mut reader: impl std::io::Read) {
+    let mut buf = [0u8; 256];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn stdin_is_pipe() -> bool {
+    // SAFETY: fstat only writes into the zeroed buffer we own; a closed fd 0
+    // just returns -1 (EBADF).
+    unsafe {
+        let mut stat: libc::stat = std::mem::zeroed();
+        libc::fstat(0, &mut stat) == 0
+            && matches!(stat.st_mode & libc::S_IFMT, libc::S_IFIFO | libc::S_IFSOCK)
+    }
+}
+
+#[cfg(windows)]
+fn stdin_is_pipe() -> bool {
+    use std::os::windows::io::AsRawHandle;
+    // kernel32, linked by std on every Windows target.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileType(file: std::os::windows::io::RawHandle) -> u32;
+    }
+    const FILE_TYPE_PIPE: u32 = 0x0003;
+    let handle = std::io::stdin().as_raw_handle();
+    // No stdin at all (a detached service) is a null handle.
+    // SAFETY: GetFileType only queries the handle; an invalid one yields
+    // FILE_TYPE_UNKNOWN. NUL and consoles are FILE_TYPE_CHAR, files
+    // FILE_TYPE_DISK - only an anonymous or named pipe counts.
+    !handle.is_null() && unsafe { GetFileType(handle) } == FILE_TYPE_PIPE
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stdin_is_pipe() -> bool {
+    false
 }
 
 // ── TLS helpers ──────────────────────────────────────────────────────────────
 
-fn load_tls_acceptor(tls: &config::TlsConfig) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+fn load_tls_acceptor(
+    tls: &config::TlsConfig,
+    http2: bool,
+) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(
+        tls_server_config(tls, http2)?,
+    )))
+}
+
+fn tls_server_config(
+    tls: &config::TlsConfig,
+    http2: bool,
+) -> anyhow::Result<rustls::ServerConfig> {
     let cert_path = tls
         .cert_path
         .as_deref()
@@ -3265,15 +5805,39 @@ fn load_tls_acceptor(tls: &config::TlsConfig) -> anyhow::Result<tokio_rustls::Tl
     let certs = load_certs(cert_path)?;
     let key = load_private_key(key_path)?;
 
-    let mut server_config = rustls::ServerConfig::builder()
+    let mut server_config = tls_server_config_builder()?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| anyhow::anyhow!("Invalid TLS certificate/key: {e}"))?;
 
-    // ALPN: prefer HTTP/2, fall back to HTTP/1.1
-    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    server_config.alpn_protocols = alpn_protocols(http2);
+    Ok(server_config)
+}
 
-    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
+/// The protocols TLS offers in ALPN: h2 first, then HTTP/1.1. Only
+/// HTTP/1.1 when `[server] http2 = false` - the connection is then served by
+/// the HTTP/1-only builder, and a client that negotiated h2 would send a
+/// preface it cannot parse.
+fn alpn_protocols(http2: bool) -> Vec<Vec<u8>> {
+    let mut protocols = Vec::with_capacity(2);
+    if http2 {
+        protocols.push(b"h2".to_vec());
+    }
+    protocols.push(b"http/1.1".to_vec());
+    protocols
+}
+
+/// rustls server config builder with an explicit crypto provider. Both
+/// aws-lc-rs (rustls' default feature) and ring (enabled through reqwest for
+/// the image/font fetchers) are compiled in, and with two candidates rustls
+/// will not pick a process default - `ServerConfig::builder()` panics.
+fn tls_server_config_builder(
+) -> anyhow::Result<rustls::ConfigBuilder<rustls::ServerConfig, rustls::WantsVerifier>> {
+    rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| anyhow::anyhow!("TLS provider setup failed: {e}"))
 }
 
 fn load_certs(path: &str) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
@@ -3297,32 +5861,42 @@ fn load_private_key(path: &str) -> anyhow::Result<rustls::pki_types::PrivateKeyD
 async fn serve_connections(
     listener: tokio::net::TcpListener,
     app: axum::Router,
-    http2: bool,
+    settings: conn::ConnSettings,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
+    let settings = Arc::new(settings);
+    let mut acceptor = conn::ConnAcceptor::new(listener, settings.max_connections);
     let mut join_set = tokio::task::JoinSet::new();
-    let mut shutdown = std::pin::pin!(shutdown_signal());
+    let mut shutdown = std::pin::pin!(shutdown);
+    // Tells every live connection to close gracefully (see conn::drive).
+    let (closing_tx, closing_rx) = tokio::sync::watch::channel(false);
 
     loop {
         tokio::select! {
-            result = listener.accept() => {
-                let (tcp_stream, peer_addr) = match result {
-                    Ok(pair) => pair,
-                    Err(e) => { warn!(error = %e, "accept failed"); continue; }
-                };
+            // A JoinSet keeps every finished task until it is joined; reap as
+            // we go or a long-running server grows with each connection served.
+            Some(_) = join_set.join_next(), if !join_set.is_empty() => {}
+            accepted = acceptor.accept() => {
+                let Some((tcp_stream, peer_addr, permit)) = accepted else { continue };
                 let app = app.clone();
                 let tls_acceptor = tls_acceptor.clone();
+                let settings = settings.clone();
+                let closing = closing_rx.clone();
 
                 join_set.spawn(async move {
+                    // The max_connections slot, held for the connection's lifetime.
+                    let _permit = permit;
                     if let Some(acceptor) = tls_acceptor {
-                        match acceptor.accept(tcp_stream).await {
-                            Ok(tls_stream) => {
-                                run_connection(TokioIo::new(tls_stream), app, peer_addr, http2).await;
-                            }
-                            Err(e) => warn!(error = %e, "TLS handshake failed"),
+                        let handshake =
+                            conn::tls_handshake(&acceptor, tcp_stream, settings.tls_handshake_timeout);
+                        if let Some(tls_stream) = handshake.await {
+                            let io = TokioIo::new(tls_stream);
+                            run_connection(io, app, peer_addr, &settings, closing).await;
                         }
                     } else {
-                        run_connection(TokioIo::new(tcp_stream), app, peer_addr, http2).await;
+                        let io = TokioIo::new(tcp_stream);
+                        run_connection(io, app, peer_addr, &settings, closing).await;
                     }
                 });
             }
@@ -3332,6 +5906,11 @@ async fn serve_connections(
             }
         }
     }
+    // Free the port now: new connections are refused instead of queueing
+    // unanswered in the backlog, and a replacement process can bind at once.
+    drop(acceptor);
+    // Idle keep-alive connections close now; in-flight requests finish.
+    let _ = closing_tx.send(true);
 
     // Bounded drain: idle keep-alive connections have no reason to close on
     // our schedule, and a graceful shutdown that can wait forever is not
@@ -3350,40 +5929,78 @@ async fn serve_connections(
     Ok(())
 }
 
-async fn run_connection<I>(io: I, app: axum::Router, peer_addr: SocketAddr, http2: bool)
-where
+async fn run_connection<I>(
+    io: I,
+    app: axum::Router,
+    peer_addr: SocketAddr,
+    settings: &conn::ConnSettings,
+    closing: tokio::sync::watch::Receiver<bool>,
+) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
-    let svc =
+    let activity = conn::ConnActivity::new();
+    let keep_alive_hint = settings.keep_alive_hint();
+    let svc = {
+        let activity = activity.clone();
         hyper::service::service_fn(move |req: axum::http::Request<hyper::body::Incoming>| {
             let mut app = app.clone();
+            // Taken before the handler runs and moved into the response body,
+            // so the idle watchdog never fires under an in-flight request or
+            // a streaming / SSE response.
+            let guard = activity.begin();
+            let keep_alive_hint = match req.version() {
+                axum::http::Version::HTTP_10 | axum::http::Version::HTTP_11 => {
+                    keep_alive_hint.clone()
+                }
+                _ => None,
+            };
             async move {
                 let (mut parts, body) = req.into_parts();
                 parts
                     .extensions
                     .insert(ConnectInfo::<SocketAddr>(peer_addr));
                 let req = axum::http::Request::from_parts(parts, axum::body::Body::new(body));
-                Ok::<_, Infallible>(app.call(req).await.unwrap_or_else(|_| {
+                let mut resp = app.call(req).await.unwrap_or_else(|_| {
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                }))
+                });
+                // The server's hint always wins: it states when this server
+                // closes an idle socket, which no handler or rule can change.
+                if let Some(hint) = keep_alive_hint {
+                    if resp.status() != axum::http::StatusCode::SWITCHING_PROTOCOLS {
+                        resp.headers_mut()
+                            .insert(axum::http::HeaderName::from_static("keep-alive"), hint);
+                    }
+                }
+                Ok::<_, Infallible>(resp.map(|body| conn::TrackedBody::new(body, guard)))
             }
-        });
+        })
+    };
 
-    if http2 {
-        if let Err(e) = AutoConnBuilder::new(TokioExecutor::new())
-            .serve_connection_with_upgrades(io, svc)
-            .await
-        {
-            warn!(error = %e, "connection error");
-        }
+    if settings.http2 {
+        let connection = settings
+            .auto_builder()
+            .serve_connection_with_upgrades(io, svc);
+        conn::drive(
+            connection,
+            |c| c.graceful_shutdown(),
+            &activity,
+            settings,
+            closing,
+        )
+        .await;
     } else {
-        if let Err(e) = hyper::server::conn::http1::Builder::new()
+        let connection = settings
+            .http1_builder()
             .serve_connection(io, svc)
-            .with_upgrades()
-            .await
-        {
-            warn!(error = %e, "connection error");
-        }
+            .with_upgrades();
+        conn::drive(
+            connection,
+            |c| c.graceful_shutdown(),
+            &activity,
+            settings,
+            closing,
+        )
+        .await;
     }
 }
 
@@ -3394,6 +6011,152 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+
+    #[test]
+    fn dev_mode_always_runs_one_render_worker() {
+        let four = config::WorkersSetting::Count(4);
+        assert_eq!(render_worker_count(four, Some(16), false), 4);
+        assert_eq!(render_worker_count(four, Some(16), true), 1);
+        let auto = config::WorkersSetting::Auto;
+        assert_eq!(render_worker_count(auto, Some(6), false), 6);
+        assert_eq!(render_worker_count(auto, Some(6), true), 1);
+        assert_eq!(
+            render_worker_count(config::WorkersSetting::default(), None, false),
+            1
+        );
+    }
+
+    #[test]
+    fn health_details_off_reports_only_status_and_readiness() {
+        let mut facts = HealthFacts {
+            details: true,
+            http2: true,
+            tls: false,
+            deployment_id: "d3pl0y",
+            workers_configured: 2,
+            workers_ready: 1,
+            cache_entries: 7,
+            uptime_secs: 42,
+        };
+        let full = health_body(&facts);
+        assert_eq!(full["deploymentId"], "d3pl0y");
+        assert_eq!(full["workers"], serde_json::json!({ "configured": 2, "ready": 1 }));
+        assert_eq!(full["nodeReady"], true);
+        facts.details = false;
+        assert_eq!(
+            health_body(&facts),
+            serde_json::json!({ "status": "ok", "nodeReady": true })
+        );
+        facts.workers_ready = 0;
+        assert_eq!(health_body(&facts)["nodeReady"], false);
+    }
+
+    fn metrics_config(toml: &str) -> config::MetricsConfig {
+        config::GioConfig::parse(toml, "gio.toml")
+            .expect("valid gio.toml")
+            .metrics
+    }
+
+    #[test]
+    fn metrics_is_loopback_only_without_a_token_or_an_allowlist() {
+        // No [metrics] section, or enabled = false: /_gio/metrics is a 404.
+        assert!(!metrics_loopback_only(&metrics_config("")));
+        assert!(!metrics_loopback_only(&metrics_config(
+            "[metrics]\nenabled = false\n"
+        )));
+        assert!(metrics_loopback_only(&metrics_config("[metrics]\n")));
+        assert!(!metrics_loopback_only(&metrics_config(
+            "[metrics]\ntoken = \"t\"\n"
+        )));
+        assert!(!metrics_loopback_only(&metrics_config(
+            "[metrics]\nip_allowlist = [\"10.0.0.0/8\"]\n"
+        )));
+    }
+
+    #[test]
+    fn metrics_refusals_follow_the_section() {
+        let request = |client: Option<&str>, authorization: Option<&str>| {
+            let mut req = Request::builder();
+            if let Some(authorization) = authorization {
+                req = req.header(header::AUTHORIZATION, authorization);
+            }
+            let mut req = req.body(Body::empty()).unwrap();
+            if let Some(client) = client {
+                req.extensions_mut().insert(client_identity::ClientInfo {
+                    ip: client.parse().unwrap(),
+                    unresolved: false,
+                    via_trusted_proxy: true,
+                    peer: "127.0.0.1:9".parse().unwrap(),
+                    scheme: "http",
+                    host: None,
+                    request_id: String::new(),
+                });
+            }
+            req
+        };
+        // What a reverse proxy adds; `client` as for `request`.
+        let forwarded = |name: &'static str, client: Option<&str>| {
+            let mut req = request(client, None);
+            req.headers_mut()
+                .insert(name, header::HeaderValue::from_static("198.51.100.4"));
+            req
+        };
+        let local: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let remote: SocketAddr = "203.0.113.7:5000".parse().unwrap();
+        let refusal = |toml: &str, req: &axum::extract::Request, peer: SocketAddr| {
+            metrics_refusal(&metrics_config(toml), req, peer)
+        };
+
+        assert_eq!(refusal("", &request(None, None), local), Some(StatusCode::NOT_FOUND));
+        // The safe default: this machine only - a forwarded client behind a
+        // local proxy is not this machine.
+        let open = "[metrics]\n";
+        assert_eq!(refusal(open, &request(None, None), local), None);
+        assert_eq!(refusal(open, &request(None, None), "[::1]:9".parse().unwrap()), None);
+        assert_eq!(
+            refusal(open, &request(None, None), remote),
+            Some(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            refusal(open, &request(Some("198.51.100.4"), None), local),
+            Some(StatusCode::FORBIDDEN)
+        );
+        // A proxy on this machine that trusted_proxies does not list connects
+        // from loopback for every client: what it forwards is refused.
+        for name in ["x-forwarded-for", "forwarded", "x-real-ip"] {
+            assert_eq!(
+                refusal(open, &forwarded(name, None), local),
+                Some(StatusCode::FORBIDDEN),
+                "{name}"
+            );
+        }
+        // Through a trusted proxy the forwarded client is judged instead.
+        assert_eq!(
+            refusal(
+                open,
+                &forwarded("x-forwarded-for", Some("127.0.0.1")),
+                local
+            ),
+            None
+        );
+        // The explicit loosening.
+        let everyone = "[metrics]\nip_allowlist = [\"0.0.0.0/0\", \"::/0\"]\n";
+        assert_eq!(refusal(everyone, &request(None, None), remote), None);
+        assert_eq!(
+            refusal(everyone, &request(None, None), "[2001:db8::1]:9".parse().unwrap()),
+            None
+        );
+        // A token alone admits any client that presents it.
+        let token = "[metrics]\ntoken = \"scrape-token\"\n";
+        assert_eq!(
+            refusal(token, &request(None, None), remote),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            refusal(token, &request(None, Some("Bearer scrape-token")), remote),
+            None
+        );
+    }
 
     // ── inject_into_html ──────────────────────────────────────────────────────
 
@@ -3498,6 +6261,131 @@ mod tests {
     }
 
     #[test]
+    fn deployment_script_carries_the_configured_locales_when_i18n_is_on() {
+        assert_eq!(deployment_script_locales(&[]), "");
+        assert_eq!(
+            deployment_script_with("d", "en", ""),
+            r#"<script>window.__GIO_DEPLOYMENT_ID__="d";window.__GIO_DEFAULT_LOCALE__="en";</script>"#
+        );
+        let locales = deployment_script_locales(&[
+            "de".to_string(),
+            "pt-BR".to_string(),
+            "</script>".to_string(),
+        ]);
+        assert_eq!(locales, r#"["de","pt-BR","\u003c/script\u003e"]"#);
+        let script = deployment_script_with("d", "de", &locales);
+        assert!(script
+            .ends_with(r#"window.__GIO_LOCALES__=["de","pt-BR","\u003c/script\u003e"];</script>"#));
+    }
+
+    #[test]
+    fn critical_css_snippet_without_nonces_keeps_the_onload_swap() {
+        let snippet = critical_css_snippet("a{b:c}", "");
+        assert!(snippet.starts_with("<style>a{b:c}</style>"));
+        assert!(snippet.contains(r#"media="print" onload="this.media='all'""#));
+        assert!(!snippet.contains("<script"));
+    }
+
+    #[test]
+    fn critical_css_snippet_under_csp_nonces_has_no_inline_handler() {
+        // Inline event handlers cannot carry a nonce, so a strict CSP would
+        // leave the full stylesheet stuck at media=print.
+        let snippet = critical_css_snippet("a{b:c}", r#" nonce="P""#);
+        assert!(snippet.starts_with(r#"<style nonce="P">a{b:c}</style>"#));
+        assert!(!snippet.contains("onload"));
+        assert!(snippet.contains(r#"<script nonce="P">(function(l){"#));
+        assert!(snippet.contains("l.media='all'"));
+        assert!(snippet.contains("<noscript>"));
+    }
+
+    fn globals_cache() -> css_assets::CssCache {
+        let css_cache = DashMap::new();
+        css_cache.insert(
+            "/globals.css".to_string(),
+            css_assets::CssAsset::new(Bytes::from_static(b".hero{color:red}.unused{color:blue}")),
+        );
+        css_cache
+    }
+
+    #[test]
+    fn critical_css_is_extracted_for_pages_on_path_served_css() {
+        let html = Bytes::from(r#"<html><head></head><body><h1 class="hero">x</h1></body></html>"#);
+        let out = compose_final_html(html, "dep-1", "en", &[], &globals_cache(), true);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("<style>.hero{color:red}"), "{s}");
+        assert!(!s.contains(".unused"), "{s}");
+        assert!(s.contains(r#"href="/globals.css""#));
+    }
+
+    #[test]
+    fn critical_css_skips_pages_that_link_imported_stylesheets() {
+        // The root layout imports globals.css: it is in the route stylesheet,
+        // and must not load again after it.
+        let html = Bytes::from(
+            r#"<html><head><link rel="stylesheet" href="/_next/static/css/root-ABC.css" data-precedence="default"/></head><body><h1 class="hero">x</h1></body></html>"#,
+        );
+        let out = compose_final_html(html, "dep-1", "en", &[], &globals_cache(), true);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(!s.contains("<style>"), "{s}");
+        assert!(!s.contains("/globals.css"), "{s}");
+    }
+
+    #[test]
+    fn critical_css_skips_pages_without_a_root_layout_that_link_imported_stylesheets() {
+        // No root layout: React puts the links at the top of <body>.
+        let html = Bytes::from(
+            r#"<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><link rel="stylesheet" href="/_next/static/css/route-docs-ABC.css" data-precedence="default"/><div id="__gio"><h1 class="hero">x</h1></div></body></html>"#,
+        );
+        let out = compose_final_html(html, "dep-1", "en", &[], &globals_cache(), true);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(!s.contains("<style>"), "{s}");
+        assert!(!s.contains("/globals.css"), "{s}");
+    }
+
+    #[test]
+    fn critical_css_is_kept_on_pages_that_only_mention_the_stylesheet_path() {
+        // A docs page about CSS: the path is text (and escaped attribute
+        // text in an inline code sample), never a <link>.
+        let html = Bytes::from(
+            r#"<html><head><link rel="icon" href="/favicon.ico"/></head><body><h1 class="hero">CSS</h1><p>Served from <code>/_next/static/css/</code>.</p><pre>&lt;link href=&quot;/_next/static/css/x.css&quot;&gt;</pre></body></html>"#,
+        );
+        let out = compose_final_html(html, "dep-1", "en", &[], &globals_cache(), true);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("<style>.hero{color:red}"), "{s}");
+        assert!(s.contains(r#"href="/globals.css""#), "{s}");
+    }
+
+    #[test]
+    fn links_route_stylesheet_only_matches_link_tags() {
+        assert!(links_route_stylesheet(
+            r#"<head><link rel="stylesheet" href="/_next/static/css/root-A.css" data-precedence="default"/></head>"#
+        ));
+        assert!(!links_route_stylesheet(
+            r#"<head><link rel="stylesheet" href="/globals.css"/></head><body>/_next/static/css/</body>"#
+        ));
+        assert!(!links_route_stylesheet(
+            r#"<a href="/_next/static/css/root-A.css">raw file</a>"#
+        ));
+        // An unterminated tag at the end of the input is still scanned safely.
+        assert!(!links_route_stylesheet("<link rel=\"icon\""));
+    }
+
+    #[tokio::test]
+    async fn css_modules_are_not_served_by_path() {
+        let dir = std::env::temp_dir().join(format!("gio-css-cache-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("globals.css"), ".a{color:red}").unwrap();
+        std::fs::write(dir.join("nested/card.module.css"), ".card{color:red}").unwrap();
+        std::fs::write(dir.join("nested/plain.css"), ".p{color:red}").unwrap();
+        let css_cache = DashMap::new();
+        load_css_cache(&css_cache, dir.to_str().unwrap(), false).await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        let mut keys: Vec<String> = css_cache.iter().map(|e| e.key().clone()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["/globals.css", "/nested/plain.css"]);
+    }
+
+    #[test]
     fn compose_final_html_without_head_close_returns_body_unchanged() {
         let css_cache = DashMap::new();
         let html = Bytes::from(r#"{"not":"html"}"#);
@@ -3516,6 +6404,8 @@ mod tests {
             composed,
             tags: Vec::new(),
             ppr_shell: false,
+            route: None,
+            etag: None,
         }
     }
 
@@ -3584,6 +6474,94 @@ mod tests {
         assert!(s.contains("__gio_dev_overlay_script"));
     }
 
+    #[tokio::test]
+    async fn grown_html_bodies_lose_the_apps_content_length() {
+        let doc = "<!doctype html><html><head></head><body>hi</body></html>";
+        let headers = HashMap::from([
+            ("content-type".to_string(), "text/html".to_string()),
+            ("content-length".to_string(), doc.len().to_string()),
+        ]);
+        let css_cache = Arc::new(DashMap::new());
+        let css = config::CssConfig::default();
+        // A route.ts answer (uncomposed: injected here) and a composed page.
+        for composed in [false, true] {
+            let resp = build_html_response(
+                200,
+                &headers,
+                Bytes::from(doc),
+                false,
+                composed,
+                "dep-1",
+                "en",
+                &[],
+                &css_cache,
+                &css,
+                false,
+            );
+            let length = resp.headers().get(header::CONTENT_LENGTH);
+            assert_eq!(length, None, "composed: {composed}");
+        }
+        // A stored entry's length is the render's, from before composition.
+        let mut entry = html_entry(doc, false);
+        entry.headers = headers.clone();
+        let resp =
+            build_response_from_entry(entry, "dep-1", "en", &[], &css_cache, &css, false).await;
+        assert_eq!(resp.headers().get(header::CONTENT_LENGTH), None);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(body.len() > doc.len());
+
+        // A body sent as the app wrote it keeps the app's length.
+        let json = HashMap::from([
+            ("content-type".to_string(), "application/json".to_string()),
+            ("content-length".to_string(), "2".to_string()),
+        ]);
+        let resp = build_html_response(
+            200,
+            &json,
+            Bytes::from_static(b"{}"),
+            false,
+            false,
+            "dep-1",
+            "en",
+            &[],
+            &css_cache,
+            &css,
+            false,
+        );
+        assert_eq!(resp.headers()[header::CONTENT_LENGTH], "2");
+    }
+
+    #[test]
+    fn css_composition_switches_change_the_deployment_id() {
+        if std::env::var(ipc::DEPLOYMENT_ID_ENV).is_ok() {
+            return; // A pinned ID never changes.
+        }
+        let root = std::env::temp_dir().join("gio-no-such-project");
+        let id = |css: config::CssConfig| {
+            ipc::DeploymentInputs::from_process(
+                &root,
+                &[],
+                composed_page_settings(&[], "en".to_string(), &css),
+            )
+            .before_build()
+        };
+        let default = id(config::CssConfig::default());
+        assert_eq!(default, id(config::CssConfig::default()));
+        let no_critical = id(config::CssConfig {
+            critical_extraction: false,
+            ..config::CssConfig::default()
+        });
+        let no_css = id(config::CssConfig {
+            enabled: false,
+            ..config::CssConfig::default()
+        });
+        assert_ne!(default, no_critical);
+        assert_ne!(default, no_css);
+        assert_ne!(no_critical, no_css);
+    }
+
     #[test]
     fn cacheable_headers_drop_set_cookie_and_keep_content_type() {
         let headers = HashMap::from([
@@ -3616,10 +6594,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("giojs-devreclear-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let cache = PageCache::new(CacheConfig {
-            memory_max_entries: NonZeroUsize::new(10).unwrap(),
+            memory_max_entries: std::num::NonZeroUsize::new(10).unwrap(),
             disk_dir: dir.clone(),
             swr_multiplier: 1,
             disk_max_bytes: u64::MAX,
+            ..giojs_cache::CacheConfig::default()
         });
         // Simulates a stale render landing after the pre-restart clear.
         cache
@@ -3677,6 +6656,753 @@ mod tests {
         assert_eq!(req.uri().query(), None);
     }
 
+    #[test]
+    fn rule_headers_combine_static_then_worker_sets() {
+        let header_rules = |path: &str, name: &str| {
+            rules::RuleSet::compile(&rules::MiddlewareRules {
+                headers: vec![rules::HeaderRule {
+                    path: path.to_string(),
+                    headers: [(name.to_string(), "1".to_string())].into(),
+                }],
+                ..Default::default()
+            })
+        };
+        let static_rules = header_rules("/*rest", "x-static");
+        let worker_rules = header_rules("/admin", "x-worker");
+        let names = |path: &str| -> Vec<String> {
+            rule_response_headers(&static_rules, &worker_rules, path)
+                .into_iter()
+                .map(|(name, _)| name.to_string())
+                .collect()
+        };
+        assert_eq!(names("/admin"), ["x-static", "x-worker"]);
+        assert_eq!(names("/"), ["x-static"]);
+        let empty = rules::RuleSet::default();
+        assert!(rule_response_headers(&empty, &empty, "/admin").is_empty());
+
+        let mut resp = rule_redirect_response("/login", StatusCode::FOUND).unwrap();
+        stamp_rule_headers(
+            resp.headers_mut(),
+            rule_response_headers(&static_rules, &worker_rules, "/admin"),
+        );
+        assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/login");
+        assert_eq!(resp.headers().get("x-static").unwrap(), "1");
+        assert_eq!(resp.headers().get("x-worker").unwrap(), "1");
+    }
+
+    // ── path hygiene ──────────────────────────────────────────────────────────
+
+    /// Spellings the Node router dispatches to the same handler as
+    /// `/api/login` (it skips empty segments; escapes of unreserved
+    /// characters are equivalent and get decoded before Node sees them).
+    const LOGIN_SPELLINGS: [&str; 8] = [
+        "/api/login",
+        "/api/login/",
+        "//api/login",
+        "/api//login",
+        "///api///login///",
+        "/api/%6Cogin",
+        "/%61pi/%6c%6f%67%69%6e",
+        "//%61pi//login/",
+    ];
+
+    #[test]
+    fn rate_limit_buckets_cannot_be_dodged_by_path_spelling() {
+        let limiter = RateLimiter::new(vec![RateLimitRule {
+            path_pattern: giojs_ratelimit::PathPattern::parse("/api/login").unwrap(),
+            per_ip: 1,
+            window_seconds: 3600,
+            burst: 0,
+            key_header: None,
+            max_keys_per_client: giojs_ratelimit::DEFAULT_MAX_KEYS_PER_CLIENT,
+        }]);
+        let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        let headers = HashMap::new();
+        let first = path_hygiene::canonical(LOGIN_SPELLINGS[0]).unwrap();
+        assert!(matches!(
+            limiter.check(&first, ip, &headers),
+            RateLimitResult::Allowed { limit: 1, .. }
+        ));
+        for raw in LOGIN_SPELLINGS {
+            let canonical = path_hygiene::canonical(raw).unwrap();
+            assert!(
+                matches!(
+                    limiter.check(&canonical, ip, &headers),
+                    RateLimitResult::Rejected { .. }
+                ),
+                "{raw} must hit the exhausted /api/login bucket"
+            );
+        }
+    }
+
+    #[test]
+    fn rules_cannot_be_dodged_by_path_spelling() {
+        let rules = rules::RuleSet::compile(&rules::MiddlewareRules {
+            guards: vec![rules::GuardRule {
+                path: "/api/login".to_string(),
+                require_cookie: "session".to_string(),
+                require_session: false,
+                redirect_to: "/".to_string(),
+            }],
+            redirects: vec![rules::RedirectRule {
+                from: "/old/:slug".to_string(),
+                to: "/new/:slug".to_string(),
+                status: 301,
+            }],
+            rewrites: vec![rules::RewriteRule {
+                from: "/alias".to_string(),
+                to: "/cached".to_string(),
+            }],
+            headers: vec![rules::HeaderRule {
+                path: "/api/login".to_string(),
+                headers: [("x-frame-options".to_string(), "DENY".to_string())].into(),
+            }],
+        });
+        for raw in LOGIN_SPELLINGS {
+            let canonical = path_hygiene::canonical(raw).unwrap();
+            assert!(
+                matches!(
+                    rules.apply(&canonical, None),
+                    rules::RuleOutcome::Redirect { .. }
+                ),
+                "guard must hold for {raw}"
+            );
+            assert_eq!(rules.response_headers(&canonical).len(), 1, "{raw}");
+        }
+        let canonical = path_hygiene::canonical("//%6Fld/hello%2dworld/").unwrap();
+        assert_eq!(
+            rules.apply(&canonical, None),
+            rules::RuleOutcome::Redirect {
+                location: "/new/hello-world".to_string(),
+                status: StatusCode::MOVED_PERMANENTLY,
+            }
+        );
+        let canonical = path_hygiene::canonical("/%61lias/").unwrap();
+        assert_eq!(
+            rules.apply(&canonical, None),
+            rules::RuleOutcome::Rewrite {
+                new_path: "/cached".to_string()
+            }
+        );
+    }
+
+    /// The real middleware stack shape: routes, a nested service, a fallback
+    /// that echoes the path it was handed, and the internal-endpoint verdict
+    /// (what the rate-limit and rules middlewares key their exemptions on)
+    /// exposed as a response header.
+    fn hygiene_router(dev_mode: bool) -> Router {
+        let mut app = Router::new()
+            .route("/_gio/health", get(|| async { "health" }))
+            .route("/_gio/image", get(|| async { "image" }));
+        if dev_mode {
+            app = app.route("/_gio/devtools", get(|| async { "devtools" }));
+        }
+        app.nest_service("/_gio/fonts", get(|| async { "font" }))
+            .fallback(
+                |req: axum::extract::Request| async move { format!("fallback {}", req.uri()) },
+            )
+            .layer(axum::middleware::from_fn(
+                |req: axum::extract::Request, next: Next| async move {
+                    let internal = is_internal_endpoint(&req);
+                    let mut resp = next.run(req).await;
+                    resp.headers_mut().insert(
+                        "x-internal",
+                        HeaderValue::from_static(if internal { "1" } else { "0" }),
+                    );
+                    resp
+                },
+            ))
+            .layer(axum::middleware::from_fn(path_hygiene_middleware))
+    }
+
+    async fn hygiene_get(app: &Router, uri: &str) -> (StatusCode, Option<String>, String) {
+        // Router is always ready; run_connection calls it the same way.
+        let resp = app
+            .clone()
+            .call(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let internal = resp
+            .headers()
+            .get("x-internal")
+            .map(|value| value.to_str().unwrap().to_string());
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, internal, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn unrouted_gio_paths_404_before_reaching_the_app() {
+        let app = hygiene_router(false);
+        for uri in [
+            "/_gio",
+            "/_gio/",
+            "/_gio/settings",
+            "/_gio/health/",
+            "//_gio/health",
+            "/_gio//health",
+            "/%5Fgio/settings",
+            "/%5fgio/health",
+            "/_gio/image/extra",
+        ] {
+            let (status, internal, body) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(internal, None, "{uri} must not reach the inner layers");
+            assert!(!body.contains("fallback"), "{uri} reached the fallback");
+        }
+    }
+
+    #[tokio::test]
+    async fn real_internal_endpoints_pass_and_are_recognized() {
+        let app = hygiene_router(false);
+        for (uri, body) in [
+            ("/_gio/health", "health"),
+            ("/_gio/image?src=/a.png&w=64", "image"),
+            ("/_gio/fonts/inter.woff2", "font"),
+        ] {
+            assert_eq!(
+                hygiene_get(&app, uri).await,
+                (StatusCode::OK, Some("1".to_string()), body.to_string()),
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dev_only_endpoints_404_in_production() {
+        let (status, internal, _) = hygiene_get(&hygiene_router(false), "/_gio/devtools").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(internal, None);
+        assert_eq!(
+            hygiene_get(&hygiene_router(true), "/_gio/devtools").await,
+            (
+                StatusCode::OK,
+                Some("1".to_string()),
+                "devtools".to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn app_paths_are_not_internal_and_reach_the_fallback() {
+        let app = hygiene_router(false);
+        let (status, internal, body) = hygiene_get(&app, "/acme/_gio").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(internal.as_deref(), Some("0"));
+        assert_eq!(body, "fallback /acme/_gio");
+    }
+
+    #[tokio::test]
+    async fn unreserved_escapes_are_decoded_before_the_app_sees_the_path() {
+        let app = hygiene_router(false);
+        let (_, _, body) = hygiene_get(&app, "/api/%6Cogin?next=%2Fhome").await;
+        // Path decoded, query untouched.
+        assert_eq!(body, "fallback /api/login?next=%2Fhome");
+        let (_, _, body) = hygiene_get(&app, "/a%2fb/caf%c3%a9").await;
+        assert_eq!(body, "fallback /a%2Fb/caf%C3%A9");
+        // Slashes are left as sent: the Node router already ignores them.
+        let (_, _, body) = hygiene_get(&app, "//api//login/").await;
+        assert_eq!(body, "fallback //api//login/");
+    }
+
+    #[tokio::test]
+    async fn dot_segments_are_rejected_with_400() {
+        let app = hygiene_router(false);
+        for uri in [
+            "/admin/../x",
+            "/x/./admin",
+            "/%2e%2e/admin",
+            "/_gio/fonts/../../etc/passwd",
+        ] {
+            let (status, internal, _) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(internal, None, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_escapes_are_rejected_with_400() {
+        let app = hygiene_router(false);
+        for uri in [
+            // Each would forward as a valid escape ("/api/%6Cogin",
+            // "/%2e%2e/admin", "/%61dmin") that a second pass decodes.
+            "/api/%%36Cogin",
+            "/%%32e%%32e/admin",
+            "/%%361dmin",
+            "/%zz",
+            "/trailing%",
+            "/_gio/%",
+        ] {
+            let (status, internal, body) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(internal, None, "{uri}");
+            assert!(!body.contains("fallback"), "{uri} reached the fallback");
+        }
+    }
+
+    #[tokio::test]
+    async fn later_matchers_see_the_path_the_app_is_handed() {
+        // rate_limit_middleware and rules_middleware canonicalize the
+        // forwarded path again. That pass may only fold slashes: decoding an
+        // escape the app's router still sees encoded would let a rule or
+        // limit match one path while Node routes another.
+        let app = hygiene_router(false);
+        for uri in [
+            "/api/%6Cogin",
+            "//%61pi//login/",
+            "/%2561dmin",
+            "/%25%36%31",
+            "/caf%c3%a9/",
+            "/a%2fb",
+        ] {
+            let (status, _, body) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            let forwarded = body.strip_prefix("fallback ").unwrap();
+            assert!(
+                matches!(
+                    path_hygiene::normalize_escapes(forwarded),
+                    Ok(std::borrow::Cow::Borrowed(_))
+                ),
+                "{uri} was forwarded as {forwarded}, which decodes further"
+            );
+            assert_eq!(
+                path_hygiene::canonical(forwarded),
+                path_hygiene::canonical(uri),
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_backslashes_are_rejected_with_400() {
+        // `/blog/:slug` -> `/:slug` would answer `Location: /\evil.example`,
+        // which browsers resolve to https://evil.example/.
+        let app = hygiene_router(false);
+        for uri in ["/blog/\\evil.example", "/\\evil.example", "/a\\b"] {
+            let (status, internal, body) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(internal, None, "{uri}");
+            assert!(!body.contains("fallback"), "{uri} reached the fallback");
+        }
+        // The escape stays encoded and is no redirect hazard.
+        let (status, _, body) = hygiene_get(&app, "/blog/%5cevil.example").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "fallback /blog/%5Cevil.example");
+    }
+
+    #[tokio::test]
+    async fn escaped_separators_never_reach_the_public_mount() {
+        // ServeDir decodes %2F into a separator: one segment to every rule,
+        // public/members/report.txt to the file service.
+        let app = hygiene_router(false);
+        for uri in [
+            "/public/members%2Freport.txt",
+            "/public/members%2freport.txt",
+            "/public/members%5Creport.txt",
+            "//public/members%2Freport.txt",
+        ] {
+            let (status, internal, body) = hygiene_get(&app, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(internal, None, "{uri}");
+            assert!(!body.contains("fallback"), "{uri} reached the fallback");
+        }
+        // App paths keep their encoded slashes (a dynamic segment may carry
+        // one); the root alias never maps them onto a file (public_files.rs).
+        let (status, _, body) = hygiene_get(&app, "/members%2Freport.txt").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "fallback /members%2Freport.txt");
+    }
+
+    // ── cookie crumbs ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn cookie_crumbs_are_joined_in_wire_order() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append(header::COOKIE, HeaderValue::from_static("a=1"));
+        headers.append(header::COOKIE, HeaderValue::from_static("session=1"));
+        headers.append(header::COOKIE, HeaderValue::from_static("who=alice"));
+        join_cookie_fields(&mut headers);
+        let fields: Vec<_> = headers.get_all(header::COOKIE).iter().collect();
+        assert_eq!(fields, ["a=1; session=1; who=alice"]);
+
+        let mut single = axum::http::HeaderMap::new();
+        single.insert(header::COOKIE, HeaderValue::from_static("a=1; b=2"));
+        join_cookie_fields(&mut single);
+        assert_eq!(single[header::COOKIE], "a=1; b=2");
+        let mut none = axum::http::HeaderMap::new();
+        join_cookie_fields(&mut none);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn worker_headers_join_repeated_fields_instead_of_dropping_them() {
+        let req = Request::builder()
+            .uri("/personal")
+            .header(header::COOKIE, "who=alice")
+            .header(header::COOKIE, "z=1")
+            .header("x-tag", "a")
+            .header("x-tag", "b")
+            .header("Accept", "text/html")
+            .body(Body::empty())
+            .unwrap();
+        let headers = extract_headers(&req);
+        assert_eq!(headers["cookie"], "who=alice; z=1");
+        assert_eq!(headers["x-tag"], "a, b");
+        assert_eq!(headers["accept"], "text/html");
+    }
+
+    #[tokio::test]
+    async fn cookie_crumbs_reach_guards_as_one_header() {
+        // HTTP/2 browsers send one `cookie` field per cookie; the guard
+        // reads the Cookie header, and must see every crumb.
+        let guards = Arc::new(rules::RuleSet::compile(&rules::MiddlewareRules {
+            guards: vec![rules::GuardRule {
+                path: "/members/*rest".to_string(),
+                require_cookie: "session".to_string(),
+                require_session: false,
+                redirect_to: "/login".to_string(),
+            }],
+            ..rules::MiddlewareRules::default()
+        }));
+        let app = Router::new()
+            .fallback(move |req: Request<Body>| {
+                let guards = guards.clone();
+                async move {
+                    let cookie = req
+                        .headers()
+                        .get(header::COOKIE)
+                        .and_then(|value| value.to_str().ok());
+                    match guards.apply(req.uri().path(), cookie) {
+                        rules::RuleOutcome::None => "admitted",
+                        _ => "redirected",
+                    }
+                }
+            })
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(client_identity::ProxyTrust::default()),
+                client_identity_middleware,
+            ));
+        for crumbs in [
+            ["a=1", "session=1"].as_slice(),
+            ["session=1", "a=1"].as_slice(),
+            ["session=1"].as_slice(),
+        ] {
+            let mut req = Request::builder().uri("/members/report");
+            for crumb in crumbs {
+                req = req.header(header::COOKIE, *crumb);
+            }
+            let mut req = req.body(Body::empty()).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 4000))));
+            let resp = app.clone().call(req).await.unwrap();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(&body[..], b"admitted", "{crumbs:?}");
+        }
+    }
+
+    // ── CSRF behind a trusted proxy ───────────────────────────────────────────
+
+    fn csrf_router(trusted_proxies: &[&str]) -> Router {
+        let security = Arc::new(
+            security::SecurityPolicy::new(&config::SecurityConfig::default(), false).unwrap(),
+        );
+        let trust = Arc::new(client_identity::ProxyTrust {
+            trusted: serde_json::from_value(serde_json::json!(trusted_proxies)).unwrap(),
+            ..client_identity::ProxyTrust::default()
+        });
+        Router::new()
+            .fallback(|| async { "ok" })
+            .layer(axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: Next| {
+                    let security = security.clone();
+                    async move {
+                        match cross_site_rejection(&security, &req) {
+                            Some(resp) => resp,
+                            None => next.run(req).await,
+                        }
+                    }
+                },
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                trust,
+                client_identity_middleware,
+            ))
+    }
+
+    async fn csrf_post(app: &Router, peer: [u8; 4], headers: &[(&str, &str)]) -> StatusCode {
+        let mut req = Request::builder().method("POST").uri("/api/echo");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let mut req = req.body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((peer, 4000))));
+        app.clone().call(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn csrf_compares_origin_with_a_trusted_proxys_forwarded_host() {
+        let app = csrf_router(&["127.0.0.1"]);
+        let proxied = |origin| {
+            [
+                ("host", "127.0.0.1:39871"),
+                ("x-forwarded-host", "app.example"),
+                ("x-forwarded-proto", "https"),
+                ("origin", origin),
+            ]
+        };
+        // A Host-rewriting proxy (nginx's default proxy_pass): the browser's
+        // same-origin post names the forwarded host, not Host.
+        assert_eq!(
+            csrf_post(&app, [127, 0, 0, 1], &proxied("https://app.example")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            csrf_post(&app, [127, 0, 0, 1], &proxied("https://evil.example")).await,
+            StatusCode::FORBIDDEN
+        );
+        // From a peer that is not a trusted proxy, X-Forwarded-Host is the
+        // client's own claim and does not count.
+        assert_eq!(
+            csrf_post(&app, [203, 0, 113, 9], &proxied("https://app.example")).await,
+            StatusCode::FORBIDDEN
+        );
+        // RFC 7239 host= from a trusted proxy counts the same way.
+        let forwarded = Arc::new(client_identity::ProxyTrust {
+            trusted: serde_json::from_value(serde_json::json!(["127.0.0.1"])).unwrap(),
+            headers: client_identity::ProxyHeaders::Forwarded,
+            ..client_identity::ProxyTrust::default()
+        });
+        let security = Arc::new(
+            security::SecurityPolicy::new(&config::SecurityConfig::default(), false).unwrap(),
+        );
+        let app = Router::new()
+            .fallback(|| async { "ok" })
+            .layer(axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: Next| {
+                    let security = security.clone();
+                    async move {
+                        match cross_site_rejection(&security, &req) {
+                            Some(resp) => resp,
+                            None => next.run(req).await,
+                        }
+                    }
+                },
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                forwarded,
+                client_identity_middleware,
+            ));
+        assert_eq!(
+            csrf_post(
+                &app,
+                [127, 0, 0, 1],
+                &[
+                    ("host", "127.0.0.1:39871"),
+                    ("forwarded", "for=198.51.100.7;proto=https;host=app.example"),
+                    ("origin", "https://app.example"),
+                ],
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn csrf_without_proxies_still_compares_origin_with_host() {
+        let app = csrf_router(&[]);
+        let direct = |origin| [("host", "site.example"), ("origin", origin)];
+        assert_eq!(
+            csrf_post(&app, [192, 0, 2, 1], &direct("http://site.example")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            csrf_post(&app, [192, 0, 2, 1], &direct("http://evil.example")).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    // ── /_gio/image and guards ────────────────────────────────────────────────
+
+    #[test]
+    fn image_optimizer_honors_the_guards_of_the_file_it_reads() {
+        let base = std::env::temp_dir().join(format!("gio_image_guard_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let public = base.join("public");
+        std::fs::create_dir_all(public.join("members")).unwrap();
+        std::fs::create_dir_all(public.join("open")).unwrap();
+        std::fs::create_dir_all(public.join("vault")).unwrap();
+        std::fs::write(public.join("members").join("photo.png"), b"png").unwrap();
+        std::fs::write(public.join("open").join("logo.png"), b"png").unwrap();
+        std::fs::write(public.join("vault").join("key.png"), b"png").unwrap();
+        let image = giojs_image::ImageHandler::new(
+            giojs_image::ImageConfig::default(),
+            base.join("cache"),
+            public.clone(),
+        );
+        let guard = |path: &str| rules::GuardRule {
+            path: path.to_string(),
+            require_cookie: "session".to_string(),
+            require_session: false,
+            redirect_to: "/login".to_string(),
+        };
+        // A guard for the root URL (gio.toml) and one for the /public URL
+        // (middleware.ts).
+        let static_rules = rules::RuleSet::compile(&rules::MiddlewareRules {
+            guards: vec![guard("/members/*rest")],
+            ..rules::MiddlewareRules::default()
+        });
+        let worker_rules = rules::RuleSet::compile(&rules::MiddlewareRules {
+            guards: vec![guard("/public/vault/*rest")],
+            ..rules::MiddlewareRules::default()
+        });
+        let anonymous = axum::http::HeaderMap::new();
+        let mut member = axum::http::HeaderMap::new();
+        member.insert(header::COOKIE, HeaderValue::from_static("a=1; session=x"));
+        let access = |src: &str, headers: &axum::http::HeaderMap| {
+            image_source_access(&image, &static_rules, &worker_rules, src, headers)
+        };
+        for src in [
+            "/members/photo.png",
+            "/public/members/photo.png",
+            "members//photo.png",
+            "/open/../members/photo.png",
+            "/vault/key.png",
+            "/public/vault/key.png",
+        ] {
+            assert_eq!(access(src, &anonymous), ImageSourceAccess::Denied, "{src}");
+            assert_eq!(access(src, &member), ImageSourceAccess::Admitted, "{src}");
+        }
+        assert_eq!(
+            access("/open/logo.png", &anonymous),
+            ImageSourceAccess::Open
+        );
+        assert_eq!(
+            access("https://cdn.example/members/photo.png", &anonymous),
+            ImageSourceAccess::Open
+        );
+        #[cfg(unix)]
+        {
+            // A symlink outside the guarded folder still reads the guarded file.
+            std::os::unix::fs::symlink(
+                public.join("members").join("photo.png"),
+                public.join("open").join("alias.png"),
+            )
+            .unwrap();
+            assert_eq!(
+                access("/open/alias.png", &anonymous),
+                ImageSourceAccess::Denied
+            );
+        }
+        let none = rules::RuleSet::default();
+        assert_eq!(
+            image_source_access(&image, &none, &none, "/members/photo.png", &anonymous),
+            ImageSourceAccess::Open
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn encode_url_path_spells_paths_as_browsers_send_them() {
+        assert_eq!(encode_url_path("/a/b.png"), "/a/b.png");
+        assert_eq!(encode_url_path("/my photo.png"), "/my%20photo.png");
+        assert_eq!(encode_url_path("/caf\u{e9}/100%"), "/caf%C3%A9/100%25");
+        assert_eq!(encode_url_path("/a\\b?#"), "/a%5Cb%3F%23");
+    }
+
+    // ── prefetch budget ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_cancelled_prefetch_releases_its_budget_slot() {
+        let budgets = Arc::new(PrefetchBudgets::new(giojs_prefetch::PrefetchConfig {
+            max_in_flight: 1,
+            max_per_second: 100,
+        }));
+        let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        // What prefetch_budget_middleware does: hold the slot across the
+        // await of a render that never finishes - until the client goes away
+        // and hyper drops the request future.
+        let in_flight = {
+            let budgets = budgets.clone();
+            async move {
+                let _slot = PrefetchSlot::acquire(&budgets, ip).expect("first slot");
+                std::future::pending::<()>().await;
+            }
+        };
+        let mut in_flight = Box::pin(in_flight);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut in_flight)
+                .await
+                .is_err()
+        );
+        assert!(
+            PrefetchSlot::acquire(&budgets, ip).is_none(),
+            "the slot is held while the prefetch is in flight"
+        );
+        drop(in_flight);
+        assert!(
+            PrefetchSlot::acquire(&budgets, ip).is_some(),
+            "the cancelled prefetch released its slot"
+        );
+    }
+
+    #[test]
+    fn fonts_with_preload_off_get_no_preload_link() {
+        let font = |family: &str, preload: bool| config::FontEntry {
+            family: family.to_string(),
+            url: format!("/fonts/{family}.woff2"),
+            weight: 400,
+            style: "normal".to_string(),
+            preload,
+        };
+        let files = vec!["inter-1.woff2".to_string(), "serif-2.woff2".to_string()];
+        assert_eq!(
+            font_head_snippets(&[font("inter", true), font("serif", false)], &files),
+            vec![
+                r#"<link rel="preload" href="/_gio/fonts/inter-1.woff2" as="font" type="font/woff2" crossorigin>"#
+                    .to_string(),
+                r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string(),
+            ]
+        );
+        // Every font still has its @font-face rule; without fonts, no links.
+        assert_eq!(
+            font_head_snippets(&[font("serif", false)], &files[1..]),
+            vec![r#"<link rel="stylesheet" href="/_gio/fonts/fonts.css">"#.to_string()]
+        );
+        assert!(font_head_snippets(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn disabled_prefetching_refuses_every_prefetch_whatever_the_budget() {
+        // Unlimited budgets (0), so only the switch can refuse.
+        let budgets = Arc::new(PrefetchBudgets::new(giojs_prefetch::PrefetchConfig {
+            max_in_flight: 0,
+            max_per_second: 0,
+        }));
+        let ip: std::net::IpAddr = "192.0.2.8".parse().unwrap();
+        assert!(matches!(
+            admit_prefetch(false, &budgets, ip),
+            PrefetchAdmission::Disabled
+        ));
+        assert!(matches!(
+            admit_prefetch(true, &budgets, ip),
+            PrefetchAdmission::Admitted(_)
+        ));
+        let tight = Arc::new(PrefetchBudgets::new(giojs_prefetch::PrefetchConfig {
+            max_in_flight: 1,
+            max_per_second: 100,
+        }));
+        let _held = admit_prefetch(true, &tight, ip);
+        assert!(matches!(
+            admit_prefetch(true, &tight, ip),
+            PrefetchAdmission::OverBudget
+        ));
+    }
+
     // ── query decoding ────────────────────────────────────────────────────────
 
     #[test]
@@ -3711,15 +7437,17 @@ mod tests {
             .header("x-deployment-id", "old_id")
             .body(Body::empty())
             .unwrap();
-        let resp = check_version_skew(&req, "new_id").unwrap();
+        let resp = check_version_skew(&req, "new_id", true).unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         assert_eq!(resp.headers().get("x-gio-action").unwrap(), "hard-reload");
+        // Labeled by the refusal itself: the stamp layer skips /_gio paths.
+        assert_eq!(resp.headers().get("x-gio-cache").unwrap(), "bypass");
     }
 
     #[test]
     fn version_skew_absent_id_passes() {
         let req = Request::builder().body(Body::empty()).unwrap();
-        assert!(check_version_skew(&req, "server_id").is_none());
+        assert!(check_version_skew(&req, "server_id", true).is_none());
     }
 
     #[test]
@@ -3728,7 +7456,7 @@ mod tests {
             .header("x-deployment-id", "same_id")
             .body(Body::empty())
             .unwrap();
-        assert!(check_version_skew(&req, "same_id").is_none());
+        assert!(check_version_skew(&req, "same_id", true).is_none());
     }
 
     #[test]
@@ -3741,8 +7469,27 @@ mod tests {
             .header("x-deployment-id", "old_id")
             .body(Body::empty())
             .unwrap();
-        let resp = check_version_skew(&req, "new_id").unwrap();
+        let resp = check_version_skew(&req, "new_id", true).unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn skew_protection_off_ignores_the_deployment_id() {
+        let req = Request::builder()
+            .header("x-deployment-id", "old_id")
+            .body(Body::empty())
+            .unwrap();
+        assert!(check_version_skew(&req, "new_id", false).is_none());
+        assert!(check_version_skew(&req, "new_id", true).is_some());
+    }
+
+    #[test]
+    fn body_limit_413_is_marked_refused_unread() {
+        // <GioForm> re-sends natively only a refusal marked this way: an
+        // action's own 413 must never look like one.
+        let resp = payload_too_large();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(resp.headers().get(REFUSED_UNREAD_HEADER).unwrap(), "unread");
     }
 
     // ── request body forwarding ───────────────────────────────────────────────
@@ -3750,7 +7497,7 @@ mod tests {
     #[tokio::test]
     async fn read_body_utf8_is_forwarded() {
         let body = axum::body::Body::from(r#"{"title":"hello"}"#);
-        match read_request_body(body, 1024).await {
+        match read_request_body(body, 1024, None).await {
             BodyReadOutcome::Read(Some(s), false) => assert_eq!(s, r#"{"title":"hello"}"#),
             _ => panic!("expected forwarded UTF-8 body"),
         }
@@ -3760,7 +7507,7 @@ mod tests {
     async fn read_body_empty_is_none() {
         let body = axum::body::Body::empty();
         assert!(matches!(
-            read_request_body(body, 1024).await,
+            read_request_body(body, 1024, None).await,
             BodyReadOutcome::Read(None, false)
         ));
     }
@@ -3769,7 +7516,7 @@ mod tests {
     async fn read_body_over_limit_is_rejected() {
         let body = axum::body::Body::from(vec![b'x'; 2048]);
         assert!(matches!(
-            read_request_body(body, 1024).await,
+            read_request_body(body, 1024, None).await,
             BodyReadOutcome::TooLarge
         ));
     }
@@ -3778,12 +7525,33 @@ mod tests {
     async fn read_body_non_utf8_is_base64_encoded() {
         let raw = vec![0xff, 0xfe, 0x00, 0x01];
         let body = axum::body::Body::from(raw.clone());
-        match read_request_body(body, 1024).await {
+        match read_request_body(body, 1024, None).await {
             BodyReadOutcome::Read(Some(encoded), true) => {
                 assert_eq!(ws_ipc::b64::decode(&encoded).unwrap(), raw);
             }
             _ => panic!("binary body must cross as base64 with bodyBase64=true"),
         }
+    }
+
+    #[tokio::test]
+    async fn read_body_trickled_past_the_deadline_times_out() {
+        use tokio_stream::StreamExt;
+        let chunks = tokio_stream::iter([Ok::<_, Infallible>(Bytes::from("partial"))])
+            .chain(tokio_stream::pending());
+        let body = axum::body::Body::from_stream(chunks);
+        assert!(matches!(
+            read_request_body(body, 1024, Some(Duration::from_millis(100))).await,
+            BodyReadOutcome::TimedOut
+        ));
+    }
+
+    // ── TLS ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tls_config_builds_with_both_crypto_providers_compiled_in() {
+        // rustls::ServerConfig::builder() panics in this build: aws-lc-rs and
+        // ring are both enabled, so there is no process-default provider.
+        assert!(tls_server_config_builder().is_ok());
     }
 
     // ── render sharing rules ──────────────────────────────────────────────────
@@ -3802,8 +7570,441 @@ mod tests {
             cache_tags: Vec::new(),
             body_base64: false,
             streaming: false,
+            route_stream: false,
             ppr_shell: false,
+            worker_error: false,
+            set_cookies: Vec::new(),
+            route: None,
+            route_handler: false,
+            frame_error: None,
         }
+    }
+
+    #[test]
+    fn shared_pages_are_cdn_cacheable_and_browser_revalidated() {
+        let fresh = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 0,
+            swr_multiplier: 10,
+        };
+        assert_eq!(
+            page_cache_control(fresh),
+            "public, max-age=0, s-maxage=60, stale-while-revalidate=540"
+        );
+        // A hit hands out only what is left of the windows.
+        let aged = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 45,
+            swr_multiplier: 10,
+        };
+        assert_eq!(
+            page_cache_control(aged),
+            "public, max-age=0, s-maxage=15, stale-while-revalidate=540"
+        );
+        let stale = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 100,
+            swr_multiplier: 10,
+        };
+        assert_eq!(
+            page_cache_control(stale),
+            "public, max-age=0, s-maxage=0, stale-while-revalidate=500"
+        );
+        // [cache] swr_multiplier = 0: never stale, so no SWR directive.
+        let no_swr = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 45,
+            swr_multiplier: 0,
+        };
+        assert_eq!(page_cache_control(no_swr), "public, max-age=0, s-maxage=15");
+        let doubled = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 0,
+            swr_multiplier: 2,
+        };
+        assert_eq!(
+            page_cache_control(doubled),
+            "public, max-age=0, s-maxage=60, stale-while-revalidate=60"
+        );
+        // Never no-store: it disables the back/forward cache.
+        assert_eq!(
+            page_cache_control(PageCachePolicy::Private),
+            "private, no-cache"
+        );
+    }
+
+    fn html_response(cache_control: Option<&str>, content_type: &str) -> Response {
+        let mut builder = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_LENGTH, "11");
+        if let Some(value) = cache_control {
+            builder = builder.header(header::CACHE_CONTROL, value);
+        }
+        builder.body(axum::body::Body::from("<p>page</p>")).unwrap()
+    }
+
+    #[test]
+    fn app_set_cache_control_always_wins() {
+        let mut page = html_response(None, "text/html; charset=utf-8");
+        apply_page_cache_control(&mut page, PageCachePolicy::Private);
+        assert_eq!(page.headers()[header::CACHE_CONTROL], "private, no-cache");
+        assert!(page.extensions().get::<FrameworkCacheControl>().is_some());
+
+        let mut own = html_response(Some("max-age=5"), "text/html");
+        apply_page_cache_control(&mut own, PageCachePolicy::Private);
+        assert_eq!(own.headers()[header::CACHE_CONTROL], "max-age=5");
+        assert!(own.extensions().get::<FrameworkCacheControl>().is_none());
+
+        // Route handler JSON is the app's business.
+        let mut json = html_response(None, "application/json");
+        apply_page_cache_control(&mut json, PageCachePolicy::Private);
+        assert!(json.headers().get(header::CACHE_CONTROL).is_none());
+    }
+
+    #[test]
+    fn csp_nonces_keep_cached_pages_out_of_shared_caches() {
+        let shared = PageCachePolicy::Shared {
+            max_age_secs: 300,
+            age_secs: 10,
+            swr_multiplier: 10,
+        };
+        let mut page = html_response(None, "text/html; charset=utf-8");
+        set_page_cache_control(&mut page, shared, true);
+        assert_eq!(page.headers()[header::CACHE_CONTROL], "private, no-cache");
+        assert!(page.extensions().get::<FrameworkCacheControl>().is_some());
+
+        let mut plain = html_response(None, "text/html; charset=utf-8");
+        set_page_cache_control(&mut plain, shared, false);
+        assert_eq!(
+            plain.headers()[header::CACHE_CONTROL],
+            "public, max-age=0, s-maxage=290, stale-while-revalidate=2700"
+        );
+
+        // An app-set value still wins with nonces on.
+        let mut own = html_response(Some("public, max-age=5"), "text/html");
+        set_page_cache_control(&mut own, shared, true);
+        assert_eq!(own.headers()[header::CACHE_CONTROL], "public, max-age=5");
+    }
+
+    #[test]
+    fn negotiated_locales_tighten_only_the_pipelines_own_cache_control() {
+        let shared = PageCachePolicy::Shared {
+            max_age_secs: 60,
+            age_secs: 0,
+            swr_multiplier: 10,
+        };
+        let mut page = html_response(None, "text/html");
+        apply_page_cache_control(&mut page, shared);
+        make_framework_cache_control_private(&mut page);
+        assert_eq!(page.headers()[header::CACHE_CONTROL], "private, no-cache");
+
+        // A [[headers]] rule stamped its own value after the handler: it wins.
+        let mut ruled = html_response(None, "text/html");
+        apply_page_cache_control(&mut ruled, shared);
+        ruled.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=300"),
+        );
+        make_framework_cache_control_private(&mut ruled);
+        assert_eq!(
+            ruled.headers()[header::CACHE_CONTROL],
+            "public, max-age=300"
+        );
+
+        // App-set from the start: never touched.
+        let mut own = html_response(Some("public, max-age=5"), "text/html");
+        apply_page_cache_control(&mut own, shared);
+        make_framework_cache_control_private(&mut own);
+        assert_eq!(own.headers()[header::CACHE_CONTROL], "public, max-age=5");
+    }
+
+    #[test]
+    fn page_etags_need_the_switch_one_audience_and_no_nonces() {
+        assert!(page_etags_allowed(true, true, false));
+        assert!(
+            !page_etags_allowed(false, true, false),
+            "[cache] etag = false"
+        );
+        assert!(!page_etags_allowed(true, false, false));
+        assert!(!page_etags_allowed(true, true, true));
+    }
+
+    #[test]
+    fn etags_only_tag_bodies_served_as_stored() {
+        let html: HashMap<String, String> = [(
+            "content-type".to_string(),
+            "text/html; charset=utf-8".to_string(),
+        )]
+        .into();
+        let json: HashMap<String, String> =
+            [("content-type".to_string(), "application/json".to_string())].into();
+        // Composed at put time: the stored bytes are the page.
+        assert!(stored_body_is_served(true, &html, false));
+        // Uncomposed HTML gets the live critical CSS injected per request.
+        assert!(!stored_body_is_served(false, &html, false));
+        // Non-HTML bodies are never injected into.
+        assert!(stored_body_is_served(false, &json, false));
+        // Dev mode: CSS edits must reach the browser, so no page ETags.
+        assert!(!stored_body_is_served(false, &html, true));
+        assert!(!stored_body_is_served(true, &html, true));
+    }
+
+    #[test]
+    fn if_none_match_uses_weak_comparison_and_lists() {
+        let etag = r#""abc123""#;
+        assert!(if_none_match_hits(r#""abc123""#, etag));
+        assert!(if_none_match_hits(r#"W/"abc123""#, etag));
+        assert!(if_none_match_hits(r#""zzz", "abc123""#, etag));
+        assert!(if_none_match_hits("*", etag));
+        assert!(!if_none_match_hits(r#""abc124""#, etag));
+        assert!(!if_none_match_hits("", etag));
+    }
+
+    #[tokio::test]
+    async fn a_matching_etag_turns_a_hit_into_a_bodiless_304_with_its_headers() {
+        let etag = r#""abc123""#;
+        let mut resp = html_response(Some("public, max-age=0"), "text/html");
+        let if_none_match = HeaderValue::from_static(r#""abc123""#);
+        assert!(apply_entry_etag(
+            &mut resp,
+            Some(etag),
+            Some(&if_none_match)
+        ));
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        // Weak: one tag covers the gzip, br and identity bytes of the page.
+        assert_eq!(resp.headers()[header::ETAG], r#"W/"abc123""#);
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=0");
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/html");
+        assert!(resp.headers().get(header::CONTENT_LENGTH).is_none());
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert!(body.is_empty());
+
+        let mut changed = html_response(None, "text/html");
+        let stale_tag = HeaderValue::from_static(r#""old""#);
+        assert!(!apply_entry_etag(
+            &mut changed,
+            Some(etag),
+            Some(&stale_tag)
+        ));
+        assert_eq!(changed.status(), StatusCode::OK);
+        assert_eq!(changed.headers()[header::ETAG], r#"W/"abc123""#);
+
+        let mut unconditional = html_response(None, "text/html");
+        assert!(!apply_entry_etag(&mut unconditional, Some(etag), None));
+        assert_eq!(unconditional.headers()[header::ETAG], r#"W/"abc123""#);
+
+        // A client echoing the weak tag it was sent still gets its 304.
+        let mut echoed = html_response(None, "text/html");
+        let weak = HeaderValue::from_static(r#"W/"abc123""#);
+        assert!(apply_entry_etag(&mut echoed, Some(etag), Some(&weak)));
+        assert_eq!(echoed.status(), StatusCode::NOT_MODIFIED);
+
+        // Skipped entries (nonces, negotiated locale) carry no ETag at all.
+        let mut skipped = html_response(None, "text/html");
+        assert!(!apply_entry_etag(&mut skipped, None, Some(&if_none_match)));
+        assert!(skipped.headers().get(header::ETAG).is_none());
+
+        // Only a would-be 200 can become a 304.
+        let mut not_found = html_response(None, "text/html");
+        *not_found.status_mut() = StatusCode::NOT_FOUND;
+        assert!(!apply_entry_etag(
+            &mut not_found,
+            Some(etag),
+            Some(&if_none_match)
+        ));
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn compression_follows_the_compression_section() {
+        async fn page(req: Request<Body>) -> Response {
+            let len: usize = req.uri().query().unwrap().parse().unwrap();
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .header(header::CONTENT_LENGTH, len)
+                .body(Body::from("x".repeat(len)))
+                .unwrap()
+        }
+        async fn encoding(
+            compression: config::CompressionConfig,
+            len: usize,
+            accept: &str,
+        ) -> (Option<String>, bool) {
+            let mut app = Router::new()
+                .route("/page", get(page))
+                .layer(compression_layer(compression));
+            let resp = app
+                .call(
+                    Request::builder()
+                        .uri(format!("/page?{len}"))
+                        .header(header::ACCEPT_ENCODING, accept)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let encoding = resp
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .map(|v| v.to_str().unwrap().to_string());
+            (encoding, resp.headers().contains_key(header::VARY))
+        }
+        let defaults = config::CompressionConfig::default();
+        assert_eq!(
+            encoding(defaults, 4096, "gzip, br").await,
+            (Some("br".into()), true),
+            "Brotli by default"
+        );
+        assert_eq!(
+            encoding(defaults, 1000, "gzip, br").await,
+            (None, false),
+            "below the 1024-byte default threshold"
+        );
+        let small = config::CompressionConfig {
+            min_size_bytes: 100,
+            ..defaults
+        };
+        assert_eq!(
+            encoding(small, 200, "gzip").await,
+            (Some("gzip".into()), true)
+        );
+        assert_eq!(encoding(small, 50, "gzip").await, (None, false));
+        let gzip_only = config::CompressionConfig {
+            prefer_brotli: false,
+            ..defaults
+        };
+        assert_eq!(
+            encoding(gzip_only, 4096, "gzip, br").await,
+            (Some("gzip".into()), true)
+        );
+        let off = config::CompressionConfig {
+            enabled: false,
+            ..defaults
+        };
+        assert_eq!(
+            encoding(off, 1 << 20, "gzip, br").await,
+            (None, false),
+            "disabled: nothing compressed, nothing varies"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_304_carries_the_vary_compression_gives_its_200() {
+        const ETAG: &str = r#""abc123""#;
+        // `?<len>` picks the body size; the cache hit path, in miniature.
+        async fn page(req: Request<Body>) -> Response {
+            let len: usize = req.uri().query().unwrap().parse().unwrap();
+            let mut resp = Response::builder()
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .header(header::CONTENT_LENGTH, len)
+                .body(Body::from("x".repeat(len)))
+                .unwrap();
+            apply_entry_etag(
+                &mut resp,
+                Some(ETAG),
+                req.headers().get(header::IF_NONE_MATCH),
+            );
+            resp
+        }
+        let app = Router::new()
+            .route("/page", get(page))
+            .layer(CompressionLayer::new().compress_when(compression_predicate()));
+        let vary = |resp: &Response| -> Vec<String> {
+            resp.headers()
+                .get_all(header::VARY)
+                .iter()
+                .map(|v| v.to_str().unwrap().to_ascii_lowercase())
+                .collect()
+        };
+        // Compressible and too small to compress, for clients that take
+        // gzip and clients that do not: the layer marks the large 200 either way.
+        for (len, varies) in [(4096, true), (100, false)] {
+            for encoding in ["gzip", "identity"] {
+                let request = |conditional: bool| {
+                    let builder = Request::builder()
+                        .uri(format!("/page?{len}"))
+                        .header(header::ACCEPT_ENCODING, encoding);
+                    let builder = if conditional {
+                        builder.header(header::IF_NONE_MATCH, ETAG)
+                    } else {
+                        builder
+                    };
+                    builder.body(Body::empty()).unwrap()
+                };
+                let ok = app.clone().call(request(false)).await.unwrap();
+                let not_modified = app.clone().call(request(true)).await.unwrap();
+                assert_eq!(ok.status(), StatusCode::OK);
+                assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+                let expected: Vec<String> = if varies {
+                    vec!["accept-encoding".to_string()]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(vary(&ok), expected, "200, {len} bytes, {encoding}");
+                assert_eq!(
+                    vary(&not_modified),
+                    expected,
+                    "304, {len} bytes, {encoding}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_304_adds_accept_encoding_to_an_existing_vary_only_once() {
+        let etag = r#""abc123""#;
+        let if_none_match = HeaderValue::from_static(etag);
+        let page = |vary: &'static str| {
+            let mut resp = Response::builder()
+                .header(header::CONTENT_TYPE, "text/html")
+                .header(header::CONTENT_LENGTH, 4096)
+                .header(header::VARY, vary)
+                .body(Body::from("x".repeat(4096)))
+                .unwrap();
+            assert!(apply_entry_etag(
+                &mut resp,
+                Some(etag),
+                Some(&if_none_match)
+            ));
+            resp.headers()
+                .get_all(header::VARY)
+                .iter()
+                .map(|v| v.to_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(page("cookie"), ["cookie", "accept-encoding"]);
+        assert_eq!(page("Cookie, Accept-Encoding"), ["Cookie, Accept-Encoding"]);
+        assert_eq!(page("*"), ["*"]);
+    }
+
+    #[test]
+    fn pages_for_one_audience_never_reach_shared_caches() {
+        let request = |header: Option<(HeaderName, &'static str)>| {
+            let builder = Request::builder().uri("/report");
+            let builder = match header {
+                Some((name, value)) => builder.header(name, value),
+                None => builder,
+            };
+            builder.body(Body::empty()).unwrap()
+        };
+        assert!(shared_cache_audience(&request(None)));
+        // A cookie alone is no audience: a render that reads it is never cached.
+        assert!(shared_cache_audience(&request(Some((
+            header::COOKIE,
+            "theme=dark"
+        )))));
+        // RFC 9111 3.5: public/s-maxage would let a CDN reuse it for anyone.
+        assert!(!shared_cache_audience(&request(Some((
+            header::AUTHORIZATION,
+            "Basic YWxpY2U6c2VjcmV0"
+        )))));
+        let mut guarded = request(None);
+        guarded.extensions_mut().insert(GuardAdmitted);
+        assert!(!shared_cache_audience(&guarded));
+        let mut negotiated = request(None);
+        negotiated.extensions_mut().insert(HeaderNegotiatedLocale);
+        assert!(!shared_cache_audience(&negotiated));
     }
 
     #[test]
@@ -3815,6 +8016,163 @@ mod tests {
     }
 
     #[test]
+    fn only_page_renders_get_the_streaming_idle_gap() {
+        let head = |content_type: &str, route_stream: bool| {
+            let mut resp = ipc_response(false, 0);
+            resp.streaming = true;
+            resp.route_stream = route_stream;
+            resp.headers
+                .insert("content-type".into(), content_type.into());
+            resp
+        };
+        let html = "text/html; charset=utf-8";
+        assert!(has_render_idle_gap(&head(html, false)));
+        // A route.ts body streaming HTML (htmx, an LLM writing markup) is
+        // paced by its handler, like any other route stream.
+        assert!(!has_render_idle_gap(&head(html, true)));
+        assert!(!has_render_idle_gap(&head("text/event-stream", true)));
+        assert!(!has_render_idle_gap(&head("text/plain", false)));
+
+        let parsed: ipc::IpcResponse = serde_json::from_value(serde_json::json!({
+            "id": "r", "status": 200, "headers": {"content-type": "text/html"},
+            "body": "", "cacheable": false, "streaming": true, "routeStream": true,
+        }))
+        .unwrap();
+        assert!(parsed.route_stream);
+    }
+
+    #[test]
+    fn only_page_streams_are_injected_into() {
+        let head = |content_type: &str, route_stream: bool, route_handler: bool| {
+            let mut resp = ipc_response(false, 0);
+            resp.streaming = true;
+            resp.route_stream = route_stream;
+            resp.route_handler = route_handler;
+            resp.headers
+                .insert("content-type".into(), content_type.into());
+            resp
+        };
+        let html = "text/html; charset=utf-8";
+        assert!(injects_into_stream(&head(html, false, false)));
+        // A streamed route.ts HTML body passes through untouched: no head
+        // scan holding back a body that has no </head>.
+        assert!(!injects_into_stream(&head(html, true, true)));
+        assert!(!injects_into_stream(&head(html, false, true)));
+        assert!(!injects_into_stream(&head("text/plain", false, false)));
+    }
+
+    fn holes_answer(status: u16, location: Option<&str>) -> ipc::IpcResponse {
+        let mut resp = ipc_response(false, 0);
+        resp.status = status;
+        if let Some(location) = location {
+            resp.headers.insert("location".into(), location.into());
+        }
+        resp
+    }
+
+    fn fallback_text(resp: &ipc::IpcResponse) -> String {
+        String::from_utf8(ppr_holes_fallback(resp).to_vec()).unwrap()
+    }
+
+    #[test]
+    fn a_ppr_holes_redirect_finishes_the_page_with_a_script_redirect() {
+        let html = fallback_text(&holes_answer(303, Some("/login?next=/a&b=</script>")));
+        assert!(
+            html.starts_with(
+                r#"<script>location.replace("/login?next=/a\u0026b=\u003c/script\u003e")</script>"#
+            ),
+            "{html}"
+        );
+        assert!(html.contains(
+            r#"<noscript><meta http-equiv="refresh" content="0;url=/login?next=/a&amp;b=&lt;/script&gt;"></noscript>"#
+        ));
+        assert!(
+            html.ends_with("</body></html>"),
+            "the document is closed: {html}"
+        );
+        assert!(!html.contains(PPR_BYPASS_COOKIE));
+        // Off-origin http(s) redirects are followed, as a Location header
+        // would be.
+        let html = fallback_text(&holes_answer(302, Some("https://id.example.com/sso")));
+        assert!(html.contains(r#"location.replace("https://id.example.com/sso")"#));
+    }
+
+    #[test]
+    fn other_ppr_holes_answers_reload_past_the_shell() {
+        for resp in [
+            holes_answer(404, None),
+            holes_answer(500, None),
+            // A scheme no Location header would navigate to.
+            holes_answer(302, Some("javascript:alert(1)")),
+            holes_answer(302, Some(" JavaScript:alert(1)")),
+            holes_answer(302, Some("data:text/html,x")),
+            // No Location at all.
+            holes_answer(302, None),
+            // A redirect setting cookies: only the real response carries them.
+            {
+                let mut resp = holes_answer(303, Some("/dashboard"));
+                resp.set_cookies = vec!["session=x; Path=/".into()];
+                resp
+            },
+        ] {
+            let html = fallback_text(&resp);
+            assert!(!html.contains("location.replace"), "{html}");
+            assert!(!html.contains("javascript:"), "{html}");
+            assert!(html.contains(PPR_BYPASS_COOKIE), "{html}");
+            assert!(html.contains("location.reload()"), "{html}");
+            assert!(html.ends_with("</script></body></html>"), "{html}");
+        }
+    }
+
+    #[test]
+    fn script_followable_locations_are_what_a_location_header_follows() {
+        for ok in [
+            "/login",
+            "login",
+            "?a=1",
+            "#x",
+            "//cdn.example.com/x",
+            "HTTPS://a.b/c",
+            "http://a/b:c",
+        ] {
+            assert!(script_followable_location(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "javascript:x",
+            "vbscript:x",
+            "data:x",
+            "java\nscript:x",
+            "blob:x",
+            "/a\u{7f}",
+        ] {
+            assert!(!script_followable_location(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_ppr_bypass_cookie_is_found_among_others() {
+        let headers = |values: &[&'static str]| {
+            let mut map = axum::http::HeaderMap::new();
+            for value in values {
+                map.append(header::COOKIE, HeaderValue::from_static(value));
+            }
+            map
+        };
+        assert!(ppr_bypass_requested(&headers(&["__gio_ppr_bypass=1"])));
+        assert!(ppr_bypass_requested(&headers(&[
+            "who=a; __gio_ppr_bypass=1"
+        ])));
+        assert!(ppr_bypass_requested(&headers(&[
+            "who=a",
+            "__gio_ppr_bypass=1"
+        ])));
+        assert!(!ppr_bypass_requested(&headers(&[])));
+        assert!(!ppr_bypass_requested(&headers(&["who=__gio_ppr_bypass=1"])));
+        assert!(!ppr_bypass_requested(&headers(&["x__gio_ppr_bypass=1"])));
+    }
+
+    #[test]
     fn vary_disqualifies_sharing_until_keyed_caching_exists() {
         let mut resp = ipc_response(true, 60);
         resp.vary = vec!["cookie".to_string()];
@@ -3822,37 +8180,319 @@ mod tests {
     }
 
     #[test]
+    fn cookie_setting_renders_are_never_shareable() {
+        let mut listed = ipc_response(true, 60);
+        listed.set_cookies = vec!["session=abc; Path=/".to_string()];
+        assert!(!render_is_shareable(&listed));
+        // A plugin may still put a lone cookie in the headers map.
+        let mut mapped = ipc_response(true, 60);
+        mapped
+            .headers
+            .insert("Set-Cookie".to_string(), "session=abc".to_string());
+        assert!(!render_is_shareable(&mapped));
+    }
+
+    fn set_cookie_values(resp: &Response) -> Vec<&str> {
+        resp.headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect()
+    }
+
+    fn buffered_response(headers: &HashMap<String, String>, set_cookies: &[String]) -> Response {
+        let mut resp = build_html_response(
+            200,
+            headers,
+            Bytes::from_static(b"{}"),
+            false,
+            false,
+            "dep",
+            "en",
+            &[],
+            &DashMap::new(),
+            &config::CssConfig::default(),
+            false,
+        );
+        append_set_cookies(resp.headers_mut(), set_cookies);
+        resp
+    }
+
+    #[test]
+    fn set_cookies_become_separate_headers_verbatim() {
+        let headers = HashMap::from([("content-type".to_string(), "application/json".to_string())]);
+        // Expires dates contain commas - the reason cookies cannot be joined.
+        let cookies = vec![
+            "session=abc; Path=/; HttpOnly; Expires=Wed, 21 Oct 2026 07:28:00 GMT".to_string(),
+            "csrf=xyz; Path=/; SameSite=Strict".to_string(),
+        ];
+        let resp = buffered_response(&headers, &cookies);
+        assert_eq!(set_cookie_values(&resp), cookies);
+    }
+
+    #[test]
+    fn set_cookie_in_both_places_is_emitted_once() {
+        let headers = HashMap::from([("set-cookie".to_string(), "a=1".to_string())]);
+        let resp = buffered_response(&headers, &["a=1".to_string(), "b=2".to_string()]);
+        assert_eq!(set_cookie_values(&resp), vec!["a=1", "b=2"]);
+    }
+
+    #[test]
+    fn lone_set_cookie_in_headers_map_still_passes_through() {
+        let headers = HashMap::from([("set-cookie".to_string(), "a=1".to_string())]);
+        let resp = buffered_response(&headers, &[]);
+        assert_eq!(set_cookie_values(&resp), vec!["a=1"]);
+    }
+
+    #[test]
+    fn invalid_set_cookie_values_are_dropped_not_smuggled() {
+        let resp = buffered_response(
+            &HashMap::new(),
+            &["a=1\r\nx-injected: 1".to_string(), "b=2".to_string()],
+        );
+        assert_eq!(set_cookie_values(&resp), vec!["b=2"]);
+        assert!(resp.headers().get("x-injected").is_none());
+    }
+
+    fn header_rules(headers: &[(&str, &str)]) -> rules::RuleSet {
+        rules::RuleSet::compile(&rules::MiddlewareRules {
+            headers: vec![rules::HeaderRule {
+                path: "/account".to_string(),
+                headers: headers
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+            }],
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn set_cookie_header_rule_adds_to_worker_cookies_instead_of_replacing() {
+        let cookies = vec![
+            "session=abc; Path=/; HttpOnly".to_string(),
+            "csrf=xyz; Path=/".to_string(),
+        ];
+        let mut resp = buffered_response(&HashMap::new(), &cookies);
+        let rules = header_rules(&[("set-cookie", "consent=1; Path=/")]);
+        stamp_rule_headers(resp.headers_mut(), rules.response_headers("/account"));
+        assert_eq!(
+            set_cookie_values(&resp),
+            vec![
+                "session=abc; Path=/; HttpOnly",
+                "csrf=xyz; Path=/",
+                "consent=1; Path=/"
+            ]
+        );
+        // A rule cookie the worker already sent is not doubled.
+        let rules = header_rules(&[("set-cookie", "csrf=xyz; Path=/")]);
+        stamp_rule_headers(resp.headers_mut(), rules.response_headers("/account"));
+        assert_eq!(set_cookie_values(&resp).len(), 3);
+    }
+
+    #[test]
+    fn ordinary_header_rules_still_replace_the_response_value() {
+        let headers = HashMap::from([("x-frame-options".to_string(), "SAMEORIGIN".to_string())]);
+        let mut resp = buffered_response(&headers, &[]);
+        let rules = header_rules(&[("x-frame-options", "DENY")]);
+        stamp_rule_headers(resp.headers_mut(), rules.response_headers("/account"));
+        let values: Vec<_> = resp.headers().get_all("x-frame-options").iter().collect();
+        assert_eq!(values, vec!["DENY"]);
+    }
+
+    #[test]
+    fn stdin_watch_returns_at_eof_and_on_read_errors() {
+        read_until_eof(std::io::Cursor::new(b"ignored input".to_vec()));
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+        }
+        read_until_eof(Broken);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn render_body_stream_logs_inside_its_request_span() {
+        // hyper polls bodies after the handler returned, outside its span:
+        // the stream carries the span so its lines still name the request.
+        let (client, _write_rx) = ipc::test_client_with_write_channel();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
+        let mut stream =
+            render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
+        tokio::time::advance(ipc::DEFAULT_RENDER_TIMEOUT + Duration::from_secs(1)).await;
+        let log = captured_log("warn", || {
+            stream.span = request_span("rid-body");
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            let _ = Pin::new(&mut stream).poll_next(&mut cx);
+        });
+        let line = log
+            .lines()
+            .find(|line| line.contains("idle-gap timeout"))
+            .unwrap_or_else(|| panic!("timeout warning missing: {log}"));
+        assert!(line.contains("request_id=rid-body"), "{line}");
+    }
+
+    /// Log lines written under `filter`, as the server's fmt subscriber
+    /// prints them.
+    fn captured_log(filter: &str, emit: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        let bytes = capture.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn request_id_stays_on_warn_and_error_lines_at_any_log_level() {
+        // Production often runs RUST_LOG=warn: the request span must not be
+        // filtered out from under the lines it exists for.
+        for filter in ["info", "warn", "error", "giojs_server=warn"] {
+            let log = captured_log(filter, || {
+                let _entered = request_span("rid-42").entered();
+                warn!(ip = "203.0.113.50", "rate limit exceeded");
+                error!("IPC error");
+            });
+            for line in ["rate limit exceeded", "IPC error"] {
+                let printed = log.lines().find(|l| l.contains(line));
+                if line == "rate limit exceeded" && filter == "error" {
+                    assert!(printed.is_none(), "{filter}: {log}");
+                    continue;
+                }
+                let printed = printed.unwrap_or_else(|| panic!("{filter}: {line} missing: {log}"));
+                assert!(
+                    printed.contains("request{request_id=rid-42}"),
+                    "{filter}: {printed}"
+                );
+            }
+        }
+    }
+
+    /// A ticket from a cache no invalidation ever ran on.
+    fn first_ticket() -> FillTicket {
+        let (cache, _dir) = temp_cache("coalesce-ticket");
+        cache.fill_ticket()
+    }
+
+    #[test]
+    fn head_shares_the_get_cache_entry() {
+        let key = |method| PageCache::build_key(cache_key_method(method), "/cached", "a=1");
+        assert_eq!(key("HEAD"), key("GET"));
+        assert_ne!(key("POST"), key("GET"));
+        assert_eq!(cache_key_method("POST"), "POST");
+    }
+
+    #[test]
     fn coalesce_key_separates_different_cookies() {
+        let ticket = first_ticket();
         let anon: HashMap<String, String> = HashMap::new();
         let user_a = HashMap::from([("cookie".to_string(), "session=aaa".to_string())]);
         let user_b = HashMap::from([("cookie".to_string(), "session=bbb".to_string())]);
-        let key_anon = build_coalesce_key("cachekey", &anon);
-        let key_a = build_coalesce_key("cachekey", &user_a);
-        let key_b = build_coalesce_key("cachekey", &user_b);
+        let key_anon = build_coalesce_key("cachekey", &anon, ticket);
+        let key_a = build_coalesce_key("cachekey", &user_a, ticket);
+        let key_b = build_coalesce_key("cachekey", &user_b, ticket);
         assert_ne!(key_a, key_b, "different cookies must not coalesce");
         assert_ne!(key_a, key_anon, "cookie and anonymous must not coalesce");
     }
 
     #[test]
     fn coalesce_key_is_stable_for_same_credentials() {
+        let ticket = first_ticket();
         let headers = HashMap::from([
             ("cookie".to_string(), "session=aaa".to_string()),
             ("authorization".to_string(), "Bearer t".to_string()),
         ]);
         assert_eq!(
-            build_coalesce_key("cachekey", &headers),
-            build_coalesce_key("cachekey", &headers)
+            build_coalesce_key("cachekey", &headers, ticket),
+            build_coalesce_key("cachekey", &headers, ticket)
         );
     }
 
     #[test]
     fn coalesce_key_separates_authorization_header() {
+        let ticket = first_ticket();
         let bearer_a = HashMap::from([("authorization".to_string(), "Bearer a".to_string())]);
         let bearer_b = HashMap::from([("authorization".to_string(), "Bearer b".to_string())]);
         assert_ne!(
-            build_coalesce_key("cachekey", &bearer_a),
-            build_coalesce_key("cachekey", &bearer_b)
+            build_coalesce_key("cachekey", &bearer_a, ticket),
+            build_coalesce_key("cachekey", &bearer_b, ticket)
         );
+    }
+
+    /// A miss for a page whose render is in flight joins it - unless a purge
+    /// happened in between: that render read the data from before the
+    /// purge, and once the purge returned nobody may be served that version.
+    #[tokio::test]
+    async fn misses_on_either_side_of_a_purge_never_share_a_render() {
+        let (cache, dir) = temp_cache("coalesce-purge");
+        let headers = HashMap::new();
+        let leader = cache.fill_ticket();
+        assert_eq!(
+            build_coalesce_key("cachekey", &headers, leader),
+            build_coalesce_key("cachekey", &headers, cache.fill_ticket()),
+            "no purge in between: the second miss shares the first render"
+        );
+        cache.invalidate_tags(&["article:1"]).await;
+        let after_purge = cache.fill_ticket();
+        assert_ne!(
+            build_coalesce_key("cachekey", &headers, leader),
+            build_coalesce_key("cachekey", &headers, after_purge),
+            "a miss after the purge renders on its own"
+        );
+
+        // Through SingleFlight: the post-purge miss gets its own render while
+        // the pre-purge one is still running.
+        let flights: Arc<SingleFlight<u32>> = Arc::new(SingleFlight::new());
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let leader_key = build_coalesce_key("cachekey", &headers, leader);
+        let first = {
+            let flights = flights.clone();
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                flights
+                    .run(&leader_key, move || {
+                        let gate = gate.clone();
+                        async move {
+                            gate.notified().await;
+                            1 // rendered from the old data
+                        }
+                    })
+                    .await
+            })
+        };
+        tokio::task::yield_now().await; // the first render is in flight
+        let second = tokio::time::timeout(
+            Duration::from_secs(5),
+            flights.run(
+                &build_coalesce_key("cachekey", &headers, after_purge),
+                || async { 2 },
+            ),
+        )
+        .await;
+        assert_eq!(
+            second.ok(),
+            Some(2),
+            "served a render that started after the purge"
+        );
+        gate.notify_one();
+        assert_eq!(first.await.unwrap(), 1);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     // ── streaming SSR body ────────────────────────────────────────────────────
@@ -3867,9 +8507,10 @@ mod tests {
             req_id: "req-stream".into(),
             ipc: Arc::new(client),
             injector,
-            idle: Box::pin(tokio::time::sleep(ipc::IPC_RESPONSE_TIMEOUT)),
+            idle: Some(IdleDeadline::new(ipc::DEFAULT_RENDER_TIMEOUT)),
             done: false,
             shell_capture: None,
+            span: tracing::Span::none(),
         }
     }
 
@@ -3918,6 +8559,29 @@ mod tests {
         assert_eq!(value["type"], "cancel");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn route_stream_bodies_have_no_idle_gap_deadline() {
+        use tokio_stream::StreamExt as _;
+        let (client, mut write_rx) = ipc::test_client_with_write_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
+        let mut stream =
+            render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
+        stream.idle = None;
+
+        tx.send(RenderFrame::Chunk(Bytes::from("data: 1\n\n")))
+            .unwrap();
+        assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"data: 1\n\n");
+        // An event stream may wait far longer than a render may stall.
+        let quiet = tokio::time::timeout(ipc::DEFAULT_RENDER_TIMEOUT * 4, stream.next()).await;
+        assert!(quiet.is_err(), "the body must still be open");
+        assert!(write_rx.try_recv().is_err(), "no cancel sent");
+        tx.send(RenderFrame::Chunk(Bytes::from("data: 2\n\n")))
+            .unwrap();
+        tx.send(RenderFrame::End).unwrap();
+        assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"data: 2\n\n");
+        assert!(stream.next().await.is_none());
+    }
+
     #[tokio::test]
     async fn dropping_render_body_stream_midway_cancels_the_render() {
         let (client, mut write_rx) = ipc::test_client_with_write_channel();
@@ -3942,7 +8606,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn buffered_lang_injection_replaces_the_root_layouts_lang() {
+        let html =
+            Bytes::from(r#"<!DOCTYPE html><html lang="en"><head></head><body></body></html>"#);
+        assert_eq!(
+            &inject_html_lang(html, "de")[..],
+            br#"<!DOCTYPE html><html lang="de"><head></head><body></body></html>"#
+        );
+    }
+
     fn shell_capture_with(cache: Arc<PageCache>, cache_key: &str) -> PprShellCapture {
+        let fill_ticket = cache.fill_ticket();
         PprShellCapture {
             raw: BytesMut::new(),
             overflowed: false,
@@ -3953,19 +8628,22 @@ mod tests {
             headers: HashMap::from([("content-type".into(), "text/html; charset=utf-8".into())]),
             max_age_secs: 60,
             deployment_id: "dep-1".into(),
-            tags: Vec::new(),
+            tags: revalidate::entry_tags("/ppr", &["feed".to_string()]),
+            fill_ticket,
             head_snippets: "<script>D</script>".into(),
             lang: None,
+            route: Some("/ppr".into()),
         }
     }
 
     fn temp_cache(name: &str) -> (Arc<PageCache>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("giojs-{name}-{}", std::process::id()));
         let cache = Arc::new(PageCache::new(CacheConfig {
-            memory_max_entries: NonZeroUsize::new(10).unwrap(),
+            memory_max_entries: std::num::NonZeroUsize::new(10).unwrap(),
             disk_dir: dir.clone(),
             swr_multiplier: 10,
             disk_max_bytes: 0,
+            ..giojs_cache::CacheConfig::default()
         }));
         (cache, dir)
     }
@@ -4012,6 +8690,11 @@ mod tests {
         assert!(html.contains("SHELL"), "shell content cached");
         assert!(html.contains("<script>D</script></head>"), "shell composed");
         assert!(!html.contains("HOLE"), "hole content must not be cached");
+        assert_eq!(
+            entry.route.as_deref(),
+            Some("/ppr"),
+            "hits keep the route label"
+        );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
@@ -4033,6 +8716,31 @@ mod tests {
         assert!(
             cache.get("ppr-torn", "dep-1").await.is_none(),
             "a stream aborted before shell_end must never cache a torn shell"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn a_shell_rendered_across_a_revalidation_is_not_stored() {
+        use tokio_stream::StreamExt as _;
+        let (cache, dir) = temp_cache("ppr-race");
+        let (client, _write_rx) = ipc::test_client_with_write_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RenderFrame>();
+        let mut stream =
+            render_body_stream(client, rx, stream_inject::StreamInjector::passthrough());
+        // The render (and its ticket) started before the purge.
+        stream.shell_capture = Some(shell_capture_with(cache.clone(), "ppr-raced"));
+        assert_eq!(cache.invalidate_tags(&["feed"]).await, 0);
+
+        tx.send(RenderFrame::Chunk(Bytes::from("<p>OLD SHELL</p>")))
+            .unwrap();
+        tx.send(RenderFrame::ShellEnd).unwrap();
+        tx.send(RenderFrame::End).unwrap();
+        while stream.next().await.is_some() {}
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            cache.get("ppr-raced", "dep-1").await.is_none(),
+            "a shell that may predate the purge must not be cached after it"
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -4097,6 +8805,7 @@ mod tests {
             deployment_id: "dep-test".into(),
             locale: String::new(),
             skip_shell: true,
+            client: ipc::IpcClientFields::default(),
         };
         tokio::spawn(feed_ppr_holes(
             Arc::new(client),
@@ -4113,6 +8822,211 @@ mod tests {
             body.extend_from_slice(&bytes);
         }
         assert_eq!(body, b"<p>shell</p>", "failed holes must not hang the body");
+    }
+
+    // ── dev endpoint guard ────────────────────────────────────────────────────
+
+    /// Same layering as the real dev routes, with stub handlers.
+    fn guarded_dev_router() -> Router {
+        Router::new()
+            .route("/_gio/devtools/codeframe", get(|| async { "frame" }))
+            .route("/_gio/devtools/open-in-editor", post(|| async { "opened" }))
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::new(dev_guard::DevHostPolicy::new("0.0.0.0", &[])),
+                dev_endpoint_guard,
+            ))
+    }
+
+    async fn dev_request(method: &str, path: &str, headers: &[(&str, &str)]) -> StatusCode {
+        let mut builder = Request::builder().method(method).uri(path);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        guarded_dev_router()
+            .call(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn dev_guard_rejects_untrusted_host_before_routing() {
+        let status = dev_request(
+            "GET",
+            "/_gio/devtools/codeframe",
+            &[("host", "evil.example:3000")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let status = dev_request(
+            "POST",
+            "/_gio/devtools/open-in-editor",
+            &[("host", "evil.example:3000")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn dev_guard_admits_localhost_and_keeps_method_routing() {
+        let host = ("host", "127.0.0.1:3000");
+        assert_eq!(
+            dev_request("GET", "/_gio/devtools/codeframe", &[host]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            dev_request("GET", "/_gio/devtools/open-in-editor", &[host]).await,
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            dev_request(
+                "POST",
+                "/_gio/devtools/open-in-editor",
+                &[
+                    host,
+                    ("origin", "http://127.0.0.1:3000"),
+                    ("sec-fetch-site", "same-origin")
+                ],
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn dev_guard_rejects_cross_site_editor_post() {
+        let status = dev_request(
+            "POST",
+            "/_gio/devtools/open-in-editor",
+            &[
+                ("host", "localhost:3000"),
+                ("origin", "https://evil.example"),
+                ("sec-fetch-site", "cross-site"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn dev_guard_refuses_a_forged_localhost_host_from_another_machine() {
+        let request = |peer: &str| {
+            let mut req = Request::builder()
+                .uri("/_gio/devtools/codeframe")
+                .header("host", "localhost:4518")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo::<SocketAddr>(peer.parse().unwrap()));
+            req
+        };
+        let lan = guarded_dev_router()
+            .call(request("192.0.2.2:50000"))
+            .await
+            .unwrap();
+        assert_eq!(lan.status(), StatusCode::FORBIDDEN);
+        let local = guarded_dev_router()
+            .call(request("127.0.0.1:50000"))
+            .await
+            .unwrap();
+        assert_eq!(local.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn dev_guard_uses_http2_authority_when_host_is_absent() {
+        assert_eq!(
+            dev_request("GET", "http://localhost:3000/_gio/devtools/codeframe", &[]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            dev_request("GET", "/_gio/devtools/codeframe", &[]).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    /// A fallback that answers like a failed render (marked) or a normal page.
+    fn error_detail_router() -> Router {
+        Router::new()
+            .route(
+                "/fine",
+                get(|| async { "PAGE_BODY at /home/dev/app/page.tsx" }),
+            )
+            .fallback(|| async {
+                let mut resp = (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    dev_overlay::error_page_html(
+                        500,
+                        "SECRET_MESSAGE",
+                        Some("Error: SECRET_MESSAGE\n    at Page (/home/dev/app/page.tsx:3:9)"),
+                    ),
+                )
+                    .into_response();
+                resp.extensions_mut().insert(WorkerErrorPage);
+                resp
+            })
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(dev_guard::DevHostPolicy::new("0.0.0.0", &[])),
+                dev_error_detail_guard,
+            ))
+    }
+
+    async fn error_detail_body(path: &str, host: Option<&str>) -> (StatusCode, String) {
+        let mut builder = Request::builder().uri(path);
+        if let Some(host) = host {
+            builder = builder.header("host", host);
+        }
+        let resp = error_detail_router()
+            .call(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn dev_error_details_are_hidden_from_other_machines() {
+        for (peer, shown) in [("192.0.2.2:50000", false), ("127.0.0.1:50000", true)] {
+            let mut req = Request::builder()
+                .uri("/broken")
+                .header("host", "localhost:3000")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo::<SocketAddr>(peer.parse().unwrap()));
+            let resp = error_detail_router().call(req).await.unwrap();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert_eq!(body.contains("SECRET_MESSAGE"), shown, "{peer}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dev_error_details_are_hidden_from_untrusted_hosts() {
+        for host in [Some("evil.example:3000"), None] {
+            let (status, body) = error_detail_body("/broken", host).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(!body.contains("SECRET_MESSAGE"), "{body}");
+            assert!(!body.contains("/home/dev/"), "{body}");
+            assert!(body.contains("allowed_hosts"), "{body}");
+            assert!(body.contains("</body>"), "still an HTML page: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dev_error_details_reach_localhost_and_other_pages_pass_through() {
+        let (_, body) = error_detail_body("/broken", Some("localhost:3000")).await;
+        assert!(body.contains("SECRET_MESSAGE"));
+        assert!(body.contains("/home/dev/app/page.tsx"));
+        // Only marked error pages are rewritten.
+        let (status, body) = error_detail_body("/fine", Some("evil.example")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "PAGE_BODY at /home/dev/app/page.tsx");
     }
 
     // ── TLS error paths ───────────────────────────────────────────────────────
@@ -4135,5 +9049,237 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("TLS enabled but key not found"));
+    }
+
+    // A throwaway self-signed P-256 certificate for localhost, generated for
+    // these tests only (it secures nothing).
+    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBmzCCAUGgAwIBAgIUNyJeQb7k8UbVuc86JtU6jP4T6+YwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTAwNzE5MjYyOVoYDzIxMjYwOTEz
+MTkyNjI5WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAS7IWT5SzdlHHiV33c2IEtceeqriEg8Z1uis5x6LpdQ/f48fePWB4bJ
+azo1nu0iiDgI5KKq1gGbWFFjVjMISa/mo28wbTAdBgNVHQ4EFgQUdcsaLFfigEPz
+BcLt+i0B/EUV2BEwHwYDVR0jBBgwFoAUdcsaLFfigEPzBcLt+i0B/EUV2BEwDwYD
+VR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwCgYIKoZI
+zj0EAwIDSAAwRQIhAMhP9eBhd9BVSude5PIF9g8jB+LY6jOLUs1/DLXTQyevAiBy
+6cVdI/JK1+eV4e0cP/encbpZ6MW4vqw8QneqnH45mQ==
+-----END CERTIFICATE-----
+";
+    const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg4ueBBM1qbFXwB/NG
+unfYWiFnNHUmYsdTGk+ik2k1x+ShRANCAAS7IWT5SzdlHHiV33c2IEtceeqriEg8
+Z1uis5x6LpdQ/f48fePWB4bJazo1nu0iiDgI5KKq1gGbWFFjVjMISa/m
+-----END PRIVATE KEY-----
+";
+
+    #[test]
+    fn tls_offers_h2_in_alpn_only_when_http2_is_on() {
+        let dir = std::env::temp_dir().join(format!("giojs-tls-alpn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        std::fs::write(&cert, TEST_CERT_PEM).unwrap();
+        std::fs::write(&key, TEST_KEY_PEM).unwrap();
+        let tls = config::TlsConfig {
+            enabled: true,
+            cert_path: Some(cert.to_string_lossy().into_owned()),
+            key_path: Some(key.to_string_lossy().into_owned()),
+        };
+        let offered = |http2: bool| tls_server_config(&tls, http2).unwrap().alpn_protocols;
+        assert_eq!(offered(true), vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        // `[server] http2 = false` serves HTTP/1.1 only: a client that
+        // negotiated h2 would fail on its connection preface.
+        assert_eq!(offered(false), vec![b"http/1.1".to_vec()]);
+        assert!(load_tls_acceptor(&tls, false).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── response heads ────────────────────────────────────────────────────────
+
+    #[test]
+    fn sse_heads_carry_each_header_once_and_nothing_hop_by_hop() {
+        // What the worker's GioEventStream head sends, plus a header of its own.
+        let worker: HashMap<String, String> = [
+            ("content-type", "text/event-stream"),
+            ("cache-control", "no-cache"),
+            ("connection", "keep-alive"),
+            ("keep-alive", "timeout=5"),
+            ("transfer-encoding", "chunked"),
+            ("x-stream", "ticker"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        let headers = sse_response_headers(&worker);
+        let all = |name: &str| -> Vec<&str> {
+            headers
+                .get_all(name)
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect()
+        };
+        assert_eq!(all("content-type"), ["text/event-stream"]);
+        assert_eq!(all("cache-control"), ["no-cache"]);
+        assert_eq!(all("x-gio-cache"), ["bypass"]);
+        assert_eq!(all("x-stream"), ["ticker"]);
+        for name in ["connection", "keep-alive", "transfer-encoding"] {
+            assert!(all(name).is_empty(), "{name} must not be forwarded");
+        }
+    }
+
+    #[test]
+    fn page_and_route_heads_forward_nothing_hop_by_hop() {
+        // What a route.ts may set itself, in any case.
+        let worker: HashMap<String, String> = [
+            ("Connection", "keep-alive"),
+            ("keep-alive", "timeout=99"),
+            ("Transfer-Encoding", "chunked"),
+            ("proxy-connection", "keep-alive"),
+            ("upgrade", "h2c"),
+            ("content-type", "text/plain"),
+            ("x-app", "kept"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        let resp = buffered_response(&worker, &[]);
+        assert_eq!(resp.headers()["x-app"], "kept");
+        assert_eq!(resp.headers()["content-type"], "text/plain");
+        let cached = cacheable_response_headers(&worker);
+        for name in HOP_BY_HOP_HEADERS {
+            assert!(
+                !resp.headers().contains_key(name),
+                "{name} must not be forwarded"
+            );
+            assert!(
+                !cached.keys().any(|key| key.eq_ignore_ascii_case(name)),
+                "{name} must not be stored"
+            );
+        }
+    }
+
+    #[test]
+    fn prefetch_purposes_are_token_lists() {
+        let purpose = |name: &str, value: &str| {
+            Request::builder()
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap()
+        };
+        for (name, value) in [
+            ("purpose", "prefetch"),
+            ("sec-purpose", "prefetch"),
+            // Speculation rules and private prefetches add parameters.
+            ("sec-purpose", "prefetch;prerender"),
+            ("sec-purpose", "prefetch; anonymous-client-ip"),
+            ("purpose", "Prefetch"),
+            ("sec-purpose", "other, prefetch"),
+        ] {
+            assert!(is_prefetch(&purpose(name, value)), "{name}: {value}");
+        }
+        for (name, value) in [
+            ("purpose", "prerender"),
+            ("sec-purpose", "prefetcher"),
+            ("sec-purpose", "no-prefetch;prefetch"),
+        ] {
+            assert!(!is_prefetch(&purpose(name, value)), "{name}: {value}");
+        }
+        assert!(!is_prefetch(
+            &Request::builder().body(Body::empty()).unwrap()
+        ));
+        // Either header counts, whichever comes first.
+        let both = Request::builder()
+            .header("purpose", "prerender")
+            .header("sec-purpose", "prefetch;prerender")
+            .body(Body::empty())
+            .unwrap();
+        assert!(is_prefetch(&both));
+    }
+
+    #[tokio::test]
+    async fn refusals_are_not_labeled_static_and_files_are() {
+        async fn refused() -> Response {
+            StatusCode::TOO_MANY_REQUESTS.into_response()
+        }
+        async fn file() -> Response {
+            stamp_static_file("body".into_response())
+        }
+        let app = Router::new()
+            .route("/api/limited", get(refused))
+            .route("/robots.txt", get(file))
+            .nest_service(
+                "/_gio/fonts",
+                Router::new()
+                    .fallback(|| async { "font" })
+                    .layer(static_file_stamp_layer()),
+            )
+            .layer(axum::middleware::from_fn(cache_status_stamp_middleware));
+        let label = |path: &'static str| {
+            let mut app = app.clone();
+            async move {
+                let resp = app
+                    .call(Request::builder().uri(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                resp.headers()
+                    .get("x-gio-cache")
+                    .map(|value| value.to_str().unwrap().to_string())
+            }
+        };
+        assert_eq!(label("/api/limited").await.as_deref(), Some("bypass"));
+        assert_eq!(label("/robots.txt").await.as_deref(), Some("static"));
+        assert_eq!(label("/_gio/fonts/a.woff2").await.as_deref(), Some("static"));
+    }
+
+    #[tokio::test]
+    async fn known_size_bodies_keep_their_content_length_through_compression() {
+        async fn page(req: Request<Body>) -> Response {
+            let len: usize = req.uri().query().unwrap().parse().unwrap();
+            ([(header::CONTENT_TYPE, "text/html")], "x".repeat(len)).into_response()
+        }
+        async fn streamed() -> Response {
+            Body::from_stream(tokio_stream::iter([Ok::<_, Infallible>(Bytes::from("x"))]))
+                .into_response()
+        }
+        async fn empty() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+        let app = Router::new()
+            .route("/page", get(page))
+            .route("/stream", get(streamed))
+            .route("/empty", get(empty))
+            .layer(axum::middleware::from_fn(exact_length_middleware))
+            .layer(compression_layer(config::CompressionConfig::default()));
+        let call = |method: &'static str, uri: &'static str| {
+            let mut app = app.clone();
+            async move {
+                app.call(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::ACCEPT_ENCODING, "gzip")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let length = |resp: &Response| {
+            resp.headers()
+                .get(header::CONTENT_LENGTH)
+                .map(|value| value.to_str().unwrap().to_string())
+        };
+        // Below the compression threshold: sent as is, with its size.
+        let small = call("GET", "/page?100").await;
+        assert_eq!(small.headers().get(header::CONTENT_ENCODING), None);
+        assert_eq!(length(&small).as_deref(), Some("100"));
+        // Compressed: the length is unknown until the encoder is done.
+        let large = call("GET", "/page?4096").await;
+        assert_eq!(large.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(length(&large), None);
+        assert_eq!(length(&call("GET", "/stream").await), None);
+        assert_eq!(length(&call("GET", "/empty").await), None);
+        assert_eq!(length(&call("HEAD", "/page?100").await), None);
     }
 }

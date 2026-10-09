@@ -7,15 +7,18 @@
     "dev": "tsx ../packages/giojs-core/src/index.ts",
     "export": "node build.mjs",
     "deploy": "node build.mjs && npx wrangler pages deploy out --project-name=giojs --branch=main --commit-dirty=true",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check-links": "node scripts/check-links.mjs",
+    "test": "node --test scripts/*.test.mjs"
   },
   "dependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@types/react": "^19.0.0",
     "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.3.0",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0"
   }

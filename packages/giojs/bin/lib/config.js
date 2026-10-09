@@ -1,0 +1,541 @@
+'use strict';
+/**
+ * giojs/bin/lib/config.js
+ *
+ * What the server will do with this project's configuration, asked of the
+ * server itself: `giojs-server --check-config` loads the .env files and
+ * gio.toml exactly as startup does and prints a JSON report (listen address,
+ * validation errors, guard and proxy settings). The CLI never re-implements
+ * the strict gio.toml rules.
+ *
+ * Fallback for when no binary that understands the flag is at hand (none
+ * installed, or a different version): a lenient reader for the few keys the
+ * CLI needs - [server] host/port/trusted_proxies, [server.tls] enabled,
+ * [cache] disk_path, require_session guards, rate limit count - plus the
+ * PORT / GIO_PORT / GIO_HOST variables from the environment and the .env
+ * files. It validates nothing.
+ */
+const { spawnSync } = require('child_process');
+const { existsSync, readFileSync } = require('fs');
+const { isIP } = require('net');
+const { networkInterfaces } = require('os');
+const { join, resolve } = require('path');
+
+const CHECK_CONFIG_FLAG = '--check-config';
+// Startup reads a few small files; anything slower is not answering the flag.
+const CHECK_CONFIG_TIMEOUT_MS = 15_000;
+
+/**
+ * Run `binary --check-config` with `env`. Returns the parsed report, or null
+ * when the binary does not support the flag. A binary from before the flag
+ * would ignore it and start a server: stdin is an already-closed pipe and
+ * GIO_EXIT_ON_STDIN_EOF=1 makes such a server shut down at once, and the
+ * timeout bounds the rest.
+ */
+function checkConfig(binary, env, cwd = process.cwd()) {
+  const result = spawnSync(binary, [CHECK_CONFIG_FLAG], {
+    cwd,
+    env: { ...env, GIO_EXIT_ON_STDIN_EOF: '1' },
+    input: '',
+    encoding: 'utf8',
+    timeout: CHECK_CONFIG_TIMEOUT_MS,
+    windowsHide: true,
+  });
+  if (result.error || typeof result.stdout !== 'string') return null;
+  const lines = result.stdout.trim().split(/\r?\n/);
+  try {
+    const report = JSON.parse(lines[lines.length - 1]);
+    return report && typeof report.ok === 'boolean' ? report : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// ── lenient gio.toml reader ────────────────────────────────────────────────
+
+function stripComment(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"') i++;
+      else if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '#') {
+      return line.slice(0, i);
+    }
+  }
+  return line;
+}
+
+function parseScalar(raw) {
+  const value = raw.trim();
+  if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
+    return value.slice(1, -1).replace(/\\(["\\])/g, '$1');
+  }
+  if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) return value.slice(1, -1);
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (/^[+-]?\d[\d_]*$/.test(value)) return Number(value.replace(/_/g, ''));
+  return value;
+}
+
+function parseValue(raw) {
+  const value = raw.trim();
+  if (value.startsWith('[') && value.endsWith(']')) {
+    const inner = value.slice(1, -1);
+    const items = [];
+    let current = '';
+    let quote = null;
+    for (const ch of inner) {
+      if (quote) {
+        if (ch === quote) quote = null;
+        current += ch;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+        current += ch;
+      } else if (ch === ',') {
+        if (current.trim()) items.push(parseScalar(current));
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    if (current.trim()) items.push(parseScalar(current));
+    return items;
+  }
+  return parseScalar(value);
+}
+
+/**
+ * A TOML key - `files`, `env.files`, `headers."x-frame-options"`,
+ * `'a b'.c` - as its list of names, or null when it is not one.
+ */
+function parseKeyPath(text) {
+  const keys = [];
+  let rest = String(text).trim();
+  for (;;) {
+    const match = /^(?:([A-Za-z0-9_-]+)|"((?:[^"\\]|\\.)*)"|'([^']*)')\s*/.exec(rest);
+    if (!match) return null;
+    if (match[1] !== undefined) keys.push(match[1]);
+    else if (match[2] !== undefined) keys.push(match[2].replace(/\\(["\\])/g, '$1'));
+    else keys.push(match[3]);
+    rest = rest.slice(match[0].length);
+    if (rest === '') return keys;
+    if (rest[0] !== '.') return null;
+    rest = rest.slice(1).trimStart();
+  }
+}
+
+/** Index of the first `=` outside quotes in `text`, or -1. */
+function assignmentEquals(text) {
+  let quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"') i++;
+      else if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '=') {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** `text` split at the commas outside quotes, brackets and braces. */
+function splitTopLevel(text) {
+  const parts = [];
+  let depth = 0;
+  let quote = null;
+  let current = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"') {
+        current += ch + (text[i + 1] || '');
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '[' || ch === '{') {
+      depth++;
+    } else if (ch === ']' || ch === '}') {
+      depth--;
+    } else if (ch === ',' && depth === 0) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
+}
+
+/**
+ * Set `value` at `keys` under `table`, creating the tables between. False
+ * when a name on the way already holds something other than a table.
+ */
+function setKeyPath(table, keys, value) {
+  let node = table;
+  for (const key of keys.slice(0, -1)) {
+    if (node[key] === undefined) node[key] = {};
+    else if (typeof node[key] !== 'object' || node[key] === null || Array.isArray(node[key])) return false;
+    node = node[key];
+  }
+  node[keys[keys.length - 1]] = value;
+  return true;
+}
+
+/** `{ a = 1, b.c = "x", d = { e = true } }` as an object, or null. */
+function parseInlineTable(text) {
+  const value = text.trim();
+  if (!value.startsWith('{') || !value.endsWith('}')) return null;
+  const table = {};
+  const inner = value.slice(1, -1);
+  if (inner.trim() === '') return table;
+  for (const part of splitTopLevel(inner)) {
+    const equals = assignmentEquals(part);
+    if (equals < 0) return null;
+    const keys = parseKeyPath(part.slice(0, equals));
+    const raw = part.slice(equals + 1).trim();
+    if (keys === null || raw === '') return null;
+    const item = raw.startsWith('{') ? parseInlineTable(raw) : parseValue(raw);
+    if (item === null || !setKeyPath(table, keys, item)) return null;
+  }
+  return table;
+}
+
+/**
+ * Tables, arrays of tables, and `key = value` with strings, integers,
+ * booleans, (possibly multi-line) arrays of those and inline tables. Keys
+ * and table names may be dotted or quoted (`env.files = false` sets what
+ * `[env] files = false` does). Multi-line strings are skipped. Never throws:
+ * a line it cannot read is ignored, and described in `problems` (when
+ * given) as `gio.toml:<line>: <reason>` - never quoting the line, which may
+ * hold a token - so a caller can tell a file it read from one whose
+ * settings it may have missed.
+ */
+function parseTomlLite(text, problems = null) {
+  const root = {};
+  let table = root;
+  const lines = String(text).split(/\r?\n/);
+  const problem = (index, reason) => {
+    if (problems) problems.push(`gio.toml:${index + 1}: ${reason}`);
+  };
+  for (let i = 0; i < lines.length; i++) {
+    let line = stripComment(lines[i]).trim();
+    if (!line) continue;
+    const arrayTable = /^\[\[(.+)\]\]$/.exec(line);
+    const plainTable = !arrayTable && /^\[([^[].*)\]$/.exec(line);
+    const tablePath = arrayTable || plainTable ? parseKeyPath((arrayTable || plainTable)[1]) : null;
+    if (tablePath === null && line.startsWith('[')) {
+      // `[server` is not TOML at all: its keys go nowhere.
+      problem(i, 'not a table header');
+      table = {};
+      continue;
+    }
+    if (tablePath !== null) {
+      const path = tablePath;
+      let node = root;
+      for (const key of path.slice(0, -1)) {
+        if (Array.isArray(node[key])) node = node[key][node[key].length - 1];
+        else node = node[key] = typeof node[key] === 'object' && node[key] ? node[key] : {};
+      }
+      const last = path[path.length - 1];
+      if (arrayTable) {
+        if (!Array.isArray(node[last])) node[last] = [];
+        table = {};
+        node[last].push(table);
+      } else {
+        table = node[last] = typeof node[last] === 'object' && node[last] ? node[last] : {};
+      }
+      continue;
+    }
+    const equals = assignmentEquals(line);
+    const keys = equals < 0 ? null : parseKeyPath(line.slice(0, equals));
+    if (keys === null) {
+      problem(i, 'not a `key = value` line or a table header');
+      continue;
+    }
+    const start = i;
+    let raw = line.slice(equals + 1).trim();
+    if (raw.trim() === '') {
+      problem(i, 'a key without a value');
+      continue;
+    }
+    // A multi-line string runs until its closing delimiter.
+    const multiline = /^("""|''')/.exec(raw.trim());
+    if (multiline) {
+      let rest = raw.trim().slice(3);
+      while (!rest.includes(multiline[1]) && i + 1 < lines.length) rest = lines[++i];
+      if (!rest.includes(multiline[1])) problem(start, 'a multi-line string that never ends');
+      continue;
+    }
+    // A multi-line array runs until its brackets balance.
+    if (raw.trim().startsWith('[')) {
+      while (bracketDepth(raw) > 0 && i + 1 < lines.length) {
+        raw += ' ' + stripComment(lines[++i]).trim();
+      }
+      if (bracketDepth(raw) > 0) {
+        problem(start, 'an array that never closes');
+        continue;
+      }
+    }
+    if (/^("[^"]*|'[^']*)$/.test(stripComment(raw).trim())) {
+      problem(start, 'a string that never ends');
+      continue;
+    }
+    const value = raw.trim().startsWith('{') ? parseInlineTable(raw) : parseValue(raw);
+    if (value === null) {
+      problem(start, 'an inline table this reader cannot follow');
+      continue;
+    }
+    if (!setKeyPath(table, keys, value)) problem(start, 'a key under a name that is not a table');
+  }
+  return root;
+}
+
+function bracketDepth(text) {
+  let depth = 0;
+  let quote = null;
+  for (const ch of text) {
+    if (quote) {
+      if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '[') depth++;
+    else if (ch === ']') depth--;
+  }
+  return depth;
+}
+
+// ── .env files (the listen variables only) ─────────────────────────────────
+
+/** Same candidates and precedence as the server: first definition wins. */
+function envFileCandidates(mode) {
+  return [`.env.${mode}.local`, '.env.local', `.env.${mode}`, '.env'];
+}
+
+/**
+ * What turns the server's .env loading off: GIO_ENV_FILES (`0` / `false`
+ * off, `1` / `true` on) over gio.toml's `[env] files`. Null when it loads.
+ * Any other GIO_ENV_FILES value throws the error the server refuses to
+ * start with.
+ */
+function envFilesDisabledBy(env, toml) {
+  const value = String(env.GIO_ENV_FILES || '').trim();
+  if (value === '0' || value === 'false') return 'GIO_ENV_FILES';
+  if (value === '1' || value === 'true') return null;
+  if (value !== '') {
+    throw new Error(`cannot load the .env files: GIO_ENV_FILES=${JSON.stringify(value)} must be 0 (skip them) or 1 (load them)`);
+  }
+  return toml.env && toml.env.files === false ? '[env] files' : null;
+}
+
+/**
+ * The values `names` take after the server's .env loading, never overriding
+ * `env` - just `env`'s own when `loadFiles` is false.
+ */
+function envWithFiles(env, projectRoot, mode, names, loadFiles = true) {
+  const merged = {};
+  for (const name of names) if (env[name] !== undefined) merged[name] = env[name];
+  for (const file of loadFiles ? envFileCandidates(mode) : []) {
+    let text;
+    try {
+      text = readFileSync(join(projectRoot, file), 'utf8');
+    } catch (_) {
+      continue;
+    }
+    for (const line of text.split(/\r?\n/)) {
+      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+      if (!match || !names.includes(match[1]) || merged[match[1]] !== undefined) continue;
+      const quoted = /^(["'])(.*?)\1/.exec(match[2]);
+      merged[match[1]] = quoted ? quoted[2] : match[2].replace(/\s+#.*$/, '');
+    }
+  }
+  return merged;
+}
+
+const LISTEN_VARS = ['GIO_HOST', 'GIO_PORT', 'PORT', 'GIO_SESSION_SECRET'];
+
+/**
+ * A report shaped like --check-config's, from the lenient reader, marked
+ * `fallback`: nothing in gio.toml was validated, so `ok` is true - unless
+ * GIO_ENV_FILES is invalid, which the server refuses before it reads
+ * anything else. That report, like the server's, holds only the error. A
+ * gio.toml the reader cannot read (or open) leaves out every setting too,
+ * and lists why under `configProblems`.
+ */
+function fallbackReport(env, projectRoot) {
+  const mode = env.NODE_ENV === 'development' ? 'development' : 'production';
+  const configFile = join(projectRoot, 'gio.toml');
+  let toml = {};
+  let configText = null;
+  const problems = [];
+  if (existsSync(configFile)) {
+    try {
+      configText = readFileSync(configFile, 'utf8');
+      toml = parseTomlLite(configText, problems);
+    } catch (err) {
+      configText = '';
+      problems.push(`gio.toml: cannot be read (${err.code || err.message})`);
+    }
+  }
+  const server = toml.server || {};
+  let envFilesOff;
+  try {
+    envFilesOff = envFilesDisabledBy(env, toml);
+  } catch (err) {
+    return {
+      ok: false,
+      fallback: true,
+      errors: [err.message],
+      warnings: [],
+      configFile: configText === null ? null : configFile,
+    };
+  }
+  const base = {
+    ok: true,
+    fallback: true,
+    errors: [],
+    warnings: [],
+    mode,
+    envFilesDisabledBy: envFilesOff,
+    configFile: configText === null ? null : configFile,
+  };
+  // Lines the reader could not read may hold any of the settings below: the
+  // report leaves them all out, as the server's does for a file it cannot
+  // parse, so no check passes on a default the file may override.
+  if (problems.length > 0) return { ...base, configProblems: problems };
+  const vars = envWithFiles(env, projectRoot, mode, LISTEN_VARS, envFilesOff === null);
+  let port =Number.isInteger(server.port) ? server.port : 3000;
+  let portSource = Number.isInteger(server.port) ? 'gio.toml' : 'default';
+  for (const name of ['GIO_PORT', 'PORT']) {
+    if (vars[name] && /^\d+$/.test(vars[name])) {
+      port = Number(vars[name]);
+      portSource = name;
+      break;
+    }
+  }
+  const host = vars.GIO_HOST || (typeof server.host === 'string' ? server.host : '0.0.0.0');
+  const guards = Array.isArray(toml.guards) ? toml.guards : [];
+  const secret = vars.GIO_SESSION_SECRET || '';
+  const secrets = secret.split(',').map((s) => s.trim()).filter(Boolean);
+  const cachePath = toml.cache && typeof toml.cache.disk_path === 'string'
+    ? toml.cache.disk_path
+    : '.gio/cache/pages';
+  return {
+    ...base,
+    listen:{ host, port, portSource, tls: Boolean(server.tls && server.tls.enabled) },
+    trustedProxies: Array.isArray(server.trusted_proxies) ? server.trusted_proxies.length : 0,
+    proxyHeaders: typeof server.proxy_headers === 'string' ? server.proxy_headers : 'x-forwarded',
+    rateLimitRules: Array.isArray(toml.rate_limits) ? toml.rate_limits.length : 0,
+    sessionGuards: guards.filter((g) => g.require_session === true || g.requireSession === true).length,
+    sessionSecret: secrets.length === 0 ? 'unset' : secrets.every((s) => s.length >= 32) ? 'valid' : 'invalid',
+    cacheDir: env.GIO_CACHE_DIR ? resolve(env.GIO_CACHE_DIR) : join(projectRoot, cachePath),
+  };
+}
+
+/**
+ * The server's view of the configuration under `env`: --check-config when
+ * `binary` (a locateBinary result) can answer it, else the fallback.
+ * `cliVersion` gates the flag on installed packages: one of another version
+ * may predate it.
+ */
+function resolveConfig({ binary, env, projectRoot, cliVersion }) {
+  const canAsk = binary && binary.found &&
+    (binary.source !== 'package' || binary.version === cliVersion);
+  if (canAsk) {
+    const report = checkConfig(binary.path, env);
+    if (report) return report;
+  }
+  return fallbackReport(env, projectRoot);
+}
+
+// ── URLs ─────────────────────────────────────────────────────────────────
+
+// The server writes IPv6 listen hosts in brackets (`[::1]`, as in a URL);
+// Node's net and the checks below want the bare address.
+
+/** `[::1]` -> `::1`; any other host unchanged. */
+function bareHost(host) {
+  const match = /^\[(.*)\]$/.exec(String(host));
+  return match ? match[1] : String(host);
+}
+
+function hostForUrl(host) {
+  const bare = bareHost(host);
+  return isIP(bare) === 6 ? `[${bare}]` : bare;
+}
+
+/** `host:port` for messages, IPv6 bracketed. */
+function displayAddress(host, port) {
+  return `${hostForUrl(host)}:${port}`;
+}
+
+function isWildcard(host) {
+  const bare = bareHost(host);
+  return bare === '0.0.0.0' || bare === '::' || bare === '';
+}
+
+/** Where to connect (bare address) to reach a server bound to `host` from this machine. */
+function connectHost(host) {
+  const bare = bareHost(host);
+  if (bare === '0.0.0.0' || bare === '') return '127.0.0.1';
+  if (bare === '::') return '::1';
+  return bare;
+}
+
+/** The base URL this machine reaches the server on. */
+function connectBaseUrl(listen) {
+  const scheme = listen.tls ? 'https' : 'http';
+  return `${scheme}://${hostForUrl(connectHost(listen.host))}:${listen.port}`;
+}
+
+function isLoopback(host) {
+  const bare = bareHost(host);
+  return bare === '::1' || /^127\./.test(bare);
+}
+
+/**
+ * The URLs to print: `local` for this machine, `network` for other devices
+ * (empty when the server only listens on loopback).
+ */
+function serverUrls(listen, interfaces = networkInterfaces()) {
+  const scheme = listen.tls ? 'https' : 'http';
+  const url = (host) => `${scheme}://${hostForUrl(host)}:${listen.port}`;
+  if (!isWildcard(listen.host)) {
+    return {
+      local: url(isLoopback(listen.host) ? 'localhost' : listen.host),
+      network: isLoopback(listen.host) ? [] : [url(listen.host)],
+    };
+  }
+  const network = [];
+  for (const addresses of Object.values(interfaces)) {
+    for (const address of addresses || []) {
+      const v4 = address.family === 'IPv4' || address.family === 4;
+      if (!address.internal && v4) network.push(url(address.address));
+    }
+  }
+  return { local: url('localhost'), network };
+}
+
+module.exports = {
+  CHECK_CONFIG_FLAG,
+  checkConfig,
+  parseTomlLite,
+  envWithFiles,
+  envFilesDisabledBy,
+  fallbackReport,
+  resolveConfig,
+  bareHost,
+  displayAddress,
+  connectHost,
+  connectBaseUrl,
+  serverUrls,
+};

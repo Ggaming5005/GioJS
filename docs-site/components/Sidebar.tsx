@@ -1,92 +1,48 @@
 /**
  * docs-site/components/Sidebar.tsx
  *
- * Grouped sidebar navigation. Receives the current path so the active link is
- * marked server-side with aria-current="page". Plain anchors keep it robust
- * (full-page nav) - no client runtime needed for docs.
+ * The docs sidebar, rendered from the nav data (components/nav/): the four
+ * top-level sections, each with its collapsible groups. Groups are
+ * <details> elements, so they open and close without JavaScript; the one
+ * holding the current page renders open, and its link is marked
+ * aria-current="page" server-side. Plain anchors (full-page navigation).
+ * Once hydrated, the active link is scrolled into view inside the sidebar.
  */
-import React from 'react';
-
-interface NavItem {
-  href: string;
-  label: string;
-}
-interface NavGroup {
-  title: string;
-  items: NavItem[];
-}
-
-export const NAV_GROUPS: NavGroup[] = [
-  {
-    title: 'Getting Started',
-    items: [
-      { href: '/docs/getting-started', label: 'Introduction' },
-      { href: '/docs/installation', label: 'Installation' },
-      { href: '/docs/project-structure', label: 'Project Structure' },
-    ],
-  },
-  {
-    title: 'Building Your App',
-    items: [
-      { href: '/docs/layouts-and-pages', label: 'Layouts & Pages' },
-      { href: '/docs/linking-and-navigating', label: 'Linking & Navigating' },
-      { href: '/docs/fetching-data', label: 'Fetching Data' },
-      { href: '/docs/caching', label: 'Caching & Revalidating' },
-      { href: '/docs/error-handling', label: 'Error Handling' },
-      { href: '/docs/css', label: 'CSS & Styling' },
-      { href: '/docs/image-optimization', label: 'Image Optimization' },
-      { href: '/docs/font-optimization', label: 'Font Optimization' },
-      { href: '/docs/route-handlers', label: 'Route Handlers' },
-      { href: '/docs/middleware', label: 'Middleware' },
-      { href: '/docs/websockets', label: 'WebSockets' },
-      { href: '/docs/i18n', label: 'Internationalization' },
-    ],
-  },
-  {
-    title: 'Architecture',
-    items: [
-      { href: '/docs/architecture', label: 'How GioJS Works' },
-      { href: '/docs/boundary', label: 'The Rust ⇄ Node Boundary' },
-      { href: '/docs/caching-layers', label: 'Caching Layers' },
-    ],
-  },
-  {
-    title: 'API Reference',
-    items: [
-      { href: '/docs/configuration', label: 'gio.toml Configuration' },
-      { href: '/docs/cli', label: 'CLI' },
-      { href: '/docs/components', label: 'Components' },
-      { href: '/docs/functions', label: 'Functions' },
-      { href: '/docs/file-conventions', label: 'File Conventions' },
-    ],
-  },
-  {
-    title: 'Deployment',
-    items: [
-      { href: '/docs/deployment', label: 'Deploying' },
-      { href: '/docs/standalone', label: 'Standalone Deploys' },
-      { href: '/docs/static-export', label: 'Static Export' },
-      { href: '/docs/adapters', label: 'Adapters' },
-      { href: '/docs/observability', label: 'Observability' },
-    ],
-  },
-  {
-    title: 'Resources',
-    items: [
-      { href: '/docs/migration', label: 'Migrating from Next.js' },
-      { href: '/docs/benchmarks', label: 'Benchmarks' },
-      { href: '/docs/examples', label: 'Examples' },
-      { href: '/docs/known-issues', label: 'Known Issues' },
-      { href: '/docs/contributing', label: 'Contributing' },
-    ],
-  },
-];
+import React, { useEffect } from 'react';
+import { NAV, type NavItem } from './nav/index.ts';
 
 interface SidebarProps {
   currentPath: string;
 }
 
+function NavLink({ item, currentPath }: { item: NavItem; currentPath: string }): React.JSX.Element {
+  return (
+    <li>
+      <a
+        href={item.href}
+        className="sidebar-link"
+        aria-current={currentPath === item.href ? 'page' : undefined}
+      >
+        {item.label}
+      </a>
+    </li>
+  );
+}
+
 export function Sidebar({ currentPath }: SidebarProps): React.JSX.Element {
+  useEffect(() => {
+    // Bring the current page's link into view within the sidebar's own
+    // scroll box - never scroll the page itself.
+    const sidebar = document.getElementById('sidebar');
+    const active = sidebar?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!sidebar || !active) return;
+    const box = sidebar.getBoundingClientRect();
+    const link = active.getBoundingClientRect();
+    if (link.top < box.top || link.bottom > box.bottom) {
+      sidebar.scrollTop += link.top - box.top - box.height / 3;
+    }
+  }, [currentPath]);
+
   return (
     <aside className="sidebar" id="sidebar">
       {/* Shown only in the mobile drawer (hidden on desktop via CSS). */}
@@ -94,19 +50,24 @@ export function Sidebar({ currentPath }: SidebarProps): React.JSX.Element {
         <span className="sidebar-drawer-title">Documentation</span>
       </div>
       <nav className="sidebar-nav" aria-label="Documentation">
-        {NAV_GROUPS.map(group => (
-          <div className="sidebar-group" key={group.title}>
-            <div className="sidebar-group-title">{group.title}</div>
-            {group.items.map(item => (
-              <a
-                key={item.href}
-                href={item.href}
-                className="sidebar-link"
-                aria-current={currentPath === item.href ? 'page' : undefined}
-              >
-                {item.label}
-              </a>
-            ))}
+        {NAV.map((section) => (
+          <div className="sidebar-section" key={section.title}>
+            <div className="sidebar-section-title">{section.title}</div>
+            {section.groups.map((group, i) => {
+              const links = (
+                <ul className="sidebar-list">
+                  {group.items.map((item) => <NavLink key={item.href} item={item} currentPath={currentPath} />)}
+                </ul>
+              );
+              if (group.title === undefined) return <React.Fragment key={i}>{links}</React.Fragment>;
+              const active = group.items.some((item) => item.href === currentPath);
+              return (
+                <details className="sidebar-group" key={group.title} open={active}>
+                  <summary className="sidebar-group-title">{group.title}</summary>
+                  {links}
+                </details>
+              );
+            })}
           </div>
         ))}
         {/* Drawer footer — surfaces the links dropped from the mobile header. */}

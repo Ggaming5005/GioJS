@@ -1,5 +1,14 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Benchmarks',
+  description:
+    'GioJS keeps memory flat under sustained load because Rust owns the HTTP layer - cache ' +
+    'hits never allocate in Node. Self-hosted Next.js allocates in the Node event loop for ' +
+    'every request, including cache hits.',
+};
 
 export const revalidate = false;
 
@@ -13,7 +22,7 @@ export default function BenchmarksPage(): React.JSX.Element {
         loop for every request, including cache hits.
       </p>
 
-      <h2>Memory stability - GioJS vs Next.js 15</h2>
+      <h2 id="memory-stability-giojs-vs-nextjs-15">Memory stability - GioJS vs Next.js 15</h2>
       <p>
         <em>
           The table below shows illustrative, projected figures - not measurements. It
@@ -46,7 +55,7 @@ export default function BenchmarksPage(): React.JSX.Element {
         the table the harness populates with measured results.
       </p>
 
-      <h2>Why GioJS stays flat</h2>
+      <h2 id="why-giojs-stays-flat">Why GioJS stays flat</h2>
       <p>
         In self-hosted Next.js, the Node.js HTTP layer allocates a new buffer for every
         incoming request - even when the response is a cache hit. Under 50 req/s, GC
@@ -58,7 +67,7 @@ export default function BenchmarksPage(): React.JSX.Element {
         Only cache misses cross the IPC boundary to Node for rendering.
       </p>
 
-      <h2>Throughput</h2>
+      <h2 id="throughput">Throughput</h2>
       <p>
         Cache-hit throughput (static pages) is bounded by Rust I/O, not Node. The figures
         sometimes quoted for this class of architecture (tens of thousands of cached
@@ -70,9 +79,9 @@ export default function BenchmarksPage(): React.JSX.Element {
         render time.
       </p>
 
-      <h2>Load testing with gio bench</h2>
+      <h2 id="load-testing-with-gio-bench">Load testing with gio bench</h2>
       <p>
-        <code>gio bench</code> ships with <code>@gio.js/server</code>: a zero-dependency
+        <a href="/docs/cli/bench"><code>gio bench</code></a> ships with <code>@gio.js/server</code>: a zero-dependency
         HTTP load generator (plain <code>node:http</code>, keep-alive connections). It
         opens N concurrent connection loops for a fixed duration and reports requests/s,
         latency p50/p90/p99/max (nearest-rank, no sampling), non-200 count, errors, and
@@ -95,7 +104,7 @@ gio bench --suite /,/posts/1 --base http://localhost:3000`} />
         and why localhost microbenchmarks must not be read as user-facing speedups.
       </p>
 
-      <h2>Running benchmarks yourself</h2>
+      <h2 id="running-benchmarks-yourself">Running benchmarks yourself</h2>
       <p>
         The benchmark infrastructure lives in <code>benchmarks/memory-stability/</code>:
       </p>

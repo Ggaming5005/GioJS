@@ -1,12 +1,20 @@
 import React from 'react';
+import type { Metadata } from '@gio.js/core';
 import { CodeBlock } from '../../../components/CodeBlock.tsx';
+
+export const metadata: Metadata = {
+  title: 'Standalone Deploys',
+  description:
+    'One folder, one command. Build a self-contained deploy directory, copy it to any server ' +
+    'that has Node installed, and run node run.mjs. No node_modules, no npm install, no ' +
+    'toolchain on the host.',
+};
 
 export const revalidate = false;
 
 export default function Page(): React.JSX.Element {
   return (
     <>
-      <div className="docs-eyebrow">Deployment</div>
       <h1>Standalone Deploys</h1>
       <p className="page-subtitle">
         One folder, one command. Build a self-contained deploy directory, copy it to any
@@ -23,7 +31,7 @@ export default function Page(): React.JSX.Element {
         their work during the build and are never loaded at runtime.
       </p>
 
-      <h2>Build</h2>
+      <h2 id="build">Build</h2>
       <CodeBlock lang="bash" code={`gio build standalone [--out <dir>] [--target <platform>]
 
   --out <dir>         output directory (default: ./standalone)
@@ -34,24 +42,34 @@ export default function Page(): React.JSX.Element {
         mode.)
       </p>
 
-      <h2>What you get</h2>
+      <h2 id="what-you-get">What you get</h2>
       <CodeBlock lang="text" code={`standalone/
   server(.exe)     the Rust HTTP server binary for the target platform
   worker.js        the entire Node side bundled to one file (React included)
   run.mjs          launcher: spawns the server wired to worker.js and static/
-  static/          prebuilt hydration chunks
+  static/          prebuilt hydration chunks and route stylesheets
   public/          your public assets (if any)
   gio.toml         your server config (if any)
   .gio/            manifest (deployment ID input) and generated route types`} />
       <p>
         <code>worker.js</code> is generated from your discovered app modules - every page,
-        layout, <code>route.ts</code> handler, <code>gio.config</code>, and{' '}
-        <code>middleware</code> file is statically imported and bundled, so boot performs no
-        filesystem discovery and no TypeScript transform. The hydration chunks in{' '}
-        <code>static/</code> are built ahead of time too.
+        layout, <a href="/docs/file-conventions/route"><code>route.ts</code></a> handler, <code>gio.config</code>, and{' '}
+        <code>middleware</code> file is bundled, so boot performs no filesystem discovery and
+        no TypeScript transform. Modules are evaluated when <code>gio</code> evaluates them
+        from source: <code>gio.config</code>, <code>middleware</code> and{' '}
+        <code>route.ts</code> files at startup, pages and layouts on first use. A module that
+        throws while it is imported (a missing <code>GIO_SESSION_SECRET</code>, a required
+        variable check) makes the URLs that import it answer 500, with the file and the error
+        in the log - the server still starts. The hydration chunks in{' '}
+        <code>static/</code> are built ahead of time too, and so are the route stylesheets:{' '}
+        <a href="/docs/css">CSS imports and CSS Modules</a> work exactly as with{' '}
+        <code>gio</code>, with each CSS Module&apos;s class names compiled into{' '}
+        <code>worker.js</code>. The build minifies them unless the project&apos;s{' '}
+        <code>gio.toml</code> says <a href="/docs/configuration/css"><code>[css] minify = false</code></a>; changing that key in the
+        deployed <code>gio.toml</code> needs a rebuild.
       </p>
 
-      <h2>Deploy</h2>
+      <h2 id="deploy">Deploy</h2>
       <p>
         Copy the folder to any server with Node 20+ installed, then:
       </p>
@@ -60,15 +78,40 @@ export default function Page(): React.JSX.Element {
         <code>run.mjs</code> spawns the server binary with the environment wired up
         (<code>NODE_ENV=production</code> by default, worker and static paths pointed into
         the folder), forwards <code>SIGINT</code>/<code>SIGTERM</code> for clean shutdown,
-        and passes any extra arguments through to the server.
+        and passes any extra arguments through to the server (which takes only{' '}
+        <code>--check-config</code>; any other argument exits with <code>2</code>). If <code>run.mjs</code>{' '}
+        itself is killed outright (<code>SIGKILL</code>, the OOM killer), the server still
+        shuts down instead of lingering on the port: it is started with a stdin pipe the
+        launcher holds open, and exits gracefully when that pipe closes (see{' '}
+        <a href="/docs/deployment">process supervision</a>).
       </p>
-      <p>As a systemd service, the whole unit is one line of ExecStart:</p>
+      <h2 id="environment-variables">Environment variables</h2>
+      <p>
+        The build loads the project's production <code>.env</code> files, and{' '}
+        <code>GIO_PUBLIC_*</code> values are frozen into the hydration chunks and{' '}
+        <code>worker.js</code> at build time - changing one needs a rebuild. Nothing else is
+        baked in and no <code>.env</code> file is copied into the output: server-side
+        variables are read at runtime from the environment, or from <code>.env</code> files
+        you place inside the deploy folder (the server loads them at startup with the usual{' '}
+        <a href="/docs/configuration">precedence</a>; real environment variables win).
+      </p>
+      <p>
+        As a systemd service, the unit needs <code>ExecStart</code> plus a stop policy:
+        systemd&apos;s default sends <code>SIGTERM</code> to every process at once, which
+        stops the workers in the middle of requests the server is still draining.{' '}
+        <code>KillMode=mixed</code> signals only the launcher (the server then drains and
+        stops its workers itself); the full unit is in{' '}
+        <a href="/docs/guides/deploying#vps">Deploying</a>.
+      </p>
       <CodeBlock lang="ini" code={`[Service]
 ExecStart=node /srv/app/run.mjs
 Restart=always
-Environment=NODE_ENV=production`} />
+Environment=NODE_ENV=production
+# SIGTERM to the launcher only: the server drains requests, then stops its workers.
+KillMode=mixed
+TimeoutStopSec=30`} />
 
-      <h2>Cross-building for another platform</h2>
+      <h2 id="cross-building-for-another-platform">Cross-building for another platform</h2>
       <p>
         By default the build packages the server binary for the machine you build on. To
         build on one platform and deploy to another (say, build on Windows or macOS, deploy
@@ -82,15 +125,16 @@ gio build standalone --target linux-x64`} />
         platform package must be installed - if it isn't, the build fails with the exact{' '}
         <code>npm i</code> command to run.
       </p>
+      <p>
+        <code>@gio.js/server-linux-arm64</code> is not published yet. For an arm64 Linux host,
+        build the server from a checkout of the repository (
+        <code>cargo build --release -p giojs-server</code>, on the target platform or with a
+        cross toolchain) and point the build at it - <code>GIO_STANDALONE_SERVER_BIN</code>{' '}
+        takes precedence over <code>--target</code>:
+      </p>
+      <CodeBlock lang="bash" code={`GIO_STANDALONE_SERVER_BIN=/path/to/giojs-server gio build standalone`} />
 
-      <h2>Limitations</h2>
-      <div className="callout">
-        App-level <code>.css</code> imports (<code>import './styles.css'</code> from a page or
-        layout) are not carried into the standalone bundle in this version. Serve stylesheets
-        from <code>public/</code> and link them from a layout instead.
-      </div>
-
-      <h2>When to prefer a normal deploy</h2>
+      <h2 id="when-to-prefer-a-normal-deploy">When to prefer a normal deploy</h2>
       <p>
         A standalone folder is frozen at build time: framework fixes only reach it when you
         rebuild and re-copy. A normal deploy (<code>npm install</code> on the host, run{' '}

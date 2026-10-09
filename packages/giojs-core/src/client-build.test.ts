@@ -4,14 +4,32 @@
  * Integration tests for the client bundle pipeline: builds a real fixture app
  * with esbuild and asserts the manifest, hashed output, hydration wiring, and
  * - critically - that getServerSideProps and its server-only imports (secrets,
- * node builtins) never reach the client bundle.
+ * node builtins, npm SDKs) never reach the client bundle in any export form,
+ * that the server-only guard rejects bundles that would ship server code, and
+ * that only GIO_PUBLIC_* variables are inlined.
  */
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildClientBundles, demoteServerExports, type ClientManifest } from './client-build.ts';
+import { build, type Plugin } from 'esbuild';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { clientBuildHash } from './build-manifest.ts';
+import {
+  bareImportSpecifiers,
+  boundImportSpecifiers,
+  buildClientBundles,
+  clientBuildErrorFor,
+  clientEnvDefines,
+  computedImportDirs,
+  gioServerCodePlugin,
+  isProjectSource,
+  type ClientManifest,
+} from './client-build.ts';
+import { logger } from './logger.ts';
+import { emptyStyleManifest } from './style-manifest.ts';
+import { discoverLayouts, discoverRoutes } from './router.ts';
 import type { RouteModule, LayoutEntry, PageModule, LayoutModule } from './router.ts';
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -41,18 +59,19 @@ export function readSecret(): string {
 }
 `;
 
-function routeFor(pattern: string, filePath: string): RouteModule {
+function routeFor(pattern: string, filePath: string, dir = pattern.slice(1)): RouteModule {
   return {
     filePath,
     urlPattern: pattern,
+    dir,
     load: (): Promise<PageModule> => Promise.reject(new Error('not loaded in build test')),
   };
 }
 
-function layoutFor(urlPrefix: string, filePath: string): LayoutEntry {
+function layoutFor(dir: string, filePath: string): LayoutEntry {
   return {
     filePath,
-    urlPrefix,
+    dir,
     load: (): Promise<LayoutModule> => Promise.reject(new Error('not loaded in build test')),
   };
 }
@@ -89,7 +108,7 @@ export default function DocsLayout({ children }: { children: React.ReactNode }) 
       ['/docs', routeFor('/docs', join(projectRoot, 'app', 'docs', 'page.tsx'))],
     ]);
     const layouts = new Map<string, LayoutEntry>([
-      ['/docs', layoutFor('/docs', join(projectRoot, 'app', 'docs', 'layout.tsx'))],
+      ['docs', layoutFor('docs', join(projectRoot, 'app', 'docs', 'layout.tsx'))],
     ]);
 
     manifest = await buildClientBundles({
@@ -168,27 +187,1008 @@ export default missing;
       });
       expect(result.get('/')).toBeDefined();
       expect(result.get('/bad')).toBeUndefined();
+      expect(clientBuildErrorFor('/bad')).toMatch(/does-not-exist/);
+      expect(clientBuildErrorFor('/')).toBeUndefined();
     } finally {
       await rm(brokenRoot, { recursive: true, force: true });
     }
   }, 60_000);
 });
 
-describe('demoteServerExports', () => {
-  it('demotes function and const forms of server exports', () => {
-    expect(demoteServerExports('export async function getServerSideProps() {}')).toBe(
-      'async function getServerSideProps() {}',
+describe('buildClientBundles layout association', () => {
+  let projectRoot: string;
+  let entrySources: Map<string, string>;
+
+  beforeAll(async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), 'gio-client-layouts-'));
+    const appDir = join(projectRoot, 'app');
+    const component = (name: string, tag: string): string => `import React from 'react';
+export default function ${name}({ children }: { children?: React.ReactNode }) {
+  return React.createElement('${tag}', null, children);
+}
+`;
+    const files: Record<string, string> = {
+      'layout.tsx': component('Root', 'body'),
+      'posts/[id]/layout.tsx': component('PostLayout', 'article'),
+      'posts/[id]/page.tsx': component('Post', 'p'),
+      '(shop)/layout.tsx': component('ShopLayout', 'section'),
+      '(shop)/cart/page.tsx': component('Cart', 'p'),
+      '(marketing)/layout.tsx': component('MarketingLayout', 'aside'),
+      '(marketing)/about/page.tsx': component('About', 'p'),
+    };
+    for (const [rel, source] of Object.entries(files)) {
+      await mkdir(dirname(join(appDir, rel)), { recursive: true });
+      await writeFile(join(appDir, rel), source);
+    }
+
+    const [routes, layouts] = await Promise.all([discoverRoutes(appDir), discoverLayouts(appDir)]);
+    const manifest = await buildClientBundles({
+      routes,
+      layouts,
+      projectRoot,
+      dev: true,
+      nodePaths: [join(packageDir, 'node_modules')],
+    });
+    expect([...manifest.keys()].sort()).toEqual(['/about', '/cart', '/posts/:id']);
+
+    // The generated entry sources show exactly which layouts each route wraps.
+    entrySources = new Map();
+    const entriesDir = join(projectRoot, '.gio', 'build', 'entries');
+    for (const file of await readdir(entriesDir)) {
+      const source = await readFile(join(entriesDir, file), 'utf8');
+      const pattern = /registerRoute\(("[^"]*")/.exec(source)?.[1];
+      if (pattern !== undefined) entrySources.set(JSON.parse(pattern) as string, source);
+    }
+  }, 60_000);
+
+  afterAll(async () => {
+    await rm(projectRoot, { recursive: true, force: true });
+  });
+
+  it('includes a layout inside a dynamic [id] folder in that route bundle', () => {
+    const source = entrySources.get('/posts/:id') ?? '';
+    expect(source).toContain('posts/[id]/layout.tsx');
+  });
+
+  it("includes a (group) layout only in that group's route bundles", () => {
+    expect(entrySources.get('/cart')).toContain('(shop)/layout.tsx');
+    expect(entrySources.get('/cart')).not.toContain('(marketing)/layout.tsx');
+    expect(entrySources.get('/about')).toContain('(marketing)/layout.tsx');
+    expect(entrySources.get('/about')).not.toContain('(shop)/layout.tsx');
+  });
+
+  it('keeps the root layout out of every bundle (it stays server-only HTML)', () => {
+    for (const source of entrySources.values()) {
+      expect(source).not.toContain('/app/layout.tsx');
+    }
+  });
+});
+
+/** Write `files` (project-relative path → source) under a fresh temp root. */
+async function writeProject(prefix: string, files: Record<string, string>): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  for (const [path, source] of Object.entries(files)) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), source);
+  }
+  return root;
+}
+
+/** Build every `app/<name>/page.tsx` in `root` as route `/<name>`. */
+async function buildPages(root: string, names: string[]): Promise<ClientManifest> {
+  const routes = new Map<string, RouteModule>(
+    names.map(name => [`/${name}`, routeFor(`/${name}`, join(root, 'app', name, 'page.tsx'))]),
+  );
+  return buildClientBundles({
+    routes,
+    layouts: new Map(),
+    projectRoot: root,
+    dev: true,
+    nodePaths: [join(packageDir, 'node_modules')],
+  });
+}
+
+async function allChunks(root: string): Promise<string> {
+  const chunksDir = join(root, '.gio', 'build', 'static', 'chunks');
+  const files = (await readdir(chunksDir)).filter(f => f.endsWith('.js'));
+  const contents = await Promise.all(files.map(f => readFile(join(chunksDir, f), 'utf8')));
+  return contents.join('\n');
+}
+
+/** A page rendering `marker`, with `rest` spliced in after the react import. */
+function page(marker: string, rest: string): string {
+  return `import React from 'react';
+${rest}
+export default function Page() {
+  return React.createElement('p', null, ${JSON.stringify(marker)});
+}
+`;
+}
+
+describe('server code stripping', () => {
+  let root: string;
+  let manifest: ClientManifest;
+  let chunks: string;
+
+  const FORMS: Record<string, string> = {
+    declaration: page('FORM_DECLARATION', `import { readSecret } from '../../lib/secret.ts';
+export async function getServerSideProps() { return { props: { s: readSecret() } }; }`),
+    'const-arrow': page('FORM_CONST', `import { readSecret } from '../../lib/secret.ts';
+export const getServerSideProps = async () => ({ props: { s: readSecret() } });
+export const getStaticPaths = () => ({ paths: [{ params: { s: readSecret() } }] });`),
+    'local-list': page('FORM_LOCAL_LIST', `import { readSecret } from '../../lib/secret.ts';
+async function getServerSideProps() { return { props: { s: readSecret() } }; }
+export { getServerSideProps };`),
+    renamed: page('FORM_RENAMED', `import { readSecret } from '../../lib/secret.ts';
+async function loader() { return { props: { s: readSecret() } }; }
+export { loader as getServerSideProps };`),
+    'reexport-from': page('FORM_REEXPORT_FROM', `export { getServerSideProps } from '../../lib/data.ts';`),
+    'export-star': page('FORM_EXPORT_STAR', `export * from '../../lib/data.ts';`),
+    // Export look-alikes in comments and strings must survive untouched.
+    lookalike: `import React from 'react';
+// export async function getServerSideProps() { return LOOKALIKE_COMMENT; }
+const text = "export const getServerSideProps = 'LOOKALIKE_STRING_KEPT';";
+export default function Page() {
+  return React.createElement('p', null, text);
+}
+`,
+    // A helper guarded by server-only, used only by gSSP.
+    'guarded-helper': page('FORM_GUARDED_HELPER', `import { query } from '../../lib/db.ts';
+export async function getServerSideProps() { return { props: { rows: query() } }; }`),
+    // A page action (forms) and the server-only helper only it uses.
+    action: page('FORM_ACTION', `import { query } from '../../lib/db.ts';
+export async function action() { return { marker: 'GIO_TEST_ACTION_DO_NOT_BUNDLE', rows: query() }; }`),
+    // An npm SDK used only by gSSP, next to a bare side-effect import.
+    'npm-sdk': page('FORM_NPM_SDK', `import '../../lib/polyfill.ts';
+import { Sdk } from 'gio-test-server-sdk';
+export async function getServerSideProps() { return { props: { sdk: String(new Sdk()) } }; }`),
+    // A helper gSSP loads with import(): esbuild splits it into a chunk of
+    // its own before it shakes out the gSSP that imported it.
+    'dynamic-import': page('FORM_DYNAMIC_IMPORT', `export async function getServerSideProps() {
+  const { readSecret, SECRET_MARKER } = await import('../../lib/secret.ts');
+  return { props: { s: readSecret() + SECRET_MARKER } };
+}`),
+    // A dynamic import() client code still makes ships as its own chunk.
+    'client-lazy': page('FORM_CLIENT_LAZY', `export const loadWidget = () => import('../../lib/widget.ts');
+(globalThis as Record<string, unknown>).__gioLoadWidget = loadWidget;`),
+  };
+
+  beforeAll(async () => {
+    const files: Record<string, string> = {
+      'lib/secret.ts': SECRET_SOURCE,
+      'lib/data.ts': `import { readSecret, SECRET_MARKER } from './secret.ts';
+export async function getServerSideProps() { return { props: { s: readSecret() + SECRET_MARKER } }; }
+`,
+      'lib/db.ts': `import '@gio.js/core/server-only';
+import { readSecret } from './secret.ts';
+export const DB_MARKER = 'GIO_TEST_DB_DO_NOT_BUNDLE';
+export function query(): string { return readSecret() + DB_MARKER; }
+`,
+      'lib/polyfill.ts': `(globalThis as Record<string, unknown>).__gioPolyfill = 'POLYFILL_SIDE_EFFECT_KEPT';\n`,
+      'lib/widget.ts': `export const WIDGET = 'CLIENT_LAZY_WIDGET_KEPT';
+export const loadMore = () => import('./more.ts');
+`,
+      'lib/more.ts': `export const MORE = 'CLIENT_LAZY_NESTED_KEPT';\n`,
+      'node_modules/gio-test-server-sdk/package.json': JSON.stringify({
+        name: 'gio-test-server-sdk',
+        version: '1.0.0',
+        type: 'module',
+        main: 'index.js',
+      }),
+      'node_modules/gio-test-server-sdk/index.js': `console.log('GIO_TEST_SDK_SIDE_EFFECT');
+export class Sdk { toString() { return 'GIO_TEST_SDK_CLASS'; } }
+`,
+    };
+    for (const [name, source] of Object.entries(FORMS)) {
+      files[`app/${name}/page.tsx`] = source;
+    }
+    root = await writeProject('gio-client-strip-', files);
+    manifest = await buildPages(root, Object.keys(FORMS));
+    chunks = await allChunks(root);
+  }, 60_000);
+
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('builds a hydration bundle for every export form', () => {
+    for (const name of Object.keys(FORMS)) {
+      expect(manifest.get(`/${name}`), `/${name} must hydrate`).toBeDefined();
+    }
+    for (const marker of ['FORM_DECLARATION', 'FORM_RENAMED', 'FORM_EXPORT_STAR', 'FORM_NPM_SDK']) {
+      expect(chunks).toContain(marker);
+    }
+  });
+
+  it('drops server exports and their imports in every export form', () => {
+    expect(chunks).not.toContain('GIO_TEST_SECRET_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('/etc/gio-secret');
+    expect(chunks).not.toContain('readSecret');
+    expect(chunks).not.toContain('getStaticPaths');
+  });
+
+  it('drops a server-only helper module that only gSSP uses', () => {
+    expect(chunks).not.toContain('GIO_TEST_DB_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('server-only module bundled for the browser');
+    expect(clientBuildErrorFor('/guarded-helper')).toBeUndefined();
+  });
+
+  it('drops a page action and the server-only code only it uses', () => {
+    expect(chunks).toContain('FORM_ACTION');
+    expect(clientBuildErrorFor('/action')).toBeUndefined();
+    expect(chunks).not.toContain('GIO_TEST_ACTION_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('GIO_TEST_DB_DO_NOT_BUNDLE');
+  });
+
+  it('never ships a module only a shaken-out import() loads, but keeps live ones', async () => {
+    expect(manifest.get('/dynamic-import')).toBeDefined();
+    expect(chunks).toContain('FORM_DYNAMIC_IMPORT');
+    expect(chunks).toContain('CLIENT_LAZY_WIDGET_KEPT');
+    expect(chunks).toContain('CLIENT_LAZY_NESTED_KEPT');
+    expect(chunks).not.toContain('gio-dynamic-import:');
+    // Source maps included: nothing in the public chunk directory holds it.
+    const chunksDir = join(root, '.gio', 'build', 'static', 'chunks');
+    for (const file of await readdir(chunksDir)) {
+      expect(await readFile(join(chunksDir, file), 'utf8'), file).not.toContain(
+        'GIO_TEST_SECRET_DO_NOT_BUNDLE',
+      );
+    }
+  });
+
+  it('drops npm packages that only gSSP uses but keeps bare side-effect imports', () => {
+    expect(chunks).not.toContain('GIO_TEST_SDK_SIDE_EFFECT');
+    expect(chunks).not.toContain('GIO_TEST_SDK_CLASS');
+    expect(chunks).toContain('POLYFILL_SIDE_EFFECT_KEPT');
+  });
+
+  it('never rewrites export look-alikes inside strings', () => {
+    expect(chunks).toContain("export const getServerSideProps = 'LOOKALIKE_STRING_KEPT';");
+  });
+});
+
+describe('server-only guard', () => {
+  let root: string;
+  let manifest: ClientManifest;
+  let errorLog: ReturnType<typeof vi.spyOn>;
+
+  beforeAll(async () => {
+    errorLog = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    root = await writeProject('gio-client-server-only-', {
+      'lib/db.ts': `import '@gio.js/core/server-only';
+export const DB_MARKER = 'GIO_TEST_DB_DO_NOT_BUNDLE';
+export function query(): string { return DB_MARKER; }
+`,
+      'lib/keys.server.ts': `export const API_KEY = 'GIO_TEST_SERVER_FILE_DO_NOT_BUNDLE';\n`,
+      // esbuild inlines enum members across modules; the guard must still
+      // see the server-only module that declared them.
+      'lib/enums.ts': `import '@gio.js/core/server-only';
+export enum Secret { Key = 'GIO_TEST_ENUM_DO_NOT_BUNDLE' }
+`,
+      'lib/flags.server.ts': `export const enum Flag { A = 'GIO_TEST_CONST_ENUM_DO_NOT_BUNDLE' }\n`,
+      // Server-only code with an enum next to parameter decorators
+      // (TypeORM/Nest style): precompiling it must not break the build.
+      'lib/entity.server.ts': `export enum Role { Admin = 'GIO_TEST_ENTITY_ENUM_DO_NOT_BUNDLE' }
+function Inject(): ParameterDecorator { return () => undefined; }
+export class Repo { constructor(@Inject() readonly role: Role) {} }
+`,
+      'app/enum/page.tsx': `import React from 'react';
+import { Secret } from '../../lib/enums.ts';
+export default function Page() { return React.createElement('p', null, Secret.Key); }
+`,
+      'app/constenum/page.tsx': `import React from 'react';
+import { Flag } from '../../lib/flags.server.ts';
+export default function Page() { return React.createElement('p', null, Flag.A); }
+`,
+      'app/enumok/page.tsx': page('ENUM_OK_PAGE', `import { Secret } from '../../lib/enums.ts';
+import { Flag } from '../../lib/flags.server.ts';
+import { Repo, Role } from '../../lib/entity.server.ts';
+export async function getServerSideProps() {
+  return { props: { s: Secret.Key + Flag.A + String(new Repo(Role.Admin).role) } };
+}`),
+      'components/Rows.tsx': `import React from 'react';
+import { query } from '../lib/db.ts';
+export function Rows() { return React.createElement('ul', null, query()); }
+`,
+      // A re-export-only barrel ships zero bytes but must not hide the chain.
+      'components/index.ts': `export * from './Rows.tsx';\n`,
+      'app/barrel/page.tsx': `import React from 'react';
+import { Rows } from '../../components/index.ts';
+export default function Page() { return React.createElement(Rows); }
+`,
+      // The client graph reaches server-only through a component.
+      'app/leaky/page.tsx': `import React from 'react';
+import { Rows } from '../../components/Rows.tsx';
+export default function Page() { return React.createElement(Rows); }
+`,
+      // The bare npm specifier is recognized too.
+      'app/bare/page.tsx': page('BARE', `import 'server-only';`),
+      // *.server.* files are server-only by name.
+      'app/named/page.tsx': `import React from 'react';
+import { API_KEY } from '../../lib/keys.server.ts';
+export default function Page() { return React.createElement('p', null, API_KEY); }
+`,
+      // Server-only code used only by gSSP is fine.
+      'app/ok/page.tsx': page('OK_PAGE', `import { query } from '../../lib/db.ts';
+import { API_KEY } from '../../lib/keys.server.ts';
+export async function getServerSideProps() { return { props: { q: query() + API_KEY } }; }`),
+      // ...loaded with import() too.
+      'app/dynamic/page.tsx': page('DYNAMIC_OK_PAGE', `export async function getServerSideProps() {
+  const { query } = await import('../../lib/db.ts');
+  const { API_KEY } = await import('../../lib/keys.server.ts');
+  return { props: { q: query() + API_KEY } };
+}`),
+    });
+    manifest = await buildPages(root, [
+      'leaky',
+      'barrel',
+      'bare',
+      'named',
+      'ok',
+      'enum',
+      'constenum',
+      'enumok',
+      'dynamic',
+    ]);
+  }, 60_000);
+
+  afterAll(async () => {
+    errorLog.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('rejects routes whose client graph imports server-only code', () => {
+    expect(manifest.get('/leaky')).toBeUndefined();
+    expect(manifest.get('/barrel')).toBeUndefined();
+    expect(manifest.get('/bare')).toBeUndefined();
+    expect(manifest.get('/named')).toBeUndefined();
+  });
+
+  it('keeps routes that use server-only code only from getServerSideProps', () => {
+    expect(manifest.get('/ok')).toBeDefined();
+    expect(clientBuildErrorFor('/ok')).toBeUndefined();
+    expect(clientBuildErrorFor('/enumok')).toBeUndefined();
+    expect(manifest.get('/enumok')).toBeDefined();
+    expect(clientBuildErrorFor('/dynamic')).toBeUndefined();
+    expect(manifest.get('/dynamic')).toBeDefined();
+  });
+
+  it('rejects client reads of enums declared in server-only modules', () => {
+    expect(manifest.get('/enum')).toBeUndefined();
+    expect(clientBuildErrorFor('/enum')).toContain(
+      'app/enum/page.tsx -> lib/enums.ts -> @gio.js/core/server-only',
     );
-    expect(demoteServerExports('export function getStaticPaths() {}')).toBe(
-      'function getStaticPaths() {}',
-    );
-    expect(demoteServerExports('export const getServerSideProps = async () => ({})')).toBe(
-      'const getServerSideProps = async () => ({})',
+    expect(manifest.get('/constenum')).toBeUndefined();
+    expect(clientBuildErrorFor('/constenum')).toContain(
+      'app/constenum/page.tsx -> lib/flags.server.ts',
     );
   });
 
-  it('leaves other exports untouched', () => {
-    const source = 'export default function Page() {}\nexport const revalidate = 60;';
-    expect(demoteServerExports(source)).toBe(source);
+  it('names the importing file chain and says the page will not hydrate', () => {
+    expect(clientBuildErrorFor('/leaky')).toContain(
+      'app/leaky/page.tsx -> components/Rows.tsx -> lib/db.ts -> @gio.js/core/server-only',
+    );
+    expect(clientBuildErrorFor('/leaky')).toMatch(/still server-renders but will NOT hydrate/);
+    expect(clientBuildErrorFor('/barrel')).toContain(
+      'app/barrel/page.tsx -> components/index.ts -> components/Rows.tsx -> lib/db.ts',
+    );
+    expect(clientBuildErrorFor('/bare')).toContain('app/bare/page.tsx -> server-only');
+    expect(clientBuildErrorFor('/named')).toContain('app/named/page.tsx -> lib/keys.server.ts');
   });
+
+  it('logs each rejection as an error', () => {
+    const logged = errorLog.mock.calls.filter(call => /server-only code/.test(String(call[0])));
+    expect(logged.map(call => (call[1] as { pattern: string }).pattern).sort()).toEqual([
+      '/bare',
+      '/barrel',
+      '/constenum',
+      '/enum',
+      '/leaky',
+      '/named',
+    ]);
+  });
+
+  it('never writes a rejected bundle to the public chunks directory', async () => {
+    const chunks = await allChunks(root);
+    expect(chunks).toContain('OK_PAGE');
+    expect(chunks).toContain('ENUM_OK_PAGE');
+    expect(chunks).toContain('DYNAMIC_OK_PAGE');
+    expect(chunks).not.toContain('GIO_TEST_DB_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('GIO_TEST_SERVER_FILE_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('GIO_TEST_ENUM_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('GIO_TEST_CONST_ENUM_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('GIO_TEST_ENTITY_ENUM_DO_NOT_BUNDLE');
+    expect(chunks).not.toContain('server-only module bundled for the browser');
+  });
+});
+
+describe('a route that cannot ship', () => {
+  const CLEAN_PAGES = {
+    'app/one/page.tsx': page('ROUTE_ONE', ''),
+    'app/two/page.tsx': page('ROUTE_TWO', ''),
+  };
+  let errorLog: ReturnType<typeof vi.spyOn>;
+  let warnLog: ReturnType<typeof vi.spyOn>;
+
+  beforeAll(() => {
+    errorLog = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    warnLog = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterAll(() => {
+    errorLog.mockRestore();
+    warnLog.mockRestore();
+  });
+
+  /** The clean routes still hydrate from small entries over one shared chunk. */
+  async function expectSharedChunks(root: string, manifest: ClientManifest): Promise<void> {
+    const chunksDir = join(root, '.gio', 'build', 'static', 'chunks');
+    const files = await readdir(chunksDir);
+    expect(files.some(f => f.startsWith('shared-') && f.endsWith('.js'))).toBe(true);
+    for (const pattern of ['/one', '/two']) {
+      const url = manifest.get(pattern);
+      expect(url, `${pattern} must hydrate`).toBeDefined();
+      const entry = await readFile(join(chunksDir, url?.split('/').pop() ?? ''), 'utf8');
+      // Isolated per-route bundles each carry their own React (~190KB).
+      expect(entry).toMatch(/from "\.\/shared-[A-Z0-9]+\.js"/);
+      expect(entry.length).toBeLessThan(20_000);
+    }
+  }
+
+  it('keeps shared chunks for the other routes when it imports server-only code', async () => {
+    const root = await writeProject('gio-client-reject-shared-', {
+      ...CLEAN_PAGES,
+      'lib/keys.server.ts': `export const API_KEY = 'GIO_TEST_SERVER_FILE_DO_NOT_BUNDLE';\n`,
+      'app/leak/page.tsx': `import React from 'react';
+import { API_KEY } from '../../lib/keys.server.ts';
+export default function Page() { return React.createElement('p', null, API_KEY); }
+`,
+    });
+    try {
+      const manifest = await buildPages(root, ['one', 'two', 'leak']);
+      expect(manifest.get('/leak')).toBeUndefined();
+      expect(clientBuildErrorFor('/leak')).toMatch(/imports server-only code/);
+      await expectSharedChunks(root, manifest);
+      expect(await allChunks(root)).not.toContain('GIO_TEST_SERVER_FILE_DO_NOT_BUNDLE');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('keeps shared chunks for the other routes when it fails to build', async () => {
+    const root = await writeProject('gio-client-broken-shared-', {
+      ...CLEAN_PAGES,
+      'app/bad/page.tsx': `import { missing } from './does-not-exist.ts';
+export default missing;
+`,
+    });
+    try {
+      const manifest = await buildPages(root, ['one', 'two', 'bad']);
+      expect(manifest.get('/bad')).toBeUndefined();
+      expect(clientBuildErrorFor('/bad')).toMatch(/does-not-exist/);
+      await expectSharedChunks(root, manifest);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+/**
+ * A module reached by imports that disagree about its side effects: a bare
+ * `import` and a binding one from project files, an npm package imported by
+ * a page and by another package, and workspace sources outside the project
+ * root importing each other. esbuild keeps the side-effect flag of whichever
+ * resolution of a module finishes first, so a verdict that depended on the
+ * import (not the module) changed the output - and the deployment ID - from
+ * build to build.
+ */
+describe('a deterministic client build', () => {
+  let base: string;
+  let root: string;
+  const PAGES = ['side', 'bound', 'pkg', 'ws'];
+
+  beforeAll(async () => {
+    base = await writeProject('gio-client-determinism-', {
+      'project/lib/init.ts': `(globalThis as Record<string, unknown>).__detInit = 'DET_INIT_SIDE_EFFECT_KEPT';
+export const INIT = 'DET_INIT_BINDING';
+`,
+      'project/app/side/page.tsx': page('DET_SIDE_PAGE', `import '../../lib/init.ts';`),
+      'project/app/bound/page.tsx': page('DET_BOUND_PAGE', `import { INIT } from '../../lib/init.ts';
+export async function getServerSideProps() { return { props: { init: INIT } }; }`),
+      'project/app/pkg/page.tsx': `import React from 'react';
+import { user } from 'det-user';
+import { shared } from 'det-shared';
+export default function Page() { return React.createElement('p', null, user); }
+export async function getServerSideProps() { return { props: { shared } }; }
+`,
+      'project/app/ws/page.tsx': `import React from 'react';
+import { wsIndex } from '../../../ws/index.ts';
+import { wsShared } from '../../../ws/shared.ts';
+export default function Page() { return React.createElement('p', null, wsIndex); }
+export async function getServerSideProps() { return { props: { wsShared } }; }
+`,
+      'project/node_modules/det-shared/package.json': JSON.stringify({
+        name: 'det-shared',
+        type: 'module',
+        main: 'index.js',
+      }),
+      'project/node_modules/det-shared/index.js': `globalThis.__detShared = 'DET_SHARED_SIDE_EFFECT';
+export const shared = 'DET_SHARED_BINDING';
+`,
+      'project/node_modules/det-user/package.json': JSON.stringify({
+        name: 'det-user',
+        type: 'module',
+        main: 'index.js',
+      }),
+      'project/node_modules/det-user/index.js': `import { shared } from 'det-shared';
+export const user = 'DET_USER_KEPT';
+export const viaShared = () => shared;
+`,
+      // A workspace package next to the project, imported by relative path.
+      'ws/shared.ts': `(globalThis as Record<string, unknown>).__detWs = 'DET_WS_SHARED_SIDE_EFFECT';
+export const wsShared = 'DET_WS_SHARED_BINDING';
+`,
+      'ws/index.ts': `import { wsShared } from './shared.ts';
+export const wsIndex = 'DET_WS_INDEX_KEPT';
+export const viaWs = () => wsShared;
+`,
+      // Like the generated entries: each imports only its page's default export.
+      ...Object.fromEntries(
+        PAGES.map(name => [
+          `project/.entries/${name}.tsx`,
+          `import Page from '../app/${name}/page.tsx';\n(globalThis as Record<string, unknown>).page = Page;\n`,
+        ]),
+      ),
+    });
+    root = join(base, 'project');
+  });
+
+  afterAll(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const entryFiles = (): string[] => PAGES.map(name => join(root, '.entries', `${name}.tsx`));
+
+  /** Outputs of one bundle of the pages, with every resolution delayed by `seed`. */
+  async function scrambledBuild(seed: number): Promise<string> {
+    // Delays a resolution by up to 7ms, differently per seed: esbuild then
+    // sees the resolutions of one module finish in a different order.
+    const scrambler: Plugin = {
+      name: 'scramble-resolution-order',
+      setup(pluginBuild) {
+        pluginBuild.onResolve({ filter: /.*/ }, async args => {
+          const digest = createHash('sha256')
+            .update(`${seed}\0${args.importer}\0${args.path}\0${String(args.pluginData)}`)
+            .digest();
+          await new Promise(done => setTimeout(done, (digest[0] as number) % 8));
+          return null;
+        });
+      },
+    };
+    const result = await build({
+      entryPoints: entryFiles(),
+      bundle: true,
+      format: 'esm',
+      splitting: true,
+      outdir: join(root, 'out-scrambled'),
+      absWorkingDir: root,
+      minify: true,
+      jsx: 'automatic',
+      platform: 'browser',
+      write: false,
+      logLevel: 'silent',
+      nodePaths: [join(packageDir, 'node_modules')],
+      plugins: [
+        scrambler,
+        gioServerCodePlugin({
+          projectRoot: root,
+          dynamicImports: { live: new Set() },
+          entryFiles: entryFiles(),
+          excludedDirs: [],
+        }),
+      ],
+    });
+    return result.outputFiles
+      .map(file => `${basename(file.path)}\n${file.text}`)
+      .sort()
+      .join('\n\n');
+  }
+
+  it('decides side effects per module, whatever import of it resolves first', async () => {
+    const first = await scrambledBuild(0);
+    for (let seed = 1; seed < 12; seed++) {
+      expect(await scrambledBuild(seed), `seed ${seed}`).toBe(first);
+    }
+    // A bare import keeps the module's side effects, even though another
+    // page binds from it.
+    expect(first).toContain('DET_INIT_SIDE_EFFECT_KEPT');
+    // What only shaken-out server code used drops, however else it is reached.
+    expect(first).toContain('DET_USER_KEPT');
+    expect(first).not.toContain('DET_SHARED_SIDE_EFFECT');
+    expect(first).toContain('DET_WS_INDEX_KEPT');
+    expect(first).not.toContain('DET_WS_SHARED_SIDE_EFFECT');
+  }, 120_000);
+
+  it('gives byte-identical chunks and clientBuildHash build after build', async () => {
+    const routes = new Map<string, RouteModule>(
+      PAGES.map(name => [`/${name}`, routeFor(`/${name}`, join(root, 'app', name, 'page.tsx'))]),
+    );
+    const chunksDir = join(root, '.gio', 'build', 'static', 'chunks');
+    const builds: { hash: string; chunks: string }[] = [];
+    for (let i = 0; i < 8; i++) {
+      const manifest = await buildClientBundles({
+        routes,
+        layouts: new Map(),
+        projectRoot: root,
+        dev: false,
+        nodePaths: [join(packageDir, 'node_modules')],
+      });
+      expect(manifest.size).toBe(PAGES.length);
+      const files = (await readdir(chunksDir)).sort();
+      const contents = await Promise.all(files.map(f => readFile(join(chunksDir, f), 'utf8')));
+      builds.push({
+        hash: clientBuildHash({ clientScripts: manifest, stylesheets: emptyStyleManifest() }),
+        chunks: files.map((f, n) => `${f}\n${contents[n]}`).join('\n\n'),
+      });
+    }
+    for (const [i, built] of builds.entries()) {
+      expect(built.chunks, `build ${i + 1}`).toBe(builds[0]?.chunks);
+      expect(built.hash, `build ${i + 1}`).toBe(builds[0]?.hash);
+    }
+    expect(builds[0]?.chunks).toContain('DET_INIT_SIDE_EFFECT_KEPT');
+    expect(builds[0]?.chunks).not.toContain('DET_SHARED_SIDE_EFFECT');
+  }, 120_000);
+});
+
+/**
+ * Only the imports of files the browser bundle can reach decide a module's
+ * side effects. A route handler, gio.config.ts, middleware.ts, a test or a
+ * script that imports a module bare must not keep it - and the secrets at
+ * its top level - in a page that uses it only in getServerSideProps; one
+ * that binds from a module must not strip the side effects a dependency or
+ * workspace source imports it bare for.
+ */
+describe('side effects decided by the client graph', () => {
+  let base: string;
+  let root: string;
+  let manifest: ClientManifest;
+  let chunks: string;
+  const PAGES = ['db', 'env', 'pkg', 'locale'];
+
+  beforeAll(async () => {
+    base = await writeProject('gio-client-graph-', {
+      // Server modules a page binds from only in getServerSideProps.
+      'project/lib/db.ts': `import 'server-only';
+const DATABASE_URL = 'postgres://admin:CG_LEAK_DB_PASSWORD@db.internal/app';
+(globalThis as Record<string, unknown>).__pool = DATABASE_URL;
+export const pool = DATABASE_URL;
+`,
+      'project/lib/env.ts': `const read = (name: string, fallback: string): string => process.env[name] ?? fallback;
+export const env = { STRIPE_SECRET_KEY: read('STRIPE_SECRET_KEY', 'sk_test_CG_LEAK_STRIPE') };
+`,
+      'project/app/db/page.tsx': page('CG_DB_PAGE', `import { pool } from '../../lib/db.ts';
+export async function getServerSideProps() { return { props: { ok: pool.length > 0 } }; }`),
+      'project/app/env/page.tsx': page('CG_ENV_PAGE', `import { env } from '../../lib/env.ts';
+export async function getServerSideProps() { return { props: { ok: env.STRIPE_SECRET_KEY !== '' } }; }`),
+      // ...and the server-side files that import them bare.
+      'project/app/api/health/route.ts': `import '../../../lib/db.ts';
+export async function GET() { return new Response('ok'); }
+`,
+      'project/gio.config.ts': `import './lib/env.ts';
+export default {};
+`,
+      'project/middleware.ts': `import './lib/db.ts';
+export default function middleware() {}
+`,
+      'project/scripts/seed.ts': `import '../lib/env.ts';\n`,
+      'project/tests/db.test.ts': `import '../lib/db.ts';\n`,
+
+      // A page using a package and a workspace source that import their
+      // registration / polyfill modules bare...
+      'project/app/pkg/page.tsx': `import React from 'react';
+import { pkg } from 'cg-pkg';
+import { ui } from '../../../ws/ui.ts';
+export default function Page() { return React.createElement('p', null, pkg + ui); }
+`,
+      'project/node_modules/cg-pkg/package.json': JSON.stringify({
+        name: 'cg-pkg',
+        type: 'module',
+        main: 'index.js',
+      }),
+      'project/node_modules/cg-pkg/index.js': `import './register.js';
+export const pkg = 'CG_PKG_USED';
+`,
+      'project/node_modules/cg-pkg/register.js': `globalThis.__cgRegister = 'CG_PKG_REGISTER_RAN';
+export const registered = 1;
+`,
+      'ws/ui.ts': `import './ws-poly.ts';
+export const ui = 'CG_WS_UI_USED';
+`,
+      'ws/ws-poly.ts': `(globalThis as Record<string, unknown>).__cgWsPoly = 'CG_WS_POLY_RAN';
+export const wsPolyVersion = 2;
+`,
+      // ...and a unit test that binds from both.
+      'project/lib/register.test.ts': `import { registered } from 'cg-pkg/register.js';
+import { wsPolyVersion } from '../../ws/ws-poly.ts';
+if (registered !== 1 || wsPolyVersion !== 2) throw new Error('bad');
+`,
+
+      // A computed import(): esbuild bundles every file it may load, so
+      // their bare imports count.
+      'project/app/locale/page.tsx': page('CG_LOCALE_PAGE', `import { POLY } from '../../lib/poly.ts';
+if (typeof window !== 'undefined') void import(\`../../locales/\${navigator.language}.ts\`);
+export async function getServerSideProps() { return { props: { poly: POLY } }; }`),
+      'project/locales/en.ts': `import '../lib/poly.ts';
+export const msg = 'CG_LOCALE_EN';
+`,
+      'project/lib/poly.ts': `(globalThis as Record<string, unknown>).__cgPoly = 'CG_POLY_RAN';
+export const POLY = 1;
+`,
+    });
+    root = join(base, 'project');
+    manifest = await buildPages(root, PAGES);
+    chunks = await allChunks(root);
+  }, 60_000);
+
+  afterAll(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  it('keeps out what only gSSP uses, though a route, config, middleware, test or script imports it bare', () => {
+    expect([...manifest.keys()].sort()).toEqual(PAGES.map(name => `/${name}`).sort());
+    expect(clientBuildErrorFor('/db')).toBeUndefined();
+    expect(chunks).toContain('CG_DB_PAGE');
+    expect(chunks).toContain('CG_ENV_PAGE');
+    expect(chunks).not.toContain('CG_LEAK_DB_PASSWORD');
+    expect(chunks).not.toContain('CG_LEAK_STRIPE');
+    expect(chunks).not.toContain('server-only module bundled for the browser');
+  });
+
+  it("keeps a dependency's or workspace source's bare imports, though a test binds from them", () => {
+    expect(chunks).toContain('CG_PKG_USED');
+    expect(chunks).toContain('CG_PKG_REGISTER_RAN');
+    expect(chunks).toContain('CG_WS_UI_USED');
+    expect(chunks).toContain('CG_WS_POLY_RAN');
+  });
+
+  it('counts the bare imports of the files a computed import() may load', () => {
+    expect(chunks).toContain('CG_LOCALE_EN');
+    expect(chunks).toContain('CG_POLY_RAN');
+  });
+});
+
+describe('computedImportDirs', () => {
+  it('finds the literal folder of template and concatenated import() / require()', () => {
+    const source = [
+      'import(`./locales/${lang}.json`);',
+      'require(`../messages/${a}/${b}.ts`);',
+      "import('./pages/' + name);",
+      'import(`./${name}.ts`);',
+      "import('./fixed.ts');",
+      'import(`pkg/${name}`);',
+      'obj.import(`./not/${x}`);',
+    ].join('\n');
+    expect(computedImportDirs(source)).toEqual(['./locales/', '../messages/', './pages/', './']);
+  });
+});
+
+describe('boundImportSpecifiers', () => {
+  it('finds binding, re-export, dynamic and require imports but not bare ones', () => {
+    const source = `import './styles.css';
+import React from 'react';
+import { a,
+  b } from "./a";
+export * from './c';
+export { d } from './d';
+import type { T } from './types';
+const lazy = import('./lazy');
+const opts = import('./with-options', { with: { type: 'json' } });
+const legacy = require('./legacy');
+const computed = import(name);
+`;
+    expect(boundImportSpecifiers(source)).toEqual([
+      { specifier: 'react', kind: 'import-statement' },
+      { specifier: './a', kind: 'import-statement' },
+      { specifier: './c', kind: 'import-statement' },
+      { specifier: './d', kind: 'import-statement' },
+      { specifier: './types', kind: 'import-statement' },
+      { specifier: './lazy', kind: 'dynamic-import' },
+      { specifier: './with-options', kind: 'dynamic-import' },
+      { specifier: './legacy', kind: 'require-call' },
+    ]);
+  });
+});
+
+describe('isProjectSource', () => {
+  const root = join(tmpdir(), 'gio-project');
+  it('counts project files but not dependencies, dot folders, public/ or out/', () => {
+    expect(isProjectSource(root, join(root, 'app', 'page.tsx'))).toBe(true);
+    expect(isProjectSource(root, join(root, 'lib', 'out', 'x.ts'))).toBe(true);
+    expect(isProjectSource(root, join(root, 'app', 'public', 'page.tsx'))).toBe(true);
+    expect(isProjectSource(root, join(root, 'node_modules', 'pkg', 'index.js'))).toBe(false);
+    expect(isProjectSource(root, join(root, 'lib', 'node_modules', 'pkg', 'index.js'))).toBe(false);
+    expect(isProjectSource(root, join(root, '.gio', 'build', 'entries', 'route-index.tsx'))).toBe(false);
+    expect(isProjectSource(root, join(root, 'public', 'vendor.js'))).toBe(false);
+    expect(isProjectSource(root, join(root, 'out', 'chunk.js'))).toBe(false);
+    expect(isProjectSource(root, join(root, 'dist', 'chunk.js'), [join(root, 'dist')])).toBe(false);
+    expect(isProjectSource(root, join(tmpdir(), 'gio-project-other', 'x.ts'))).toBe(false);
+    expect(isProjectSource(root, join(tmpdir(), 'elsewhere', 'x.ts'))).toBe(false);
+    expect(isProjectSource(root, root)).toBe(false);
+  });
+});
+
+describe('client env inlining', () => {
+  let root: string;
+  let manifest: ClientManifest;
+  const saved = { ...process.env };
+
+  beforeAll(async () => {
+    process.env['GIO_PUBLIC_TEST_GREETING'] = 'hello "public" world';
+    process.env['GIO_PUBLIC_TEST_DESTRUCTURED'] = 'GIO_TEST_DESTRUCTURED_VALUE';
+    process.env['GIO_TEST_PRIVATE_TOKEN'] = 'GIO_TEST_PRIVATE_VALUE_DO_NOT_BUNDLE';
+    root = await writeProject('gio-client-env-', {
+      'app/env/page.tsx': `import React from 'react';
+export default function Page() {
+  const secret = process.env.GIO_TEST_PRIVATE_TOKEN;
+  const { GIO_PUBLIC_TEST_DESTRUCTURED, GIO_TEST_PRIVATE_TOKEN } = process.env;
+  return React.createElement('p', null, process.env.GIO_PUBLIC_TEST_GREETING, String(secret === undefined),
+    GIO_PUBLIC_TEST_DESTRUCTURED, GIO_TEST_PRIVATE_TOKEN);
+}
+`,
+    });
+    manifest = await buildPages(root, ['env']);
+  }, 60_000);
+
+  afterAll(async () => {
+    process.env = saved;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('inlines GIO_PUBLIC_* values and never non-public ones', async () => {
+    expect(manifest.get('/env')).toBeDefined();
+    const chunks = await allChunks(root);
+    expect(chunks).toContain('hello "public" world');
+    // Destructured reads see the public values too (the server rendered them).
+    expect(chunks).toContain('GIO_TEST_DESTRUCTURED_VALUE');
+    expect(chunks).not.toContain('GIO_TEST_PRIVATE_VALUE_DO_NOT_BUNDLE');
+    // Non-public reads resolve against an empty object, not a global
+    // `process` that would throw in the browser.
+    expect(chunks).not.toContain('process.env.GIO_TEST_PRIVATE_TOKEN');
+  });
+});
+
+describe('buildClientBundles for a static export', () => {
+  let projectRoot: string;
+
+  beforeAll(async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), 'gio-client-export-'));
+    await mkdir(join(projectRoot, 'app'), { recursive: true });
+    await mkdir(join(projectRoot, 'lib'), { recursive: true });
+    await writeFile(join(projectRoot, 'app', 'page.tsx'), PAGE_SOURCE);
+    await writeFile(join(projectRoot, 'lib', 'secret.ts'), SECRET_SOURCE);
+    // A running server's build must survive an export from the same project.
+    await mkdir(join(projectRoot, '.gio', 'build', 'static', 'chunks'), { recursive: true });
+    await writeFile(join(projectRoot, '.gio', 'build', 'static', 'chunks', 'route-live-X.js'), '');
+  });
+
+  afterAll(async () => {
+    await rm(projectRoot, { recursive: true, force: true });
+  });
+
+  it('writes the chunks under <out>/_next/static/chunks, at the URLs it reports', async () => {
+    const outDir = join(projectRoot, 'out');
+    const manifest = await buildClientBundles({
+      routes: new Map([['/', routeFor('/', join(projectRoot, 'app', 'page.tsx'))]]),
+      layouts: new Map(),
+      projectRoot,
+      dev: false,
+      staticExportDir: outDir,
+      nodePaths: [join(packageDir, 'node_modules')],
+    });
+    const url = manifest.get('/');
+    expect(url).toMatch(/^\/_next\/static\/chunks\/route-index-[A-Z0-9]+\.js$/);
+    const files = await readdir(join(outDir, '_next', 'static', 'chunks'));
+    expect(files).toContain(url?.split('/').pop());
+    expect(files.some(f => f.endsWith('.map'))).toBe(false);
+    expect(await readdir(join(projectRoot, '.gio', 'build', 'static', 'chunks'))).toEqual(['route-live-X.js']);
+  }, 60_000);
+});
+
+describe('clientEnvDefines', () => {
+  it('defines only well-formed GIO_PUBLIC_* keys, JSON-encoded', () => {
+    const defines = clientEnvDefines(
+      {
+        GIO_PUBLIC_API_URL: 'https://api.example.com',
+        'GIO_PUBLIC_BAD-KEY': 'x',
+        DATABASE_URL: 'postgres://secret',
+      },
+      false,
+    );
+    expect(defines['process.env.GIO_PUBLIC_API_URL']).toBe('"https://api.example.com"');
+    expect(defines['process.env.NODE_ENV']).toBe('"production"');
+    expect(JSON.parse(defines['process.env'] ?? '')).toEqual({
+      NODE_ENV: 'production',
+      GIO_EXPORT: '0',
+      GIO_PUBLIC_API_URL: 'https://api.example.com',
+    });
+    expect(Object.keys(defines).some(k => k.includes('BAD-KEY'))).toBe(false);
+    expect(JSON.stringify(defines)).not.toContain('BAD-KEY');
+    expect(JSON.stringify(defines)).not.toContain('postgres://secret');
+  });
+
+  it('marks dev builds as development', () => {
+    expect(clientEnvDefines({}, true)['process.env.NODE_ENV']).toBe('"development"');
+  });
+
+  it('static export bundles see GIO_EXPORT=1, as the export render did', () => {
+    const defines = clientEnvDefines({}, false, true);
+    expect(defines['process.env.GIO_EXPORT']).toBe('"1"');
+    expect(JSON.parse(defines['process.env'] ?? '')).toMatchObject({ GIO_EXPORT: '1' });
+  });
+
+  it('gives destructuring and dynamic reads the public values, and only those', async () => {
+    const result = await build({
+      stdin: {
+        contents: `const { GIO_PUBLIC_A, DATABASE_URL } = process.env;
+const name = 'GIO_PUBLIC_A';
+export const probe = [GIO_PUBLIC_A, process.env[name], process.env.GIO_PUBLIC_A, DATABASE_URL,
+  process.env.DATABASE_URL, process.env.NODE_ENV];
+`,
+        loader: 'js',
+      },
+      bundle: true,
+      write: false,
+      format: 'iife',
+      globalName: 'gioEnvProbe',
+      platform: 'browser',
+      define: clientEnvDefines(
+        { GIO_PUBLIC_A: 'public-a', DATABASE_URL: 'postgres://secret' },
+        false,
+      ),
+    });
+    const code = result.outputFiles[0]?.text ?? '';
+    expect(code).not.toContain('postgres://secret');
+    const { probe } = new Function(`${code}; return gioEnvProbe;`)() as { probe: unknown[] };
+    expect(probe).toEqual(['public-a', 'public-a', 'public-a', undefined, undefined, 'production']);
+  });
+});
+
+describe('bareImportSpecifiers', () => {
+  it('finds side-effect imports but not binding or dynamic imports', () => {
+    const source = `import './styles.css';
+import"polyfill";
+import React from 'react';
+import { a } from './a';
+import * as b from './b';
+export * from './c';
+const lazy = import('./lazy');
+`;
+    expect([...bareImportSpecifiers(source)].sort()).toEqual(['./styles.css', 'polyfill']);
+  });
+});
+
+describe("the project's tsconfig", () => {
+  it('applies to client bundles as it does in SSR (jsxImportSource)', async () => {
+    const root = await writeProject('gio-client-tsconfig-', {
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: { jsx: 'react-jsx', jsxImportSource: 'custom-jsx' },
+      }),
+      'node_modules/custom-jsx/package.json': JSON.stringify({
+        name: 'custom-jsx',
+        exports: { './jsx-runtime': './jsx-runtime.js', './jsx-dev-runtime': './jsx-runtime.js' },
+      }),
+      'node_modules/custom-jsx/jsx-runtime.js': `export const Fragment = 'CUSTOM_JSX_FRAGMENT';
+export function jsx(type, props) { return { marker: 'CUSTOM_JSX_RUNTIME', type, props }; }
+export const jsxs = jsx;
+export const jsxDEV = jsx;
+`,
+      'app/custom/page.tsx': `export default function Page() { return <p>tsconfig page</p>; }\n`,
+    });
+    try {
+      const manifest = await buildPages(root, ['custom']);
+      expect(manifest.get('/custom')).toBeDefined();
+      expect(await allChunks(root)).toContain('CUSTOM_JSX_RUNTIME');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
