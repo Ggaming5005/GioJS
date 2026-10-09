@@ -7,6 +7,6 @@
     "typecheck": "pnpm -r run typecheck"
   },
   "devDependencies": {
-    "ws": "8.21.1"
+    "ws": "8.22.0"
   }
 }
