@@ -3954,9 +3954,11 @@ async function buildChangeCachePhase() {
  */
 async function testingKitPhase() {
   const kitFixture = join(repoRoot, 'packages', 'giojs-core', 'test-fixtures', 'testing-app');
-  // `--import tsx` resolves from the cwd: giojs-core has tsx installed.
+  // `--import tsx` resolves from the cwd: giojs-core has tsx installed. TAP
+  // on every Node version - the assertions read its summary lines, and piped
+  // output defaults to TAP only up to Node 22 (spec from Node 23).
   const nodeTest = (args, timeout) =>
-    spawnSync(process.execPath, ['--import', 'tsx', ...args], {
+    spawnSync(process.execPath, ['--import', 'tsx', '--test-reporter=tap', ...args], {
       cwd: join(repoRoot, 'packages', 'giojs-core'),
       env: { ...process.env, GIO_SERVER_BIN: findServerBinary() },
       encoding: 'utf8',

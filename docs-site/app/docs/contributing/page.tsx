@@ -99,7 +99,7 @@ cd docs-site && npm ci && npm run typecheck && npm run check-links && npm test &
 
       <h2 id="pull-requests">Pull requests</h2>
       <ul>
-        <li>CI runs the Rust tests and clippy on Linux and Windows, the MSRV check, <code>cargo-deny</code>, the Node tests and typechecks, the integration suite and the docs site.</li>
+        <li>CI runs the Rust tests and clippy on Linux and Windows, the MSRV check, <code>cargo-deny</code>, the Node tests and typechecks, the integration suite and the docs site; the Node tests and the integration suite run again on Node 24.</li>
         <li>Behavior changes get a test that fails without them, and an entry in <code>CHANGELOG.md</code>; a change in meaning also gets an upgrade note.</li>
         <li>Every published package shares one version, set by <code>packages/giojs</code>: <code>node scripts/sync-versions.mjs</code> stamps it everywhere and <code>--check</code> verifies it in CI.</li>
       </ul>
