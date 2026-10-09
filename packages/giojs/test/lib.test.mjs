@@ -152,7 +152,32 @@ value = { a = 1 }
     assert.equal(parsed.guards.length, 2);
     assert.equal(parsed.guards[0].redirect_to, '/login#top');
     assert.equal(parsed.guards[1].require_cookie, 'token');
-    assert.equal(parsed.headers.inline.value, undefined);
+    assert.deepEqual(parsed.headers.inline.value, { a: 1 });
+  });
+
+  test('follows dotted and quoted keys, quoted table names and inline tables as the server does', () => {
+    const problems = [];
+    const parsed = parseTomlLite(`
+env.files = false
+server . port = 4000
+"cache".'disk_path' = "data/cache"
+security = { hsts = { max_age = 63072000, include_subdomains = true }, csrf.enabled = false }
+[[redirects]]
+from = "/a"
+headers = { "x-frame-options" = "", "x-list" = ["a, b", 'c'] }
+[headers."/api/*"]
+"x-a" = "1"
+`, problems);
+    assert.deepEqual(problems, []);
+    assert.equal(parsed.env.files, false);
+    assert.equal(parsed.server.port, 4000);
+    assert.equal(parsed.cache.disk_path, 'data/cache');
+    assert.deepEqual(parsed.security, {
+      hsts: { max_age: 63072000, include_subdomains: true },
+      csrf: { enabled: false },
+    });
+    assert.deepEqual(parsed.redirects[0].headers, { 'x-frame-options': '', 'x-list': ['a, b', 'c'] });
+    assert.deepEqual(parsed.headers['/api/*'], { 'x-a': '1' });
   });
 
   test('never throws on garbage', () => {
@@ -169,12 +194,23 @@ value = { a = 1 }
       'gio.toml:5: a key without a value',
       'gio.toml:6: an array that never closes',
     ]);
-    // Valid TOML it does not follow is skipped, not a problem; the tables
-    // after it are still read.
+    // A multi-line string is skipped, not a problem; the tables after it are
+    // still read.
     const valid = [];
     const parsed = parseTomlLite('a.b = 1\n"quoted" = 2\n[x-tool."name"]\nport = 9\nnote = """\nline\n"""\n[server]\nport = 4\n', valid);
     assert.deepEqual(valid, []);
-    assert.deepEqual(parsed, { server: { port: 4 } });
+    assert.deepEqual(parsed, { a: { b: 1 }, quoted: 2, 'x-tool': { name: { port: 9 } }, server: { port: 4 } });
+    // Keys and inline tables it cannot follow are problems, never skipped
+    // in silence.
+    const unread = [];
+    parseTomlLite('a b = 1\nport = 1\nport.x = 2\nh = { a = }\nt = { a = 1\n[a b]\n', unread);
+    assert.deepEqual(unread, [
+      'gio.toml:1: not a `key = value` line or a table header',
+      'gio.toml:3: a key under a name that is not a table',
+      'gio.toml:4: an inline table this reader cannot follow',
+      'gio.toml:5: an inline table this reader cannot follow',
+      'gio.toml:6: not a table header',
+    ]);
     const unclosed = [];
     parseTomlLite('note = """\nnever closed\n', unclosed);
     assert.deepEqual(unclosed, ['gio.toml:1: a multi-line string that never ends']);
@@ -223,6 +259,14 @@ describe('fallbackReport', () => {
     assert.equal(fallbackReport({ GIO_ENV_FILES: '0' }, on).listen.port, 4000);
     assert.equal(fallbackReport({ GIO_ENV_FILES: '0' }, on).envFilesDisabledBy, 'GIO_ENV_FILES');
     assert.equal(fallbackReport({ GIO_ENV_FILES: '1' }, off).listen.port, 5000, 'the variable wins');
+    // A dotted key or an inline table turns them off just the same.
+    for (const toml of ['env.files = false\n[server]\nport = 4000\n', 'env = { files = false }\nserver.port = 4000\n']) {
+      const report = fallbackReport({ NODE_ENV: 'production' }, tempProject({ ...files, 'gio.toml': toml }));
+      assert.equal(report.configProblems, undefined, toml);
+      assert.equal(report.envFilesDisabledBy, '[env] files', toml);
+      assert.equal(report.listen.port, 4000, toml);
+      assert.equal(report.listen.portSource, 'gio.toml', toml);
+    }
   });
 
   test('an invalid GIO_ENV_FILES is the error the server refuses to start with, not "load"', () => {

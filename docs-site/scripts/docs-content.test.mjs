@@ -344,7 +344,7 @@ test('the page-exports reference states the limits and codes the code decides', 
   assert.match(revalidate, /defaults to\{' '\}\s*<code>3600<\/code>/);
   // redirect() defaults to 303; the getServerSideProps redirect object is 301/302.
   assert.match(core('action.ts'), /const \{ status = 303, headers \}/);
-  assert.match(ssr, /status: result\.redirect\.permanent \? 301 : 302/);
+  assert.match(ssr, /const status = result\.redirect\.permanent \? 301 : 302;/);
   assert.match(docsPage('page-exports/action'), /<code>303 See Other<\/code>/);
   // route.ts methods, and the WebSocket close codes.
   assert.match(core('router.ts'), /HANDLER_METHODS = \['GET', 'POST', 'PUT', 'PATCH', 'DELETE'\] as const/);

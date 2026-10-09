@@ -1163,7 +1163,28 @@ first.
   or `false`) - the error overlay in dev, a logged error and a `500` with a
   digest in production. A literal value (`export const revalidate = -5`) is
   refused at route discovery already: the worker does not boot, and
-  `gio build standalone` fails, naming the file.
+  `gio build standalone` fails, naming the file. Only an export in code
+  counts there: one in a comment, a string or a template literal (a
+  commented-out line, a code sample on a docs page) is not read.
+- `getServerSideProps` results with a `redirect` key were all redirects: flat
+  props such as `{ redirect: next, title }` or `{ redirect: { permanent } }`
+  answered a `302` with no `Location`, and the object form's `destination`
+  was sent unchecked - one with a newline was dropped by the server, leaving
+  another `Location`-less `302` and nothing in the log. Only a `redirect`
+  object with a `destination` key is now a redirect (anything else under
+  that key is a prop, as `notFound` counts only when `true`), and its
+  `destination` gets the check `redirect()` makes: a non-string, empty or
+  control-character destination is a render error naming the route, a
+  `500` with a digest, never sent.
+- The `gio` CLI's fallback `gio.toml` reader (used when no server binary of
+  its version is installed) skipped dotted keys, quoted keys and inline
+  tables in silence: with `env.files = false`, `gio doctor` reported a
+  `GIO_PORT` from `.env` that the server would not load, and
+  `gio build standalone` minified CSS despite `css.minify = false`. It now
+  follows them (and quoted table names) as the server does, and lists a key
+  or inline table it still cannot read among the lines it could not read, so
+  the checks that depend on `gio.toml` are skipped instead of run on
+  defaults.
 - Every startup warning for a protection `gio.toml` turns off or loosens was
   logged twice.
 - With `[server.tls]` on, `[server] http2 = false` still offered `h2` in the

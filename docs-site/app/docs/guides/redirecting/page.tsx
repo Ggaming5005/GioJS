@@ -289,11 +289,11 @@ function SignOut(): React.JSX.Element {
           <strong>Open redirects.</strong> Never redirect to a URL taken from the request
           unchecked: <code>?next=https://evil.example</code> would turn your login page into a
           phishing hop. Accept only paths on your site:
-          <CodeBlock lang="ts" code={`/** Same-site paths only; \`//evil.example\` and absolute URLs fall back to \`/\`. */
+          <CodeBlock lang="ts" code={`/** Same-site paths only; \`//evil.example\`, \`/\\evil.example\` and absolute URLs fall back to \`/\`. */
 export function safeNext(value: string | undefined): string {
-  return value !== undefined && value.startsWith('/') && !value.startsWith('//') && !value.startsWith('/\\\\')
-    ? value
-    : '/';
+  // A browser drops tabs and newlines, and reads a leading // or /\\ as another host.
+  if (value === undefined || !value.startsWith('/') || /[\\u0000-\\u001f\\u007f]/.test(value)) return '/';
+  return /^\\/[/\\\\]/.test(value) ? '/' : value;
 }`} />
         </li>
         <li>

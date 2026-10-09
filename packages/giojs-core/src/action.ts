@@ -75,9 +75,10 @@ export function redirect(url: string, init: number | RedirectInit = {}): ActionR
 /**
  * Throw a TypeError unless `url` and `status` are what redirect() accepts.
  * The renderer checks again before answering (assertValidRedirect), so a
- * hand-built ActionRedirect cannot send what redirect() would refuse.
+ * hand-built ActionRedirect cannot send what redirect() would refuse; a
+ * getServerSideProps `{ redirect: { destination } }` goes through it too.
  */
-function assertRedirectTarget(url: unknown, status: unknown): void {
+export function assertRedirectTarget(url: unknown, status: unknown): void {
   if (typeof url !== 'string' || url === '') {
     throw new TypeError('redirect() needs a non-empty URL');
   }

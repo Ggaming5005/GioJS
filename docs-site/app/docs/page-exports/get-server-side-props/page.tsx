@@ -67,7 +67,7 @@ export default function PostPage({ post }: InferPageProps<typeof getServerSidePr
         <tbody>
           <tr><td><code>{'{ props, headers?, tags? }'}</code></td><td><code>200</code> with the page rendered from <code>props</code>. <code>headers</code> are response headers; <code>tags</code> are <a href="/docs/page-exports/tags">cache tags</a> for this render.</td></tr>
           <tr><td>Any other object</td><td>Used as the props themselves (&quot;flat props&quot;). A <code>headers</code> or <code>tags</code> key in it is just a prop.</td></tr>
-          <tr><td><code>{'{ redirect: { destination, permanent }, headers? }'}</code></td><td><code>301</code> when <code>permanent</code> is <code>true</code>, else <code>302</code>, with <code>Location: destination</code>. <code>headers</code> go with it.</td></tr>
+          <tr><td><code>{'{ redirect: { destination, permanent }, headers? }'}</code></td><td><code>301</code> when <code>permanent</code> is <code>true</code>, else <code>302</code>, with <code>Location: destination</code>. <code>headers</code> go with it. A <code>destination</code> that <code>redirect()</code> would refuse (not a string, empty, or holding a control character such as a newline) is a render error, answered <code>500</code>, never sent.</td></tr>
           <tr><td><code>redirect(url, init?)</code></td><td>A <code>303</code> by default, or the status you pass (<code>301</code>, <code>302</code>, <code>307</code>, <code>308</code>), with <code>init.headers</code>. See <a href="/docs/functions/redirect">redirect</a>.</td></tr>
           <tr><td><code>{'{ notFound: true }'}</code></td><td><code>404</code> with the nearest <code>not-found.tsx</code>, the same as calling <code>notFound()</code>.</td></tr>
         </tbody>
@@ -101,6 +101,8 @@ export default function PostPage({ post }: InferPageProps<typeof getServerSidePr
           <strong>Bad results.</strong> A result that is not an object (<code>null</code>, a
           string, an array) is a render error:{' '}
           <code>getServerSideProps for route &quot;/x&quot; must return an object - {'{ props: {...} }'}, flat props, {'{ redirect: {...} }'} or {'{ notFound: true }'} - but returned null</code>.
+          So is a redirect whose <code>destination</code> cannot be sent:{' '}
+          <code>getServerSideProps for route &quot;/x&quot; returned {'{ redirect: { destination } }'} that cannot be sent: redirect() URL contains control characters</code>.
         </li>
         <li>
           <strong>Headers and caching.</strong> A page that returns response headers is never
@@ -252,9 +254,10 @@ export default function EditPost({ post, draft, actionData }: Props) {
           CDN never stores it either.
         </li>
         <li>
-          Any object with a <code>redirect</code> key is treated as a redirect, and{' '}
-          <code>notFound</code> counts only when it is exactly <code>true</code>. Nest props
-          under <code>props</code> to avoid surprises.
+          <code>redirect</code> counts only when it is an object with a{' '}
+          <code>destination</code> key, and <code>notFound</code> only when it is exactly{' '}
+          <code>true</code>; any other value under those keys is a prop. Nest props under{' '}
+          <code>props</code> to avoid surprises.
         </li>
         <li>
           <code>ctx.headers</code> is a <code>Proxy</code>, so <code>structuredClone</code>,{' '}
