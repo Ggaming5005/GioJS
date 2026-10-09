@@ -395,12 +395,25 @@ fn local_font_errors(config: &GioConfig, public_dir: &Path) -> Vec<String> {
             errors.push(format!(
                 "[[fonts]] {}: {} {problem} (url = \"{}\")",
                 font.family,
-                path.display(),
+                slashed(&path),
                 font.url
             ));
         }
     }
     errors
+}
+
+/// `path` with `/` between its components on every OS, for messages. A font
+/// path is public/ joined with a URL path, which Windows would print with
+/// both separators (`C:\app\public\fonts/a.woff2`). Only Windows converts:
+/// elsewhere `\` can be part of a file name.
+fn slashed(path: &Path) -> String {
+    let shown = path.display().to_string();
+    if cfg!(windows) {
+        shown.replace('\\', "/")
+    } else {
+        shown
+    }
 }
 
 /// The process inputs the report depends on, gathered once so the report
@@ -813,14 +826,16 @@ mod tests {
             .map(|error| error.as_str().unwrap())
             .collect();
         assert_eq!(errors.len(), 3, "{errors:?}");
-        let missing_path = root.join("public/fonts/missing.woff2");
+        let missing_path = root.join("public").join("fonts").join("missing.woff2");
         assert!(
             errors[0].starts_with(&format!(
                 "[[fonts]] Missing: {} not found",
-                missing_path.display()
+                slashed(&missing_path)
             )),
             "{errors:?}"
         );
+        // One separator on every OS (Windows used to print `public\fonts/...`).
+        assert!(errors[0].contains("public/fonts/missing.woff2 not found"), "{errors:?}");
         assert!(errors[1].starts_with("[[fonts]] Escape: font url"), "{errors:?}");
         assert!(errors[2].starts_with("[[fonts]] Dir: "), "{errors:?}");
         assert!(errors[2].contains("is not a file"), "{errors:?}");

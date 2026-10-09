@@ -211,3 +211,46 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: cargo build -p giojs-server --locked
       - run: node tests/integration/run.mjs
+
+  # From Node 24.11.1, tsx loads TypeScript through the synchronous
+  # module.registerHooks() instead of module.register(), and the worker's
+  # .css import hooks must follow it (giojs-core/src/css-hooks.ts): with the
+  # two mixed, every page answered 500. The jobs above run Node 20 and 22,
+  # so the Node suites and the integration suite run on Node 24 here, the
+  # boot tests (testing kit, scaffolded starters) against the server built
+  # first.
+  node-24:
+    name: Node 24 (Node tests + integration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: cargo build -p giojs-server --locked
+      - name: giojs-core tests + typecheck
+        working-directory: packages/giojs-core
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+      - name: giojs-react tests + typecheck
+        working-directory: packages/giojs-react
+        run: |
+          npx tsc --noEmit
+          npx vitest run
+      - name: create-giojs tests
+        working-directory: packages/giojs-cli
+        run: npm test
+      - name: gio CLI tests
+        working-directory: packages/giojs
+        run: npm test
+      - run: node tests/integration/run.mjs

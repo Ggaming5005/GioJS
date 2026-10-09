@@ -200,6 +200,19 @@ fn boot_failure_message(status: &str, written: Option<&str>) -> String {
     format!("the Node worker exited before it was ready ({status}):\n{detail}")
 }
 
+/// A worker's exit as boot errors state it, the same on every OS: a code
+/// reads `exit status: 1` (Rust's own Display says `exit code: 1` on
+/// Windows), a Windows crash status is in hex as Rust writes it
+/// (`exit status: 0xc0000005`), and a Unix signal reads as Rust shows it
+/// (`signal: 9 (SIGKILL)`).
+fn exit_status_text(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) if cfg!(windows) && code < 0 => format!("exit status: {:#x}", code as u32),
+        Some(code) => format!("exit status: {code}"),
+        None => status.to_string(),
+    }
+}
+
 /// Startup budget: Node + tsx can take several seconds to boot.
 const STARTUP_CONNECT_ATTEMPTS: usize = 60;
 /// Per-round attempts once running; the supervisor loops rounds forever.
@@ -965,7 +978,7 @@ impl WorkerProcess {
     /// The boot failure of a worker that exited with `status` before READY.
     async fn boot_failure(&mut self, status: std::io::Result<std::process::ExitStatus>) -> WorkerBootError {
         let status = match status {
-            Ok(status) => status.to_string(),
+            Ok(status) => exit_status_text(status),
             Err(error) => format!("wait failed: {error}"),
         };
         let written = tokio::fs::read_to_string(&self.error_file).await.ok();
@@ -4255,6 +4268,35 @@ mod tests {
         for written in [None, Some("not json")] {
             assert!(boot_failure_message("signal: 9", written)
                 .ends_with("(it reported no error - see its output above)"));
+        }
+    }
+
+    #[test]
+    fn boot_failures_state_the_exit_the_same_on_every_os() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            // Raw wait statuses: exit code 1, then killed by SIGKILL.
+            assert_eq!(
+                exit_status_text(std::process::ExitStatus::from_raw(1 << 8)),
+                "exit status: 1"
+            );
+            assert_eq!(
+                exit_status_text(std::process::ExitStatus::from_raw(9)),
+                "signal: 9 (SIGKILL)"
+            );
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            assert_eq!(
+                exit_status_text(std::process::ExitStatus::from_raw(1)),
+                "exit status: 1"
+            );
+            assert_eq!(
+                exit_status_text(std::process::ExitStatus::from_raw(0xC000_0005)),
+                "exit status: 0xc0000005"
+            );
         }
     }
 

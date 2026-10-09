@@ -1026,6 +1026,17 @@ first.
 
 ### Fixed
 
+- On Node.js 24.11.1 and later nothing rendered: every page answered `500`
+  (`Element type is invalid ... got: undefined`), in `gio dev`, `gio start`
+  and `createTestServer` alike, a project with a `middleware.ts` did not
+  start (`middleware.ts has no default export`), `gio export` wrote no pages
+  and `gio routes` listed no route handlers. tsx loads TypeScript through
+  Node's synchronous `module.registerHooks()` on those versions, and the
+  worker's `.css` import hook, still registered with `module.register()`,
+  left every module tsx compiled with no exports. The hook now registers
+  with whichever of the two APIs tsx used, so app modules, `.css` imports
+  and CSS Modules load the same on Node 20, 22 and 24. CI runs the Node test
+  suites and the integration suite on Node 24 too.
 - The worker reassembled each IPC frame by copying everything received so
   far on every socket read, so a large request body (a raised
   `max_body_bytes`) blocked it for seconds - and from about 50 MB missed the
