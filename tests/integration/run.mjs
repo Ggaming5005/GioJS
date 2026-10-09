@@ -22,6 +22,10 @@ import { tmpdir } from 'node:os';
 import { gzipSync } from 'node:zlib';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+// The `ws` client, not the WebSocket global: Node has that only from 22
+// (21 behind a flag), and CI runs this suite on Node 20. One client on every
+// Node version keeps runs here and in CI the same.
+import WebSocket from 'ws';
 
 const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const fixtureDir = join(repoRoot, 'tests', 'integration', 'fixture');

@@ -6,7 +6,11 @@ settings:
 
 importers:
 
-  .: {}
+  .:
+    devDependencies:
+      ws:
+        specifier: 8.21.1
+        version: 8.21.1
 
   examples/auth-demo:
     dependencies:
