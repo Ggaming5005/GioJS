@@ -158,6 +158,8 @@ impl BootErrorDir {
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ));
+        // `mut` only for the Unix-only mode below.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
