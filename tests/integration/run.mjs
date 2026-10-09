@@ -322,6 +322,10 @@ async function linkFixtureDeps(targetDir = fixtureDir) {
  * mutate, each in its own `name`d copy. The copy lives at the same directory
  * depth as the original so the fixture's relative `../../../packages/`
  * imports keep resolving.
+ *
+ * Git for Windows checks the fixture out with CRLF line endings: compare a
+ * served file with the file on disk, and anchor edits on /^...$/m lines,
+ * never on '\n'.
  */
 async function copyFixtureForDev(name = '.dev-fixture') {
   const devDir = join(repoRoot, 'tests', 'integration', name);
@@ -355,6 +359,8 @@ async function main() {
       // Also set in fixture/.env: the real environment must win.
       GIO_FIXTURE_PROCESS_WINS: 'from-process',
       GIO_REVALIDATE_TOKEN: REVALIDATE_TOKEN,
+      // Windows has no SIGTERM: the shutdown test closes stdin there.
+      GIO_EXIT_ON_STDIN_EOF: '1',
     },
   });
   server.stdout.on('data', (d) => { log += d.toString(); });
@@ -1886,7 +1892,7 @@ async function main() {
       const res = await fetch(`${BASE}/shadowed`);
       assert.equal(res.status, 200);
       assert.equal(res.headers.get('x-gio-cache'), 'static');
-      assert.equal(await res.text(), 'FIXTURE_PUBLIC_SHADOWS_PAGE\n');
+      assert.equal(await res.text(), await readFile(join(fixtureDir, 'public', 'shadowed'), 'utf8'));
     });
 
     await test('rules middleware runs for root-served public/ files', async () => {
@@ -1905,7 +1911,7 @@ async function main() {
       }
       const member = await fetch(`${BASE}/members/report.txt`, { headers: { cookie: 'session=abc' } });
       assert.equal(member.status, 200);
-      assert.equal(await member.text(), 'FIXTURE_MEMBERS_ONLY\n');
+      assert.equal(await member.text(), await readFile(join(fixtureDir, 'public', 'members', 'report.txt'), 'utf8'));
       assert.equal(member.headers.get('x-robots-tag'), 'noindex', '/public/* header rule stamped on the alias');
     });
 
@@ -1971,7 +1977,7 @@ async function main() {
       assert.equal(legacy.headers.get('location'), '/moved-root/file.txt');
       const root = await fetch(`${BASE}/moved-root/file.txt`, { redirect: 'manual' });
       assert.equal(root.status, 200);
-      assert.equal(await root.text(), 'FIXTURE_MOVED_ROOT\n');
+      assert.equal(await root.text(), await readFile(join(fixtureDir, 'public', 'moved-root', 'file.txt'), 'utf8'));
     });
 
     await test('unhashed app CSS revalidates with a strong ETag and 304s', async () => {
@@ -2743,10 +2749,13 @@ async function main() {
       // Headers out and the body under way before the signal lands.
       await new Promise((resolve) => setTimeout(resolve, 150));
       const stoppedAt = Date.now();
-      server.kill();
+      // kill() on Windows terminates at once, with no signal to handle;
+      // closing stdin takes the same graceful path there.
+      if (process.platform === 'win32') server.stdin.end();
+      else server.kill();
       await Promise.all([sseEnded, routeEnded]);
       const streamsEndedMs = Date.now() - stoppedAt;
-      assert.ok(streamsEndedMs < 2000, `open streams ended ${streamsEndedMs}ms after SIGTERM`);
+      assert.ok(streamsEndedMs < 2000, `open streams ended ${streamsEndedMs}ms after the stop`);
       const html = await slowHtml;
       assert.match(html, /SLOW_FIXTURE_LATE_CONTENT/);
       assert.match(html, /<\/html>/);
@@ -2759,7 +2768,7 @@ async function main() {
       assert.match(log, /shutdown: ended open event streams/);
       await waitFor('server exit', () => Promise.resolve(serverGone), 10_000);
       const exitMs = Date.now() - stoppedAt;
-      assert.ok(exitMs < 5000, `server exited ${exitMs}ms after SIGTERM`);
+      assert.ok(exitMs < 5000, `server exited ${exitMs}ms after the stop`);
       assert.doesNotMatch(log, /shutdown drain timed out/);
       // kill(pid, 0) probes liveness; the worker tree must die with the server.
       await waitFor('worker reaped', async () => {
@@ -5075,7 +5084,7 @@ async function standalonePhase() {
 
     await test('standalone: a worker pool boots from the prebuilt registry', async () => {
       const toml = join(outDir, 'gio.toml');
-      const pooled = (await readFile(toml, 'utf8')).replace('http2 = false\n', 'http2 = false\nworkers = 2\n');
+      const pooled = (await readFile(toml, 'utf8')).replace(/^http2 = false$/m, 'http2 = false\nworkers = 2');
       assert.match(pooled, /workers = 2/);
       await writeFile(toml, pooled);
       log = '';
@@ -5156,8 +5165,8 @@ async function cspPhase() {
   const binary = findServerBinary();
   const cspDir = await copyFixtureForDev('.csp-fixture');
   const toml = await readFile(join(cspDir, 'gio.toml'), 'utf8');
-  assert.ok(toml.includes('[security.csrf]\n'));
-  const cspOffToml = toml.replace('[security.csrf]\n', '[security.csrf]\nenabled = false\n');
+  assert.match(toml, /^\[security\.csrf\]$/m);
+  const cspOffToml = toml.replace(/^\[security\.csrf\]$/m, '[security.csrf]\nenabled = false');
   const cspToml = cspOffToml + CSP_TOML;
   await writeFile(join(cspDir, 'gio.toml'), cspToml);
   await mkdir(join(cspDir, 'app', 'csp-boom'), { recursive: true });
@@ -5749,7 +5758,7 @@ async function configSettingsPhase() {
   assert.match(toml, /^port\s*=\s*39517$/m, 'fixture gio.toml sets the port');
   assert.match(toml, /^quality\s*=\s*70$/m, 'fixture gio.toml sets [images] quality');
   toml = toml
-    .replace(/^port\s*=.*\n/m, '')
+    .replace(/^port\s*=.*\r?\n/m, '')
     .replace(/^quality\s*=\s*70$/m, 'quality        = 70\nformats        = ["webp"]');
   toml += [
     '',
@@ -6645,68 +6654,45 @@ async function devSwitchesPhase() {
   }
 }
 
-await strictConfigPhase();
-if (process.exitCode !== 1) {
-  await workerBootPhase();
+// Every phase runs even when an earlier one failed: each boots its own server
+// on its own fixture copy, so one run reports every broken phase.
+const failedPhases = [];
+for (const phase of [
+  strictConfigPhase,
+  workerBootPhase,
+  main,
+  cspPhase,
+  unsetNodeEnvPhase,
+  projectTsconfigPhase,
+  inheritedModePhase,
+  untrustedProxyPhase,
+  opsPhase,
+  workersPhase,
+  imageConfigCachePhase,
+  buildChangeCachePhase,
+  configSettingsPhase,
+  switchesOffPhase,
+  featureSwitchesPhase,
+  cliPhase,
+  testingKitPhase,
+  devWatchPhase,
+  devCacheDirPhase,
+  devSwitchesPhase,
+  standalonePhase,
+]) {
+  process.exitCode = undefined;
+  try {
+    await phase();
+  } catch (err) {
+    console.error(`\nintegration (${phase.name}): FAILED\n${err?.stack ?? err}`);
+    process.exitCode = 1;
+  }
+  if (process.exitCode === 1) failedPhases.push(phase.name);
 }
-if (process.exitCode !== 1) {
-  await main();
-}
-if (process.exitCode !== 1) {
-  await cspPhase();
-}
-if (process.exitCode !== 1) {
-  await unsetNodeEnvPhase();
-}
-if (process.exitCode !== 1) {
-  await projectTsconfigPhase();
-}
-if (process.exitCode !== 1) {
-  await inheritedModePhase();
-}
-if (process.exitCode !== 1) {
-  await untrustedProxyPhase();
-}
-if (process.exitCode !== 1) {
-  await opsPhase();
-}
-if (process.exitCode !== 1) {
-  await workersPhase();
-}
-if (process.exitCode !== 1) {
-  await imageConfigCachePhase();
-}
-if (process.exitCode !== 1) {
-  await buildChangeCachePhase();
-}
-if (process.exitCode !== 1) {
-  await configSettingsPhase();
-}
-if (process.exitCode !== 1) {
-  await switchesOffPhase();
-}
-if (process.exitCode !== 1) {
-  await featureSwitchesPhase();
-}
-if (process.exitCode !== 1) {
-  await cliPhase();
-}
-if (process.exitCode !== 1) {
-  await testingKitPhase();
-}
-if (process.exitCode !== 1) {
-  await devWatchPhase();
-}
-if (process.exitCode !== 1) {
-  await devCacheDirPhase();
-}
-if (process.exitCode !== 1) {
-  await devSwitchesPhase();
-}
-if (process.exitCode !== 1) {
-  await standalonePhase();
-}
-console.log(`\nintegration: ${passed} passed${process.exitCode === 1 ? ', with FAILURES' : ''}`);
+process.exitCode = failedPhases.length > 0 ? 1 : undefined;
+console.log(
+  `\nintegration: ${passed} passed${failedPhases.length > 0 ? `, with FAILURES in ${failedPhases.join(', ')}` : ''}`,
+);
 // Any stray handle (an orphaned worker holding a stdio pipe) must never keep
 // the harness alive after the verdict is printed - CI burned 30 minutes on
 // exactly that.
