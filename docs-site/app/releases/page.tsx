@@ -44,10 +44,10 @@ function releaseId(version: string): string {
 const RELEASES: Release[] = [
   {
     version: '0.1.0-beta.8',
-    date: 'Unreleased',
-    tag: 'next',
+    date: 'October 9, 2026',
+    tag: 'latest',
     summary:
-      'The production release: security on by default, sessions and forms, a worker pool, on-demand revalidation, a metadata API, CSS Modules, a testing kit, a Next.js migration tool, a real gio CLI and a starter with optional features - and documentation for all of it.',
+      'The production release: security on by default with a gio.toml switch for every protection, sessions and forms, a worker pool, on-demand revalidation, a metadata API, CSS Modules, a testing kit, a Next.js migration tool, a real gio CLI, a starter with optional features, and a rebuilt documentation site with search and a full API reference. Tested on Node.js 20, 22 and 24.',
     groups: [
       {
         title: 'Security',
@@ -56,6 +56,8 @@ const RELEASES: Release[] = [
           'Encrypted, signed cookie sessions (createSessionStorage), cookie and signing helpers, and require_session guards that verify the session in the Rust layer before any Node code runs.',
           'Trusted proxies: real client IPs for rate limits, metrics and req.ip, plus request ids on every response and log line in both processes.',
           'Production mode is anything but NODE_ENV=development: error responses carry only a digest that matches the log line. Connection caps and slowloris/TLS/body timeouts, Host- and Origin-gated dev endpoints, a closed /_gio namespace, and supply-chain hardening (committed Cargo.lock, cargo-deny, pinned CI actions, SECURITY.md).',
+          'Every protection and feature is on by default and has a gio.toml switch - [security.csrf] enabled, [security] default_headers, [cache], [images], [prefetch], [health], [env] and more. Each loosened protection logs a startup warning that giojs-server --check-config reports too; the Security switches guide lists them all, and the few that stay fixed on purpose.',
+          'Fail closed: a middleware.ts that throws, a guard or rule that cannot be enforced, or an invalid [i18n] setting stops startup instead of being skipped, and --check-config lists every problem in one run with its line. A worker that cannot boot ends startup with its own error.',
         ],
       },
       {
@@ -83,6 +85,14 @@ const RELEASES: Release[] = [
           'gio.toml is strict - an unknown key stops startup with the closest valid one - and ships a JSON Schema for editor autocomplete; PORT and GIO_HOST/GIO_PORT are honored.',
           '@gio.js/core/testing (renderPage, callRoute, createTestServer), typed app conventions (PageProps, LayoutProps, Metadata...), whole-project dev watch, and create-giojs migrate for Next.js projects.',
           'New guides - environment variables, deploying to Docker, Fly.io, Railway, Render and a Linux server, a production checklist - and a list of known limitations.',
+          'Reproducible builds: the same code always builds the same client chunks, so the deployment ID stays put across restarts and pods. CI tests Node.js 20, 22 and 24.',
+        ],
+      },
+      {
+        title: 'Documentation',
+        items: [
+          'A rebuilt docs site: one API reference page per component, hook, function, file convention, page export, gio.toml section and CLI command, instant search (Ctrl/Cmd+K), an on-this-page outline, and copy-as-Markdown on every page.',
+          'New guides for upgrading, streaming, redirecting, Content Security Policy and turning protections on and off.',
         ],
       },
       {
@@ -104,7 +114,9 @@ const RELEASES: Release[] = [
           'Routing follows the App Router: _private folders are never routed, (group) folders leave the URL, catch-all params are one /-joined string, and conflicting routes stop startup. public/ files are served at the site root and win over a page with the same path.',
           'In production, error.tsx receives a generic message and a digest, and it now also runs in the browser as an error boundary, so it must not import server-only code.',
           'Idle HTTP/1.1 keep-alive connections are closed after 10 seconds: keep a pooling proxy\'s upstream idle timeout below that, or raise header_read_timeout_secs and idle_timeout_secs.',
-          'Bare gio no longer starts a server - it prints the help and exits with code 2. Use gio start or gio dev; giojs-server is unchanged.',
+          'Bare gio no longer starts a server - it prints the help and exits with code 2. Use gio start or gio dev. giojs-server refuses arguments it does not take (exit 2): configure it with gio.toml and environment variables.',
+          'Rules fail closed: a middleware.ts that throws, a guard without a requirement, a redirect, rewrite or header rule that cannot compile, or an invalid [i18n] setting now stops startup instead of being skipped.',
+          'A [metrics] section without a token or ip_allowlist answers only this machine; list your scrapers in ip_allowlist. And 0 now lifts a limit everywhere in gio.toml ([prefetch], [websocket] max_connections, [server] max_body_bytes ...) where it used to refuse.',
         ],
       },
     ],
@@ -112,7 +124,6 @@ const RELEASES: Release[] = [
   {
     version: '0.1.0-beta.7',
     date: 'September 6, 2026',
-    tag: 'latest',
     summary:
       'Partial prerendering - cached shell, per-user Suspense holes streamed into the same response - and standalone deploys: one self-contained folder that runs on any server with only Node installed.',
     groups: [

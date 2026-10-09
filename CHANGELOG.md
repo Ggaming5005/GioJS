@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## 0.1.0-beta.8 (unreleased)
+## 0.1.0-beta.8 (2026-10-09)
 
 This release is about running GioJS in production. The server decides the
 runtime mode, error details and personalized pages no longer reach other
