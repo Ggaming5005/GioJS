@@ -42,7 +42,7 @@ toml               = "0.8"
 thiserror          = "1"
 dashmap            = "5"
 anyhow             = "1"
-sha2               = "0.10"
+sha2               = "0.11"
 # Session-cookie verification for require_session guards (HMAC + HKDF over sha2).
 hmac               = "0.12"
 hkdf               = "0.12"
